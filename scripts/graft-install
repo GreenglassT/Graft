@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+# Build Graft.app and copy it to /Applications so Spotlight/Dock launches
+# the latest version. Run after pulling new code.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT="$REPO_ROOT/Graft/Graft.xcodeproj"
+
+# Pin DerivedData to the repo instead of letting Xcode hash a path into
+# ~/Library/Developer/Xcode/DerivedData. Two things fall out of this:
+#
+#   - The products dir is a constant, so there is nothing to discover. We used
+#     to scrape it from the build log (which only works for projects with script
+#     build phases — this one has none) and then fall back to globbing
+#     DerivedData and taking the newest by DIRECTORY mtime. Directory mtime is
+#     touched by reads and does not track which tree was last BUILT, so with two
+#     Graft-* trees left behind by an xcodegen regeneration that silently
+#     installed a twelve-hour-old binary: BUILD SUCCEEDED, app launched, one
+#     whole feature missing.
+#   - The ambiguity cannot recur, rather than being detected after the fact.
+#
+# It also drops the second `xcodebuild -showBuildSettings` the fallback needed,
+# which cold-starts the build system and costs 5-10s on every run — and this
+# script is re-run after every source change.
+DERIVED_DATA="$REPO_ROOT/.derived-data"
+BUILT_PRODUCTS_DIR="$DERIVED_DATA/Build/Products/Debug"
+
+# Regenerate the project, every time.
+#
+# `project.yml` globs whole directories, so the set of files in the .xcodeproj
+# is a snapshot taken whenever xcodegen last ran — and *adding a file* changes
+# nothing that a staleness check can see. The failure is silent and total: the
+# new file is compiled by nothing, and a test file added alongside it simply
+# does not run. That happened while writing this feature; the suite reported
+# the same count as before and looked green.
+#
+# Conditioning it on `project.yml -nt project.pbxproj` does not help, because
+# the trigger is a file appearing somewhere else entirely. XcodeGen is ~1s and
+# its output is deterministic, so running it unconditionally costs a second and
+# rewrites nothing when nothing changed.
+#
+# Never fatal, and guarded on the file existing. Making this unconditional was
+# right; dropping the `-f project.yml` test and letting `set -e` see a non-zero
+# exit was not. A missing project.yml (a partial checkout), a YAML error
+# mid-edit, or an xcodegen too old for the spec would abort the script *before*
+# xcodebuild — with the output swallowed by `>/dev/null`, so all the user saw
+# was "regenerating the Xcode project…" and no install. Building the project as
+# it stands is the documented behaviour and the right one: the worst case is a
+# file that isn't compiled yet, said out loud, rather than no app.
+PROJECT_YML="$REPO_ROOT/Graft/project.yml"
+# Both temp files exist before the trap that removes them: a trap body naming
+# an unset variable under `set -u` fails at the moment the script is already
+# on its way out, which is the worst time to learn about it.
+BUILD_LOG=$(mktemp -t graft-install-XXXXXX.log)
+XCODEGEN_LOG=$(mktemp -t graft-xcodegen-XXXXXX.log)
+trap 'rm -f "$BUILD_LOG" "$XCODEGEN_LOG"' EXIT
+
+if [[ ! -f "$PROJECT_YML" ]]; then
+  echo "! $PROJECT_YML is missing — building the project as it stands" >&2
+elif ! command -v xcodegen >/dev/null 2>&1; then
+  echo "! xcodegen is not installed — building the project as it stands," >&2
+  echo "  so any source file added since it last ran will not be compiled" >&2
+else
+  echo "→ regenerating the Xcode project…"
+  if ! (cd "$REPO_ROOT/Graft" && xcodegen generate) > "$XCODEGEN_LOG" 2>&1; then
+    echo "! xcodegen failed — building the project as it stands:" >&2
+    sed 's/^/  /' "$XCODEGEN_LOG" >&2
+  fi
+fi
+
+echo "→ building Graft…"
+# `if !`, not a bare command: under `set -e` a failing xcodebuild exited the
+# script *here*, before the line below that pulls the compiler errors out of the
+# log — and the EXIT trap then deleted the log. A failed build printed one line,
+# "→ building Graft…", and nothing else, whether you ran this by hand or
+# the app ran it for you and put the output in front of you.
+if ! xcodebuild \
+  -project "$PROJECT" \
+  -scheme Graft \
+  -destination 'platform=macOS' \
+  -configuration Debug \
+  -derivedDataPath "$DERIVED_DATA" \
+  CODE_SIGNING_ALLOWED=NO \
+  build \
+  > "$BUILD_LOG" 2>&1
+then
+  echo "× build failed:" >&2
+  # Capped, because a single bad type annotation can produce hundreds of
+  # follow-on errors and the first ones are the ones that matter.
+  grep -E 'error:' "$BUILD_LOG" | head -40 >&2 || true
+  exit 1
+fi
+
+grep -E 'error:|BUILD SUCCEEDED|BUILD FAILED' "$BUILD_LOG" || true
+
+if [[ ! -d "$BUILT_PRODUCTS_DIR/Graft.app" ]]; then
+  echo "× could not find built Graft.app under $BUILT_PRODUCTS_DIR" >&2
+  exit 1
+fi
+
+echo "→ quitting any running Graft instances…"
+# Ask politely first, then insist — a modal sheet blocks AppKit's quit outright.
+#
+# Every name the app has run under is checked, and the check has to be a
+# superset rather than a choice. `Graft` is the process now. `TweakBuild` is
+# the same app before the rename, still running on a machine upgrading across
+# it, and `TweakBuild-bin` is what a pre-rename build that still had the
+# launcher shim (see below) ran as. Watching only one name is exactly how this
+# failed before: `pkill -x TweakBuild` matched the shim and never the process
+# actually running, so a new bundle was installed over a live old one and then
+# "verified" — the same stale-binary failure as the DerivedData bug above,
+# from the other end.
+PROCESS_NAMES=(Graft TweakBuild TweakBuild-bin)
+running() {
+  local name
+  for name in "${PROCESS_NAMES[@]}"; do
+    pgrep -x "$name" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+# GRAFT_SKIP_QUIT is set by the app when *it* is the one running this script,
+# to rebuild itself after noticing its source changed (see `RebuildCoordinator`).
+# Quitting there would kill this script's own parent, and then this script with
+# it. Replacing the bundle under the running app is safe: `mv` swaps the
+# directory entry while the live process keeps the inode it already mapped, and
+# the app relaunches itself the moment the install returns.
+if [[ "${GRAFT_SKIP_QUIT:-}" == "1" ]]; then
+  echo "  (GRAFT_SKIP_QUIT: leaving the running instance alone; it will relaunch itself)"
+else
+
+# Only an app that is actually running is asked by name: `tell application`
+# naming one that is not installed — TweakBuild, once it has been removed —
+# makes AppleScript put up a "Where is TweakBuild?" chooser and wait on it.
+for name in Graft TweakBuild; do
+  if pgrep -x "$name" >/dev/null 2>&1; then
+    osascript -e "tell application \"$name\" to quit" 2>/dev/null || true
+  fi
+done
+for name in "${PROCESS_NAMES[@]}"; do
+  pkill -x "$name" 2>/dev/null || true
+done
+
+for _ in $(seq 20); do
+  running || break
+  sleep 0.25
+done
+if running; then
+  for name in "${PROCESS_NAMES[@]}"; do
+    pkill -9 -x "$name" 2>/dev/null || true
+  done
+  sleep 0.5
+fi
+if running; then
+  echo "× a Graft (or TweakBuild) instance is still running; refusing to install over it" >&2
+  echo "  (installing anyway would leave you testing the old build)" >&2
+  exit 1
+fi
+sleep 1
+
+fi
+
+# Assemble beside the destination, then swap. Everything below used to run
+# against /Applications *after* `rm -rf` had already deleted the previous
+# bundle, which made the tail a point of no return: the one command there that
+# can genuinely fail (codesign, on a locked keychain or a revoked identity) had
+# to be made non-fatal, because aborting would have left no app at all.
+#
+# Staging removes the dilemma rather than managing it. `set -e` is correct
+# again for every step, the destructive window is a same-volume rename instead
+# of a full recursive copy, and there is no half-installed outcome to describe.
+echo "→ staging…"
+STAGE="/Applications/.Graft.app.staging.$$"
+trap 'rm -f "$BUILD_LOG" "$XCODEGEN_LOG"; rm -rf "$STAGE"' EXIT
+rm -rf "$STAGE"
+cp -R "$BUILT_PRODUCTS_DIR/Graft.app" "$STAGE"
+
+# The auto-rebuild shim used to go here, and it is deliberately gone.
+#
+# It renamed the Swift binary to <app>-bin and put a shell launcher at
+# Contents/MacOS/<app> — the path CFBundleExecutable names — which checked
+# source mtimes and re-ran this script before exec'ing the real binary. Cheap,
+# and it silently broke notifications for months.
+#
+# macOS identifies an app to UserNotifications by its *main executable*, not by
+# its bundle identifier. Running as <app>-bin, exec'd from a script, the
+# process is not the executable the bundle declares, so it gets a blank
+# notification identity. Measured, same bundle and same Developer ID signature:
+#
+#     with shim:    getNotificationSettings -> authorizationStatus 0 (notDetermined)
+#     without shim: getNotificationSettings -> authorizationStatus 2 (authorized)
+#
+# System Settings still listed the app as allowed, which is what made this so
+# hard to see: the *bundle* was authorized, the *process* was not. Every build
+# therefore fell through to `requestAuthorization`, which for notDetermined has
+# to raise a permission prompt — from an app that by construction is in the
+# background, since that is the only case this feature fires in. The prompt was
+# queued and never shown, the completion handler never ran, and the banner
+# appeared whenever something else happened to resolve it. Hence "notifications
+# fire at really weird times".
+#
+# The cost is that launching a stale /Applications build no longer rebuilds
+# itself; run this script after changing source. `scripts/tb-launcher` is
+# deleted rather than left unused — its only purpose was to be that shim, and a
+# script sitting in the tree is an invitation to wire it back up.
+
+# Where this bundle was installed from, so the app can notice its own source
+# changing and rebuild itself — the auto-rebuild the shim used to do, from
+# inside the real binary instead of in front of it. See `SourceWatch`.
+#
+# Written here rather than baked into project.yml because only this script
+# knows the path, and written *before* signing because editing Info.plist
+# afterwards would invalidate the signature. Its absence is the feature's off
+# switch: an Xcode run and the test bundle have no such key and so never
+# rebuild anything.
+/usr/libexec/PlistBuddy -c "Add :GraftRepoPath string $REPO_ROOT" \
+  "$STAGE/Contents/Info.plist" >/dev/null 2>&1 \
+  || /usr/libexec/PlistBuddy -c "Set :GraftRepoPath $REPO_ROOT" "$STAGE/Contents/Info.plist"
+
+# The build above runs with CODE_SIGNING_ALLOWED=NO, so the staged bundle
+# arrives here unsigned and this is what gives it an identity.
+#
+# That is not cosmetic. macOS refuses UNUserNotificationCenter authorization to
+# an unsigned bundle (UNErrorDomain 1, "Notifications are not allowed for this
+# application"), so the build-completion banner could never be delivered. An
+# unsigned app also has no stable identity for any other TCC permission it may
+# come to need.
+#
+# Developer ID is preferred over ad-hoc for one specific reason: an ad-hoc
+# signature's designated requirement is its own cdhash, which changes on every
+# rebuild, so macOS sees a different app each time and resets whatever
+# permissions had been granted. This script is re-run constantly during
+# development; a Developer ID signature keeps one identity across all of it.
+#
+# Still deliberately WITHOUT `--options runtime`. The original reason is gone
+# with the shim — hardened runtime would not let a shell-script
+# CFBundleExecutable exec <app>-bin, and the app died instantly on launch
+# with no crash report and no log line — but the flag stays off because it buys
+# nothing here and has not been tested since. Hardened runtime only matters for
+# notarized distribution, and this bundle is a local dev install that is never
+# notarized.
+sign_bundle() {
+  local id
+  # `|| true` on the pipeline: `security` takes SIGPIPE when awk exits at the
+  # first match, which `pipefail` would otherwise make fatal.
+  id=$(security find-identity -v -p codesigning 2>/dev/null \
+       | awk -F'"' '/Developer ID Application/ {print $2; exit}' || true)
+
+  # Developer ID first, ad-hoc if it fails — not only if it is absent.
+  # `find-identity` lists an identity whose private key the keychain will not
+  # hand over while it is locked, so a screen lock turned a working install
+  # into `errSecInternalComponent` and, now that signing is fatal, into no
+  # install at all. Ad-hoc needs no keychain. It is the weaker signature (its
+  # designated requirement is its own cdhash, so it changes every rebuild and
+  # macOS resets granted permissions), which is why it stays the fallback and
+  # not the default — but a weaker signature beats a bundle you cannot install.
+  local err=""
+  if [[ -n "$id" ]] && err=$(codesign --force --sign "$id" "$1" 2>&1); then
+    echo "→ signed as ${id}"
+  else
+    if [[ -n "$id" ]]; then
+      # Print what codesign actually said rather than guessing. A locked
+      # keychain, an expired identity, a revoked cert and an ACL denial all
+      # fail identically from here, and only one of them is fixed by unlocking
+      # anything — so telling the user to unlock a keychain that was never
+      # locked sends them after the wrong problem.
+      echo "→ could not sign as ${id}:" >&2
+      printf '  %s\n' "$err" >&2
+    else
+      echo "→ no Developer ID found." >&2
+    fi
+    # Worth stating at the moment it happens, not only in the comment above:
+    # an ad-hoc signature's designated requirement is its own cdhash, so macOS
+    # sees a different app after every rebuild and resets whatever permissions
+    # were granted — which is why the build-completion notification stops
+    # arriving until the next Developer ID install.
+    echo "  signing ad-hoc; granted permissions (e.g. notifications) will reset" >&2
+    codesign --force --sign - "$1"
+  fi
+  codesign --verify "$1"
+}
+
+# Fatal, because it runs on the staged copy: a failure here aborts with the
+# installed app untouched, which is what tb-launcher's "Launching previous
+# build" fallback has always claimed and could not deliver.
+sign_bundle "$STAGE"
+
+# Move the old one aside, put the new one in place, *then* delete the old.
+#
+# This used to be `rm -rf` then `mv`, which reopened the exact window staging
+# was introduced to close: between the two commands there was no app at all,
+# and if the `mv` failed (a full disk, an EBUSY, a permission or SIP denial) or
+# the script was signalled, `set -e` aborted straight into the EXIT trap, which
+# deleted the stage as well. Both copies gone, and under GRAFT_SKIP_QUIT the app
+# that ran the script is still running out of a bundle that no longer exists.
+#
+# Two renames within /Applications are same-volume and atomic, so the worst
+# interruption leaves the previous app one rename from where it started, and
+# the trap below puts it back.
+echo "→ installing to /Applications…"
+PREVIOUS="/Applications/.Graft.app.previous.$$"
+trap 'rm -f "$BUILD_LOG" "$XCODEGEN_LOG"; rm -rf "$STAGE"; [[ -d "$PREVIOUS" && ! -e /Applications/Graft.app ]] && mv "$PREVIOUS" /Applications/Graft.app; rm -rf "$PREVIOUS"' EXIT
+if [[ -e /Applications/Graft.app ]]; then
+  mv /Applications/Graft.app "$PREVIOUS"
+fi
+mv "$STAGE" /Applications/Graft.app
+rm -rf "$PREVIOUS"
+
+echo "✓ installed. launch it from Spotlight or:"
+echo "  open /Applications/Graft.app"
+echo "  (the bundle now auto-rebuilds on launch when source has changed)"
+
+# The app was called TweakBuild before the rename, at a different bundle id, so
+# installing Graft does not replace it — the old bundle stays in /Applications,
+# still pointing its auto-rebuild at a script that no longer exists. Said rather
+# than done: deleting an app the user did not name is not this script's call.
+if [[ -e /Applications/TweakBuild.app ]]; then
+  echo "  note: the pre-rename /Applications/TweakBuild.app is still installed;"
+  echo "        once Graft works, move it to the Trash"
+fi

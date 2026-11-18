@@ -1,0 +1,419 @@
+"""SQLite-backed build history."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS builds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    app TEXT NOT NULL,
+    bundle_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    tweaks TEXT NOT NULL,        -- comma-separated list
+    ipa_sha256 TEXT,             -- hash of the signed IPA
+    ipa_path TEXT,               -- absolute path to the archived IPA
+    log_path TEXT,               -- absolute path to the per-build JSON-Lines log
+    signing_team TEXT,
+    udid TEXT,
+    target TEXT,                 -- 'device' or 'mac'; NULL means a row written
+                                 -- before this column existed, which is a
+                                 -- device build. Read through `_target_of`.
+    success INTEGER NOT NULL,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_builds_app ON builds(app);
+CREATE INDEX IF NOT EXISTS idx_builds_timestamp ON builds(timestamp);
+
+-- What actually reached a device, as opposed to what was built. Only the push
+-- path writes here; see `record_delivery`.
+--
+-- `inputs_digest`, `digest_version` and `cyan` are all nullable by design: a
+-- row written before this feature existed carries none of them, and
+-- `delivery.diff_delivery` reports "can't tell" for such a row rather than
+-- guessing. A NOT NULL constraint would make that guard dead code.
+CREATE TABLE IF NOT EXISTS deliveries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    app TEXT NOT NULL,
+    bundle_id TEXT NOT NULL,
+    inputs_digest TEXT,
+    digest_version INTEGER,      -- which hashing format produced it; see spec 4.2
+    cyan TEXT,                   -- JSON of the hashed cyan options; see spec 5.1
+    tweaks TEXT NOT NULL,        -- JSON [[name, sha256], ...]
+    source_version TEXT NOT NULL,
+    ipa_sha256 TEXT,
+    delivery TEXT NOT NULL,
+    lc_bundle_id TEXT,
+    remote_name TEXT,
+    udid TEXT,
+    -- How the artifact got there: 'build' for the push at the end of a build,
+    -- 'reinstall' for `--reinstall-build` re-shipping an archived IPA. The
+    -- distinction is not cosmetic: an archive's build inputs were never
+    -- recorded and cannot be reconstructed (the tweak files on disk now are
+    -- not necessarily the ones inside it), so such a row carries no digest and
+    -- must never be read as `current`. NULL is a row written before this
+    -- column existed, i.e. a build.
+    origin TEXT,
+    reconciled_at TEXT,
+    reconcile_ok INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_deliveries_app ON deliveries(app);
+
+-- LiveContainers this tool installed, per device. `--lc-status` reads it to
+-- tell a LiveContainer we manage from one AltStore (or a hand-run script) put
+-- there; see `lc_manage.status_payload`.
+CREATE TABLE IF NOT EXISTS lc_installs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    udid TEXT NOT NULL,
+    bundle_id TEXT NOT NULL,
+    version TEXT NOT NULL,
+    channel TEXT,
+    ipa_sha256 TEXT
+);
+"""
+
+
+def _declared_columns(table: str) -> list[tuple[str, str]]:
+    """(name, type) for every column SCHEMA declares on `table`.
+
+    Read out of SCHEMA rather than restated as a second list, because a second
+    list is one more thing to forget: the failure it guards against is somebody
+    adding a column above and nowhere else.
+    """
+    body = re.search(
+        rf"CREATE TABLE IF NOT EXISTS {table} \((.*?)\n\);", SCHEMA, re.DOTALL
+    )
+    if body is None:  # pragma: no cover - only reachable by renaming a table
+        raise KeyError(f"SCHEMA declares no table named {table!r}")
+    columns = []
+    for line in body.group(1).splitlines():
+        # Strip the trailing comment before matching, so a `-- ...` note that
+        # happens to mention a type can't be read as a column.
+        match = re.match(r"([A-Za-z_]\w*)\s+(TEXT|INTEGER|REAL|BLOB)\b", line.split("--")[0].strip())
+        if match:
+            columns.append((match.group(1), match.group(2)))
+    return columns
+
+
+def _target_of(row: sqlite3.Row) -> str:
+    """`'device'` or `'mac'`, never None.
+
+    A closed set of two, not whatever the column happens to hold. A row
+    predating the column reads NULL, and NULL here means a build made before
+    Mac builds existed — which is a device build. So does anything else
+    unrecognised: `'Mac'`, `'macos'`, a typo. Only the exact string a writer
+    means by "this artifact was prepared for this Mac" reads as `mac`.
+
+    That asymmetry is deliberate, because the two errors are not equal. A Mac
+    build offered to a phone points a tweak dylib at a stub Preferences
+    framework that iOS has for real, and breaks it silently at runtime; a Mac
+    build read as a device build merely withholds an action. Falling back to
+    `device` is the survivable direction, and making it the default for
+    everything except one spelling means no future writer can reach the other
+    one by accident.
+
+    Normalised here rather than in each consumer, so that "unrecognised means
+    phone" is written down once: `--builds` and the GUI reading its JSON are
+    both about to branch on this, and each would get it wrong differently.
+
+    The `except` is belt and braces, not the live path — with the migration in
+    place `recent()` always hands over a row that has the column, and the NULL
+    it carries is handled below. It fires only if the column is missing
+    outright, which a `sqlite3.Row` reports as IndexError, not KeyError (both
+    for an unknown name and an out-of-range position — measured). A dict would
+    raise KeyError, but this is only ever handed a Row, so catching that too
+    would be an arm nothing can reach and a claim the code cannot back.
+    """
+    try:
+        value = row["target"]
+    except IndexError:
+        return "device"
+    return value if value == "mac" else "device"
+
+
+class BuildLog:
+    def __init__(self, db_path: Path) -> None:
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.executescript(SCHEMA)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(builds)").fetchall()}
+            if "ipa_path" not in cols:
+                conn.execute("ALTER TABLE builds ADD COLUMN ipa_path TEXT")
+            if "log_path" not in cols:
+                conn.execute("ALTER TABLE builds ADD COLUMN log_path TEXT")
+            if "target" not in cols:
+                conn.execute("ALTER TABLE builds ADD COLUMN target TEXT")
+            # `deliveries` gets the general form of the three lines above.
+            # CREATE TABLE IF NOT EXISTS is a no-op against a database that
+            # already has the table, so a column added to SCHEMA never reaches
+            # one — and every reader indexes rows by name, which makes a
+            # missing column an IndexError on `--list`, the GUI's whole app
+            # list. Added bare (no NOT NULL, no default) because that is all
+            # ALTER TABLE ADD COLUMN can do; every nullable column here already
+            # reads NULL as "written before this existed".
+            live = {row[1] for row in conn.execute("PRAGMA table_info(deliveries)").fetchall()}
+            for name, decl in _declared_columns("deliveries"):
+                if name not in live:
+                    conn.execute(f"ALTER TABLE deliveries ADD COLUMN {name} {decl}")
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.db_path)
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
+    def record(
+        self,
+        *,
+        app: str,
+        bundle_id: str,
+        version: str,
+        tweaks: list[str],
+        ipa_path: Path | None,
+        signing_team: str | None,
+        udid: str | None,
+        success: bool,
+        error: str | None = None,
+        log_path: Path | None = None,
+        target: str = "device",
+    ) -> int:
+        ipa_hash = sha256_of(ipa_path) if ipa_path and ipa_path.exists() else None
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO builds (
+                    timestamp, app, bundle_id, version, tweaks,
+                    ipa_sha256, ipa_path, log_path, signing_team, udid, target,
+                    success, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(UTC).isoformat(),
+                    app,
+                    bundle_id,
+                    version,
+                    ",".join(tweaks),
+                    ipa_hash,
+                    str(ipa_path) if ipa_path else None,
+                    str(log_path) if log_path else None,
+                    signing_team,
+                    udid,
+                    target,
+                    1 if success else 0,
+                    error,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def clear_ipa_path(self, ipa_path: Path) -> list[int]:
+        """NULL out `ipa_path` for every row pointing at `ipa_path`.
+
+        Returns the ids of the rows changed. Call this *before* removing the
+        file: the GUI offers "Re-install" for exactly the rows with a non-null
+        ipa_path, so a row that still points at a deleted archive renders a
+        button that can only fail. Clearing first and then failing to remove
+        the file is the survivable half of that race — the archive is still on
+        disk, only the shortcut to it is gone.
+
+        Matching is on the same string `record()` writes (`str(ipa_path)`), and
+        both sides are built from `cfg.built_dir`, so the spellings agree.
+        """
+        target = str(ipa_path)
+        with self._connect() as conn:
+            ids = [
+                int(row[0])
+                for row in conn.execute(
+                    "SELECT id FROM builds WHERE ipa_path = ?", (target,)
+                ).fetchall()
+            ]
+            if ids:
+                conn.execute(
+                    "UPDATE builds SET ipa_path = NULL WHERE ipa_path = ?", (target,)
+                )
+        return ids
+
+    def recent(self, app: str | None = None, limit: int = 10) -> list[dict]:
+        """Recent build rows, as dicts whose `target` is always populated.
+
+        Dicts rather than `sqlite3.Row` because `ALTER TABLE ADD COLUMN` cannot
+        supply a default for rows that already exist, so `target` has to be
+        normalised on read — and a Row is immutable. Every caller indexes by
+        name, so the swap is invisible to them. What would not survive it is
+        positional access (`r[0]`), and subscripting or comparing the key view
+        as a list (`r.keys()[0]`, `r.keys() == [...]`) — `dict.keys()` itself
+        works and yields the identical names. No caller uses any of it.
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            if app:
+                cur = conn.execute(
+                    "SELECT * FROM builds WHERE app = ? ORDER BY id DESC LIMIT ?",
+                    (app, limit),
+                )
+            else:
+                cur = conn.execute(
+                    "SELECT * FROM builds ORDER BY id DESC LIMIT ?", (limit,)
+                )
+            return [dict(r) | {"target": _target_of(r)} for r in cur.fetchall()]
+
+    def record_delivery(
+        self,
+        *,
+        app: str,
+        bundle_id: str,
+        inputs_digest: str | None,
+        digest_version: int | None,
+        cyan: dict[str, object] | None,
+        tweaks: list[list[str | None]],
+        source_version: str,
+        ipa_sha256: str | None,
+        delivery: str,
+        lc_bundle_id: str | None,
+        remote_name: str | None,
+        udid: str | None,
+        origin: str = "build",
+    ) -> int:
+        """Record that an artifact reached a device.
+
+        Written on the PUSH path, never the build path: "built but never
+        delivered" is one of the states this exists to surface, so a build that
+        is not pushed must leave no row behind.
+
+        `digest_version` is `InputsDigest.version`, not a constant read at
+        write time: it is what lets a later comparison say "a different version
+        of this tool delivered that" instead of inventing reasons out of a
+        `cyan` payload whose key set has since changed.
+
+        `origin` defaults to the ordinary case. Only `--reinstall-build` passes
+        anything else, and what it means is on the column in SCHEMA.
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO deliveries (
+                    timestamp, app, bundle_id, inputs_digest, digest_version, cyan,
+                    tweaks, source_version, ipa_sha256, delivery, lc_bundle_id,
+                    remote_name, udid, origin
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    datetime.now(UTC).isoformat(),
+                    app,
+                    bundle_id,
+                    inputs_digest,
+                    digest_version,
+                    # `is not None`, not a truth test: NULL here is the signal
+                    # for "row from before the column existed", the one path
+                    # that still yields the generic "build options changed"
+                    # reason. An empty dict is a row that recorded its options
+                    # and must not be mistaken for one that couldn't.
+                    json.dumps(cyan, sort_keys=True, separators=(",", ":"))
+                    if cyan is not None
+                    else None,
+                    json.dumps(tweaks, separators=(",", ":")),
+                    source_version,
+                    ipa_sha256,
+                    delivery,
+                    lc_bundle_id,
+                    remote_name,
+                    udid,
+                    origin,
+                ),
+            )
+            return int(cur.lastrowid or 0)
+
+    def latest_delivery(self, app: str, *, udid: str | None = None) -> sqlite3.Row | None:
+        """The most recent delivery recorded for `app`, or None.
+
+        Ordered by `id`, not `timestamp`: the id is monotonic by construction,
+        so it stays correct across a system clock that steps backwards (NTP
+        correction, a timezone-confused VM), where ordering by the recorded
+        wall time would hand back a superseded row as the latest one.
+
+        `udid` scopes it to one phone. The filter is inside the query, not
+        applied to its result — "the latest row for this device" and "the
+        latest row, if it happens to be this device" are different questions
+        and only the first is useful. Unscoped remains "the latest anywhere",
+        which is what every existing caller means.
+
+        A row whose `udid` is NULL is invisible to a scoped query, because SQL
+        `= NULL` never matches. That is correct: we cannot claim an artifact
+        reached this phone when nothing recorded where it went.
+        """
+        sql = "SELECT * FROM deliveries WHERE app = ?"
+        params: list[object] = [app]
+        if udid is not None:
+            sql += " AND udid = ?"
+            params.append(udid)
+        sql += " ORDER BY id DESC LIMIT 1"
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(sql, params).fetchone()
+
+    def mark_reconciled(self, delivery_id: int, *, seen: bool) -> None:
+        """Note that the device was checked, and whether the artifact was there.
+
+        Both outcomes are recorded. `reconcile_ok` stays NULL only while a row
+        has never been checked, which is a different claim from "checked and
+        absent" — the reader distinguishes the three.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE deliveries SET reconciled_at = ?, reconcile_ok = ? WHERE id = ?",
+                (datetime.now(UTC).isoformat(), 1 if seen else 0, delivery_id),
+            )
+
+
+    def record_lc_install(
+        self, *, udid: str, bundle_id: str, version: str, channel: str | None,
+        ipa_sha256: str | None,
+    ) -> None:
+        """Note that `--lc-install` put `bundle_id` on `udid`."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO lc_installs (timestamp, udid, bundle_id, version, channel,"
+                " ipa_sha256) VALUES (?, ?, ?, ?, ?, ?)",
+                (datetime.now(UTC).isoformat(), udid, bundle_id, version, channel, ipa_sha256),
+            )
+
+    def pushed_remote_names(self, lc_bundle_id: str) -> set[str]:
+        """Every file name a delivery pushed into `lc_bundle_id`'s Documents."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT remote_name FROM deliveries"
+                " WHERE lc_bundle_id = ? AND remote_name IS NOT NULL",
+                (lc_bundle_id,),
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    def lc_installed_bundle_ids(self, udid: str) -> set[str]:
+        """Every LiveContainer bundle id this tool has installed on `udid`."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT bundle_id FROM lc_installs WHERE udid = ?", (udid,)
+            ).fetchall()
+        return {r[0] for r in rows}
+
+
+def sha256_of(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()

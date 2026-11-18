@@ -1,0 +1,73 @@
+name: Graft
+options:
+  deploymentTarget:
+    macOS: "15.0"
+  developmentLanguage: en
+  bundleIdPrefix: com.greenglasst
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    ENABLE_HARDENED_RUNTIME: YES
+    CODE_SIGN_STYLE: Automatic
+    CODE_SIGN_IDENTITY: "-"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+packages:
+  Yams:
+    url: https://github.com/jpsim/Yams
+    from: "5.0.0"
+  SnapshotTesting:
+    url: https://github.com/pointfreeco/swift-snapshot-testing
+    from: "1.18.0"
+targets:
+  Graft:
+    type: application
+    platform: macOS
+    sources:
+      - path: Graft
+        excludes:
+          - "Info.plist"
+    info:
+      path: Graft/Info.plist
+      properties:
+        CFBundleDisplayName: Graft
+        CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSPrincipalClass: NSApplication
+        NSSupportsAutomaticTermination: true
+        NSSupportsSuddenTermination: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.greenglasst.graft
+        INFOPLIST_FILE: Graft/Info.plist
+        ENABLE_APP_SANDBOX: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  GraftTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: GraftTests
+    settings:
+      base:
+        BUNDLE_LOADER: $(TEST_HOST)
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Graft.app/Contents/MacOS/Graft
+        # Without this, `xcodebuild test` cannot build this target at all:
+        # the base settings turn on hardened runtime and ad-hoc signing, and
+        # codesign refuses a bundle with no Info.plist. The app target supplies
+        # its own via INFOPLIST_FILE; this one had nothing, so the build failed
+        # before a single test compiled —
+        #
+        #   error: Cannot code sign because the target does not have an
+        #   Info.plist file and one is not being generated automatically
+        #
+        # — with "Testing cancelled because the build failed" as the only
+        # summary. Nothing was wrong with the tests: supplying the setting on
+        # the command line runs all 415 green. Xcode's own scheme runner
+        # defaults it to YES, which is why this stayed invisible to anyone
+        # pressing ⌘U and fatal to anyone running xcodebuild.
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - target: Graft
+      - package: SnapshotTesting
+      # Test-only: AppConfigTests parses YAML fixtures with it. The app itself
+      # never imports Yams, so it is not linked into Graft.app.
+      - package: Yams
