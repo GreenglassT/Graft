@@ -122,7 +122,7 @@
           <li>Or a paid Apple Developer account, with a development certificate and a provisioning profile that includes your device. It adds sideloading apps directly, and lets Graft install and sign LiveContainer for you.</li>
           <li>An Apple silicon Mac. The app needs macOS 15 or later, and the CLI needs Python 3.11 or later.</li>
           <li>An iPhone or iPad paired with that Mac, over USB or Wi-Fi</li>
-          <li>cyan, the tool that injects the tweaks. Sideloading with a paid account also needs zsign and libimobiledevice. The <a href="https://github.com/GreenglassT/Graft#requirements">README</a> has a one-line install for each, and <code>graft --check</code> prints the ones you're missing.</li>
+          <li>cyan, which injects the tweaks, and the Xcode Command Line Tools (<code>xcode-select --install</code>), which Graft uses to check that an IPA is decrypted. Sideloading with a paid account also needs zsign and libimobiledevice. The <a href="https://github.com/GreenglassT/Graft#requirements">README</a> has a one-line install for each, and <code>graft --check</code> prints the ones you're missing.</li>
         </ul>
       </section>
 
