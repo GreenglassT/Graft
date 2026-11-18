@@ -51,6 +51,21 @@ class Check:
     #: failure told people the feature was broken when it was merely going to
     #: be less reliable.
     blocking: bool = True
+    #: Which failure this is, as a stable word, for a check whose failures
+    #: need different responses — today only `ssh` (the `SSH_*` values
+    #: below). None when `ok`, and for every other check.
+    reason: str | None = None
+
+
+#: Why the `ssh` check failed, reported as its `reason`. The Mac app's decrypt
+#: card collapses to "needs a jailbroken device" on `SSH_NO_SERVER` alone: the
+#: other two are fixable from here on a phone that *is* jailbroken (install
+#: libimobiledevice; store the right root password), and hiding the checks
+#: hid the fix. Pinned against `CLIContract.DecryptCheck.SSHReason` by
+#: tests/test_decrypt_check_keys.py.
+SSH_NO_IPROXY = "no_iproxy"
+SSH_NO_SERVER = "no_server"
+SSH_LOGIN_REJECTED = "login_rejected"
 
 
 @dataclass
@@ -134,18 +149,22 @@ def check(udid: str | None = None, device_name: str | None = None) -> Readiness:
         third or "open the Dopamine app on the phone to (re)start the jailbreak"
     )
 
-    ssh_ok, ssh_detail, ssh_fix = _check_ssh(udid)
+    ssh_ok, ssh_detail, ssh_fix, ssh_reason = _check_ssh(udid)
     # A key authenticates the dump, not bagbak: see `_check_ssh`.
     key_only = bool(decrypt_runner.os.environ.get("GRAFT_SSH_KEY"))
-    # Neither channel answered, which is what an *un-jailbroken* phone looks
-    # like — and `_check_ssh` cannot tell, because on its own "no banner" is
-    # equally a stopped OpenSSH. Alone it says "install it from Sileo; if it
-    # is, respring", which on a stock phone is a fix for a problem it does not
-    # have and cannot acquire. Measured 2026-08-17: that hint sent a whole
-    # session chasing SSH on an iOS 26.1 device with no jailbreak available
-    # for it. Only this function sees both answers, so the correction lives
-    # here rather than in either probe.
-    if not ssh_ok:
+    # Nothing answered on port 22, which is what an *un-jailbroken* phone
+    # looks like — and `_check_ssh` cannot tell, because on its own "no
+    # banner" is equally a stopped OpenSSH. Alone it says "install it from
+    # Sileo; if it is, respring", which on a stock phone is a fix for a problem
+    # it does not have and cannot acquire. Measured 2026-08-17: that hint sent
+    # a whole session chasing SSH on an iOS 26.1 device with no jailbreak
+    # available for it. Only this function sees both answers, so the
+    # correction lives here rather than in either probe.
+    #
+    # Only for that outcome. A missing iproxy is this Mac's problem and a
+    # rejected login is a jailbroken phone with the wrong stored password;
+    # both keep `_check_ssh`'s own fix, which is the one that works.
+    if ssh_reason == SSH_NO_SERVER:
         ssh_fix = (
             "either this phone has no jailbreak — decryption needs one, so pass "
             "--device with a jailbroken phone — or OpenSSH has stopped on it: "
@@ -177,7 +196,8 @@ def check(udid: str | None = None, device_name: str | None = None) -> Readiness:
         fix=frida_fix,
     ))
     r.checks.append(Check(
-        key="ssh", label="SSH login", ok=ssh_ok, detail=ssh_detail, fix=ssh_fix
+        key="ssh", label="SSH login", ok=ssh_ok, detail=ssh_detail, fix=ssh_fix,
+        reason=ssh_reason,
     ))
 
     front = _frontmost(udid) if frida_ok else None
@@ -279,8 +299,11 @@ def _server_version(udid: str | None) -> str | None:
     return m.group(1) if m else None
 
 
-def _check_ssh(udid: str | None) -> tuple[bool, str, str | None]:
+def _check_ssh(udid: str | None) -> tuple[bool, str, str | None, str | None]:
     """Whether the device answers SSH, and whether our credential is accepted.
+
+    Returns `(ok, detail, fix, reason)`; `reason` is one of the `SSH_*` words
+    for a failure, None otherwise.
 
     Four distinguishable outcomes, because they need four different responses
     and collapsing any two of them produces a message that sends people the
@@ -300,7 +323,7 @@ def _check_ssh(udid: str | None) -> tuple[bool, str, str | None]:
     exactly the sort of error this whole check exists to abolish.
     """
     if shutil.which("iproxy") is None:
-        return False, "iproxy is missing", "brew install libimobiledevice"
+        return False, "iproxy is missing", "brew install libimobiledevice", SSH_NO_IPROXY
 
     banner = _ssh_banner(udid)
     if banner is None:
@@ -313,7 +336,7 @@ def _check_ssh(udid: str | None) -> tuple[bool, str, str | None]:
             "if OpenSSH is not installed, install it from Sileo; if it is, it has "
             "stopped — respring or restart it from your jailbreak app. "
             "frida-ios-dump pulls the app bundle over SSH"
-        )
+        ), SSH_NO_SERVER
 
     if decrypt_runner.os.environ.get("GRAFT_SSH_KEY"):
         # Answered for the *frida-ios-dump* route, which takes `-K`. bagbak has
@@ -327,19 +350,19 @@ def _check_ssh(udid: str | None) -> tuple[bool, str, str | None]:
         # Reporting that as "the login was rejected" greys out the only backend
         # that reliably decrypts the main binary, and advises storing a password
         # the user deliberately does not use.
-        return True, f"{banner} — key auth configured (GRAFT_SSH_KEY), not verified here", None
+        return True, f"{banner} — key auth configured (GRAFT_SSH_KEY), not verified here", None, None
 
     auth = _ssh_auth(udid)
     if auth is None:
         # Reachable, unverified. Not a failure: the dump may well work, and
         # calling it one would send the user to fix something that isn't broken.
-        return True, f"{banner} — password not verified (paramiko not installed)", None
+        return True, f"{banner} — password not verified (paramiko not installed)", None, None
     if auth is True:
-        return True, f"{banner}, authenticated as root", None
+        return True, f"{banner}, authenticated as root", None, None
     return False, f"{banner}, but the login was rejected", (
         "set the phone's root password with `graft --set-ssh-password` "
         "(or from the device's row in the Devices pane)"
-    )
+    ), SSH_LOGIN_REJECTED
 
 
 def _ssh_banner(udid: str | None) -> str | None:
@@ -422,7 +445,14 @@ def _backends(
     out: list[BackendStatus] = []
 
     if decrypt_runner.frida_ios_dump_available() is None:
-        out.append(BackendStatus(decrypt_runner.FRIDA, False, "frida-ios-dump is not set up"))
+        # The command alone in `note`, which the app offers to copy; the
+        # alternative is prose, so it goes in `reason` (R11).
+        out.append(BackendStatus(
+            decrypt_runner.FRIDA, False,
+            f"frida-ios-dump is not set up: run the setup command, "
+            f"{decrypt_runner.FRIDA_IOS_DUMP_ELSEWHERE}",
+            note=decrypt_runner.frida_ios_dump_setup_command(),
+        ))
     elif not frida_ok:
         out.append(BackendStatus(decrypt_runner.FRIDA, False, "frida-server is not reachable"))
     elif not ssh_ok:
@@ -452,7 +482,7 @@ def _backends(
             decrypt_runner.BAGBAK, False,
             f"bagbak bundles frida {bag_version} and the phone runs frida-server "
             f"{server_version} — install a bagbak whose frida matches "
-            f"(npm install -g bagbak@4.0.3 for a 16.x server)",
+            f"({decrypt_runner.BAGBAK_INSTALL} for a 16.x server)",
         ))
     else:
         out.append(BackendStatus(

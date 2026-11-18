@@ -43,11 +43,12 @@ def test_load_minimal_config(tmp_path: Path) -> None:
     assert cfg.tweak_path("a.deb") == (tmp_path / "tweaks" / "a.deb")
 
 
-def test_missing_signing(tmp_path: Path) -> None:
+def test_missing_signing_is_a_free_account_not_an_error(tmp_path: Path) -> None:
+    """It used to raise "config missing 'signing' section". A config without
+    one is now a free Apple ID (see test_free_account_config.py)."""
     cfg_path = tmp_path / "config.yaml"
     cfg_path.write_text(yaml.safe_dump({"apps": {}}))
-    with pytest.raises(ConfigError):
-        load_config(cfg_path)
+    assert load_config(cfg_path).free_account is True
 
 
 def test_missing_file(tmp_path: Path) -> None:

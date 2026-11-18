@@ -125,6 +125,17 @@ final class SettingsDraftTests: XCTestCase {
         XCTAssertNil(draft.changed(\.signingTeamId))
     }
 
+    /// K4 / C-SETTINGS: a null retention because the *file* does not parse is
+    /// not a value a save replaces — `--set-settings` refuses that file — so it
+    /// is not a pending edit, and the pane does not light Revert over it.
+    func test_a_config_that_does_not_parse_has_nothing_pending() {
+        var unparsed = record(keep: nil)
+        unparsed.parseError = "mapping values are not allowed here (line 3, column 9)"
+        let draft = SettingsDraft(unparsed)
+        XCTAssertFalse(draft.hasChanges)
+        XCTAssertNil(draft.changed(\.archiveKeep))
+    }
+
     /// The ordinary case is untouched — a readable value that nobody edited is
     /// still not sent, which is what keeps `--set-settings` a PATCH.
     func test_a_readable_retention_is_not_sent_when_untouched() {

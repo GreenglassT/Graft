@@ -86,7 +86,7 @@ def test_declares_no_icon_anywhere_returns_none(tmp_path: Path) -> None:
     used to exist, matching any flat PNG with "icon" in its filename, and on
     real apps in the reference cache it does not degrade gracefully: it
     returns LiveContainer's `DefaultIcon.png` (its placeholder for *guest*
-    apps, not its own icon) and a carrier's `ee-app-icon-3@3x.png` (a
+    apps, not its own icon) and another app's `carrier-icon@3x.png` (a
     carrier-branded icon for a different brand) as those apps' artwork. A miss
     here costs one App Store lookup. A wrong picture gets written to disk by
     the caller with a sidecar stamped `source: "ipa"`, reads as already

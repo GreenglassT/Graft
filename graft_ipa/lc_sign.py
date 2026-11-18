@@ -51,6 +51,8 @@ from pathlib import Path
 from typing import Any
 
 from . import lc_instance, mobileprovision
+from . import p12 as p12_mod
+from .child_env import child_env
 from .errors import SigningError
 
 #: The team id LiveContainer's build embeds in its requested entitlements, to
@@ -174,7 +176,7 @@ class Runner:
         self, cmd: list[str], *, cwd: Path | None = None, check: bool = True
     ) -> subprocess.CompletedProcess[str]:
         try:
-            proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+            proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=child_env())
         except FileNotFoundError as e:
             raise SigningError(f"{cmd[0]} not found in PATH") from e
         if check and proc.returncode != 0:
@@ -188,7 +190,7 @@ class Runner:
         """Start `cmd` without waiting — for an install that may block on the
         device until the user closes the app being replaced."""
         return subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=child_env()
         )
 
 
@@ -215,43 +217,6 @@ def p12_identity(p12: Path, password: str) -> str:
     if cert is None:
         raise SigningError(f"{p12} contains no certificate")
     return cert.fingerprint(hashes.SHA1()).hex().upper()  # an identifier, not a security boundary
-
-
-def _write_reencrypted_p12(src: Path, password: str, dest: Path, new_password: str) -> None:
-    """Re-encrypt the identity in `src` under `new_password` into `dest` (0600).
-
-    The legacy PBES1 / 3DES / SHA-1 MAC profile, not cryptography's default
-    AES one: macOS `security import` refuses the modern encryption with an
-    unhelpful "MAC verification failed". The weak cipher protects a file that
-    lives for one subprocess call under a random password, inside a private
-    temp directory.
-
-    The account's real .p12 is BER- rather than DER-encoded, so cryptography
-    warns that it is "falling back to BER" on load. That is expected.
-    """
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.serialization import PrivateFormat, pkcs12
-
-    try:
-        key, cert, extra = pkcs12.load_key_and_certificates(src.read_bytes(), password.encode())
-    except ValueError as e:
-        raise SigningError(
-            f"could not read {src}: {e}",
-            hint="wrong .p12 password, or an unsupported export format",
-        ) from e
-    if key is None or cert is None:
-        raise SigningError(f"{src} does not hold both a private key and a certificate")
-    encryption = (
-        PrivateFormat.PKCS12.encryption_builder()
-        .kdf_rounds(50000)
-        .key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESCBC)
-        .hmac_hash(hashes.SHA1())  # the MAC macOS's importer accepts
-        .build(new_password.encode())
-    )
-    data = pkcs12.serialize_key_and_certificates(b"graft", key, cert, extra, encryption)
-    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as f:
-        f.write(data)
 
 
 def _search_list(runner: Runner) -> list[str]:
@@ -347,7 +312,7 @@ def temp_keychain(runner: Runner, p12: Path, password: str, workdir: Path) -> It
         throwaway = secrets.token_hex(16)
         copy = workdir / f"lcsign-{uuid.uuid4().hex[:8]}.p12"
         try:
-            _write_reencrypted_p12(p12, password, copy, throwaway)
+            p12_mod.write_reencrypted(p12, password, copy, throwaway)
             runner.run([
                 "security", "import", str(copy), "-k", str(path), "-P", throwaway,
                 "-T", "/usr/bin/codesign",

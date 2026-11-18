@@ -407,6 +407,27 @@ final class DeliveryStateTests: XCTestCase {
         )
     }
 
+    /// K6(a) / C-NOTICE: a startup notice — written before the verb, about
+    /// the machine — is not the check's result. Counted, a renamed
+    /// environment variable became every Check device's only "warning", so a
+    /// check that did reach the phone read as one that had not.
+    @MainActor
+    func test_a_startup_notice_is_not_a_device_check_warning() async throws {
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent])
+        _ = try await store.loadApps()
+
+        let clean = try await store.reconcile(
+            appName: "example", argsOverride: ["-c", Fixture.checkAfterANotice]
+        )
+        XCTAssertEqual(clean.warnings, [], "the notice was read as the check's result")
+
+        let warned = try await store.reconcile(
+            appName: "example", argsOverride: ["-c", Fixture.checkWithNoDeviceAfterANotice]
+        )
+        XCTAssertEqual(warned.warnings, ["no device checked: no iOS devices connected"],
+                       "the check's own warning still arrives")
+    }
+
     /// Omitting `--device` is not neutral. `_do_reconcile` falls back to
     /// `select_device(None)`, which takes the first connected phone;
     /// `_reconcile_app` then bails on the udid mismatch *silently* — by design,
@@ -519,6 +540,13 @@ final class DeliveryStateTests: XCTestCase {
         /// line is the *unchanged* local answer: this is byte-identical to a
         /// clean check apart from the warning above it.
         static let checkWithNoDevice = emit([noDeviceWarning, exampleStateCurrent])
+        /// C-NOTICE: the line `main` writes before any verb while a renamed
+        /// environment variable is still set.
+        static let startupNotice = #"{"type":"log","source":"startup","line":"TB_SSH_PASS is set but no longer read; use GRAFT_SSH_PASS"}"#
+        static let checkAfterANotice = emit([startupNotice, exampleStateCurrent])
+        static let checkWithNoDeviceAfterANotice = emit(
+            [startupNotice, noDeviceWarning, exampleStateCurrent]
+        )
 
         static let oneApp = emit([deltaApp, deltaState])
         static let duplicateState = emit([exampleApp, exampleStateCurrent, exampleState])

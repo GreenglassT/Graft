@@ -64,7 +64,10 @@ struct CanisterView: View {
                     TagChip(label: pkg.repositoryId)
                 }
                 .width(90)
-                TableColumn("") { pkg in
+                // Named, though the buttons below already say "Fetch": an
+                // empty header is a sort button with no name, and VoiceOver
+                // announces the column by it on every row.
+                TableColumn("Fetch") { pkg in
                     Button("Fetch") {
                         Task { await runFetch(pkg.packageId) }
                     }

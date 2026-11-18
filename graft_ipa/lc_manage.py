@@ -40,14 +40,15 @@ import tempfile
 import threading
 import uuid
 import zipfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import USER_AGENT, lc_instance, lc_sign, mobileprovision
+from . import USER_AGENT, lc_discovery, lc_instance, lc_sign, mobileprovision
 from .apple_portal import AppIdNotRegistered
-from .errors import ConfigError, InstallError
+from .config import FREE_INSTALLERS
+from .errors import ConfigError, InstallError, Stopped
 from .json_output import JsonEmitter
 from .lc_runner import LiveContainerError
 
@@ -85,15 +86,22 @@ WAITING_MESSAGE = "close LiveContainer on the device to finish"
 
 @contextlib.contextmanager
 def exit_on_termination():
-    """Turn SIGTERM / SIGHUP into `SystemExit` for the duration, so `finally`
-    blocks run — above all `lc_sign.temp_keychain`'s, which takes the
-    throwaway keychain back off the user's search list.
+    """Turn SIGTERM / SIGHUP into `Stopped` (a `SystemExit`) for the duration,
+    so `finally` blocks run — above all `lc_sign.temp_keychain`'s, which takes
+    the throwaway keychain back off the user's search list — and a build's
+    envelope can tell the stop from a failure.
 
     Python's default for both signals kills the process outright, skipping
     every `finally`. SIGTERM is exactly what the GUI's Stop and CLIRunner's
     cancellation send, so without this a stopped install left an unlocked
     keychain on the search list. The previous handlers come back afterwards.
     Main thread only, which every CLI verb is.
+
+    A SIGHUP that arrived ignored is left ignored: that is `nohup graft …`
+    (or a launcher's `trap '' HUP`) asking for the run to outlive its
+    terminal, and a handler here turned the very hang-up it was protected
+    from into a Stop, exit 129. SIGTERM is taken whatever it was: it is the
+    Stop.
     """
 
     # `signal.signal` raises ValueError off the main thread. The verbs always
@@ -105,9 +113,12 @@ def exit_on_termination():
         return
 
     def _exit(signum: int, _frame: object) -> None:
-        raise SystemExit(128 + signum)
+        raise Stopped(signum)
 
-    previous ={sig: signal.signal(sig, _exit) for sig in (signal.SIGTERM, signal.SIGHUP)}
+    taken = [signal.SIGTERM]
+    if signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
+        taken.append(signal.SIGHUP)
+    previous = {sig: signal.signal(sig, _exit) for sig in taken}
     try:
         yield
     finally:
@@ -395,16 +406,6 @@ def version_key(version: str) -> tuple:
     )
 
 
-def role_of(bundle_id: str, team: str) -> str | None:
-    """`primary`, `2`, `3`, `legacy` (any other LiveContainer), or None."""
-    for n in lc_instance.INSTANCES:
-        if bundle_id == lc_instance.instance_bundle_id(n, team):
-            return "primary" if n == 1 else str(n)
-    if bundle_id.lower().startswith(lc_instance.LC_ORIGINAL_ID):
-        return "legacy"
-    return None
-
-
 def altstore_present(apps: dict[str, dict]) -> bool:
     """AltStore or SideStore manages LiveContainer on this device.
 
@@ -434,11 +435,11 @@ def altstore_present(apps: dict[str, dict]) -> bool:
     )
 
 
-def _instances(apps: dict[str, dict], team: str) -> list[dict]:
+def _instances(apps: dict[str, dict], team: str | None) -> list[dict]:
     order = {"primary": 0, "2": 1, "3": 2, "legacy": 3}
     found = []
     for bundle_id, meta in apps.items():
-        role = role_of(bundle_id, team)
+        role = lc_discovery.role_of(bundle_id, team)
         if role is None:
             continue
         app_id = str((meta.get("Entitlements") or {}).get("application-identifier", ""))
@@ -454,7 +455,8 @@ def _instances(apps: dict[str, dict], team: str) -> list[dict]:
 
 
 def status_payload(
-    *, udid: str, apps: dict[str, dict], team: str, ours: set[str], latest: Release | None
+    *, udid: str, apps: dict[str, dict], team: str | None, ours: set[str],
+    latest: Release | None,
 ) -> dict[str, Any]:
     """One `lc-status` event.
 
@@ -505,19 +507,37 @@ def unreachable_payload(udid: str, error: str, latest: Release | None = None) ->
 class DeviceOps(Protocol):
     def installed_apps(self, udid: str) -> dict[str, dict]: ...
     def list_documents(self, udid: str, bundle_id: str) -> list[str]: ...
+    def read_document(self, udid: str, bundle_id: str, name: str) -> bytes: ...
     def push_document(self, udid: str, bundle_id: str, name: str, data: bytes) -> None: ...
     def remove_document(self, udid: str, bundle_id: str, name: str) -> None: ...
+
+
+#: What `installed_apps` asks of every app on the device; the LiveContainers
+#: then get everything.
+LISTING_ATTRIBUTES = ["CFBundleIdentifier", "ApplicationType"]
 
 
 class UsbmuxDevice:
     """`DeviceOps` over pymobiledevice3 — usbmux, so Wi-Fi-paired devices too."""
 
     def installed_apps(self, udid: str) -> dict[str, dict]:
+        """Every app on `udid` with its metadata, System apps included: a
+        LiveContainer TrollStore or a rootful jailbreak put on is one."""
         return self._run(udid, self._apps(udid))
+
+    def installed_bundle_ids(self, udid: str) -> list[str]:
+        """Every app's bundle id on `udid`, and nothing else about them —
+        what `--check` asks discovery, listed the way the push lists."""
+        return self._run(udid, self._bundle_ids(udid))
 
     def list_documents(self, udid: str, bundle_id: str) -> list[str]:
         async def go(ha):
             return [Path(p).name for p in await ha.listdir("Documents")]
+        return self._run(udid, self._sandbox(udid, bundle_id, go))
+
+    def read_document(self, udid: str, bundle_id: str, name: str) -> bytes:
+        async def go(ha):
+            return await ha.get_file_contents(f"Documents/{_plain(name)}")
         return self._run(udid, self._sandbox(udid, bundle_id, go))
 
     def push_document(self, udid: str, bundle_id: str, name: str, data: bytes) -> None:
@@ -550,11 +570,37 @@ class UsbmuxDevice:
 
         from .device_session import closing_best_effort
 
+        # Two listings, not one with everything: a System listing with every
+        # attribute is the whole OS's app catalogue, entitlements included,
+        # and only the LiveContainers' metadata is read (their version, their
+        # application-identifier, AltStore's `ALT…` keys). Every app's id and
+        # type still come back — AltStore is found by its id, and `install`
+        # refuses a listing with no User app in it.
         lock = await create_using_usbmux(serial=udid)
         async with closing_best_effort(lock):
             proxy = InstallationProxyService(lockdown=lock)
             async with closing_best_effort(proxy):
-                return dict(await proxy.get_apps(application_type="User"))
+                apps = dict(await proxy.lookup({
+                    "ApplicationType": lc_discovery.APPLICATION_TYPE,
+                    "ReturnAttributes": LISTING_ATTRIBUTES,
+                }) or {})
+                ours = sorted(lc_discovery.livecontainers(apps))
+                if ours:
+                    apps.update(await proxy.lookup({
+                        "ApplicationType": lc_discovery.APPLICATION_TYPE,
+                        "BundleIDs": ours,
+                    }) or {})
+                return apps
+
+    @staticmethod
+    async def _bundle_ids(udid: str) -> list[str]:
+        from pymobiledevice3.lockdown import create_using_usbmux
+
+        from .device_session import closing_best_effort
+
+        lock = await create_using_usbmux(serial=udid)
+        async with closing_best_effort(lock):
+            return await lc_discovery.installed_bundle_ids(lock)
 
     @staticmethod
     async def _sandbox(udid: str, bundle_id: str, body):
@@ -757,8 +803,13 @@ def install(
     apps = device_ops.installed_apps(udid)
     # A locked device answers with no apps at all, and "no apps" contains no
     # AltStore — so without this the AltStore check would pass by default on
-    # exactly the device it cannot see into.
-    if not any(isinstance(b, str) and b for b in apps):
+    # exactly the device it cannot see into. User apps, now that the listing
+    # takes System ones too: AltStore is a User app, and a device that showed
+    # only its System apps would be just as blind to it.
+    if not any(
+        isinstance(b, str) and b and (meta or {}).get("ApplicationType", "User") == "User"
+        for b, meta in apps.items()
+    ):
         raise LiveContainerError(
             "couldn't list the device's apps — unlock it and try again"
         )
@@ -828,13 +879,40 @@ def _primary_installed(udid: str, team: str, device_ops: DeviceOps) -> str:
     return primary
 
 
-def push_cert(*, udid: str, team: str, p12: Path, device_ops: DeviceOps, events: LcEvents) -> dict:
+def push_cert(
+    *, udid: str, team: str, p12: Path, device_ops: DeviceOps, events: LcEvents, log: Any,
+) -> dict:
     """Put the `.p12` where LiveContainer's Settings -> Import Certificate can
     pick it (On My iPhone -> LiveContainer). A graft-signed LiveContainer
     has no AltStore to borrow a certificate from, and JIT-less mode needs one.
-    The password is typed on the device; it never leaves this Mac."""
+    The password is typed on the device; it never leaves this Mac.
+
+    Recorded in `log` (`BuildLog.record_cert_push`), which is what lets
+    `--lc-clean` remove it later and nothing else. An `AppleDevelopment.p12`
+    already there that no record says Graft pushed is someone else's, and is
+    refused rather than overwritten, as the IPA push refuses a stranger's file.
+    """
     primary = _primary_installed(udid, team, device_ops)
-    device_ops.push_document(udid, primary, CERT_NAME, p12.read_bytes())
+    data = p12.read_bytes()
+    ours = CERT_NAME in log.cert_pushes(udid).get(primary, set())
+    # No record, but the configured .p12 itself: what 1.0 pushed before cert
+    # pushes were recorded. Its bytes are the evidence; replacing a file with
+    # the same bytes changes nothing anyway.
+    if (
+        not ours
+        and CERT_NAME in device_ops.list_documents(udid, primary)
+        and device_ops.read_document(udid, primary, CERT_NAME) != data
+    ):
+        raise LiveContainerError(
+            f"{primary} on {udid} already has a Documents/{CERT_NAME} that Graft did not "
+            "push; not overwriting it",
+            hint=(
+                f"remove or rename {CERT_NAME} in LiveContainer's Documents (Files app, "
+                "On My iPhone > LiveContainer), then try again"
+            ),
+        )
+    device_ops.push_document(udid, primary, CERT_NAME, data)
+    log.record_cert_push(udid=udid, bundle_id=primary, name=CERT_NAME)
     payload = {"udid": udid, "bundle_id": primary, "path": f"Documents/{CERT_NAME}",
                "note": CERT_STAYS_NOTE}
     events.cert_pushed(**payload)
@@ -842,52 +920,91 @@ def push_cert(*, udid: str, team: str, p12: Path, device_ops: DeviceOps, events:
 
 
 def clean(
-    *, udid: str, team: str, device_ops: DeviceOps, pushed_names: set[str], events: LcEvents,
-    cert_only: bool = False,
-) -> dict:
-    """Remove the certificate and the IPAs we pushed — nothing else.
+    *, udid: str, device_ops: DeviceOps, events: LcEvents,
+    pushed: Mapping[str, set[str]], certs: Mapping[str, set[str]] | None = None,
+    cert_only: bool = False, look_for_cert: Iterable[str] = (),
+) -> list[dict]:
+    """Remove from each LiveContainer on `udid` what Graft recorded putting
+    there, and nothing else. One `lc-cleaned` per container cleaned.
 
-    Only `.ipa` names this tool is known to have pushed are candidates: a
-    pairing file, a profile or an IPA the user put there by hand are not ours
-    to delete, and a Documents folder is the user's.
+    `pushed` maps a LiveContainer to the `.ipa` names deliveries recorded
+    pushing into it on this device (`BuildLog.pushed_by_instance`); `certs`
+    maps one to the certificate `--lc-push-cert` recorded putting there
+    (`BuildLog.cert_pushes`). Nothing else is evidence. A Documents folder is
+    the user's, and in a free Apple ID's case it is SideStore's LiveContainer,
+    where people keep their own IPAs: one called `<app>.ipa`, or an
+    `AppleDevelopment.p12`, is not ours because of its name.
 
-    `cert_only` removes the certificate and nothing else — the step right
-    after Import Certificate, when the IPAs are still waiting to be imported.
+    `cert_only` removes the recorded certificates and nothing else, the step
+    right after Import Certificate, while the IPAs still wait to be imported.
+
+    `look_for_cert` names containers where an unrecorded certificate may sit:
+    the configured team's primary, where `--lc-push-cert` put one before it
+    was recorded. Found there, or anywhere this lists, it is reported, never
+    deleted.
     """
-    primary = _primary_installed(udid, team, device_ops)
-    docs = device_ops.list_documents(udid, primary)
-    removed = sorted(
-        n for n in docs
-        if n == CERT_NAME or (not cert_only and n.endswith(".ipa") and n in pushed_names)
-    )
-    for name in removed:
-        device_ops.remove_document(udid, primary, name)
-    payload = {"udid": udid, "bundle_id": primary, "removed": removed,
-               "kept": len(docs) - len(removed)}
-    events.cleaned(**payload)
-    return payload
+    certs = certs or {}
+    installed = set(device_ops.installed_apps(udid))
+    wanted = {b for b, names in certs.items() if names}
+    if not cert_only:
+        wanted |= {b for b, names in pushed.items() if names}
+    payloads = []
+    for bundle_id in sorted((wanted | set(look_for_cert)) & installed):
+        names = set() if cert_only else set(pushed.get(bundle_id, ()))
+        cert_names = set(certs.get(bundle_id, ()))
+        docs = device_ops.list_documents(udid, bundle_id)
+        if bundle_id in wanted:
+            removed = sorted(
+                n for n in docs if n in cert_names or (n.endswith(".ipa") and n in names)
+            )
+            for name in removed:
+                device_ops.remove_document(udid, bundle_id, name)
+            payload = {"udid": udid, "bundle_id": bundle_id, "removed": removed,
+                       "kept": len(docs) - len(removed)}
+            events.cleaned(**payload)
+            payloads.append(payload)
+        if CERT_NAME in docs and CERT_NAME not in cert_names:
+            events.warning(
+                f"{bundle_id}: left {CERT_NAME} in Documents. Graft has no record of "
+                "pushing it (it predates those records, or is someone else's); remove "
+                "it in the Files app if it is yours to remove"
+            )
+    if not payloads:
+        events.note(f"{udid}: nothing Graft recorded pushing is installed there; nothing removed")
+    return payloads
 
 
 # ---------- the legacy build path ----------
 
 
-def refuse_legacy_build(app: Any) -> None:
+def refuse_legacy_build(app: Any, *, free_account: bool = False) -> None:
     """Stop a config app from building LiveContainer the zsign way.
 
     That path signs a wildcard profile's entitlements in literally, which
     disables LiveContainer's keychain redirection: guest apps sign in and are
     not remembered. It was how LiveContainer got onto the devices until
     2026-11-17, so a config.yaml from before then can still carry the entry.
+
+    The way out depends on the account. A paid one installs LiveContainer with
+    `--lc-install`; a free one cannot (it is paid-only), and its LiveContainer
+    comes from SideStore, AltStore, iloader or Impactor, so it is sent there.
     """
     if app.delivery == "sideload" and app.bundle_id.lower().startswith(lc_instance.LC_ORIGINAL_ID):
-        raise ConfigError(
-            f"{app.name}: building LiveContainer through the sideload path signs it "
-            "with zsign, which breaks its keychain (guest apps cannot stay logged in)",
-            hint=(
+        if free_account:
+            hint = (
+                f"remove this app from config.yaml: with a free Apple ID, "
+                f"{FREE_INSTALLERS} installs LiveContainer and keeps it signed"
+            )
+        else:
+            hint = (
                 "remove this app from config.yaml and use `graft --lc-install "
                 "--device <udid>`, which signs LiveContainer with the entitlements "
                 "it needs"
-            ),
+            )
+        raise ConfigError(
+            f"{app.name}: building LiveContainer through the sideload path signs it "
+            "with zsign, which breaks its keychain (guest apps cannot stay logged in)",
+            hint=hint,
         )
 
 
@@ -897,10 +1014,18 @@ def refuse_legacy_build(app: Any) -> None:
 # carries four short functions rather than this module's logic.
 
 
-def _team(cfg: Any) -> str:
-    if not cfg.signing.team_id:
+def _paid_team(cfg: Any, what: str) -> str:
+    """The team id a signing verb needs — refused outright on a free Apple ID,
+    and named as missing on a paid config that has not set it yet.
+
+    The read-only verbs (`--lc-status`, `--lc-clean`) read `cfg.team_id`
+    instead and work without one, finding LiveContainer by bundle id pattern.
+    """
+    cfg.require_paid_account(what)
+    team = cfg.team_id
+    if not team:
         raise ConfigError("signing.team_id is not set", hint="set it in Settings or config.yaml")
-    return cfg.signing.team_id
+    return team
 
 
 def _target(cfg: Any, udid: str | None) -> str:
@@ -919,7 +1044,7 @@ def run_status(
     """One `lc-status` per device: `udid`, or every device usbmux can see."""
     from .build_log import BuildLog
 
-    team = _team(cfg)
+    team = cfg.team_id
     channel = check_channel(channel)
     device_ops = device_ops or UsbmuxDevice()
     if udid:
@@ -957,7 +1082,7 @@ def run_install(
     from .build_log import BuildLog
     from .errors import SigningError
 
-    team, target = _team(cfg), _target(cfg, udid)
+    team, target = _paid_team(cfg, "--lc-install"), _target(cfg, udid)
     picked, channel = parse_instances(instances), check_channel(channel)
     password = signer.resolve_p12_password(cfg)
     if not password:
@@ -977,28 +1102,45 @@ def run_install(
 
 
 def run_push_cert(cfg: Any, *, udid: str | None, events: LcEvents) -> dict:
-    return push_cert(udid=_target(cfg, udid), team=_team(cfg), p12=cfg.signing.cert,
-                     device_ops=UsbmuxDevice(), events=events)
-
-
-def pushed_ipa_names(cfg: Any, log: Any, lc_bundle_id: str) -> set[str]:
-    """Every `.ipa` name this tool has pushed into `lc_bundle_id`, or would.
-
-    The recorded deliveries, plus `<app>.ipa` for each configured app — the
-    name a push uses — so an IPA pushed before deliveries were recorded is
-    still recognised as ours.
-    """
-    return {f"{name}.ipa" for name in cfg.apps} | log.pushed_remote_names(lc_bundle_id)
-
-
-def run_clean(cfg: Any, *, udid: str | None, events: LcEvents, cert_only: bool = False) -> dict:
     from .build_log import BuildLog
 
-    team = _team(cfg)
-    names = pushed_ipa_names(cfg, BuildLog(cfg.state_dir / "log.sqlite"),
-                             lc_instance.instance_bundle_id(1, team))
-    return clean(udid=_target(cfg, udid), team=team, device_ops=UsbmuxDevice(),
-                 pushed_names=names, events=events, cert_only=cert_only)
+    team = _paid_team(cfg, "--lc-push-cert")
+    return push_cert(udid=_target(cfg, udid), team=team, p12=cfg.signing.cert,
+                     device_ops=UsbmuxDevice(), events=events,
+                     log=BuildLog(cfg.state_dir / "log.sqlite"))
+
+
+def run_clean(
+    cfg: Any, *, udid: str | None, events: LcEvents, cert_only: bool = False
+) -> list[dict]:
+    """`--lc-clean`: what Graft recorded pushing to this device, from the
+    LiveContainer each one went into, and nothing else (`clean`).
+
+    No container has to be chosen for that, so a device with two primaries,
+    where a push needs a pin, cleans as readily as one with one. The
+    certificate records `clean` removes go with it (`forget_cert_push`).
+    """
+    from .build_log import BuildLog
+
+    target = _target(cfg, udid)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    certs = log.cert_pushes(target)
+    team = cfg.team_id
+    payloads = clean(
+        udid=target, device_ops=UsbmuxDevice(), events=events,
+        pushed=log.pushed_by_instance(target), certs=certs, cert_only=cert_only,
+        # Where `--lc-push-cert` put a certificate before pushes were recorded.
+        look_for_cert=[lc_instance.instance_bundle_id(1, team)] if team else [],
+    )
+    pushed = log.pushed_by_instance(target)
+    for payload in payloads:
+        if payload["bundle_id"] in certs:
+            log.forget_cert_push(udid=target, bundle_id=payload["bundle_id"])
+        # Every recorded IPA in that container is gone now (removed, or gone
+        # before), so its records stop vouching for those names.
+        if not cert_only and payload["bundle_id"] in pushed:
+            log.forget_pushes(udid=target, bundle_id=payload["bundle_id"])
+    return payloads
 
 
 def human_line(event_type: str, fields: dict[str, Any]) -> str:

@@ -36,6 +36,20 @@ def _isolated_xdg_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.fixture(autouse=True)
+def _an_apple_silicon_mac(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test runs as if on Apple silicon, whatever Mac runs the suite.
+
+    PlayCover and UnfairPlay word their failures differently on an Intel Mac
+    (`graft_ipa.host`). Without this, the same test would assert one message
+    on the developer's Mac and get the other on an Intel one. Tests of the
+    Intel path replace the reader themselves.
+    """
+    from graft_ipa import host
+
+    monkeypatch.setattr(host, "_sysctl_arm64", lambda: 1)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test talks to an empty fake `security`, never the login keychain.
 

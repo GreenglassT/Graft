@@ -43,7 +43,9 @@ class Recorder:
 
     def __init__(self) -> None:
         self.buf = io.StringIO()
-        self.events = lc_manage.LcEvents(JsonEmitter(stream=self.buf))
+        #: What went through `LcEvents.warning` (the CLI's `_warn`).
+        self.warnings: list[str] = []
+        self.events = lc_manage.LcEvents(JsonEmitter(stream=self.buf), warn=self.warnings.append)
 
     def all(self) -> list[tuple[str, dict]]:
         out = []
@@ -89,9 +91,15 @@ class FakeDevice:
         self.docs = docs or {}
         self.pushed: list[tuple[str, str, bytes]] = []
         self.removed: list[tuple[str, str]] = []
+        #: The bytes of a file in `docs`, by (bundle id, name); others read
+        #: as somebody else's.
+        self.contents: dict[tuple[str, str], bytes] = {}
 
     def installed_apps(self, udid: str) -> dict[str, dict]:
         return self.apps
+
+    def read_document(self, udid: str, bundle_id: str, name: str) -> bytes:
+        return self.contents.get((bundle_id, name), b"somebody else's file")
 
     def list_documents(self, udid: str, bundle_id: str) -> list[str]:
         return list(self.docs.get(bundle_id, []))
@@ -207,7 +215,12 @@ def test_an_altstore_installed_copy_is_refused_even_with_altstore_not_listed(
     assert h.fetched == 0
 
 
-@pytest.mark.parametrize("apps", [{}, {"": {}}])
+@pytest.mark.parametrize("apps", [
+    {}, {"": {}},
+    # The listing takes System apps too now; a device that showed only those
+    # would be as blind to AltStore, a User app, as one that showed nothing.
+    {"com.apple.example": {"ApplicationType": "System"}},
+])
 def test_a_device_that_lists_no_apps_is_refused(
     tmp_path: Path, ipa: Path, apps: dict
 ) -> None:
@@ -398,18 +411,25 @@ def test_an_extension_without_its_app_id_rides_the_wildcard(tmp_path: Path, ipa:
 # ---- push-cert / clean ----
 
 
-def test_the_certificate_goes_into_the_primary_documents(tmp_path: Path) -> None:
+def test_the_certificate_goes_into_the_primary_documents_and_is_recorded(
+    tmp_path: Path,
+) -> None:
     p12, _ = _make_p12(tmp_path)
     device = FakeDevice({PRIMARY: {}})
     rec = Recorder()
+    log = BuildLog(tmp_path / "log.sqlite")
 
-    lc_manage.push_cert(udid="u1", team=TEAM, p12=p12, device_ops=device, events=rec.events)
+    lc_manage.push_cert(udid="u1", team=TEAM, p12=p12, device_ops=device, events=rec.events,
+                        log=log)
 
     assert device.pushed == [(PRIMARY, "AppleDevelopment.p12", p12.read_bytes())]
     assert rec.all() == [("lc-cert-pushed", {
         "udid": "u1", "bundle_id": PRIMARY, "path": "Documents/AppleDevelopment.p12",
         "note": lc_manage.CERT_STAYS_NOTE,
     })]
+    # What `--lc-clean` later deletes on, and nothing else does.
+    assert log.cert_pushes("u1") == {PRIMARY: {"AppleDevelopment.p12"}}
+    assert log.cert_pushes("another-phone") == {}
 
 
 def test_the_certificate_needs_the_primary_installed(tmp_path: Path) -> None:
@@ -417,9 +437,36 @@ def test_the_certificate_needs_the_primary_installed(tmp_path: Path) -> None:
 
     with pytest.raises(LiveContainerError) as exc:
         lc_manage.push_cert(udid="u1", team=TEAM, p12=p12, device_ops=FakeDevice({LC2: {}}),
-                            events=Recorder().events)
+                            events=Recorder().events, log=BuildLog(tmp_path / "log.sqlite"))
 
     assert exc.value.message == f"{PRIMARY} is not installed on u1"
+
+
+def test_a_certificate_graft_did_not_push_is_not_overwritten(tmp_path: Path) -> None:
+    p12, _ = _make_p12(tmp_path)
+    device = FakeDevice({PRIMARY: {}}, docs={PRIMARY: ["AppleDevelopment.p12"]})
+    log = BuildLog(tmp_path / "log.sqlite")
+
+    with pytest.raises(LiveContainerError) as exc:
+        lc_manage.push_cert(udid="u1", team=TEAM, p12=p12, device_ops=device,
+                            events=Recorder().events, log=log)
+
+    assert "Graft did not push" in exc.value.message
+    assert "rename" in exc.value.hint
+    assert device.pushed == []
+    assert log.cert_pushes("u1") == {}
+
+
+def test_a_certificate_graft_pushed_is_pushed_over_again(tmp_path: Path) -> None:
+    p12, _ = _make_p12(tmp_path)
+    device = FakeDevice({PRIMARY: {}}, docs={PRIMARY: ["AppleDevelopment.p12"]})
+    log = BuildLog(tmp_path / "log.sqlite")
+    log.record_cert_push(udid="u1", bundle_id=PRIMARY, name="AppleDevelopment.p12")
+
+    lc_manage.push_cert(udid="u1", team=TEAM, p12=p12, device_ops=device,
+                        events=Recorder().events, log=log)
+
+    assert device.pushed == [(PRIMARY, "AppleDevelopment.p12", p12.read_bytes())]
 
 
 def test_clean_removes_only_what_we_put_there() -> None:
@@ -430,8 +477,9 @@ def test_clean_removes_only_what_we_put_there() -> None:
     device = FakeDevice({PRIMARY: {}}, docs={PRIMARY: docs})
     rec = Recorder()
 
-    lc_manage.clean(udid="u1", team=TEAM, device_ops=device,
-                    pushed_names={"example.ipa", "bravo.ipa", "delta.ipa"}, events=rec.events)
+    lc_manage.clean(udid="u1", device_ops=device, events=rec.events,
+                    pushed={PRIMARY: {"example.ipa", "bravo.ipa", "delta.ipa"}},
+                    certs={PRIMARY: {"AppleDevelopment.p12"}})
 
     assert device.removed == [
         (PRIMARY, "AppleDevelopment.p12"), (PRIMARY, "bravo.ipa"), (PRIMARY, "example.ipa"),
@@ -450,8 +498,9 @@ def test_cert_only_removes_the_certificate_and_keeps_the_ipas() -> None:
     device = FakeDevice({PRIMARY: {}}, docs={PRIMARY: docs})
     rec = Recorder()
 
-    lc_manage.clean(udid="u1", team=TEAM, device_ops=device, pushed_names={"example.ipa"},
-                    events=rec.events, cert_only=True)
+    lc_manage.clean(udid="u1", device_ops=device, events=rec.events,
+                    pushed={PRIMARY: {"example.ipa"}},
+                    certs={PRIMARY: {"AppleDevelopment.p12"}}, cert_only=True)
 
     assert device.removed == [(PRIMARY, "AppleDevelopment.p12")]
     assert rec.of("lc-cleaned")[0]["removed"] == ["AppleDevelopment.p12"]
@@ -463,7 +512,7 @@ def test_the_pushed_certificate_says_it_stays_until_removed(tmp_path: Path) -> N
     rec = Recorder()
 
     lc_manage.push_cert(udid="u1", team=TEAM, p12=p12, device_ops=FakeDevice({PRIMARY: {}}),
-                        events=rec.events)
+                        events=rec.events, log=BuildLog(tmp_path / "log.sqlite"))
 
     note = rec.of("lc-cert-pushed")[0]["note"]
     assert "stays" in note and "until" in note and "--lc-clean --cert-only" in note
@@ -475,8 +524,8 @@ def test_clean_with_nothing_to_remove_says_so() -> None:
     device = FakeDevice({PRIMARY: {}}, docs={PRIMARY: ["iPad.mobiledevicepairing"]})
     rec = Recorder()
 
-    lc_manage.clean(udid="u1", team=TEAM, device_ops=device, pushed_names=set(),
-                    events=rec.events)
+    lc_manage.clean(udid="u1", device_ops=device, events=rec.events,
+                    pushed={PRIMARY: {"example.ipa"}})
 
     assert device.removed == []
     assert rec.of("lc-cleaned")[0]["removed"] == []

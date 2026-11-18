@@ -74,7 +74,12 @@ _NON_VERB_PARAMS: dict[str, str] = {
         "`--json` changes how every verb reports, not which one runs. It is the "
         "one flag in the signature that all 31 handlers read."
     ),
-    "dry_run": "A build modifier, read by `_verb_build_apps` and `_verb_prune_builds`.",
+    "dry_run": (
+        "A build modifier, read by `_verb_build_apps` and `_verb_prune_builds`. "
+        "Not in `_VERB_ONLY_FLAGS`: it has a default of False, and the verbs "
+        "that may take it are read off their handlers (`_Verb.honours_dry_run`) "
+        "by `_DryRunGate`, which refuses it everywhere else."
+    ),
     "skip_install": "A build modifier: stop after signing rather than pushing to a device.",
     "for_playcover": (
         "A build modifier: also make the artifact loadable on this Mac. Not a "

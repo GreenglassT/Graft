@@ -20,14 +20,14 @@ from pathlib import Path
 from typing import Any
 
 from . import USER_AGENT
-from .errors import GraftError
+from .errors import EXIT_CANISTER, GraftError
 
 API_BASE = "https://api.canister.me/v2"
 HTTP_TIMEOUT = 30
 
 
 class CanisterError(GraftError):
-    exit_code = 9
+    exit_code = EXIT_CANISTER
 
 
 @dataclass

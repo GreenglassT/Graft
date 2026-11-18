@@ -20,9 +20,20 @@ import SwiftUI
 /// Replacing AltStore's copies would orphan every guest app's JIT-less
 /// signature, and AltStore would refresh its own copy back over ours; the CLI
 /// refuses for the same reason, and the GUI does not offer what it refuses.
+///
+/// **On a free Apple ID the section is read-only.** `--lc-install` and
+/// `--lc-push-cert` sign with a paid account's certificate, and the CLI refuses
+/// both, so their buttons are disabled with the reason (`PaidOnly`), and the
+/// section says who manages what is installed and where to update it: the
+/// store that installed it. `--lc-status` and `--lc-clean` work on either
+/// account, so the listing, Re-check and Clean up are unchanged — and Clean up
+/// is there for every LiveContainer the phone has, whoever installed it
+/// (`blocks(for:account:)`).
 struct DeviceLiveContainerSection: View {
     let device: DeviceRecord
     let store: LiveContainerStore
+    /// `ConfigStore.account`. Nil (not known yet) disables nothing.
+    let account: AccountMode?
 
     @State private var instances: Set<Int> = [1, 2, 3]
     @State private var channel = "nightly"
@@ -105,16 +116,58 @@ struct DeviceLiveContainerSection: View {
                 dim("Couldn't read the device: \(status.error ?? "no answer")")
             } else {
                 instanceList(status)
-                if status.managedBy == .altstore {
-                    altStoreNotice(status)
-                } else {
-                    installControls(status)
-                    if status.instances.contains(where: { $0.role == "primary" }) {
-                        checklist
+                ForEach(Self.blocks(for: status, account: account), id: \.self) { block in
+                    switch block {
+                    case .altStoreNotice: altStoreNotice(status)
+                    case .freeNotes:
+                        ForEach(Self.freeAccountNotes(for: status), id: \.self) { dim($0) }
+                    case .installControls: installControls(status)
+                    case .freeChecklist: freeChecklist
+                    case .checklist: checklist
+                    case .cleanUp: cleanUpButton
                     }
                 }
             }
         }
+    }
+
+    /// The parts of the section below the instance list, in order.
+    enum Block: Hashable {
+        case altStoreNotice
+        case freeNotes
+        case installControls
+        case freeChecklist
+        case checklist
+        /// Clean up on its own, where no checklist carries it.
+        case cleanUp
+    }
+
+    /// Which parts a reachable device's section shows.
+    ///
+    /// **Clean up is offered wherever there is a LiveContainer to clean**, on
+    /// either account, because `--lc-clean` works on either and on every
+    /// instance. It used to ride only inside a checklist, and the checklists
+    /// were gated on a store-free device *with a primary* — so a free Apple ID
+    /// on a SideStore phone, which is the usual free setup, got neither, and
+    /// nor did a phone with only LiveContainer2 or the bare upstream id. The
+    /// IPAs Graft pushed there had no way off from here.
+    ///
+    /// On a free Apple ID the free checklist is shown on a SideStore/AltStore
+    /// phone too: its step 1 — import the certificate from SideStore — is that
+    /// phone's step exactly. A paid account's checklist stays keyed on the
+    /// primary, the instance its certificate push targets.
+    nonisolated static func blocks(for status: LCStatusRecord, account: AccountMode?) -> [Block] {
+        let installed = !status.instances.isEmpty
+        let hasPrimary = status.instances.contains { $0.role == "primary" }
+        if status.managedBy == .altstore {
+            guard installed else { return [.altStoreNotice] }
+            return [.altStoreNotice, account.isFree ? .freeChecklist : .cleanUp]
+        }
+        if account.isFree {
+            return [.freeNotes, .installControls] + (installed ? [.freeChecklist] : [])
+        }
+        if hasPrimary { return [.installControls, .checklist] }
+        return [.installControls] + (installed ? [.cleanUp] : [])
     }
 
     @ViewBuilder
@@ -154,11 +207,13 @@ struct DeviceLiveContainerSection: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Symbols.advisory.image(size: 11).foregroundStyle(Palette.accent)
-                Text("Managed by AltStore — update it there")
+                // `managed_by: altstore` is AltStore *or* SideStore on the
+                // device (`lc_manage.altstore_present`), so both are named.
+                Text("Managed by SideStore or AltStore — update it there")
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.text)
             }
-            Text("Add this source in AltStore, then update LiveContainer from it:")
+            Text("Add this source there, then update LiveContainer from it:")
                 .font(AppFont.monoSmall)
                 .foregroundStyle(Palette.textDim)
             HStack(spacing: Metrics.controlGap) {
@@ -180,7 +235,13 @@ struct DeviceLiveContainerSection: View {
 
     private func installControls(_ status: LCStatusRecord) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            ForEach(Self.installNotes(for: status), id: \.self) { dim($0) }
+            // The notes describe what an install would do to what is there;
+            // on a free Apple ID there is no install, and the reason says so.
+            if account.isFree {
+                dim(PaidOnly.installLiveContainer)
+            } else {
+                ForEach(Self.installNotes(for: status), id: \.self) { dim($0) }
+            }
             HStack(spacing: Metrics.controlGap) {
                 Button {
                     store.startInstall(udid: device.udid, instances: instances, channel: channel)
@@ -196,6 +257,7 @@ struct DeviceLiveContainerSection: View {
                 }
                 .disabled(!store.canInstall(udid: device.udid) || store.isRunning
                           || instances.isEmpty)
+                .paidOnly(account.isFree ? PaidOnly.installLiveContainer : nil)
                 ForEach([1, 2, 3], id: \.self) { n in
                     Toggle(n == 1 ? "1" : "\(n)", isOn: Binding(
                         get: { instances.contains(n) },
@@ -214,6 +276,9 @@ struct DeviceLiveContainerSection: View {
                 .help("nightly is what upstream recommends")
                 Spacer(minLength: 0)
             }
+            // The instance and channel choices qualify an install; with no
+            // install to qualify they are disabled with it.
+            .disabled(account.isFree)
             .font(AppFont.monoSmall)
             .foregroundStyle(Palette.textDim)
         }
@@ -251,6 +316,65 @@ struct DeviceLiveContainerSection: View {
         return notes
     }
 
+    /// Who manages LiveContainer on this device and where to update it, on a
+    /// free Apple ID — the guidance that replaces Install / Update, which needs
+    /// a paid account. AltStore-managed devices are not asked: they get
+    /// `altStoreNotice`, on either account.
+    nonisolated static func freeAccountNotes(for status: LCStatusRecord) -> [String] {
+        guard !status.instances.isEmpty else {
+            return ["Install LiveContainer with SideStore or iloader, using your free "
+                    + "Apple ID, then Re-check."]
+        }
+        switch status.managedBy {
+        case .graft:
+            return ["Installed by Graft with a paid account. Updating it from Graft needs "
+                    + "that account again; SideStore or iloader can install one with your "
+                    + "free Apple ID instead."]
+        case .unknown, .altstore:
+            return ["Installed outside Graft, by SideStore, AltStore, iloader or Impactor. "
+                    + "Update LiveContainer in the one that installed it."]
+        }
+    }
+
+    /// `checklist`, for a free Apple ID: LiveContainer takes its certificate
+    /// from SideStore rather than from a .p12 Graft puts on the device, so the
+    /// push is disabled with the reason and the remove step has nothing to
+    /// remove. Clean up still clears the IPAs Graft pushed.
+    private var freeChecklist: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Then, in LiveContainer on the device:")
+                .font(AppFont.monoSmall)
+                .foregroundStyle(Palette.textDim)
+            step(1, "Settings › Import Certificate from SideStore (or the store that "
+                 + "installed LiveContainer), so it can sign the apps you import.") {
+                Button("Put certificate on device") {
+                    store.startPushCert(udid: device.udid)
+                }
+                .controlSize(.small)
+                .fixedSize()
+                .paidOnly(PaidOnly.pushCertificate)
+            }
+            step(2, "Import your apps from the Documents folder.") { EmptyView() }
+            cleanUpButton
+        }
+    }
+
+    private var cleanUpButton: some View {
+        HStack(spacing: Metrics.controlGap) {
+            Button {
+                store.startClean(udid: device.udid)
+            } label: {
+                Symbols.delete.label("Clean up")
+            }
+            .controlSize(.small)
+            .fixedSize()
+            .disabled(store.isRunning)
+            .help("Remove the certificate and the IPAs Graft pushed from "
+                  + "LiveContainer's Documents. Nothing else is touched.")
+            Spacer(minLength: 0)
+        }
+    }
+
     /// What LiveContainer needs once it is on the device. Its JIT-less mode
     /// signs guest apps with a certificate; one Graft installed has no
     /// AltStore to borrow one from, so it is imported by hand.
@@ -284,19 +408,7 @@ struct DeviceLiveContainerSection: View {
                  + "should say Yes.") { EmptyView() }
             step(4, "Import your apps from the Documents folder.") { EmptyView() }
             step(5, "Long-press each app › Convert to Shared App.") { EmptyView() }
-            HStack(spacing: Metrics.controlGap) {
-                Button {
-                    store.startClean(udid: device.udid)
-                } label: {
-                    Symbols.delete.label("Clean up")
-                }
-                .controlSize(.small)
-                .fixedSize()
-                .disabled(store.isRunning)
-                .help("Remove the certificate and the IPAs Graft pushed from "
-                      + "LiveContainer's Documents. Nothing else is touched.")
-                Spacer(minLength: 0)
-            }
+            cleanUpButton
         }
     }
 
@@ -354,14 +466,37 @@ struct DeviceLiveContainerSection: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            if let cleaned = run.cleaned {
-                success(cleaned.removed.isEmpty
-                        ? "✓ Nothing to clean up"
-                        : "✓ Removed \(cleaned.removed.joined(separator: ", "))")
+            let cleaned = Self.cleanedLines(run.cleaned, instances: status?.instances ?? [])
+            ForEach(Array(cleaned.enumerated()), id: \.offset) { _, line in
+                success(line)
             }
             if let error = run.error {
                 ErrorBanner(message: error, fit: .inset, onDismiss: nil)
             }
+        }
+    }
+
+    /// What a clean did, one line per LiveContainer instance it reported on.
+    ///
+    /// A single record — the primary alone, which is every `--cert-only` run
+    /// and every device with one instance — keeps the sentence this section
+    /// has always shown. With more than one, each line leads with the instance
+    /// (its own name from the status when listed, its bundle id otherwise),
+    /// because "Removed example.ipa" twice says nothing about where.
+    static func cleanedLines(
+        _ records: [LCCleanedRecord], instances: [LCInstanceRecord]
+    ) -> [String] {
+        if records.count == 1, let only = records.first {
+            return [only.removed.isEmpty
+                    ? "✓ Nothing to clean up"
+                    : "✓ Removed \(only.removed.joined(separator: ", "))"]
+        }
+        return records.map { record in
+            let name = instances.first { $0.bundleId == record.bundleId }?.displayName
+                ?? record.bundleId
+            return record.removed.isEmpty
+                ? "✓ \(name): nothing to clean up"
+                : "✓ \(name): removed \(record.removed.joined(separator: ", "))"
         }
     }
 

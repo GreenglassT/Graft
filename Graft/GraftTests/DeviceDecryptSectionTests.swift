@@ -168,7 +168,7 @@ final class DeviceDecryptSectionTests: XCTestCase {
     /// second hazard recurring exactly as diagnosed.
     func test_a_dumped_staged_unconfigured_bundle_id_offers_add_and_forwards_its_own_record() async throws {
         let record = try stagedIPARecord(
-            bundleId: Self.bundleId, displayName: "Sample", filename: "com.a.one_1.0.ipa"
+            bundleId: Self.bundleId, displayName: "ExamplePlayer", filename: "com.a.one_1.0.ipa"
         )
         let store = try await dumpedStore()
         var captured: StagedIPARecord?

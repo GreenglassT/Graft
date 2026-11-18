@@ -12,15 +12,29 @@ app from source.
   no second copy of the CLI's logic.
 - The app and the CLI share `~/.config/graft/config.yaml` and
   `~/.local/state/graft/log.sqlite`.
-- The app looks for `graft` in `~/.local/bin`, `/opt/homebrew/bin` and
-  `/usr/local/bin`, so the CLI must be installed (`pipx install
-  git+https://github.com/GreenglassT/Graft`).
-- First-run setup is terminal only: `graft --init` and `graft --setup-portal`
-  have no GUI equivalent.
+- At launch, and again on Check again, the app reads your login shell's
+  environment (your shell from the user database, run as `-l -i -c`, or
+  `-i -c` for csh and tcsh, given 5 seconds), so the CLI sees the same
+  `PATH`, `XDG_*` directories, `GRAFT_*` variables and `.p12` password
+  variable as it does in Terminal. If the shell does not answer, the app
+  carries on without it, and a later re-read that gets no answer keeps the
+  last one that did.
+- The app looks for `graft` in `~/.local/bin`, `/opt/homebrew/bin`,
+  `/usr/local/bin` and `/opt/local/bin`, then on that `PATH`, so the CLI must
+  be installed (`pipx install git+https://github.com/GreenglassT/Graft`).
+- First-run setup happens in Terminal: until the CLI is installed and
+  `graft --init` has written a config, the app shows a setup screen with the
+  commands to run and checks again when you come back to it. Once it is set
+  up, coming back to the window re-reads the app list, so an account change
+  made in Terminal is picked up without a relaunch, and Settings' tool checks
+  run again for the new account. A `config.yaml` that did not parse is read
+  again too, so fixing it in an editor clears Settings' notice.
+  `graft --setup-portal` has no GUI equivalent.
 
 ## Requirements
 
-- macOS 15 or later on Apple silicon
+- macOS 15 or later (a Release build is universal, arm64 and x86_64; only
+  Apple silicon has been tested)
 - Xcode, and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 
 ## Build
@@ -54,6 +68,13 @@ cd Graft
 TEST_RUNNER_PATH="$PWD/../.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   xcodebuild test -scheme Graft -destination 'platform=macOS'
 ```
+
+A few tests (`AccessibilityTests` and the ones that read text off a hosted
+window) go through the macOS Accessibility API. macOS serves an app's tree
+only after an assistive client such as VoiceOver or Accessibility Inspector
+has talked to it, so without one those tests skip; check the skip count. To
+see that skip path on a Mac that does serve the tree, add
+`TEST_RUNNER_GRAFT_TESTS_PRETEND_NO_AX=1` to the command.
 
 ## Acknowledgements
 

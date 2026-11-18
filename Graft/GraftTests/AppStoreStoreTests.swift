@@ -201,7 +201,8 @@ final class AppStoreStoreTests: XCTestCase {
             argsOverride: ["-c", script], onStage: { seen.append($0) }
         )
 
-        XCTAssertEqual(record?.filename, "b_1.ipa")
+        XCTAssertEqual(record?.record.filename, "b_1.ipa")
+        XCTAssertEqual(record?.decrypted, false, "a decrypt stage alone is not the CLI saying it decrypted")
         XCTAssertEqual(seen, [.decrypt])
     }
 }

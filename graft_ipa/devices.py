@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from dataclasses import dataclass
 
 from .device_session import closing_best_effort
@@ -39,10 +38,10 @@ def list_devices() -> DeviceListing:
     Returns a listing rather than a bare list so a device that answers usbmux
     and then raises while being described cannot be dropped without the caller
     noticing. It used to be: the filter discarded it, the Devices tab said "No
-    devices connected" and the picker came up empty, while the idevice_id paths
-    in pre-flight and `select_device` still saw the phone — so the visible
-    conclusion was a bad cable or a lost trust, and re-pairing was the fix
-    people reached for.
+    devices connected" and the picker came up empty, while pre-flight and
+    `select_device` (then on libimobiledevice's `idevice_id`, now on
+    `list_devices_brief`) still saw the phone — so the visible conclusion was a
+    bad cable or a lost trust, and re-pairing was the fix people reached for.
     """
     return asyncio.run(_list_devices_async())
 
@@ -101,21 +100,22 @@ def list_devices_brief() -> list[BriefDevice]:
 async def _list_devices_brief_async() -> list[BriefDevice]:
     from pymobiledevice3.usbmux import list_devices as mux_list
 
-    seen: set[str] = set()
-    out: list[BriefDevice] = []
+    # One entry per phone, where usbmuxd first listed it — but USB if it is
+    # on both transports, whichever came first: USB is the reliable way to
+    # move a large IPA, and `select_device` hands this transport to the
+    # install.
+    by_udid: dict[str, BriefDevice] = {}
     for mux_dev in await mux_list():
         udid = _mux_udid(mux_dev)
-        if not udid or udid in seen:
+        if not udid:
             continue
-        seen.add(udid)
         conn = getattr(mux_dev, "connection_type", "USB")
-        out.append(
-            BriefDevice(
-                udid=udid,
-                connection_type="Network" if str(conn).lower().startswith("network") else "USB",
-            )
-        )
-    return out
+        kind = "Network" if str(conn).lower().startswith("network") else "USB"
+        if udid not in by_udid:
+            by_udid[udid] = BriefDevice(udid=udid, connection_type=kind)
+        elif kind == "USB":
+            by_udid[udid].connection_type = "USB"
+    return list(by_udid.values())
 
 
 def _mux_udid(mux_dev) -> str | None:
@@ -170,33 +170,44 @@ def _safe_attr(obj, attr: str):
         return None
 
 
-_LC_PREFIX = "com.kdt.livecontainer"
-
-
 async def _detect_livecontainer_async(lockdown) -> str | None:
-    """Find the installed LiveContainer bundle id (handles team-id suffixes).
+    """The LiveContainer a push to this device would use, or None for none.
 
-    Asks InstallationProxy for *only* the CFBundleIdentifier attribute so we
-    skip downloading every installed app's icon and entitlement plist.
+    Asked of `lc_discovery`, the one discovery the push, `--lc-status` and
+    `--check` share: every application type (TrollStore and a jailbreak
+    register LiveContainer as a System app), bundle ids only, matched by
+    pattern in any case, and `choose`'s pick when there are several. This had
+    its own case-sensitive prefix over User apps, first listed wins: a phone
+    with only `com.kdt.LiveContainer2.<TEAM>` showed "no LC" in the sidebar,
+    and with two installed it named whichever the phone listed first.
+
+    Unpinned, since a device belongs to no app. Where `choose` needs a pin to
+    decide (two primaries), the answer is the first one its refusal names:
+    the sidebar's question is whether there is a LiveContainer, and the push
+    says for itself which pin it needs.
+
+    Every failure, the listing's and the close's, reads as "not installed":
+    the device is described either way.
     """
-    try:
-        from pymobiledevice3.services.installation_proxy import InstallationProxyService
-        proxy = InstallationProxyService(lockdown=lockdown)
-    except Exception:
-        return None
-    # This service opens its own connection, so `_describe_device` closing the
-    # lockdown session leaves this one live — the other half of that leak, and
-    # not a consequence of it. Measured under `-X dev` against the test phone,
+    from . import lc_discovery
+    from .lc_runner import LiveContainerError
+
+    # `installed_bundle_ids` closes the InstallationProxy service it opens,
+    # which `_describe_device` closing the lockdown session does not: the
+    # other half of that leak. Measured under `-X dev` against the test phone,
     # one `list_devices()` call: five unclosed resources before either fix,
     # three with the lockdown closed alone, none with both.
-    async with closing_best_effort(proxy):
-        try:
-            call = proxy.browse(attributes=["CFBundleIdentifier"])
-            apps = await call if inspect.isawaitable(call) else call
-        except Exception:
-            apps = None
-    for entry in apps or []:
-        bid = entry.get("CFBundleIdentifier") if isinstance(entry, dict) else None
-        if bid and bid.startswith(_LC_PREFIX):
-            return bid
-    return None
+    try:
+        installed = await lc_discovery.installed_bundle_ids(lockdown)
+    except Exception:
+        return None
+    try:
+        return lc_discovery.choose(installed)[0]
+    except LiveContainerError:
+        roles = lc_discovery.livecontainers(installed)
+        primaries = [
+            b for b, role in roles.items()
+            if role == "primary" or b.lower() == lc_discovery.FAMILY_PREFIX
+        ]
+        candidates = primaries or list(roles)
+        return candidates[0] if candidates else None

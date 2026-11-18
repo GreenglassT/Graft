@@ -1,7 +1,7 @@
 """Reading a .mobileprovision, and deciding whether a cached one is still usable.
 
 A provisioning profile is a CMS-signed plist, so `plistlib` alone cannot open
-it — `/usr/bin/security cms -D` does the unwrapping. That one fact used to live
+it — the XML plist is cut out of the CMS bytes (see `decode`). That one fact used to live
 only in `preflight.parse_mobileprovision`, which put it above `signer` and
 `apple_portal` in the import graph and therefore out of reach of the code that
 decides whether to re-provision. This module sits below all three so both
@@ -21,33 +21,133 @@ file under ~/.config by hand.
 from __future__ import annotations
 
 import plistlib
-import subprocess
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
 from .errors import PreflightError
 
 
 def decode(profile: Path) -> dict:
-    """Decode a .mobileprovision and return the embedded plist as a dict."""
+    """Decode a .mobileprovision and return the embedded plist as a dict.
+
+    The profile is DER CMS whose signed content is an XML plist, stored
+    verbatim, so the plist is cut out of the bytes. `security cms -D` is
+    deliberately not used: besides needing a default keychain, it imports the
+    profile's embedded certificates into the user's login keychain.
+    """
     if not profile.exists():
         raise PreflightError(f"provisioning profile not found: {profile}")
     try:
-        out = subprocess.run(
-            ["security", "cms", "-D", "-i", str(profile)],
-            check=True,
-            capture_output=True,
-        ).stdout
-    except FileNotFoundError as e:
-        raise PreflightError(
-            "/usr/bin/security not found (expected on macOS)",
-        ) from e
-    except subprocess.CalledProcessError as e:
-        raise PreflightError(
-            f"failed to decode {profile}: {e.stderr.decode(errors='replace').strip()}"
-        ) from e
-    return plistlib.loads(out)
+        data = profile.read_bytes()
+        start = data.index(b"<?xml")
+        end = data.rindex(b"</plist>", start) + len(b"</plist>")
+        plist = plistlib.loads(data[start:end])
+    except (OSError, ValueError, ExpatError, plistlib.InvalidFileException) as e:
+        # ValueError: a missing marker; ExpatError: a plist that does not parse.
+        # The slice fails on BER content split into octet-string chunks, whose
+        # headers sit between the pieces (an 0x04 tag is never valid XML, so
+        # the slice can never parse into a wrong plist instead): read the
+        # signed content out of the CMS structure and try that.
+        content = _signed_content(data) if isinstance(e, (ExpatError, ValueError)) else None
+        try:
+            plist = plistlib.loads(content) if content else None
+        except (ValueError, ExpatError, plistlib.InvalidFileException):
+            plist = None
+        if plist is None:
+            raise PreflightError(f"failed to decode {profile}: {e}") from e
+    if not isinstance(plist, dict):
+        raise PreflightError(f"failed to decode {profile}: embedded plist is not a dictionary")
+    return plist
+
+
+def _ber_header(data: bytes, i: int) -> tuple[int, int, int | None]:
+    """`(tag, content_start, content_end)` of the BER element at `i`; the end
+    is None for an indefinite length. Raises IndexError/ValueError on garbage."""
+    tag = data[i]
+    i += 1
+    if tag & 0x1F == 0x1F:  # a multi-byte tag: none in CMS, but skip it whole
+        while data[i] & 0x80:
+            i += 1
+        i += 1
+    first = data[i]
+    i += 1
+    if first == 0x80:
+        if not tag & 0x20:
+            raise ValueError("indefinite length on a primitive")
+        return tag, i, None
+    if first & 0x80:
+        count = first & 0x7F
+        if not 0 < count <= 4:
+            raise ValueError("length out of range")
+        length = int.from_bytes(data[i:i + count], "big")
+        i += count
+    else:
+        length = first
+    if i + length > len(data):
+        raise ValueError("element runs past the end")
+    return tag, i, i + length
+
+
+def _ber_children(data: bytes, start: int, end: int | None) -> tuple[list[tuple[int, int, int]], int]:
+    """The elements inside a constructed one, as `(tag, at, after)`, and where
+    it ends — after its end-of-contents marker when the length is indefinite."""
+    children: list[tuple[int, int, int]] = []
+    i = start
+    while True:
+        if end is None and data[i:i + 2] == b"\x00\x00":
+            return children, i + 2
+        if end is not None and i >= end:
+            return children, end
+        tag, content, content_end = _ber_header(data, i)
+        after = (
+            _ber_children(data, content, None)[1] if content_end is None else content_end
+        )
+        children.append((tag, i, after))
+        i = after
+
+
+def _ber_octets(data: bytes, at: int) -> bytes:
+    """An OCTET STRING's bytes, its chunks joined if it is constructed."""
+    tag, content, content_end = _ber_header(data, at)
+    if tag == 0x04:
+        return data[content:content_end]
+    if tag != 0x24:
+        raise ValueError(f"not an octet string: tag {tag:#x}")
+    kids, _ = _ber_children(data, content, content_end)
+    return b"".join(_ber_octets(data, child_at) for _, child_at, _ in kids)
+
+
+def _ber_inside(data: bytes, at: int) -> list[tuple[int, int, int]]:
+    _, content, content_end = _ber_header(data, at)
+    return _ber_children(data, content, content_end)[0]
+
+
+def _signed_content(data: bytes) -> bytes | None:
+    """The content of a CMS SignedData — the profile's plist — or None.
+
+    ContentInfo { contentType, [0] SignedData { version, digestAlgorithms,
+    encapContentInfo { eContentType, [0] eContent }, … } }, walked just far
+    enough to reach eContent, in DER or BER, definite or indefinite length.
+    """
+    def child(at: int, index: int, tag: int) -> int:
+        """Where the `index`th element inside the one at `at` starts; it must
+        carry `tag`."""
+        found_tag, found_at, _ = _ber_inside(data, at)[index]
+        if found_tag != tag:
+            raise ValueError(f"expected tag {tag:#x}, found {found_tag:#x}")
+        return found_at
+
+    try:
+        if data[0] != 0x30:
+            return None
+        signed = child(child(0, 1, 0xA0), 0, 0x30)
+        encap = child(signed, 2, 0x30)
+        econtent = _ber_inside(data, child(encap, 1, 0xA0))[0][1]
+        return _ber_octets(data, econtent)
+    except (IndexError, ValueError, RecursionError):
+        return None
 
 
 def expiration(plist: dict) -> datetime | None:

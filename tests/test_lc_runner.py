@@ -2,45 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from graft_ipa.lc_runner import LC_BUNDLE_ID, LiveContainerError, _choose_lc_bundle_id
-
-
-def test_single_livecontainer_chosen_no_others() -> None:
-    chosen, others = _choose_lc_bundle_id(
-        ["com.kdt.livecontainer.TEAM", "com.other.app"], LC_BUNDLE_ID
-    )
-    assert chosen == "com.kdt.livecontainer.TEAM"
-    assert others == []
-
-
-def test_multiple_livecontainers_picks_original_and_reports_others() -> None:
-    # The exact scenario that broke a build: the user also installed LiveContainer 2/3.
-    installed = [
-        "com.kdt.livecontainer.TEAM",
-        "com.kdt.LiveContainer2.TEAM",
-        "com.kdt.LiveContainer3.TEAM",
-    ]
-    chosen, others = _choose_lc_bundle_id(installed, LC_BUNDLE_ID)
-    assert chosen == "com.kdt.livecontainer.TEAM"
-    assert set(others) == {"com.kdt.LiveContainer2.TEAM", "com.kdt.LiveContainer3.TEAM"}
-
-
-def test_explicit_override_targets_a_specific_livecontainer() -> None:
-    installed = ["com.kdt.livecontainer.TEAM", "com.kdt.LiveContainer3.TEAM"]
-    chosen, others = _choose_lc_bundle_id(installed, "com.kdt.LiveContainer3.TEAM")
-    assert chosen == "com.kdt.LiveContainer3.TEAM"
-    assert others == ["com.kdt.livecontainer.TEAM"]
-
-
-def test_ambiguous_when_preferred_matches_none_raises() -> None:
-    installed = ["com.kdt.LiveContainer2.TEAM", "com.kdt.LiveContainer3.TEAM"]
-    with pytest.raises(LiveContainerError):
-        _choose_lc_bundle_id(installed, LC_BUNDLE_ID)
-
-
-def test_no_livecontainer_installed_raises() -> None:
-    with pytest.raises(LiveContainerError):
-        _choose_lc_bundle_id(["com.other.app"], LC_BUNDLE_ID)
+# Which LiveContainer a push chooses is `lc_discovery.choose` now, shared with
+# `--lc-status`; its cases, including the ones that used to live here, are in
+# test_lc_discovery.py.
 
 
 # --- listing a LiveContainer's Documents/ --------------------------------------

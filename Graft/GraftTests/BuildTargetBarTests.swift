@@ -587,7 +587,7 @@ final class BuildTargetBarTests: XCTestCase {
     ///
     /// `.noDefault` resolves: `select_device(None)` returns `devices[0]`.
     /// `.unreadable` very likely resolves too, because the list it walks comes
-    /// from `idevice_id -l -n`, a usbmux enumeration with no lockdown handshake.
+    /// from a usbmux enumeration (pymobiledevice3) with no lockdown handshake.
     /// `.scanning` is not yet an answer about anything.
     func test_a_dry_run_stays_quiet_for_device_states_it_can_survive() throws {
         let unmarked = try device(Self.deviceJSON())
@@ -780,5 +780,31 @@ final class BuildTargetBarTests: XCTestCase {
             DeliveryMode.allCases.count, 2,
             "a third delivery mode needs a prose spelling and a line in this test"
         )
+    }
+
+    // MARK: - F10: what the tooltip claims
+
+    /// A LiveContainer build signs nothing — LiveContainer signs the app when
+    /// it is imported — and the installer no longer shells out to
+    /// `idevice_id`. Every tooltip is read for both claims, because the
+    /// sentences that made them were in three different cases.
+    func test_no_tooltip_claims_a_signature_or_names_idevice_id() {
+        let targets: [BuildTarget] = [
+            .device(name: "Example Phone", mode: "LiveContainer"), .noDefault, .noDevice,
+            .overrideMissing(udid: "U"), .overrideUnreadable(udid: "U"), .scanning,
+            .unreadable(count: 2), .needsPaidAccount,
+            .notDelivering(option: .skipInstall, device: .noDevice),
+            .notDelivering(option: .dryRun, device: .noDevice),
+            .notDelivering(option: .dryRun, device: .noDefault),
+        ]
+        for target in targets {
+            let text = BuildTargetBar.explanation(for: target)
+            XCTAssertFalse(text.contains("sign an IPA") || text.contains("signs an IPA"),
+                           "\(target): \(text)")
+            XCTAssertFalse(text.contains("idevice_id"), "\(target): \(text)")
+        }
+        XCTAssertTrue(BuildTargetBar.explanation(for: .noDevice).contains("make the IPA"))
+        XCTAssertTrue(BuildTargetBar.explanation(for: .overrideUnreadable(udid: "U"))
+            .contains("asks usbmuxd"))
     }
 }

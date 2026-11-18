@@ -8,14 +8,16 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from . import mobileprovision
-from .config import AppConfig, Config
-from .errors import PreflightError, SigningError
+from . import install_hints, mobileprovision
+from .child_env import child_env
+from .config import DELIVERIES, AppConfig, Config, paid_upgrade
+from .cyan_runner import CYAN_INSTALL_COMMAND
+from .errors import GraftError, PaidAccountRequiredError, PreflightError, SigningError
 from .signer import ProfilePlan, auto_profile_device_udids, plan_profile_for_app
 
 
@@ -29,52 +31,139 @@ class CheckResult:
     # (e.g. "set-p12-password" → "Set Password…" button). Independent of
     # the human-readable `name`, which is free to change.
     action_key: str | None = None
+    # A row that reports a fact rather than passing a test — the account
+    # mode. Always `ok`: nothing about it can fail, and counting it as a
+    # failure would turn a free Apple ID into a broken setup.
+    info: bool = False
+    # The exact command that installs what this row found missing, or None.
+    # The same command the hint says after "install with: ", without the
+    # prose around it, so the GUI can offer it to copy.
+    install: str | None = None
 
     @property
     def status(self) -> str:
+        if self.info:
+            return "INFO"
         return "OK" if self.ok else "FAIL"
 
 
 REQUIRED_TOOLS = {
-    "cyan": "pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip",
+    "cyan": CYAN_INSTALL_COMMAND,
     "zsign": "brew install zsign",
     "ideviceinstaller": "brew install ideviceinstaller",
-    "idevice_id": "brew install libimobiledevice",
     "otool": "xcode-select --install",
     "security": "(builtin) /usr/bin/security",
 }
+
+#: Tools whose MacPorts port is worth naming beside the Homebrew one.
+MACPORTS = {"ideviceinstaller": "sudo port install ideviceinstaller"}
+
+
+def _install_command(tool: str) -> str | None:
+    """`REQUIRED_TOOLS[tool]` when it is a command to run; None for a builtin."""
+    command = REQUIRED_TOOLS[tool]
+    return None if command.startswith("(") else command
+
+
+def _install_hint(tool: str) -> str:
+    return "install with: " + install_hints.with_prerequisites(
+        REQUIRED_TOOLS[tool], macports=MACPORTS.get(tool)
+    )
+
+
+#: What Apple's `/usr/bin/otool` shim says when there is nothing behind it.
+#: Lower-cased. The first is no tools at all; the rest are a developer
+#: directory that is selected but gone (an Xcode deleted or renamed, or
+#: `DEVELOPER_DIR` pointing nowhere) — measured: "xcrun: error: missing
+#: DEVELOPER_DIR path: /nonexistent".
+_OTOOL_STUB_MARKERS = (
+    "requires the command line developer tools",
+    "invalid active developer path",
+    "invalid developer_dir path",
+    "missing developer_dir path",
+    "missing xcrun",
+)
+
+
+def _otool_stub_problem(path: str) -> str | None:
+    """Why `/usr/bin/otool` is Apple's shim with nothing behind it, or None.
+
+    `which` finds the shim on every Mac, so it is asked. First `xcode-select -p`:
+    failing means no developer directory is selected, and a path it prints that
+    no longer exists means the selected one is gone. Only then is the shim run,
+    because run with no tools it raises an install dialog — and it is asked
+    `--version`, which a working otool answers with exit 0. (`-version` is six
+    flags to it: exit 1 and usage, from a perfectly good otool.)
+
+    A stub is recognised by the shim's own words, never by its exit status
+    alone: a working otool that exits non-zero must not fail every build.
+    """
+    if path != "/usr/bin/otool":
+        return None
+    try:
+        selected = subprocess.run(
+            ["xcode-select", "-p"], capture_output=True, text=True, timeout=10,
+            env=child_env(),
+        )
+        if selected.returncode != 0:
+            return f"{path} is a stub: the Command Line Tools are not installed"
+        developer_dir = selected.stdout.strip()
+        if developer_dir and not os.path.isdir(developer_dir):
+            return (
+                f"{path} cannot run: the selected developer directory "
+                f"{developer_dir} is missing"
+            )
+        probe = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, timeout=10,
+            env=child_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = f"{probe.stdout}{probe.stderr}".lower()
+    if probe.returncode == 0 or not any(m in text for m in _OTOOL_STUB_MARKERS):
+        return None
+    if _OTOOL_STUB_MARKERS[0] in text:
+        return f"{path} is a stub: the Command Line Tools are not installed"
+    return f"{path} cannot run: the selected developer directory is missing"
 
 
 def check_tools(tools: Iterable[str] | None = None) -> list[CheckResult]:
     names = list(tools) if tools is not None else list(REQUIRED_TOOLS)
     results = []
     for tool in names:
-        install = REQUIRED_TOOLS[tool]
         path = shutil.which(tool)
-        if path:
+        stub = _otool_stub_problem(path) if path and tool == "otool" else None
+        if stub is not None:
+            hint = _install_hint(tool)
+            if "developer directory" in stub:
+                # Xcode may be installed elsewhere; pointing back at what is
+                # there is the other fix.
+                hint += ", or select the one that is installed: sudo xcode-select --reset"
+            results.append(CheckResult(name=tool, ok=False, detail=stub, hint=hint,
+                                       install=_install_command(tool)))
+        elif path:
             results.append(CheckResult(name=tool, ok=True, detail=path))
         else:
-            results.append(
-                CheckResult(name=tool, ok=False, hint=f"install with: {install}")
-            )
+            results.append(CheckResult(name=tool, ok=False, hint=_install_hint(tool),
+                                       install=_install_command(tool)))
     return results
 
 
 def required_tools_for(delivery: str, will_install: bool) -> list[str]:
     """The external tools a build actually invokes for this delivery mode.
 
-    livecontainer never signs (no zsign) and only talks to a device when it
-    pushes the IPA into LiveContainer; sideload always signs and installs.
-    `otool` is needed in both modes for the cryptid (decryption) check.
+    livecontainer never signs (no zsign), and pushes into LiveContainer over
+    pymobiledevice3, which comes with the CLI; sideload always signs, and
+    installs with `ideviceinstaller`. `otool` is needed in both modes for the
+    cryptid (decryption) check. Finding the device is pymobiledevice3's in
+    both (`list_connected_devices`), so no mode needs libimobiledevice's
+    `idevice_id`.
     """
     if delivery == "livecontainer":
-        tools = ["cyan", "otool"]
-        if will_install:
-            tools.append("idevice_id")
-        return tools
+        return ["cyan", "otool"]
     tools = ["cyan", "zsign", "otool", "security"]
     if will_install:
-        tools += ["ideviceinstaller", "idevice_id"]
+        tools.append("ideviceinstaller")
     return tools
 
 
@@ -92,14 +181,41 @@ def planned_profile(cfg: Config, app: AppConfig | None) -> ProfilePlan | None:
 
     None means the config cannot name a profile at all — `check_signing_files`
     reports that as a failed check, so the other checks stay quiet about it.
+    A free Apple ID has no profile either, and its own row in that function.
     """
+    if cfg.free_account:
+        return None
     try:
         return plan_profile_for_app(cfg, app)
     except SigningError:
         return None
 
 
+TEAM_ID_CHECK_NAME = "signing.team_id"
+
+
+def _delivery_refusal(
+    cfg: Config, delivery: str, app: str | None
+) -> PaidAccountRequiredError | None:
+    """`Config.require_delivery`'s refusal, as a value for a row to carry: the
+    same sentence a build of that app would fail with."""
+    try:
+        cfg.require_delivery(delivery, app=app)
+    except PaidAccountRequiredError as e:
+        return e
+    return None
+
+
 def check_signing_files(cfg: Config, *, app: AppConfig | None = None) -> list[CheckResult]:
+    if cfg.free_account:
+        # One failing row rather than four about files a free Apple ID never
+        # has. Only reachable for a sideload app on a free config, which the
+        # build refuses before pre-flight; this keeps `--check`-shaped callers
+        # from reaching `cfg.signing` when it is None.
+        err = _delivery_refusal(cfg, "sideload", app.name if app else None)
+        assert err is not None  # a free account refuses sideload, always
+        return [CheckResult(name=ACCOUNT_CHECK_NAME, ok=False, detail=err.message,
+                            hint=err.hint or "")]
     results: list[CheckResult] = []
     results.append(
         CheckResult(
@@ -110,10 +226,24 @@ def check_signing_files(cfg: Config, *, app: AppConfig | None = None) -> list[Ch
         )
     )
     results.append(_check_profile_present(cfg, app))
+    # `cfg.team_id`, the one definition of "configured": None for blank,
+    # whitespace and `TEAM_ID_PLACEHOLDER` alike. The detail still shows what
+    # is written, so a placeholder reads as itself rather than as missing.
+    team = cfg.team_id
+    results.append(
+        CheckResult(
+            name=TEAM_ID_CHECK_NAME,
+            ok=team is not None,
+            detail=cfg.signing.team_id.strip() or "(missing)",
+            hint="run `graft --set-settings --signing-team-id <TEAM>`",
+        )
+    )
     from . import keychain
     env_var = cfg.signing.cert_password_env
     has_env = bool(os.environ.get(env_var))
-    in_keychain = bool(cfg.signing.team_id and keychain.read_p12_password(cfg.signing.team_id))
+    # Keyed as `--set-p12-password` writes it: by `cfg.team_id`, never by a
+    # placeholder it refuses to store under.
+    in_keychain = bool(team and keychain.read_p12_password(team))
     if has_env:
         detail, ok = f"env {env_var} set", True
     elif in_keychain:
@@ -233,8 +363,8 @@ def check_profile_contents(cfg: Config, *, app: AppConfig | None = None) -> list
         return results
 
     team_ids: list[str] = plist.get("TeamIdentifier") or []
-    expected = cfg.signing.team_id
-    team_ok = expected in team_ids
+    expected = cfg.team_id
+    team_ok = expected is not None and expected in team_ids
     results.append(
         CheckResult(
             name="profile team id matches config",
@@ -301,49 +431,39 @@ def list_connected_devices() -> list[str]:
 def list_connected_devices_with_transport() -> list[tuple[str, str]]:
     """Return (udid, transport) pairs. transport ∈ {"usb", "network"}.
 
-    `idevice_id -l -n` emits lines like:
-        00008030-0000000000000001
-        00008030-0000000000000001 (Network)
+    Asked of usbmuxd through pymobiledevice3 (`devices.list_devices_brief`), as
+    the Devices tab and the LiveContainer push ask it — no lockdown session, so
+    a phone that is on the bus is listed even if describing it would fail. It
+    used to shell out to libimobiledevice's `idevice_id -l -n`, which a free
+    Apple ID had to install for this one check and which a CLI started with a
+    bare PATH could never find, so it never saw a device.
 
-    If the same UDID appears via both transports (USB cable + Wi-Fi pairing),
-    keep the first occurrence position but upgrade transport to "usb" — USB
-    is more reliable for large IPAs.
+    A phone on both transports (a cable and Wi-Fi sync) is listed once, as
+    USB. usbmuxd unreachable is no devices, not an error: the device row says
+    so, with the fix.
     """
-    if shutil.which("idevice_id") is None:
-        return []
+    from .devices import list_devices_brief
+
     try:
-        out = subprocess.run(
-            ["idevice_id", "-l", "-n"], check=True, capture_output=True, text=True
-        ).stdout
-    except subprocess.CalledProcessError:
+        listed = list_devices_brief()
+    except Exception:
         return []
-    order: list[str] = []
-    transport_by_udid: dict[str, str] = {}
-    for raw in out.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        if line.endswith("(Network)"):
-            udid, transport = line.removesuffix("(Network)").strip(), "network"
-        elif line.endswith("(USB)"):
-            # Newer libimobiledevice tags USB devices explicitly; older builds
-            # printed the bare UDID. Strip the suffix either way.
-            udid, transport = line.removesuffix("(USB)").strip(), "usb"
-        else:
-            udid, transport = line, "usb"
-        if udid not in transport_by_udid:
-            order.append(udid)
-            transport_by_udid[udid] = transport
-        elif transport == "usb":
-            transport_by_udid[udid] = "usb"
-    return [(udid, transport_by_udid[udid]) for udid in order]
+    return [
+        (d.udid, "network" if d.connection_type == "Network" else "usb") for d in listed
+    ]
 
 
 def check_devices(
-    cfg: Config, *, check_profile: bool = True, app: AppConfig | None = None
+    cfg: Config,
+    *,
+    check_profile: bool = True,
+    app: AppConfig | None = None,
+    udids: list[str] | None = None,
 ) -> list[CheckResult]:
+    """`udids` is the connected devices when the caller has already listed
+    them; otherwise they are listed here."""
     results: list[CheckResult] = []
-    udids = list_connected_devices()
+    udids = list_connected_devices() if udids is None else udids
     results.append(
         CheckResult(
             name="connected ios device(s)",
@@ -442,35 +562,198 @@ def check_devices(
     return results
 
 
+def deliveries_in_use(cfg: Config) -> list[str]:
+    """The delivery modes a build of this config would use, in `DELIVERIES`
+    order: every configured app's, or with no apps yet the account's default
+    (sideload for paid), which is what the first app added will get."""
+    used = {a.delivery for a in cfg.apps.values()} or {cfg.default_delivery}
+    return [d for d in DELIVERIES if d in used]
+
+
 def run_all_checks(
     cfg: Config,
     *,
     delivery: str = "sideload",
     will_install: bool = True,
     app: AppConfig | None = None,
+    deliveries: Iterable[str] | None = None,
 ) -> list[CheckResult]:
     """Pre-flight checks scoped to what this build actually needs.
 
-    Defaults reproduce the original mode-agnostic, full check set so the global
-    `--check` command and other callers are unaffected. A `livecontainer` build
-    skips the entire signing identity (zsign, .p12, profile) since it runs the
-    IPA unsigned; device checks are skipped unless the build will push to a
-    device (`will_install`).
+    A `livecontainer` build skips the entire signing identity (zsign, .p12,
+    profile) since it runs the IPA unsigned; device checks are skipped unless
+    the build will push to a device (`will_install`).
 
     `app` makes the signing checks app-aware as well as delivery-aware: without
     it every check validates the global `signing.profile`, even for an app that
     signs with a per-app `profile:` override or with `auto_profile`. Leave it
-    None for the mode-agnostic `--check` command, which has no app in hand.
+    None for the `--check` command, which has no app in hand.
+
+    `deliveries` is `--check`'s, for a paid config: every mode its apps use
+    (`deliveries_in_use`), in place of `delivery`. The tools are the ones
+    those modes run — zsign and ideviceinstaller only when some app
+    sideloads, so a paid user whose apps all go into LiveContainer is not
+    told two tools are missing on every launch — and the profile's device
+    list only matters then too. The signing rows stay: a paid config's
+    identity is what `--lc-install` and `--lc-push-cert` sign with, and
+    those report the tools they need when they run.
     """
-    is_livecontainer = delivery == "livecontainer"
+    modes = [delivery] if deliveries is None else list(deliveries)
+    sideloads = "sideload" in modes
+    tools: list[str] = []
+    for mode in modes:
+        tools.extend(t for t in required_tools_for(mode, will_install) if t not in tools)
     results: list[CheckResult] = []
-    results.extend(check_tools(required_tools_for(delivery, will_install)))
-    if not is_livecontainer:
+    results.extend(check_tools(tools))
+    if sideloads or deliveries is not None:
         results.extend(check_signing_files(cfg, app=app))
         results.extend(check_profile_contents(cfg, app=app))
     if will_install:
-        results.extend(check_devices(cfg, check_profile=not is_livecontainer, app=app))
+        results.extend(check_devices(cfg, check_profile=sideloads, app=app))
     return results
+
+
+ACCOUNT_CHECK_NAME = "account"
+FREE_ACCOUNT_DETAIL = "free Apple ID: LiveContainer delivery only"
+LIVECONTAINER_CHECK_NAME = "LiveContainer on device"
+
+
+def check_account(cfg: Config) -> CheckResult:
+    """The account mode, as information. Only `--check` on a free Apple ID
+    shows it: a paid config's signing rows already say what it is."""
+    return CheckResult(
+        name=ACCOUNT_CHECK_NAME,
+        ok=True,
+        info=True,
+        detail=FREE_ACCOUNT_DETAIL if cfg.free_account else "paid Apple Developer account",
+    )
+
+
+def _installed_bundle_ids(udid: str) -> list[str]:
+    """The bundle ids on `udid`, System apps included and no other attribute
+    asked for — one listing, which `check_livecontainer` reuses for every pin."""
+    from .lc_manage import UsbmuxDevice
+
+    return UsbmuxDevice().installed_bundle_ids(udid)
+
+
+def check_livecontainer(
+    cfg: Config,
+    udids: list[str],
+    *,
+    installed_apps: Callable[[str], Iterable[str]] | None = None,
+) -> list[CheckResult]:
+    """Would a LiveContainer push find its container on the device?
+
+    Asked the way the push asks it (`lc_discovery.choose`), once per pin the
+    LiveContainer apps carry — an unpinned app and one pinned to LiveContainer2
+    look for different things — and once unpinned when there are no such apps
+    yet. The device checked is the default one when it is connected, else
+    every connected one, each listed once. No device, no row: the device row
+    has already failed.
+
+    `installed_apps` defaults to `_installed_bundle_ids`, looked up when the
+    check runs rather than bound at import, so a test that replaces the module
+    attribute replaces what `--check` calls.
+    """
+    from . import lc_discovery
+    from .lc_runner import LiveContainerError
+
+    if not udids:
+        return []
+    if installed_apps is None:
+        installed_apps = _installed_bundle_ids
+    targets = [cfg.default_device_udid] if cfg.default_device_udid in udids else udids
+    pins = {a.lc_bundle_id for a in cfg.apps.values() if a.delivery == "livecontainer"}
+    results = []
+    for udid in targets:
+        try:
+            installed = list(installed_apps(udid))
+        except GraftError as e:
+            results.append(CheckResult(
+                name=LIVECONTAINER_CHECK_NAME, ok=False,
+                detail=f"{udid}: could not list its apps: {e.message}", hint=e.hint or "",
+            ))
+            continue
+        if not installed:
+            # A locked phone lists nothing at all, not even system apps: that
+            # is no answer, not "no LiveContainer here" (the build reads the
+            # same evidence the same way, `lc_runner._ListedNoApps`).
+            results.append(CheckResult(
+                name=LIVECONTAINER_CHECK_NAME, ok=False,
+                detail=f"{udid}: the device listed no apps at all, which is how a locked phone answers",
+                hint="unlock the device, keep it on the home screen, and run `graft --check` again",
+            ))
+            continue
+        chosen: set[str] = set()
+        problem: LiveContainerError | None = None
+        for pin in sorted(pins or {None}, key=lambda p: p or ""):
+            try:
+                chosen.add(lc_discovery.choose(
+                    installed, pinned=pin, team=cfg.team_id, free_account=cfg.free_account,
+                )[0])
+            except LiveContainerError as e:
+                problem = problem or e
+        if problem is not None:
+            results.append(CheckResult(
+                name=LIVECONTAINER_CHECK_NAME, ok=False,
+                detail=f"{udid}: {problem.message}", hint=problem.hint or "",
+            ))
+            continue
+        others = [b for b in lc_discovery.livecontainers(installed, cfg.team_id)
+                  if b not in chosen]
+        detail = f"{udid}: {', '.join(sorted(chosen))}"
+        if others:
+            detail += f" (also installed: {', '.join(others)})"
+        results.append(CheckResult(name=LIVECONTAINER_CHECK_NAME, ok=True, detail=detail))
+    return results
+
+
+def run_free_account_checks(
+    cfg: Config,
+    *,
+    installed_apps: Callable[[str], Iterable[str]] | None = None,
+) -> list[CheckResult]:
+    """`graft --check` for a free Apple ID.
+
+    What a LiveContainer build needs and nothing it does not: the account as
+    information, cyan and otool, a device, and a LiveContainer on it. No zsign,
+    no .p12, profile or password — a free Apple ID has none of them, and a red
+    row for each would read as a broken setup rather than a different one.
+    `installed_apps` is `check_livecontainer`'s, None for the real device.
+
+    But an app the config does say to sideload is a failure: every build of
+    it is refused (`check_app_deliveries`).
+    """
+    udids = list_connected_devices()
+    return [
+        check_account(cfg),
+        *check_app_deliveries(cfg),
+        *check_tools(required_tools_for("livecontainer", will_install=True)),
+        *check_devices(cfg, check_profile=False, udids=udids),
+        *check_livecontainer(cfg, udids, installed_apps=installed_apps),
+    ]
+
+
+def check_app_deliveries(cfg: Config) -> list[CheckResult]:
+    """One failing row per app whose delivery this account cannot do.
+
+    On a free Apple ID that is an app with an explicit `delivery: sideload`,
+    carried over from a paid config: it loads, so `--list` and every other
+    verb keep working, and each build of it is refused. The row says so with
+    the build's own sentence (`Config.require_delivery`) and the one-line fix.
+    """
+    rows = []
+    for name, app in sorted(cfg.apps.items()):
+        err = _delivery_refusal(cfg, app.delivery, name)
+        if err is None:
+            continue
+        rows.append(CheckResult(
+            name=f"app '{name}'", ok=False, detail=err.message,
+            hint=f"graft --set-app-options --app {name} --delivery livecontainer; or, "
+            f"with a paid membership, {paid_upgrade(cfg.path, short=True)}",
+        ))
+    return rows
 
 
 def assert_all_passed(results: Iterable[CheckResult]) -> None:

@@ -433,7 +433,8 @@ final class DeviceAppsStore {
                 // guaranteed to have run by the time this await returns, so a
                 // dump that really did stage an IPA could otherwise report
                 // nothing at all.
-                if case let .log(source, line) = event {
+                if case let .log(source, line) = event,
+                   source != CLIContract.startupLogSource {  // C-NOTICE: not the dump's
                     if source == CLIContract.selfLogSource {
                         self?.notes.append(line)
                     } else {

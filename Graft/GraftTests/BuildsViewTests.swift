@@ -57,6 +57,51 @@ final class BuildsViewTests: XCTestCase {
                        "an unrecognised target is not a Mac build")
     }
 
+    // MARK: - F15: the menus
+
+    /// The context menu read `success && ipaPath != nil` for itself and so
+    /// offered Re-install… on a Mac build. Both menus read `installItem` now,
+    /// which reads `action(for:)`.
+    func test_a_mac_build_is_never_offered_a_reinstall() throws {
+        let item = BuildsView.installItem(for: try record(target: "mac"), refusal: nil)
+        XCTAssertEqual(item, .init(title: "Install to Mac…", enabled: true))
+        let failed = BuildsView.installItem(for: try record(target: "mac", success: false), refusal: nil)
+        XCTAssertFalse(failed.title.hasPrefix("Re-install"), failed.title)
+    }
+
+    /// A disabled item says why in its title: a menu draws no tooltip, so the
+    /// `.help` reason never reached anyone.
+    func test_a_refused_reinstall_says_why_in_its_title() throws {
+        let item = BuildsView.installItem(
+            for: try record(target: "device"), refusal: PaidOnly.sideloadApp
+        )
+        XCTAssertEqual(item, .init(title: "Re-install… (needs a paid account)", enabled: false))
+        XCTAssertEqual(
+            BuildsView.installItem(for: try record(target: "device"), refusal: nil),
+            .init(title: "Re-install…", enabled: true)
+        )
+    }
+
+    func test_an_item_with_nothing_to_act_on_says_why() throws {
+        XCTAssertEqual(
+            BuildsView.installItem(for: try record(target: "device", success: false), refusal: nil),
+            .init(title: "Re-install… (build failed)", enabled: false)
+        )
+        XCTAssertEqual(
+            BuildsView.installItem(for: try record(target: "device", ipaPath: nil), refusal: nil),
+            .init(title: "Re-install… (archive not kept)", enabled: false)
+        )
+        XCTAssertEqual(
+            BuildsView.revealItem(for: try record(target: "device", ipaPath: nil)),
+            .init(title: "Reveal in Finder (no archive)", enabled: false)
+        )
+        XCTAssertEqual(
+            BuildsView.logItem(for: try record(target: "device")),
+            .init(title: "View log… (not saved)", enabled: false),
+            "the fixture's log_path is null: a build run from Terminal"
+        )
+    }
+
     // MARK: -
 
     /// A `BuildRecord` as `--builds --json` actually emits one.

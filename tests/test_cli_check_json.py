@@ -32,7 +32,9 @@ def test_check_json_emits_results_and_end(temp_config_env: Path) -> None:
     assert checks[1]["ok"] is False
     assert checks[1]["hint"] == "brew install zsign"
     end = [e for e in events if e["type"] == "preflight-end"]
-    assert end == [{"type": "preflight-end", "ok_count": 2, "fail_count": 1}]
+    assert end == [
+        {"type": "preflight-end", "ok_count": 2, "fail_count": 1, "account": "paid"}
+    ]
 
 
 def test_check_json_carries_action_key_for_p12_row(temp_config_env: Path) -> None:

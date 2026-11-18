@@ -49,7 +49,7 @@ TWEAKED_BYTES = b"y" * 64
 # Deliberately not f"{app_name}.ipa". The row must carry the name lc_runner
 # reports having written, not a second guess at how that name is built — Task
 # 6's reconcile goes looking for this file on the device.
-PUSHED_AS = "yt-as-pushed.ipa"
+PUSHED_AS = "example-as-pushed.ipa"
 
 
 def _cfg(tmp_path: Path, *, delivery: str = "livecontainer") -> Config:
@@ -69,8 +69,8 @@ def _cfg(tmp_path: Path, *, delivery: str = "livecontainer") -> Config:
         tweaks_dir=tweaks,
         state_dir=tmp_path / "state",
         apps={
-            "yt": AppConfig(
-                name="yt",
+            "example": AppConfig(
+                name="example",
                 bundle_id="com.example.app",
                 preferred_version="latest",
                 tweaks=["a.deb"],
@@ -159,7 +159,7 @@ def _run_build(
         cli_mod._build_one(
             cfg=cfg,
             log=log,
-            app_name="yt",
+            app_name="example",
             dry_run=dry_run,
             skip_install=skip_install,
             skip_decrypt_check=True,
@@ -251,8 +251,8 @@ def test_a_build_that_is_never_pushed_records_no_delivery(tmp_path: Path) -> Non
 
     _run_build(cfg, tmp_path, log, skip_install=True)
 
-    assert log.recent(app="yt"), "the build itself should still be logged"
-    assert log.latest_delivery("yt") is None
+    assert log.recent(app="example"), "the build itself should still be logged"
+    assert log.latest_delivery("example") is None
 
 
 def test_a_dry_run_build_records_no_delivery(tmp_path: Path) -> None:
@@ -262,7 +262,7 @@ def test_a_dry_run_build_records_no_delivery(tmp_path: Path) -> None:
 
     _run_build(cfg, tmp_path, log, dry_run=True)
 
-    assert log.latest_delivery("yt") is None
+    assert log.latest_delivery("example") is None
 
 
 def test_a_failed_build_records_no_delivery(tmp_path: Path) -> None:
@@ -272,7 +272,7 @@ def test_a_failed_build_records_no_delivery(tmp_path: Path) -> None:
     with pytest.raises(CyanError):
         _run_build(cfg, tmp_path, log, cyan_error=True)
 
-    assert log.latest_delivery("yt") is None
+    assert log.latest_delivery("example") is None
 
 
 def test_a_push_that_throws_records_no_delivery(tmp_path: Path) -> None:
@@ -284,7 +284,7 @@ def test_a_push_that_throws_records_no_delivery(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         _run_build(cfg, tmp_path, log, push=exploding)
 
-    assert log.latest_delivery("yt") is None
+    assert log.latest_delivery("example") is None
 
 
 def test_a_livecontainer_push_records_what_reached_the_phone(tmp_path: Path) -> None:
@@ -293,7 +293,7 @@ def test_a_livecontainer_push_records_what_reached_the_phone(tmp_path: Path) -> 
 
     _run_build(cfg, tmp_path, log)
 
-    row = log.latest_delivery("yt")
+    row = log.latest_delivery("example")
     assert row is not None
     assert row["bundle_id"] == "com.example.app"
     assert row["source_version"] == "21.16.2"
@@ -329,7 +329,7 @@ def test_the_row_carries_the_tweak_bytes_that_were_injected(tmp_path: Path) -> N
     cfg = _cfg(tmp_path)
     log = _log(cfg)
     # What cyan will read, and therefore what is inside the pushed IPA.
-    injected = _digest(cfg, app="yt")
+    injected = _digest(cfg, app="example")
 
     def _push_then_rebuild(*args, **kwargs):
         (cfg.tweaks_dir / "a.deb").write_bytes(b"rebuilt-mid-transfer")
@@ -337,14 +337,14 @@ def test_the_row_carries_the_tweak_bytes_that_were_injected(tmp_path: Path) -> N
 
     _run_build(cfg, tmp_path, log, push=MagicMock(side_effect=_push_then_rebuild))
 
-    row = log.latest_delivery("yt")
+    row = log.latest_delivery("example")
     assert row is not None
     assert row["inputs_digest"] == injected.digest
     assert json.loads(row["tweaks"]) == [
         ["a.deb", hashlib.sha256(TWEAK_BYTES).hexdigest()]
     ]
     assert (
-        row["inputs_digest"] != _digest(cfg, app="yt").digest
+        row["inputs_digest"] != _digest(cfg, app="example").digest
     ), "the post-push state of the tweaks_dir must not be what got recorded"
 
 
@@ -367,7 +367,7 @@ def test_the_row_carries_the_format_version_that_produced_the_digest(
 
     _run_build(cfg, tmp_path, log)
 
-    assert log.latest_delivery("yt")["digest_version"] == bumped
+    assert log.latest_delivery("example")["digest_version"] == bumped
 
 
 def test_a_sideload_install_records_a_delivery(tmp_path: Path) -> None:
@@ -377,7 +377,7 @@ def test_a_sideload_install_records_a_delivery(tmp_path: Path) -> None:
 
     _run_build(cfg, tmp_path, log)
 
-    row = log.latest_delivery("yt")
+    row = log.latest_delivery("example")
     assert row is not None
     assert row["delivery"] == "sideload"
     assert row["lc_bundle_id"] is None
@@ -398,7 +398,7 @@ def test_a_sideload_install_that_throws_records_no_delivery(tmp_path: Path) -> N
     with pytest.raises(InstallError):
         _run_build(cfg, tmp_path, log, install_error=True)
 
-    assert log.latest_delivery("yt") is None
+    assert log.latest_delivery("example") is None
 
 
 def test_a_dry_run_records_no_delivery_over_the_real_flag_path(
@@ -585,6 +585,8 @@ def test_each_delivery_state_follows_its_own_app_event(temp_config_env: Path) ->
 
     pairs = [(e["type"], e.get("name") or e.get("app")) for e in _events(result.stdout)]
     assert pairs == [
+        # `--list`'s one config-wide line comes first; see test_cli_list_account.
+        ("account", None),
         ("app", "bravo"),
         ("delivery-state", "bravo"),
         ("app", "example"),
@@ -963,8 +965,8 @@ def test_a_corrupt_row_does_not_take_the_whole_list_down(temp_config_env: Path) 
     result = CliRunner().invoke(cli_mod.app, ["--json", "--list"])
 
     assert result.exit_code == 0, result.exception or result.output
-    assert [e["type"] for e in _events(result.stdout)] == ["app", "delivery-state"]
-    assert _events(result.stdout)[1]["kind"] == "unknown"
+    assert [e["type"] for e in _events(result.stdout)] == ["account", "app", "delivery-state"]
+    assert _events(result.stdout)[2]["kind"] == "unknown"
 
 
 def test_a_log_that_cannot_be_queried_reads_unknown_not_never(
@@ -1561,3 +1563,105 @@ def test_a_normal_push_is_not_read_as_a_reinstall(temp_config_env: Path) -> None
     _lc_deliver(cfg, log)
 
     assert _state(cfg, log)["kind"] == "current"
+
+
+# --- a reinstall of bytes a push already recorded ----------------------------
+
+
+def _reinstall(cfg: Config, ipa: Path) -> None:
+    from graft_ipa import cli as cli_mod
+
+    cli_mod._record_reinstall_delivery(
+        cfg, app_name="example", bundle_id=cfg.get_app("example").bundle_id,
+        version="21.16.2", ipa_path=ipa, delivery="livecontainer",
+        lc_bundle_id="com.kdt.livecontainer.T", remote_name="example.ipa", udid="UDID1",
+    )
+
+
+def test_reinstalling_the_archive_a_recorded_push_shipped_keeps_it_current(
+    temp_config_env: Path, tmp_path: Path
+) -> None:
+    """Re-install the newest build, unchanged config: the phone holds exactly
+    the bytes a recorded push shipped, so their inputs are known. It read
+    "An archived build was re-installed; what went into it was never recorded"
+    and "out of date" — seen after a real re-install of a build 40 minutes old.
+    The sha256 of the archive ties it to that push's digest."""
+    from graft_ipa.build_log import sha256_of
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    archive = tmp_path / "example_21.16.2_20260101T000000.ipa"
+    archive.write_bytes(b"the archived IPA")
+    _deliver(cfg, log, ipa_sha256=sha256_of(archive))
+
+    _reinstall(cfg, archive)
+
+    row = log.latest_delivery("example")
+    assert row["origin"] == "reinstall-recorded"
+    assert row["inputs_digest"] is not None
+    assert _state(cfg, log)["kind"] == "current"
+
+
+def test_a_recorded_reinstall_still_goes_stale_when_the_config_moves_on(
+    temp_config_env: Path, tmp_path: Path
+) -> None:
+    from graft_ipa.build_log import sha256_of
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    archive = tmp_path / "example.ipa"
+    archive.write_bytes(b"the archived IPA")
+    _deliver(cfg, log, ipa_sha256=sha256_of(archive))
+    _reinstall(cfg, archive)
+
+    name = cfg.get_app("example").tweaks[0]
+    (cfg.tweaks_dir / name).write_bytes(b"a newer tweak")
+
+    assert _state(cfg, log)["kind"] == "stale"
+
+
+def test_an_archive_no_recorded_push_shipped_is_still_unknowable(
+    temp_config_env: Path, tmp_path: Path
+) -> None:
+    """Different bytes (an older archive, a --skip-install build): nothing ties
+    it to recorded inputs, so it stays the honest "never recorded" stale."""
+    from graft_ipa.build_log import sha256_of
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    shipped = tmp_path / "shipped.ipa"
+    shipped.write_bytes(b"what the recorded push shipped")
+    older = tmp_path / "older.ipa"
+    older.write_bytes(b"an older archive")
+    _deliver(cfg, log, ipa_sha256=sha256_of(shipped))
+
+    _reinstall(cfg, older)
+
+    row = log.latest_delivery("example")
+    assert row["origin"] == "reinstall"
+    assert row["inputs_digest"] is None
+    state = _state(cfg, log)
+    assert state["kind"] == "stale" and "archived build" in state["summary"]
+
+
+def test_a_reinstall_row_never_lends_its_absence_of_inputs_onward(
+    temp_config_env: Path, tmp_path: Path
+) -> None:
+    """Only a row that recorded inputs can vouch for bytes: an earlier digest-less
+    reinstall of the same file is not evidence."""
+    from graft_ipa.build_log import sha256_of
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    archive = tmp_path / "example.ipa"
+    archive.write_bytes(b"bytes")
+    _deliver(cfg, log, ipa_sha256=sha256_of(archive), inputs_digest=None,
+             digest_version=None, cyan=None, tweaks=[], origin="reinstall")
+
+    _reinstall(cfg, archive)
+
+    assert log.latest_delivery("example")["origin"] == "reinstall"

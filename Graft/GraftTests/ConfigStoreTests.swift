@@ -34,6 +34,7 @@ final class ConfigStoreTests: XCTestCase {
         let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript])
         try await store.addApp(
             appStoreURL: "https://apps.apple.com/us/app/bravo/id100000001",
+            delivery: .sideload,
             addArgsOverride: ["-c", addScript]
         )
         XCTAssertEqual(store.apps.count, 1)
@@ -98,9 +99,9 @@ final class ConfigStoreTests: XCTestCase {
             fileURL: URL(fileURLWithPath: "/tmp/whatever.ipa"),
             argsOverride: ["-c", script]
         )
-        XCTAssertEqual(rec?.app, "example")
-        XCTAssertTrue(rec?.exists ?? false)
-        XCTAssertEqual(rec?.version, "21.16.2")
+        XCTAssertEqual(rec?.record.app, "example")
+        XCTAssertTrue(rec?.record.exists ?? false)
+        XCTAssertEqual(rec?.record.version, "21.16.2")
     }
 
     @MainActor
@@ -357,7 +358,7 @@ final class ConfigStoreTests: XCTestCase {
         EncryptedBinariesRecord(
             app: app,
             count: 1,
-            binaries: [.init(path: "Payload/YT.app/YT", cryptids: [1])]
+            binaries: [.init(path: "Payload/Example.app/Example", cryptids: [1])]
         )
     }
 
@@ -968,6 +969,22 @@ final class ConfigStoreTests: XCTestCase {
             "mid-push, got: \(store.cancelConsequence)"
         )
         XCTAssertFalse(store.cancelConsequence.contains("Nothing has reached the device"))
+    }
+
+    /// S7: the warning used to say graft is killed outright and leaves its
+    /// temp directory behind. Neither is true now: the whole build runs under
+    /// `lc_manage.exit_on_termination`, so the Stop's SIGTERM unwinds it and
+    /// `_build_one`'s `finally` removes `tmp_root`. What is left is the one
+    /// way it can still be left behind — cleanup outlasting `CLIRunner`'s
+    /// grace before SIGKILL (`cliStopGrace`).
+    @MainActor
+    func test_the_cancel_warning_says_graft_removes_its_temp_files() {
+        let store = makeStore()
+        startBuild(store, "example")
+        let warning = store.cancelConsequence
+        XCTAssertFalse(warning.contains("killed outright"), warning)
+        XCTAssertTrue(warning.contains("removes its temp files"), warning)
+        XCTAssertTrue(warning.contains("\(Int(cliStopGrace)) seconds"), "names the grace: \(warning)")
     }
 
     @MainActor
@@ -1636,5 +1653,50 @@ extension ConfigStoreTests {
         XCTAssertEqual(BuildOptions.Option.skipInstall.suppressesDelivery, "Install skipped")
         XCTAssertNil(BuildOptions.Option.skipDecryptCheck.suppressesDelivery)
         XCTAssertNil(BuildOptions.Option.device(udid: "x").suppressesDelivery)
+    }
+}
+
+// MARK: - C-STOP: the CLI reporting a stop
+
+extension ConfigStoreTests {
+    /// A `build-end` with `stopped: true` is a stop, whoever sent the signal:
+    /// no failure card, no "failed" banner, and the build reads as cancelled
+    /// so the pane drops whatever the stream still has queued.
+    @MainActor
+    func test_a_build_end_reporting_a_stop_writes_no_failure_and_no_banner() {
+        let store = makeStore()
+        var posted: [BuildNotifier.Note] = []
+        store.postNote = { if let note = $0 { posted.append(note) } }
+        store.launchBuild(appName: "example", delivery: .livecontainer) {}
+
+        store.note(.stopped(elapsed: 3.0), forBuildOf: "example")
+
+        XCTAssertNil(store.buildFailures["example"], "a stop is not a failure card")
+        XCTAssertTrue(posted.isEmpty, "banner'd a build that was stopped: \(posted)")
+        XCTAssertTrue(store.wasCancelled("example"), "a stop this app did not send is still a stop")
+    }
+
+    /// Control: the same store, the same build, a real failure — so the test
+    /// above is measuring the stop, not a store that never records anything.
+    @MainActor
+    func test_a_failed_build_end_still_writes_the_failure() {
+        let store = makeStore()
+        store.launchBuild(appName: "example", delivery: .livecontainer) {}
+        store.note(.finished(ok: false, error: "143", elapsed: nil), forBuildOf: "example")
+        XCTAssertEqual(store.buildFailures["example"], "143")
+        XCTAssertFalse(store.wasCancelled("example"))
+    }
+
+    /// A stop reported for a build that no longer holds the slot marks
+    /// nothing: the next build must not start life cancelled.
+    @MainActor
+    func test_a_late_stop_from_a_finished_build_cancels_nothing() {
+        let store = makeStore()
+        store.launchBuild(appName: "delta", delivery: .livecontainer) {}
+
+        store.note(.stopped(elapsed: nil), forBuildOf: "example")
+
+        XCTAssertFalse(store.wasCancelled("example"))
+        XCTAssertFalse(store.wasCancelled("delta"))
     }
 }

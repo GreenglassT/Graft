@@ -24,6 +24,23 @@ struct AppOptionsDraft: Equatable {
         var stripExtensions: Bool
         var stripSupportedDevices: Bool
         var compressionLevel: Int
+        /// Which LiveContainer a push goes into. See `LCPin`.
+        var lcPin: LCPin
+    }
+
+    /// The app's LiveContainer pin, as the Edit sheet's picker holds it.
+    ///
+    /// An enum rather than a `String?` because `changed(_:)` already returns
+    /// an optional — "unchanged" — and `String??` would make "changed to
+    /// Automatic" and "unchanged" one `nil` apart. `automatic` is
+    /// `--no-lc-bundle-id`; `bundleId` is `--lc-bundle-id <id>` (C-LCPIN).
+    enum LCPin: Hashable {
+        case automatic
+        case bundleId(String)
+
+        init(_ bundleId: String?) {
+            self = bundleId.map { .bundleId($0) } ?? .automatic
+        }
     }
 
     /// What the app record said when the sheet opened — the write-back
@@ -43,7 +60,8 @@ struct AppOptionsDraft: Equatable {
             keepBundleId: app.keepBundleId,
             stripExtensions: app.stripExtensions,
             stripSupportedDevices: app.stripSupportedDevices,
-            compressionLevel: app.compressionLevel
+            compressionLevel: app.compressionLevel,
+            lcPin: LCPin(app.lcBundleId)
         )
         edited = original
     }

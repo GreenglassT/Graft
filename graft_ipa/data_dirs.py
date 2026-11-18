@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import errno
 import os
+import re
+import shutil
+import tempfile
+import time
 from pathlib import Path
 
 APP_DIRNAME = "graft"
@@ -202,3 +206,122 @@ def migrate_legacy_dirs() -> list[str]:
         if notice is not None:
             notices.append(notice)
     return notices
+
+
+#: What Graft's own directories are kept at: the .p12, profiles, staged IPAs,
+#: archived builds and build logs are nobody else's business.
+PRIVATE_DIR_MODE = 0o700
+
+
+def secure_app_dirs() -> None:
+    """Create Graft's four directories owner-only, and tighten them if not.
+
+    Run at startup, after `migrate_legacy_dirs`, so the directories every
+    default resolves to exist 0700 before anything is written into them: a
+    `mkdir(parents=True)` of a subdirectory would otherwise create the parent
+    at the default 0755 on a first run.
+
+    Only the four `…/graft` directories (or a pre-rename one still in use) and
+    only when they are real directories. Never the XDG roots, which are shared
+    with every other program; never what is inside, which is private by being
+    inside; and never a link the user made, which points at something of
+    theirs. A legacy `tweak-build` link the user made is followed by `app_dir`
+    while `graft` is absent, so nothing is created beside it either. Failures
+    are ignored: this must not be the reason a run cannot start.
+    """
+    for root in _roots():
+        path = app_dir(root)
+        try:
+            if not os.path.lexists(path):
+                # Only ever `graft`. `app_dir` answers `tweak-build` while the
+                # data is still there, and another CLI can rename it away in
+                # between: creating a fresh one then broke that CLI's symlink
+                # and sent its move back onto an empty directory.
+                if path.name != APP_DIRNAME:
+                    continue
+                path.mkdir(mode=PRIVATE_DIR_MODE, parents=True)
+                os.chmod(path, PRIVATE_DIR_MODE)  # exactly, whatever the umask
+            elif _is_real_dir(path) and (path.stat().st_mode & 0o777) != PRIVATE_DIR_MODE:
+                os.chmod(path, PRIVATE_DIR_MODE)
+        except OSError:
+            continue
+
+
+#: How old a hidden partial file must be before a startup sweep removes it:
+#: long past any staging or archiving still running in another Graft.
+STALE_PARTIAL_SECONDS = 24 * 60 * 60
+
+
+#: `tempfile.mkstemp`'s random part: eight of `[a-z0-9_]`
+#: (`tempfile._RandomNameSequence`). Should that ever change, the sweep
+#: stops matching rather than starts matching too much.
+_MKSTEMP_RANDOM = r"[a-z0-9_]{8}"
+
+#: The hidden temporaries Graft writes into `cache_dir` and `built_dir`, and
+#: no other name. Both directories are settings and can be a folder other
+#: things write to; "any hidden `.part` or `.partial`" swept a browser's or a
+#: sync tool's unfinished download along with Graft's.
+_PARTIAL_NAME = re.compile(
+    rf"\..+\.ipa\.{_MKSTEMP_RANDOM}\.partial"         # private_copy: archiving a build
+    rf"|\..+\.{_MKSTEMP_RANDOM}\.partial\.ipa"        # provide_ipa.stage: staging, scrubbing
+    r"|\.com\.kdt\.livecontainer-[0-9a-f]{8}\.part"   # lc_manage.ensure_ipa
+)
+
+
+def _is_partial(name: str) -> bool:
+    """One of the hidden temporaries Graft writes beside a file it is
+    replacing: `private_copy`'s `.<name>.ipa.<random>.partial`,
+    `provide_ipa.stage`'s `.<stem>.<random>.partial.ipa`, and
+    `lc_manage.ensure_ipa`'s `.com.kdt.livecontainer-<hex>.part`."""
+    return _PARTIAL_NAME.fullmatch(name) is not None
+
+
+def sweep_stale_partials(*dirs: Path, older_than: float = STALE_PARTIAL_SECONDS) -> list[Path]:
+    """Remove hidden partial files left in `dirs` by a run that never finished.
+
+    Every writer here removes its own temporary on any exception, a Stop
+    included — but not on SIGKILL (the GUI escalates to one two seconds after
+    a Stop), a crash, or a power cut, and retention skips dotfiles, so those
+    stayed for good: whole IPAs, some still holding the buyer's Apple ID data.
+    Only files older than `older_than`, so another run's write in progress is
+    never touched, and only the names Graft's own writers use (`_is_partial`),
+    so another program's files in a shared folder are never touched either.
+    Never raises; returns what it removed.
+    """
+    cutoff = time.time() - older_than
+    removed: list[Path] = []
+    for directory in dirs:
+        try:
+            entries = list(os.scandir(directory))
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if (
+                    _is_partial(entry.name)
+                    and entry.is_file(follow_symlinks=False)
+                    and entry.stat(follow_symlinks=False).st_mtime < cutoff
+                ):
+                    os.unlink(entry.path)
+                    removed.append(Path(entry.path))
+            except OSError:
+                continue
+    return removed
+
+
+def private_copy(src: Path, dest: Path) -> None:
+    """Copy `src` to `dest` owner-only (0600), whatever `src`'s mode.
+
+    Not `shutil.copy2`, which carries the source's mode across. Written to a
+    0600 temp file beside `dest` and renamed over it, so `dest` is never
+    briefly another mode, nor half-written.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".partial")
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as out, src.open("rb") as source:
+            shutil.copyfileobj(source, out, 1 << 20)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise

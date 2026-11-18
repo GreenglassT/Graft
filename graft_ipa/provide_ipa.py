@@ -13,11 +13,13 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import zipfile
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import IPAInspectionError, IPAValidationError
-from .ipa_inspect import clear_stripped, read_info_plist
+from .ipa_inspect import account_data_in, clear_stripped, read_info_plist, strip_account_data
 
 
 @dataclass
@@ -75,6 +77,106 @@ def validate_ipa(path: Path, expected_bundle_id: str) -> ValidatedIPA:
     )
 
 
+def stage(source: Path, final: Path, *, keep: Collection[str] = ()) -> list[str]:
+    """Put `source` at `final`, owner-only and identifying nobody.
+
+    The one way an IPA enters the cache, whatever it came from — a drop, an
+    App Store get, a `--decrypt` dump — and the reason all three can be said
+    to stage nothing that names the buyer. An App Store IPA carries
+    `iTunesMetadata.plist` (the Apple ID's email and account ids) and an
+    `SC_Info/` licence in the app and in every extension
+    (`ipa_inspect.account_data_in`); a copy without them is written, or a plain
+    copy when there were none. The result is then *checked*, not assumed: no
+    tool's word — UnfairPlay's `--strip-account-data` included — decides what
+    reaches the cache.
+
+    Written to a uniquely named `.<name>.<random>.partial.ipa` beside `final`
+    (`mkstemp`, so 0600) and `os.replace`d into place, so a crash leaves no
+    half-written file at the canonical name. Unique rather than fixed since the
+    App Store work: a drop and a get of the same version can stage at once,
+    and a shared temp name let the second truncate the first's file under it.
+    The temp file goes on *any* exception, an interrupt included.
+
+    `keep` names account-data entries to leave in (`ipa_inspect.
+    sealed_account_data`: what a signed archive's signature seals); the rest
+    must be gone.
+
+    Returns the entries removed.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=final.parent, prefix=f".{final.stem}.", suffix=".partial.ipa"
+    )
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        if account_data_in(source):
+            removed = strip_account_data(source, tmp, keep=keep)
+        else:
+            # Into the 0600 file mkstemp made: `copyfile` copies data, not mode.
+            shutil.copyfile(source, tmp)
+            removed = []
+        left = sorted(set(account_data_in(tmp)) - set(keep))
+        if left:
+            raise IPAValidationError(
+                f"{source.name} still holds account data after staging: {', '.join(left)}",
+                hint="nothing was staged; please report this",
+            )
+        os.replace(tmp, final)
+    except OSError as e:
+        tmp.unlink(missing_ok=True)
+        raise IPAValidationError(f"failed to copy IPA into {final.parent}: {e}") from e
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return removed
+
+
+def needs_scrub(ipa: Path, *, keep: Collection[str] = ()) -> bool:
+    """Whether `ipa` holds account data beyond `keep`. One zip listing.
+
+    An IPA that cannot be read as a zip is left for the build's own checks to
+    report (stage 2.5, then cyan), which say what is wrong with it; this one
+    would only say that it could not look.
+    """
+    try:
+        return bool(set(account_data_in(ipa)) - set(keep))
+    except (zipfile.BadZipFile, OSError):
+        return False
+
+
+def scrub_staged(ipa: Path, *, keep: Collection[str] = ()) -> list[str]:
+    """Take the account data out of an IPA already in the cache, in place.
+
+    For a file staged before `stage` did it, or an archive built from one. A
+    no-op — one zip listing — for every IPA staged since. Returns the entries
+    removed.
+    """
+    if not needs_scrub(ipa, keep=keep):
+        return []
+    return stage(ipa, ipa, keep=keep)
+
+
+def scrubbed_copy(ipa: Path, dest: Path, *, keep: Collection[str] = ()) -> list[str]:
+    """`ipa` without its account data, written to `dest` (0600); the original
+    is not touched. For when the original's directory will not take a write —
+    a full or read-only cache — and the build goes on from the copy.
+    Checked like `stage`. Returns the entries removed."""
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(fd)
+    try:
+        removed = strip_account_data(ipa, dest, keep=keep)
+        left = sorted(set(account_data_in(dest)) - set(keep))
+        if left:
+            raise IPAValidationError(
+                f"{ipa.name} still holds account data after scrubbing: {', '.join(left)}",
+                hint="nothing was shipped with it; please report this",
+            )
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
+    return removed
+
+
 def provide(
     *,
     cache_dir: Path,
@@ -85,38 +187,14 @@ def provide(
     `cache_dir` under the canonical `<bundle_id>_<version>.ipa` name the build
     pipeline expects. Returns (destination path, validated IPA info).
 
-    The copy is atomic-ish: writes to a uniquely named
-    `.<bundle_id>_<version>.<random>.partial.ipa` in the same directory, then
-    `os.replace`s into place — so a crash mid-copy doesn't leave a
-    half-written file at the canonical name. Replaces any existing file with
-    the same version.
-
-    Unique rather than fixed since the App Store work: a drop and a get of the
-    same version can stage at once, and a shared temp name let the second copy
-    truncate the first's file under it. The temp file goes on *any* exception,
-    not only `OSError` — an interrupt (or the get's SIGTERM-as-exception)
-    otherwise left a partial IPA in the cache.
+    Through `stage`: owner-only, atomic, and without the buyer's metadata and
+    licences. Replaces any existing file with the same version.
     """
     info = validate_ipa(source_path, expected_bundle_id)
     cache_dir.mkdir(parents=True, exist_ok=True)
     final = cache_dir / f"{info.bundle_id}_{info.version}.ipa"
-    fd, tmp_name = tempfile.mkstemp(
-        dir=cache_dir, prefix=f".{info.bundle_id}_{info.version}.", suffix=".partial.ipa"
-    )
-    os.close(fd)
-    tmp = Path(tmp_name)
-    try:
-        shutil.copyfile(source_path, tmp)
-        os.replace(tmp, final)
-    except OSError as e:
-        tmp.unlink(missing_ok=True)
-        raise IPAValidationError(
-            f"failed to copy IPA into {cache_dir}: {e}"
-        ) from e
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    # `os.replace` swaps the IPA at `final` but, same as `shutil.move` in
+    stage(source_path, final)
+    # `stage` swaps the IPA at `final` but, as it does for
     # `_do_decrypt`, leaves any `.stripped.json` sitting beside the old one
     # untouched. A version staged earlier with `--strip-encrypted-extensions`
     # left exactly that note; providing a *complete* IPA of the same version

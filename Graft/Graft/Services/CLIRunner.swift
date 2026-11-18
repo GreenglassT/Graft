@@ -4,15 +4,16 @@ import Foundation
 ///
 /// A GUI app launched from the Dock/Finder inherits only the launchd session
 /// environment, whose PATH is `/usr/bin:/bin:/usr/sbin:/sbin`. That omits
-/// `/opt/homebrew/bin` (Homebrew: zsign, idevice_id, ideviceinstaller) and
+/// `/opt/homebrew/bin` (Homebrew: zsign, ideviceinstaller, iproxy) and
 /// `~/.local/bin` (pipx: cyan, graft itself), so the CLI's pre-flight
 /// tool checks fail and the build dies right after "build start". We prepend
 /// the real tool directories so the subprocess can find them.
 enum ProcessEnvironment {
     /// Directories where the CLI's tool dependencies actually live, in the
-    /// order they should take precedence.
+    /// order they should take precedence: pipx, Homebrew on Apple silicon,
+    /// Homebrew on Intel, MacPorts (which packages libimobiledevice too).
     static func toolDirs(home: String) -> [String] {
-        ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+        ["\(home)/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"]
     }
 
     /// The console width the CLI is told to print at, and why it isn't 80.
@@ -46,8 +47,43 @@ enum ProcessEnvironment {
     /// then quote into the banner as "the last thing it said".
     static let usagePanelColumns = 80
 
+    /// Variables that make Rich (and Typer, which wraps it) write colour
+    /// codes into a pipe. `FORCE_COLOR` is a common export — npm, jest and
+    /// CI setups set it — and the login-shell merge used to hand it to the
+    /// CLI: stderr then arrived as `\e[31merror:\e[0m …`, `CLIFailure.parse`
+    /// found no line starting with `error:`, the setup screen was lost to an
+    /// alert, and every banner showed raw escape codes.
+    ///
+    /// Rich reads `TTY_COMPATIBLE` and `TTY_INTERACTIVE` the same way, and
+    /// Typer forces a terminal on `PY_COLORS`. `CLICOLOR_FORCE` is the BSD
+    /// spelling, honoured by tools the CLI runs. None says anything about the
+    /// user's setup that a subprocess with no terminal should act on.
+    static let colourVariables: Set<String> = [
+        "FORCE_COLOR", "TTY_COMPATIBLE", "TTY_INTERACTIVE", "PY_COLORS", "CLICOLOR_FORCE",
+    ]
+
+    /// Whether `name` is a Python interpreter variable — `PYTHONPATH`,
+    /// `PYTHONHOME`, `PYTHONSTARTUP`, `PYTHONEXECUTABLE`, `PYTHONUSERBASE` and
+    /// the rest of the family.
+    ///
+    /// The CLI is a Python program in its own pipx venv, and every one of
+    /// these changes what that interpreter runs: a `PYTHONPATH` the user set
+    /// for some other project puts that project's modules ahead of the CLI's
+    /// own dependencies, `PYTHONHOME` points the interpreter at another
+    /// standard library, `PYTHONSTARTUP` and `PYTHONUSERBASE` run or import
+    /// code the CLI never chose. Terminal users are exposed to that too, but
+    /// a Terminal user can see their own exports; the app merging them in
+    /// from a login shell is invisible. Dropped from every source, not only
+    /// the shell's: a `PYTHONPATH` in the app's own environment (started from
+    /// a terminal) is the same hazard.
+    static func isPythonVariable(_ name: String) -> Bool {
+        name.hasPrefix("PYTHON")
+    }
+
     static func augmented(base: [String: String], home: String) -> [String: String] {
-        var env = base
+        var env = base.filter { name, _ in
+            !colourVariables.contains(name) && !isPythonVariable(name)
+        }
         let inherited = (env["PATH"]).map { $0.split(separator: ":").map(String.init) }
             ?? ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
         var seen = Set<String>()
@@ -58,17 +94,149 @@ enum ProcessEnvironment {
         // the text a user is shown depend on how they started the app.
         env["COLUMNS"] = String(consoleColumns)
         env["TERMINAL_WIDTH"] = String(usagePanelColumns)
+        ensureUTF8(&env)
         return env
     }
 
-    /// The environment to hand the CLI subprocess: this process's environment
-    /// with the tool directories prepended to PATH.
-    static func forCLI() -> [String: String] {
-        augmented(
-            base: ProcessInfo.processInfo.environment,
-            home: FileManager.default.homeDirectoryForCurrentUser.path
-        )
+    /// The locale the CLI's output is encoded in, made UTF-8 when it isn't.
+    ///
+    /// Everything this app reads from the CLI is decoded as UTF-8, and the CLI
+    /// prints `✓`, `✗` and `…`. From launchd there is no locale at all, and
+    /// Python coerces that C locale to UTF-8 on its own. The login shell's
+    /// environment can bring a real one, and a non-UTF-8 one there would encode
+    /// every one of those characters into something this side cannot read.
+    ///
+    /// Only the character-type category is touched, and only when the
+    /// effective one (`LC_ALL`, then `LC_CTYPE`, then `LANG`) does not already
+    /// name UTF-8 — so a user's own language, dates and number formats reach
+    /// the CLI as they set them.
+    static let utf8Locale = "en_US.UTF-8"
+
+    private static func ensureUTF8(_ env: inout [String: String]) {
+        func set(_ name: String) -> String? { env[name].flatMap { $0.isEmpty ? nil : $0 } }
+        let effective = set("LC_ALL") ?? set("LC_CTYPE") ?? set("LANG")
+        let normalized = effective?.uppercased().replacingOccurrences(of: "-", with: "")
+        guard normalized?.contains("UTF8") != true else { return }
+        if set("LC_ALL") != nil {
+            env["LC_ALL"] = utf8Locale
+        } else {
+            env["LC_CTYPE"] = utf8Locale
+        }
     }
+
+    /// This process's environment with the login shell's laid over it.
+    ///
+    /// The shell's value wins where both have one: the shell inherits this
+    /// process's environment before its startup files run, so anything it
+    /// reports differently is something the user's setup changed on purpose.
+    /// `LoginShell.noise` — the shell describing itself — is left out.
+    ///
+    /// Nil `shell` (no answer, or a failed one) returns `process` unchanged,
+    /// which is how the app behaved before it asked.
+    static func merged(process: [String: String], shell: [String: String]?) -> [String: String] {
+        guard let shell else { return process }
+        var env = process
+        for (name, value) in shell where !LoginShell.noise.contains(name) {
+            env[name] = value
+        }
+        return env
+    }
+
+    /// The environment to hand the CLI subprocess: this process's environment,
+    /// the login shell's over it when there is one, and this app's own
+    /// augmentation over both — the tool directories on PATH, the console
+    /// widths, a UTF-8 locale.
+    static func forCLI(
+        shell: [String: String]? = nil,
+        process: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) -> [String: String] {
+        augmented(base: merged(process: process, shell: shell), home: home)
+    }
+}
+
+/// Where the app finds the `graft` CLI it runs for everything it does.
+enum GraftExecutable {
+    /// The README's install line, quoted by the launch failure so a user who
+    /// installed the app without the CLI is told the one command to run.
+    static let installCommand = "pipx install git+https://github.com/GreenglassT/Graft"
+
+    /// What rebuilds an installed graft that will not start — most often a
+    /// pipx venv whose Python was upgraded or removed under it, where
+    /// `installCommand` only answers "already installed". `graft-ipa` is the
+    /// package name in pyproject.toml, which is what pipx knows it by.
+    static let reinstallCommand = "pipx reinstall graft-ipa"
+
+    /// The first executable `graft` in `ProcessEnvironment.toolDirs`, then in
+    /// `path` — the PATH the CLI itself will be given.
+    ///
+    /// The tool dirs come first because they are the same directories the CLI
+    /// is handed for *its* tools, so graft and cyan are found the same way.
+    /// `path` is the login shell's PATH when the shell answered (see
+    /// `ShellEnvironment`), so a pipx with a custom `PIPX_BIN_DIR` is found
+    /// from Finder too, not only when the app was started from a shell.
+    ///
+    /// **Absolute directories only.** A relative PATH entry (`.`, `bin`, an
+    /// empty one, which the shell reads as `.`) names wherever the app's
+    /// working directory happens to be — `/` from Finder, anything at all
+    /// from a terminal — and a `graft` found there is whatever file sits in
+    /// that directory, run with the user's signing credentials in its
+    /// environment.
+    ///
+    /// **Never a directory**, whatever `isExecutable` says. It is a seam, and
+    /// `FileManager.isExecutableFile` — what it used to be in production — is
+    /// true for any directory with its search bit set, so a `graft/` folder
+    /// early on the PATH shadowed the real CLI and every launch failed with
+    /// "permission denied". The refusal is not part of the seam so that no
+    /// predicate, injected or not, can reintroduce that.
+    static func locate(
+        home: String, path: String?, isExecutable: (String) -> Bool
+    ) -> URL? {
+        let inherited = path.map { $0.split(separator: ":").map(String.init) } ?? []
+        var seen = Set<String>()
+        for dir in ProcessEnvironment.toolDirs(home: home) + inherited
+        where dir.hasPrefix("/") && seen.insert(dir).inserted {
+            let candidate = URL(fileURLWithPath: dir).appendingPathComponent("graft")
+            if !existsAsNonRegularFile(candidate.path) && isExecutable(candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// The production `isExecutable`: a regular file — after following
+    /// symlinks, because pipx's `~/.local/bin/graft` is one, into its venv —
+    /// that this user may execute.
+    static func isRunnableFile(_ path: String) -> Bool {
+        var info = stat()
+        guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return false }
+        return access(path, X_OK) == 0
+    }
+
+    /// Something is at `path` and it is not a regular file: a directory, a
+    /// socket, a FIFO. False for a path where nothing is, so a test's fake
+    /// filesystem (paths that exist only in its predicate) is unaffected.
+    private static func existsAsNonRegularFile(_ path: String) -> Bool {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return false }
+        return (info.st_mode & S_IFMT) != S_IFREG
+    }
+
+    /// What the app runs: `locate`'s answer, or, when there is none, where
+    /// pipx installs graft by default.
+    ///
+    /// That path does not exist, and that is the point: launching it fails,
+    /// and `CLIRunner.RunError` turns the failure into the install command.
+    /// The fallback this replaces was `/usr/bin/env` handed graft's own
+    /// arguments with no `graft` in front of them, so every pane said
+    /// "exit 1: usage: env [-0iv] …" and nothing about what was missing.
+    static func resolve(
+        home: String, path: String?, isExecutable: (String) -> Bool
+    ) -> URL {
+        locate(home: home, path: path, isExecutable: isExecutable)
+            ?? URL(fileURLWithPath: home).appendingPathComponent(".local/bin/graft")
+    }
+
 }
 
 /// Wraps `Process` for running the graft CLI as a subprocess.
@@ -119,6 +287,16 @@ enum ProcessEnvironment {
 /// so that regression costs 2× this, measured at 1.04s.
 private let drainGrace: TimeInterval = 0.5
 
+/// How long a stopped CLI gets between SIGTERM and SIGKILL.
+///
+/// SIGTERM is graft's cue to unwind: `_build_one`'s `finally` deletes the
+/// build's work dir, which for a real app holds an unpacked copy of it (cyan's,
+/// ~22,000 files) and took 2.1-3.1s to remove. Two seconds cut that off: the
+/// app saw exit 9 with no `build-end`, and 442 MB stayed in $TMPDIR. Ten
+/// leaves room for a bigger app on a slower disk; a CLI that is genuinely wedged
+/// is still killed, only later.
+let cliStopGrace: TimeInterval = 10
+
 final class CLIRunner {
     struct RunResult {
         let exitCode: Int32
@@ -139,12 +317,51 @@ final class CLIRunner {
         }
     }
 
-    enum RunError: Error {
-        case launchFailed(underlying: Error)
+    enum RunError: LocalizedError {
+        case launchFailed(executable: String, underlying: Error)
+
+        /// Every pane shows `localizedDescription`, and without this a CLI
+        /// that isn't installed read "The operation couldn't be completed.
+        /// (Graft.CLIRunner.RunError error 0.)". Not being able to start graft
+        /// at all almost always means it isn't installed where the app looks,
+        /// so the message names the path and the command that installs it.
+        var errorDescription: String? {
+            switch self {
+            case let .launchFailed(executable, underlying):
+                // Something is there and would not start: installing again is
+                // the advice that loops ("already installed"). Say what is
+                // wrong with the file and how to rebuild it.
+                if let broken = BrokenCLI.diagnose(path: executable, underlying: underlying) {
+                    return "Couldn't run the graft command-line tool at \(executable): "
+                        + "\(broken.reason). Reinstall it: \(GraftExecutable.reinstallCommand)"
+                }
+                let dirs = ProcessEnvironment.toolDirs(home: "~").joined(separator: ", ")
+                return "Couldn't run the graft command-line tool at \(executable). "
+                    + "\(underlying.localizedDescription) Graft.app needs the CLI installed: "
+                    + "\(GraftExecutable.installCommand) — the app looks for graft in "
+                    + "\(dirs), then on PATH."
+            }
+        }
     }
 
-    private let executable: URL
-    private let environment: [String: String]?
+    /// What a launch runs: the executable and the environment it gets.
+    struct Target: Sendable {
+        let executable: URL
+        /// Nil inherits this process's environment unchanged.
+        let environment: [String: String]?
+    }
+
+    /// Decided at each launch, not at construction.
+    ///
+    /// A fixed pair is what every test runner is, and what this used to be for
+    /// the app too — decided in `GraftApp`'s initialiser, before anything could
+    /// have asked the login shell, and never again. Two things need it decided
+    /// later: the login shell's environment (`ShellEnvironment`) arrives
+    /// asynchronously, and the first launch must wait for it rather than run
+    /// against launchd's; and the setup screen's Check again has to find a
+    /// graft installed after the app started, which a path chosen at launch
+    /// never could.
+    private let target: @Sendable () async -> Target
 
     /// Called after the handle adopts the `Process` and before it is launched.
     ///
@@ -158,14 +375,68 @@ final class CLIRunner {
     /// Default nil, so production builds an empty optional and calls nothing.
     private let willLaunch: (@Sendable () -> Void)?
 
+    /// What `refreshEnvironment()` does: ask the login shell again, for the
+    /// app's runner; nothing, for a runner with a fixed target.
+    private let refresh: (@Sendable () -> Void)?
+
     init(
         executable: URL,
         environment: [String: String]? = nil,
         willLaunch: (@Sendable () -> Void)? = nil
     ) {
-        self.executable = executable
-        self.environment = environment
+        let fixed = Target(executable: executable, environment: environment)
+        self.target = { fixed }
         self.willLaunch = willLaunch
+        self.refresh = nil
+    }
+
+    /// A runner whose target is worked out afresh for every launch.
+    ///
+    /// - Parameter refresh: re-reads what `target` is built from, for
+    ///   `refreshEnvironment()`.
+    init(
+        resolving target: @escaping @Sendable () async -> Target,
+        refresh: (@Sendable () -> Void)? = nil
+    ) {
+        self.target = target
+        self.willLaunch = nil
+        self.refresh = refresh
+    }
+
+    /// Re-read the environment launches are built from, so the next one sees
+    /// a setup the user just changed in Terminal. The setup screen's Check
+    /// again calls this; see `ShellEnvironment.refresh()`.
+    func refreshEnvironment() {
+        refresh?()
+    }
+
+    /// The app's runner: `graft`, wherever it is now, in the user's
+    /// environment.
+    ///
+    /// Each launch waits for the login shell's environment — bounded by
+    /// `LoginShell.timeout`, and immediate after the first — then merges it
+    /// under this app's own augmentation and looks for `graft` on the PATH that
+    /// produces. Looking again every launch costs a handful of `stat`s against
+    /// a Python interpreter's startup, and it is what lets the setup screen's
+    /// Check again find a CLI installed after the app opened.
+    ///
+    /// Everything is a parameter so a test can stand in a fake shell answer, a
+    /// fake home and a fake filesystem; `GraftApp` passes none of them.
+    static func forApp(
+        shell: ShellEnvironment = .shared,
+        process: [String: String] = ProcessInfo.processInfo.environment,
+        home: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        isExecutable: @escaping @Sendable (String) -> Bool = GraftExecutable.isRunnableFile
+    ) -> CLIRunner {
+        CLIRunner(resolving: {
+            let env = ProcessEnvironment.forCLI(
+                shell: await shell.value, process: process, home: home
+            )
+            let executable = GraftExecutable.resolve(
+                home: home, path: env["PATH"], isExecutable: isExecutable
+            )
+            return Target(executable: executable, environment: env)
+        }, refresh: { shell.refresh() })
     }
 
     /// Run a command and hand back everything it wrote.
@@ -179,10 +450,11 @@ final class CLIRunner {
     /// (an `app` line plus its `delivery-state` line is ~480 bytes) and
     /// `--build-log` reaches it on any build that logged more than a screenful.
     func runOnce(arguments: [String], stdin: String? = nil) async throws -> RunResult {
+        let target = await self.target()
         let proc = Process()
-        proc.executableURL = executable
+        proc.executableURL = target.executable
         proc.arguments = arguments
-        if let env = environment { proc.environment = env }
+        if let env = target.environment { proc.environment = env }
 
         let out = Pipe()
         let err = Pipe()
@@ -299,7 +571,9 @@ final class CLIRunner {
                     // fire; resume the throw here.
                     handle.markFinished()
                     releaseDrainers()
-                    cont.resume(throwing: RunError.launchFailed(underlying: error))
+                    cont.resume(throwing: RunError.launchFailed(
+                        executable: proc.executableURL?.path ?? "graft", underlying: error
+                    ))
                 }
             }
         } onCancel: {
@@ -424,10 +698,60 @@ enum CLIFailure {
     /// stderr, line by line: trailing whitespace stripped and blank lines
     /// dropped, but leading indentation kept — it is what makes a traceback
     /// readable.
+    ///
+    /// Terminal escape sequences are removed first. The environment filter
+    /// (`ProcessEnvironment.colourVariables`) is what keeps Rich from
+    /// colouring a pipe; this is the backstop for whatever it misses — an
+    /// older app's CLI, a tool that colours regardless — because one escape in
+    /// front of `error:` is enough to lose the parse, and every surface built
+    /// on these lines would otherwise paste `\e[31m` into a SwiftUI `Text`.
     static func stderrLines(_ stderr: String) -> [String] {
-        stderr.split(separator: "\n", omittingEmptySubsequences: false)
+        strippingTerminalEscapes(stderr)
+            .split(separator: "\n", omittingEmptySubsequences: false)
             .map(trimmingTrailingWhitespace)
             .filter { !$0.isEmpty }
+    }
+
+    /// `text` without ANSI/VT escape sequences: CSI (`ESC [ … final`, colours
+    /// and cursor moves), OSC (`ESC ] … BEL` or `ESC ] … ESC \`, which is how
+    /// Rich writes a hyperlink), and the two-byte `ESC <char>` forms. A lone
+    /// ESC at the very end goes too. Everything else is kept byte for byte.
+    static func strippingTerminalEscapes(_ text: String) -> String {
+        guard text.unicodeScalars.contains("\u{1B}") else { return text }
+        var out = String.UnicodeScalarView()
+        let scalars = Array(text.unicodeScalars)
+        var i = 0
+        while i < scalars.count {
+            guard scalars[i] == "\u{1B}" else {
+                out.append(scalars[i])
+                i += 1
+                continue
+            }
+            i += 1
+            guard i < scalars.count else { break }
+            switch scalars[i] {
+            case "[":
+                // Parameter and intermediate bytes, then one final byte in
+                // 0x40–0x7E.
+                i += 1
+                while i < scalars.count, !(0x40...0x7E).contains(scalars[i].value) { i += 1 }
+                i += 1
+            case "]":
+                // Until BEL, or the two-byte string terminator ESC \.
+                i += 1
+                while i < scalars.count {
+                    if scalars[i] == "\u{07}" { i += 1; break }
+                    if scalars[i] == "\u{1B}", i + 1 < scalars.count, scalars[i + 1] == "\\" {
+                        i += 2
+                        break
+                    }
+                    i += 1
+                }
+            default:
+                i += 1
+            }
+        }
+        return String(out)
     }
 
     /// The `error:`/`hint:` pair, or nil when stderr isn't one — a traceback,
@@ -725,10 +1049,11 @@ extension CLIRunner {
         arguments: [String],
         onEvent: @escaping @MainActor (BuildEvent) -> Void
     ) async throws -> RunResult {
+        let target = await self.target()
         let proc = Process()
-        proc.executableURL = executable
+        proc.executableURL = target.executable
         proc.arguments = arguments
-        if let env = environment { proc.environment = env }
+        if let env = target.environment { proc.environment = env }
 
         let out = Pipe()
         let err = Pipe()
@@ -925,8 +1250,8 @@ private final class ProcessHandle: @unchecked Sendable {
         // spinning on output nobody will read. `isRunning` is re-checked under
         // Process's own bookkeeping, which holds the pid until the child is
         // reaped, so this can't signal a recycled pid.
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
-            // Re-walked here, never the two-second-old `orphans` snapshot.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + cliStopGrace) {
+            // Re-walked here, never the `cliStopGrace`-old `orphans` snapshot.
             // Those pids are very likely dead and reaped by now, and a reaped
             // pid is free to be handed to something else — on a machine forking
             // hundreds of short-lived processes a second, SIGKILLing a stale
@@ -975,10 +1300,22 @@ private final class ProcessHandle: @unchecked Sendable {
     /// `-test-iterations`, with and without this method, so this is not what
     /// makes it flaky and removing it will not make it worse.
     ///
-    /// Closing that window needs the child in its own process group so a
-    /// single `kill(-pgid)` reaches everything regardless of timing, and
-    /// `Foundation.Process` exposes no way to ask for one.
+    /// Closing that window needs a single `kill(-pgid)` that reaches
+    /// everything regardless of timing. (This said `Foundation.Process` gives
+    /// no way to get a process group. It does not need asking: measured on
+    /// macOS 15+, a `Process` child's pgid is its own pid — `LoginShell`
+    /// relies on that for its timeout. Using it here is a change to this
+    /// cancellation path that has not been made.)
     private static func descendants(of pid: pid_t) -> [pid_t] {
+        ProcessTree.descendants(of: pid)
+    }
+}
+
+/// The processes under a pid, for stopping what a child started.
+enum ProcessTree {
+    /// Every descendant of `pid`, deepest last. See `ProcessHandle` for why
+    /// this is best effort: a pid can exit between listing and signalling.
+    static func descendants(of pid: pid_t) -> [pid_t] {
         var found: [pid_t] = []
         var frontier = [pid]
         // Bounded rather than recursive-until-empty: a pid table that changes

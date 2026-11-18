@@ -179,6 +179,7 @@ final class AppDetailLayoutTests: XCTestCase {
                     artwork: artwork, devices: devices, tweaksStore: tweaks,
                     staged: staged,
                     appStore: appStore,
+                    liveContainer: LiveContainerStore(runner: store.runner),
                     // The bar's Change control. Nothing here observes it; the
                     // pane only needs it to be constructible.
                     showSettings: {}

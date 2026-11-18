@@ -400,4 +400,23 @@ extension TweakUpdatesTests {
         XCTAssertEqual(sut.lastCheck?.unchecked, 1)
         XCTAssertEqual(sut.outdatedCount, 0)
     }
+
+    // MARK: - K12: which rows could not be checked
+
+    func test_each_row_says_whether_its_lookup_was_made() throws {
+        let events = [
+            #"{"type":"tweak-update","filename":"a.deb","package_id":"com.x","installed":"1.0","latest":null,"source":null,"update_available":false,"unchecked":true}"#,
+            #"{"type":"tweak-update","filename":"b.deb","package_id":"com.y","installed":"1.0","latest":null,"source":null,"update_available":false,"unchecked":false}"#,
+            line("c.deb", installed: "1.0", latest: "1.0", available: false),
+        ].joined(separator: "\n").buildEvents().compactMap { event -> TweakUpdateRecord? in
+            if case let .tweakUpdate(record) = event { return record }
+            return nil
+        }
+        XCTAssertEqual(events.map(\.unchecked), [true, false, false],
+                       "absent is not unchecked: a CLI before the field still decodes")
+        XCTAssertTrue(TweaksView.couldNotCheck(events[0]))
+        XCTAssertFalse(TweaksView.couldNotCheck(events[1]), "asked, and nothing is published")
+        XCTAssertFalse(TweaksView.couldNotCheck(events[2]))
+        XCTAssertFalse(TweaksView.couldNotCheck(nil), "never checked says nothing")
+    }
 }

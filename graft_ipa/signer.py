@@ -2,24 +2,60 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import shlex
 import subprocess
+import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import apple_portal, keychain, mobileprovision
+from . import apple_portal, install_hints, keychain, mobileprovision, p12
+from .child_env import child_env
+from .child_env import which as child_which
 from .config import AppConfig, Config
 from .errors import SigningError
 
 
+def _signing_for(cfg: Config, app: AppConfig | None) -> None:
+    """Refuse to sign anything on a free Apple ID, naming what asked.
+
+    The signing boundary's guard. The delivery checks
+    (`Config.require_delivery`) refuse sideload and the paid-only verbs before
+    they get here; this is the floor under them, so a path nobody thought of
+    reads as the same refusal rather than an AttributeError on a `signing`
+    that is None.
+
+    Once per entry point: each public function below calls it, then does its
+    work through the unguarded `_p12_password`, `_plan_profile` and
+    `_resolve_profile`, so `run_zsign` asks once, not once per helper.
+    """
+    if app is not None and app.auto_profile:
+        what = f"auto_profile: true (app '{app.name}')"
+    elif app is not None:
+        what = f"signing app '{app.name}'"
+    else:
+        what = "signing"
+    cfg.require_paid_account(what)
+
+
 def resolve_p12_password(cfg: Config) -> str | None:
     """Read the .p12 password from env first, then macOS Keychain."""
+    _signing_for(cfg, None)
+    return _p12_password(cfg)
+
+
+def _p12_password(cfg: Config) -> str | None:
+    """`resolve_p12_password` past its guard."""
     pw = os.environ.get(cfg.signing.cert_password_env)
     if pw:
         return pw
-    if cfg.signing.team_id:
-        return keychain.read_p12_password(cfg.signing.team_id)
+    # By `cfg.team_id`, the key `--set-p12-password` writes under: never a
+    # placeholder or a padded spelling of it.
+    if cfg.team_id:
+        return keychain.read_p12_password(cfg.team_id)
     return None
 
 
@@ -113,6 +149,12 @@ def plan_profile_for_app(cfg: Config, app: AppConfig | None) -> ProfilePlan:
     account. Raises SigningError only when the config cannot name a profile at
     all; use `require_local()` on the result to enforce that the file is there.
     """
+    _signing_for(cfg, app)
+    return _plan_profile(cfg, app)
+
+
+def _plan_profile(cfg: Config, app: AppConfig | None) -> ProfilePlan:
+    """`plan_profile_for_app` past its guard."""
     if app and app.profile_override:
         return ProfilePlan(
             path=app.profile_override,
@@ -188,7 +230,15 @@ def resolve_profile_for_app(
     must not do any of that — `--dry-run`, pre-flight — call
     `plan_profile_for_app` instead.
     """
-    plan = plan_profile_for_app(cfg, app)
+    _signing_for(cfg, app)
+    return _resolve_profile(cfg, app, password=password)
+
+
+def _resolve_profile(
+    cfg: Config, app: AppConfig | None, *, password: str | None
+) -> ResolvedProfile:
+    """`resolve_profile_for_app` past its guard."""
+    plan = _plan_profile(cfg, app)
     if plan.source == PROFILE_SOURCE_AUTO:
         # Only reachable through `app.auto_profile`, so `app` is not None here.
         return _provision_via_portal(cfg, app, password=password)
@@ -246,7 +296,8 @@ def run_zsign(
     app: AppConfig | None = None,
     dry_run: bool = False,
 ) -> SignResult:
-    pw = resolve_p12_password(cfg)
+    _signing_for(cfg, app)
+    pw = _p12_password(cfg)
     if not pw:
         raise SigningError(
             f".p12 password not available (env {cfg.signing.cert_password_env} unset and not in Keychain)",
@@ -268,37 +319,53 @@ def run_zsign(
     # or with no device UDIDs. What it gives up is exactly the round trip that
     # has side effects, and the rendered output names the profile either way.
     if dry_run:
-        plan = plan_profile_for_app(cfg, app)
-        cmd = _zsign_cmd(cfg, input_ipa, output_ipa, pw, plan.require_local())
-        # Redact the password in the rendered command.
-        redacted = list(cmd)
-        redacted[redacted.index(pw)] = f"<{cfg.signing.cert_password_env}>"
+        plan = _plan_profile(cfg, app)
+        # Rendered, not made: a dry run writes no copy of the identity.
+        cmd = _zsign_cmd(
+            input_ipa, output_ipa,
+            f"<a private copy of {cfg.signing.cert}>", "<its one-time password>",
+            plan.require_local(),
+        )
         return SignResult(
             output_ipa=output_ipa,
             team_id=None,
             cert_subject=None,
             expiry=None,
-            stdout=" ".join(redacted) + "\n" + _describe_plan(cfg, plan),
+            stdout=" ".join(cmd) + "\n" + _describe_plan(cfg, plan),
             stderr="",
         )
 
-    resolved = resolve_profile_for_app(cfg, app, password=pw)
-    cmd = _zsign_cmd(cfg, input_ipa, output_ipa, pw, resolved.path)
-
+    resolved = _resolve_profile(cfg, app, password=pw)
     output_ipa.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-    except FileNotFoundError as e:
-        raise SigningError(
-            "zsign not found in PATH",
-            hint="brew install zsign",
-        ) from e
+
+    # Never `-p <the user's password>`: a command line is readable by every
+    # user on the Mac (`ps -axww`) for as long as zsign runs. zsign gets a
+    # 0600 copy of the identity, re-encrypted under a one-time password, in a
+    # 0700 directory that is gone however this block is left. SIGTERM becomes
+    # SystemExit while it exists: the GUI's Stop is a SIGTERM, and its default
+    # disposition would kill the process past the `finally` that removes it.
+    from .lc_manage import exit_on_termination
+
+    with exit_on_termination(), _private_identity(cfg, pw) as (identity, one_time):
+        cmd = _zsign_cmd(input_ipa, output_ipa, str(identity), one_time, resolved.path)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, env=child_env())
+        except FileNotFoundError as e:
+            raise SigningError(
+                "zsign not found in PATH",
+                hint=install_hints.with_prerequisites("brew install zsign"),
+            ) from e
 
     combined = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0 or not output_ipa.exists():
         raise SigningError(
             f"zsign exited with code {proc.returncode}",
-            hint=_signing_hint(combined, cfg.signing.cert_password_env),
+            hint=_signing_hint(
+                combined, cfg.signing.cert_password_env, proc.returncode,
+                # The binary `subprocess` ran: found on the child's PATH, which
+                # is what `child_which` searches.
+                zsign=child_which("zsign"),
+            ),
         )
 
     return SignResult(
@@ -340,12 +407,32 @@ def _provisioning_notes(resolved: ResolvedProfile) -> tuple[str, ...]:
     return tuple(notes)
 
 
+@contextlib.contextmanager
+def _private_identity(cfg: Config, password: str) -> Iterator[tuple[Path, str]]:
+    """`p12.private_identity` for the configured cert, with a wrong password
+    named the way every other signing hint names it.
+
+    Reading the .p12 in-process is also where a wrong password now shows up —
+    before zsign runs rather than as zsign's "mac verify failure".
+    """
+    try:
+        with p12.private_identity(cfg.signing.cert, password, prefix="graft-zsign-") as made:
+            yield made
+    except p12.UnreadableP12Error as e:
+        raise SigningError(
+            f"could not open {cfg.signing.cert} with the .p12 password",
+            hint=_wrong_password_hint(cfg.signing.cert_password_env)
+            + " (or the .p12 was exported in a format that cannot be read)",
+        ) from e
+
+
 def _zsign_cmd(
-    cfg: Config, input_ipa: Path, output_ipa: Path, password: str, profile: Path
+    input_ipa: Path, output_ipa: Path, identity: str, password: str, profile: Path
 ) -> list[str]:
+    """`identity` and `password` are the private copy's, never the user's."""
     return [
         "zsign",
-        "-k", str(cfg.signing.cert),
+        "-k", identity,
         "-p", password,
         "-m", str(profile),
         "-o", str(output_ipa),
@@ -391,18 +478,59 @@ def _first_match(rx: re.Pattern[str], s: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def _signing_hint(output: str, password_env: str) -> str:
+def _wrong_password_hint(password_env: str) -> str:
+    return (
+        f"the .p12 password is wrong — check the value of ${password_env} "
+        "or the one stored with `graft --set-p12-password`"
+    )
+
+
+def _quarantined(path: str | None) -> bool:
+    """Whether `path` carries macOS's `com.apple.quarantine` attribute.
+
+    `xattr -p` exits 0 only when the attribute is there. Anything that stops
+    the question being answered — no such file, no `xattr` — is "no": the hint
+    this decides is advice to strip that attribute, and it is only worth giving
+    when there is one.
+    """
+    if not path:
+        return False
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/xattr", "-p", "com.apple.quarantine", path],
+            capture_output=True, text=True, timeout=10, env=child_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def _quarantine_hint(zsign: str) -> str:
+    return (
+        f"{zsign} is quarantined, so macOS kills it before it runs. Clear it with: "
+        f"xattr -d com.apple.quarantine {shlex.quote(zsign)} and re-run."
+    )
+
+
+def _signing_hint(
+    output: str, password_env: str, returncode: int = 0, *, zsign: str | None = None
+) -> str:
     lo = output.lower()
+    killed = returncode == -9 or "killed: 9" in lo or "code signature" in lo
+    # A quarantined binary is killed by the OS before it can print anything: the
+    # subprocess reports -9 (SIGKILL) with empty output, so the text matches
+    # below alone never fire for it. Said only when the binary is asked and
+    # says so: a SIGKILL is also memory pressure, a crash, or a `kill -9`.
+    if killed and _quarantined(zsign):
+        return _quarantine_hint(zsign)
+    if returncode == -9:
+        return (
+            "zsign was killed (SIGKILL) before it finished. It is not quarantined, so "
+            "this is not Gatekeeper: re-run, and if it happens again check Console "
+            "for a crash report or memory pressure."
+        )
     if "wrong password" in lo or "incorrect password" in lo or "mac verify failure" in lo:
-        return (
-            f"the .p12 password is wrong — check the value of ${password_env} "
-            "or the one stored with `graft --set-p12-password`"
-        )
-    if "killed: 9" in lo or "code signature" in lo:
-        return (
-            "the zsign binary may be quarantined. Try: "
-            "xattr -cr \"$(which zsign)\" and re-run."
-        )
+        return _wrong_password_hint(password_env)
     if "no such file" in lo:
         return "one of the inputs is missing — verify cert/profile/IPA paths"
     return output.strip() or "re-run with --verbose for full output"

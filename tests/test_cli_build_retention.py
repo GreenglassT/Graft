@@ -38,8 +38,8 @@ def _cfg(tmp_path: Path, *, archive_keep: int) -> Config:
         tweaks_dir=tmp_path / "tweaks",
         state_dir=tmp_path / "state",
         apps={
-            "yt": AppConfig(
-                name="yt",
+            "example": AppConfig(
+                name="example",
                 bundle_id="com.example.app",
                 preferred_version="latest",
                 tweaks=[],
@@ -96,7 +96,7 @@ def _run_build(
         cli_mod._build_one(
             cfg=cfg,
             log=BuildLog(cfg.state_dir / "log.sqlite"),
-            app_name="yt",
+            app_name="example",
             dry_run=False,
             skip_install=True,
             skip_decrypt_check=True,
@@ -111,7 +111,7 @@ def test_a_successful_build_prunes_older_archives(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path, archive_keep=2)
     trash = tmp_path / "Trash"
     for stamp in ("20260101T000000", "20260102T000000", "20260103T000000"):
-        _archive(cfg, f"yt_1.0_{stamp}.ipa")
+        _archive(cfg, f"example_1.0_{stamp}.ipa")
 
     _run_build(cfg, tmp_path, trash=trash)
 
@@ -120,10 +120,10 @@ def test_a_successful_build_prunes_older_archives(tmp_path: Path) -> None:
     # and one predecessor. Being excluded only vetoes removal — it buys no
     # extra slot.
     assert len(remaining) == 2
-    assert "yt_1.0_20260103T000000.ipa" in remaining
+    assert "example_1.0_20260103T000000.ipa" in remaining
     assert sorted(p.name for p in trash.iterdir()) == [
-        "yt_1.0_20260101T000000.ipa",
-        "yt_1.0_20260102T000000.ipa",
+        "example_1.0_20260101T000000.ipa",
+        "example_1.0_20260102T000000.ipa",
     ]
 
 
@@ -132,7 +132,7 @@ def test_the_archive_the_build_just_produced_is_never_pruned(tmp_path: Path) -> 
     cfg = _cfg(tmp_path, archive_keep=0)
     trash = tmp_path / "Trash"
     for stamp in ("20260101T000000", "20260102T000000"):
-        _archive(cfg, f"yt_1.0_{stamp}.ipa")
+        _archive(cfg, f"example_1.0_{stamp}.ipa")
 
     _run_build(cfg, tmp_path, trash=trash)
 
@@ -151,7 +151,7 @@ def test_a_failed_build_prunes_nothing(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path, archive_keep=1)
     trash = tmp_path / "Trash"
     for stamp in ("20260101T000000", "20260102T000000", "20260103T000000"):
-        _archive(cfg, f"yt_1.0_{stamp}.ipa")
+        _archive(cfg, f"example_1.0_{stamp}.ipa")
     before = sorted(p.name for p in cfg.built_dir.iterdir())
 
     with pytest.raises(CyanError):
@@ -167,7 +167,7 @@ def test_a_dry_run_build_prunes_nothing(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path, archive_keep=1)
     trash = tmp_path / "Trash"
     for stamp in ("20260101T000000", "20260102T000000", "20260103T000000"):
-        _archive(cfg, f"yt_1.0_{stamp}.ipa")
+        _archive(cfg, f"example_1.0_{stamp}.ipa")
     before = sorted(p.name for p in cfg.built_dir.iterdir())
 
     source = tmp_path / "in.ipa"
@@ -184,7 +184,7 @@ def test_a_dry_run_build_prunes_nothing(tmp_path: Path) -> None:
         cli_mod._build_one(
             cfg=cfg,
             log=BuildLog(cfg.state_dir / "log.sqlite"),
-            app_name="yt",
+            app_name="example",
             dry_run=True,
             skip_install=True,
             skip_decrypt_check=True,
@@ -208,7 +208,7 @@ def test_the_prune_is_visible_in_the_build_event_stream(
     cfg = _cfg(tmp_path, archive_keep=2)
     trash = tmp_path / "Trash"
     for stamp in ("20260101T000000", "20260102T000000"):
-        _archive(cfg, f"yt_1.0_{stamp}.ipa")
+        _archive(cfg, f"example_1.0_{stamp}.ipa")
 
     _run_build(cfg, tmp_path, trash=trash, emitter=JsonEmitter())
 
@@ -217,7 +217,7 @@ def test_the_prune_is_visible_in_the_build_event_stream(
     types = [e["type"] for e in events]
 
     pruned = [e for e in events if e["type"] == "build-pruned"]
-    assert [e["filename"] for e in pruned] == ["yt_1.0_20260101T000000.ipa"]
+    assert [e["filename"] for e in pruned] == ["example_1.0_20260101T000000.ipa"]
     summary = next(e for e in events if e["type"] == "prune-end")
     assert summary["removed"] == 1 and summary["keep"] == 2
     assert types.index("prune-end") < types.index("build-end")
@@ -229,12 +229,12 @@ def test_the_prune_is_visible_in_human_output(
     cfg = _cfg(tmp_path, archive_keep=1)
     trash = tmp_path / "Trash"
     for stamp in ("20260101T000000", "20260102T000000"):
-        _archive(cfg, f"yt_1.0_{stamp}.ipa")
+        _archive(cfg, f"example_1.0_{stamp}.ipa")
 
     _run_build(cfg, tmp_path, trash=trash)
 
     out = capsys.readouterr().out
-    assert "yt_1.0_20260101T000000.ipa" in out
+    assert "example_1.0_20260101T000000.ipa" in out
     assert "empty the Trash" in out
 
 
@@ -252,7 +252,7 @@ def test_a_retention_failure_does_not_fail_the_build(
     cfg = _cfg(tmp_path, archive_keep=1)
     trash = tmp_path / "Trash"
     for stamp in ("20260101T000000", "20260102T000000"):
-        _archive(cfg, f"yt_1.0_{stamp}.ipa")
+        _archive(cfg, f"example_1.0_{stamp}.ipa")
 
     def _boom(*args, **kwargs):
         raise RuntimeError("trash on fire")

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graft-ipa"
-version = "1.0.0"
+version = "1.1.0"
 description = "IPA signer and tweak injector for paid Apple Developer accounts: inject tweaks, sign, and install or deliver to LiveContainer."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -42,7 +42,13 @@ dependencies = [
     "typer>=0.12",
     "pyjwt[crypto]>=2.8",
     "cryptography>=42.0",
-    "pymobiledevice3>=4.0",
+    # Every device call awaits pymobiledevice3 (`await create_using_usbmux`,
+    # `await list_devices()`, `HouseArrestService.create`), and that API is
+    # async only from 8.0.0; under 7.x the first `await` is a TypeError. And
+    # before 9.36.2 `services.afc` (which installation_proxy and house_arrest
+    # import) fails to import against construct-typing 0.8, which pip
+    # resolves on a fresh install. The test suite passes at 9.36.2.
+    "pymobiledevice3>=9.36.2",
     # Used to detect whether an app is running on the device before an attach-
     # based decrypt (frida-ios-dump backend). pymobiledevice3 lists installed
     # apps; only frida reports live pids.

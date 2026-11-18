@@ -141,6 +141,26 @@ struct BuildLogView: View {
     ///     archived IPA and calling that "build start" would be a lie. Stage
     ///     text, log lines and the outcome are the caller's business nowhere:
     ///     a panel that wants to phrase those differently is drift.
+    /// Where a dry run's LiveContainer push *would* have gone, off the
+    /// `lc-push` stage's end (C-DRYRUN: `dry_run`, `documents_path`, beside
+    /// the `bundle_id` and `size_bytes` it already carried), or nil.
+    ///
+    /// A dry run's whole point is that answer, and the CLI printed it only to
+    /// its console — "would push N bytes to … in …" — which under `--json` is
+    /// not the event stream, so the app's dry run said "✓ lc-push" and nothing
+    /// about where. Only for a dry run: a real push already says where in the
+    /// CLI's own lines, and a CLI from before C-DRYRUN sends neither field.
+    static func dryRunPushTarget(_ event: BuildEvent) -> String? {
+        guard case let .stage(name, "end", fields) = event,
+              name == CLIContract.Stage.liveContainerPush,
+              fields["dry_run"] as? Bool == true,
+              let bundleId = fields["bundle_id"] as? String
+        else { return nil }
+        let size = (fields["size_bytes"] as? Int).map(fileSize) ?? "the IPA"
+        let destination = (fields["documents_path"] as? String).map { "\($0) in " } ?? ""
+        return "    would push \(size) to \(destination)\(bundleId)"
+    }
+
     static func lines(for event: BuildEvent, startVerb: String = "build start") -> [LogLine] {
         // Everything outside the build stream — `build-record`, the per-file
         // `build-pruned` rows — is no panel's business.
@@ -154,7 +174,9 @@ struct BuildLogView: View {
         case .stage(let name, let status):
             switch status {
             case "start": return [LogLine(kind: .arrow, text: "→ \(name)")]
-            case "end":   return [LogLine(kind: .ok,    text: "  ✓ \(name)")]
+            case "end":
+                return [LogLine(kind: .ok, text: "  ✓ \(name)")]
+                    + (dryRunPushTarget(event).map { [LogLine(kind: .dim, text: $0)] } ?? [])
             default:      return []
             }
         case .log(let source, let line):
@@ -188,6 +210,12 @@ struct BuildLogView: View {
             } else {
                 return [LogLine(kind: .warn, text: "✗ \(error ?? "failed") (\(elapsedTxt))")]
             }
+        case .stopped(let elapsed):
+            // Amber and not `✗`: nothing failed. The live panel writes its
+            // own "Stopped during <stage>." instead (`noteCancelled`), which
+            // knows the stage; this is the line a replay has.
+            let elapsedTxt = elapsed.map { String(format: "%.1fs", $0) } ?? "?"
+            return [LogLine(kind: .warn, text: "■ stopped (\(elapsedTxt))")]
         }
     }
 }

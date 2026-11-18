@@ -122,8 +122,9 @@ def test_available_backends_reflects_what_is_installed(monkeypatch):
 
 
 def test_the_frida_dry_run_argv_uses_ssh_over_the_forwarded_port(monkeypatch, tmp_path: Path):
-    """`dump.py -o <ipa> -H localhost -p <port> -u root -P alpine <bundle>` — the
-    SSH form frida-ios-dump documents, over the port iproxy binds.
+    """`dump.py -o <ipa> -H localhost -p <port> -u root -P … <bundle>` — the
+    SSH form frida-ios-dump documents, over the port iproxy binds. The password
+    is set in-process by its launcher, never shown (`test_frida_dump_password`).
 
     The port is chosen per dump rather than fixed: two dumps at once used to
     fight over 2222, and the loser's iproxy exited silently while its dump read
@@ -141,7 +142,8 @@ def test_the_frida_dry_run_argv_uses_ssh_over_the_forwarded_port(monkeypatch, tm
     assert "dump.py" in argv and "-H localhost" in argv
     port = int(argv.split("-p ")[1].split()[0])
     assert port != 2222 and 1024 < port < 65536, f"expected an own port, got {port}"
-    assert "-u root" in argv and "-P alpine" in argv and "com.x" in argv
+    assert "-u root" in argv and "-P <from $" in argv and "com.x" in argv
+    assert "alpine" not in argv
 
 
 def test_frida_ssh_creds_come_from_the_environment(monkeypatch, tmp_path: Path):
@@ -158,7 +160,9 @@ def test_frida_ssh_creds_come_from_the_environment(monkeypatch, tmp_path: Path):
     argv = decrypt_runner.decrypt_app(
         "com.x", tmp_path / "o", udid="U", backend=decrypt_runner.FRIDA, dry_run=True
     ).stdout
-    assert "-u mobile" in argv and "-P hunter2" in argv
+    # The user from the environment; the password reaches dump.py through its
+    # launcher, never on argv or in this rendering.
+    assert "-u mobile" in argv and "hunter2" not in argv
 
     monkeypatch.setenv("GRAFT_SSH_KEY", "/home/me/.ssh/id_ed25519")
     argv = decrypt_runner.decrypt_app(

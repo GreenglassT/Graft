@@ -8,6 +8,19 @@ private typealias Flag = CLIContract.Flag
 final class ConfigStore: CLIStore {
     private(set) var apps: [AppRecord] = []
 
+    /// Which account config.yaml is for, as the last `--list` reported it, or
+    /// nil before one has landed and against a CLI too old to say.
+    ///
+    /// Every free-mode surface reads this one value — the Add App and Edit
+    /// delivery pickers, the app pane's Build & Install, Re-install, the device
+    /// pane's LiveContainer section, Settings — so they cannot disagree about
+    /// which account this is. See `AccountMode` for why nil disables nothing.
+    ///
+    /// From `--list`'s `account` event, which it emits even with no apps;
+    /// failing that, the `account` an older CLI put on each `app`. A load that
+    /// throws leaves it as it was, like `apps`.
+    private(set) var account: AccountMode?
+
     /// Whether each app's last delivery still matches what a build would
     /// produce, keyed by the app's config name. Absent means the CLI said
     /// nothing about it — an older CLI, or a state it declined to compute —
@@ -80,12 +93,23 @@ final class ConfigStore: CLIStore {
     /// build's state.
     private(set) var buildStage: String?
 
+    /// When each app's most recent build started this session, keyed by
+    /// config name.
+    ///
+    /// Read by the app pane to retire what a build makes old news — today the
+    /// "✓ Staged … from the App Store" line (`AppDetailView.
+    /// stagedConfirmation`). Set in `beginBuild`, so every build sets it:
+    /// there is one build slot and one way into it. Clearing that line from
+    /// the button instead is how "Build for this Mac" came to leave it
+    /// standing — Build & Install remembered, the second button did not.
+    private(set) var buildStartedAt: [String: ContinuousClock.Instant] = [:]
+
     /// The Task running the build, so it can be stopped from somewhere other
     /// than the pane that started it.
     ///
     /// Cancelling it is what reaches the subprocess: `CLIRunner.launch` wraps
     /// the continuation in a `withTaskCancellationHandler` whose `onCancel`
-    /// terminates the adopted process — SIGTERM, then SIGKILL two seconds
+    /// terminates the adopted process — SIGTERM, then SIGKILL `cliStopGrace`
     /// later for the stretches cyan and zsign spend in native loops.
     ///
     /// Untracked by `@Observable` on purpose: nothing renders the Task itself,
@@ -196,6 +220,7 @@ final class ConfigStore: CLIStore {
     /// skipped check emits no stage, so nothing clears.
     private func beginBuild(appName: String) {
         buildingApp = appName
+        buildStartedAt[appName] = .now
         encryptedReportedThisBuild.remove(appName)
         // A new build supersedes the last one's failure: the header is about to
         // say "running" and a red card underneath describing the previous
@@ -309,19 +334,25 @@ final class ConfigStore: CLIStore {
     /// itself. It also puts the copy where a test can read it, the same reason
     /// `DeliveryKind.stateLabel` lives on the model.
     ///
-    /// The CLI installs no SIGTERM handler, so a cancel lands on Python's
-    /// default disposition: the process dies where it stands and
-    /// `_build_one`'s `finally: shutil.rmtree(tmp_root)` never runs. That much
-    /// is true at every stage, and is the second sentence. What changes is
-    /// whether anything had started reaching the *phone*, which is the part
-    /// that matters — it is the only consequence the user has to undo by hand.
+    /// The Stop is a SIGTERM, and the CLI runs the whole build under
+    /// `lc_manage.exit_on_termination`, which turns it into `Stopped` — a
+    /// `SystemExit` — so the build unwinds rather than dying where it stands:
+    /// `_build_one`'s `finally` removes `tmp_root` (often several hundred MB).
+    /// The temp files survive only if that unwinding outlasts `CLIRunner`'s
+    /// grace — `cliStopGrace` after the SIGTERM it SIGKILLs the process. That
+    /// much is true at every stage, and is the second sentence. (It used to
+    /// say graft was "killed outright" and the directory "left behind", from
+    /// when the CLI took SIGTERM's default.) What changes is whether anything
+    /// had started reaching the *phone*, which is the part that matters — it
+    /// is the only consequence the user has to undo by hand.
     ///
     /// Worth stating plainly: none of this is new risk. Force-quitting the app
     /// does all of the same damage with no warning at all, and before there was
     /// a Stop button that was the only way to end a build.
     var cancelConsequence: String {
-        deviceExposure.cancelWarning + " graft is killed outright, so the temp "
-            + "directory it was working in — often several hundred MB — is left behind."
+        deviceExposure.cancelWarning + " graft stops and removes its temp files; "
+            + "they are left behind only if that takes longer than the "
+            + "\(Int(cliStopGrace)) seconds it is given before it is killed."
     }
 
     /// Record a build the user stopped.
@@ -407,6 +438,17 @@ final class ConfigStore: CLIStore {
         case let .finished(ok, error, elapsed):
             buildFailures[appName] = ok ? nil : (error ?? "failed")
             notify(appName, outcome(ok: ok, error: error, elapsed: elapsed, of: appName))
+        case .stopped:
+            // C-STOP: the CLI was stopped, and says so. A stop, whoever sent
+            // the signal — Stop here, or a `kill` from Terminal — so it is
+            // read exactly as one: no failure card (`buildFailures` is left as
+            // `beginBuild` cleared it), no "failed" banner, and the build is
+            // marked cancelled so the pane's guard drops whatever the stream
+            // still has queued behind this line. Only while this build holds
+            // the slot: a late event from a finished build must not mark the
+            // next one cancelled.
+            if buildingApp == appName { cancellingApp = appName }
+            notify(appName, .cancelled)
         case .start, .log, .pruned, .liveContainerChoice:
             // Transcript-only. `liveContainerChoice` is deliberately here and
             // not given a card of its own: unlike an encrypted binary it is
@@ -531,6 +573,14 @@ final class ConfigStore: CLIStore {
     func loadApps() async throws -> [AppRecord] {
         let events = try await runner.runEvents(cliArgs, failing: "Load apps")
 
+        account = events.lazy.compactMap { event -> AccountMode? in
+            if case let .account(mode) = event { return mode }
+            return nil
+        }.first ?? events.lazy.compactMap { event -> AccountMode? in
+            if case let .app(record) = event { return record.account }
+            return nil
+        }.first
+
         apps = events.compactMap { event -> AppRecord? in
             if case let .app(record) = event { return record }
             return nil
@@ -582,6 +632,85 @@ final class ConfigStore: CLIStore {
         encryptedReportedThisBuild.formIntersection(live)
 
         return apps
+    }
+
+    /// What the user still has to do in Terminal before anything here works,
+    /// or nil once the app list has loaded. Set only by `checkSetup`.
+    private(set) var setupNeed: SetupNeed?
+
+    /// Whether `checkSetup` is running — the setup screen's Check again shows
+    /// it, and refuses a second press while it does.
+    private(set) var isCheckingSetup = false
+
+    /// The app's first load, and the setup screen's Check again.
+    ///
+    /// `loadApps()` with its failure sorted: one that means "not set up yet"
+    /// (`SetupNeed`) becomes `setupNeed` and the setup screen, and anything else
+    /// goes to `lastError` and its alert, as every failure here always has. A
+    /// success clears `setupNeed`, which is what puts the app back.
+    ///
+    /// Returns the apps when the load succeeded, nil when it did not — the
+    /// caller's "did it work", without a second copy of the state to agree with
+    /// this one. A cancelled load leaves both channels alone: nobody is waiting
+    /// on it, and a SIGTERM'd `--list` is not evidence of anything.
+    ///
+    /// - Parameters:
+    ///   - refreshingEnvironment: ask the login shell again first. Check again
+    ///     passes true: the user pressing it has usually just changed their
+    ///     setup in Terminal (`pipx ensurepath`, a PATH line), and the answer
+    ///     read at launch cannot have seen that.
+    ///   - toolChecks: `--check`'s rows, or nil when they could not be read.
+    ///     Asked only when the user is on the setup screen and the config now
+    ///     loads: that is the moment a new user would otherwise learn which
+    ///     tools are missing from a failed build. Missing ones become step 3
+    ///     (`SetupNeed.tools`). Someone already using the app is not put back
+    ///     on a setup screen for a tool that went missing — the window's
+    ///     notice says so instead.
+    @discardableResult
+    func checkSetup(
+        refreshingEnvironment: Bool = false,
+        toolChecks: (@MainActor () async -> [PreflightCheck]?)? = nil
+    ) async -> [AppRecord]? {
+        guard !isCheckingSetup else { return nil }
+        isCheckingSetup = true
+        defer { isCheckingSetup = false }
+        if refreshingEnvironment { runner.refreshEnvironment() }
+        let onSetupScreen = setupNeed != nil
+        do {
+            let loaded = try await loadApps()
+            if onSetupScreen, !toolsStepSkipped, let toolChecks,
+               let checks = await toolChecks() {
+                let missing = MissingTool.all(in: checks)
+                if !missing.isEmpty {
+                    setupNeed = .tools(missing)
+                    return loaded
+                }
+            }
+            setupNeed = nil
+            return loaded
+        } catch {
+            guard !Task.isCancelled else { return nil }
+            if let need = SetupNeed(error: error) {
+                setupNeed = need
+            } else {
+                setupNeed = nil
+                lastError = error.localizedDescription
+            }
+            return nil
+        }
+    }
+
+    /// The user chose to go on without the tools step 3 lists. For the
+    /// session: they have seen the list, and the window's notice keeps
+    /// pointing at Settings until the tools are there.
+    private(set) var toolsStepSkipped = false
+
+    /// Leave the tools step for the app. Only from that step — every other
+    /// step is one the app cannot work without.
+    func continueWithoutTools() {
+        guard case .tools = setupNeed else { return }
+        toolsStepSkipped = true
+        setupNeed = nil
     }
 
     /// `CLIStore`'s post-mutation refresh: for this store, the apps list.
@@ -723,8 +852,16 @@ final class ConfigStore: CLIStore {
         // guess about a field this side has no contract for (`--describe`
         // reports events, not their fields), and the failure it buys is the
         // silent one: a check that quietly did nothing.
+        //
+        // The one source that is excluded is the one the CLI has a contract
+        // for (C-NOTICE): `startup` lines are written before the verb runs —
+        // a renamed environment variable, a moved data directory — and are
+        // about the machine, not the check. Counted here, "TB_SSH_PASS is set
+        // but no longer read" became every device check's result.
         let warnings = events.compactMap { event -> String? in
-            if case let .log(_, line) = event { return line }
+            if case let .log(source, line) = event, source != CLIContract.startupLogSource {
+                return line
+            }
             return nil
         }
 
@@ -736,10 +873,16 @@ final class ConfigStore: CLIStore {
     /// the CLI assigned (post-dedup), or nil if no `app-added` event was seen.
     /// `addArgsOverride` exists for tests; in production we invoke the real
     /// CLI with `--json --add-app <url> --delivery <mode>`.
+    ///
+    /// `delivery` has no default, and must not get one. It defaulted to
+    /// `.sideload`, which a free Apple ID cannot build, so any caller that
+    /// leaned on it sent `--delivery sideload` and got the paid-account
+    /// refusal. The caller decides, and on a free Apple ID that is
+    /// `AddAppSheet.delivery(chosen:account:)`'s LiveContainer.
     @discardableResult
     func addApp(
         appStoreURL: String,
-        delivery: DeliveryMode = .sideload,
+        delivery: DeliveryMode,
         addArgsOverride: [String]? = nil
     ) async throws -> String? {
         let trimmed = appStoreURL.trimmingCharacters(in: .whitespaces)
@@ -781,6 +924,17 @@ final class ConfigStore: CLIStore {
         }
     }
 
+    /// What a drop staged, and whether the CLI had to decrypt it first — the
+    /// difference between "your file is in the cache" and "a decrypted copy of
+    /// your file is", which the app pane's confirmation says.
+    struct ProvidedIPA: Equatable {
+        let record: CachedIPARecord
+        /// The CLI reported decrypting it (`appstore-decrypted`). Read from
+        /// the returned events, not the `onStage` callbacks, which are MainActor
+        /// hops that can land after this returns.
+        let decrypted: Bool
+    }
+
     /// Validate `fileURL` and stage it in cache_dir for the given app.
     /// Returns the CLI's `ipa-provided` record on success, or nil if no event
     /// was emitted.
@@ -800,17 +954,30 @@ final class ConfigStore: CLIStore {
         fileURL: URL,
         argsOverride: [String]? = nil,
         onStage: (@MainActor (AppStoreStage) -> Void)? = nil
-    ) async throws -> CachedIPARecord? {
+    ) async throws -> ProvidedIPA? {
         let args = argsOverride ?? [
             Flag.json, Flag.provideIPA, fileURL.path, Flag.app, appName,
         ]
         let events = try await runner.streamEvents(args, failing: "Provide IPA") { event in
             if case let .appStoreStage(record) = event { onStage?(record.stage) }
         }
-        return events.lazy.compactMap { event -> CachedIPARecord? in
+        return Self.provided(in: events)
+    }
+
+    /// The `ipa-provided` record in a stream, with whether the same stream
+    /// reported a decrypt. Shared with the App Store get, which stages the
+    /// same way and reports the same two events.
+    static func provided(in events: [BuildEvent]) -> ProvidedIPA? {
+        let record = events.lazy.compactMap { event -> CachedIPARecord? in
             if case let .ipaProvided(rec) = event { return rec }
             return nil
         }.first
+        guard let record else { return nil }
+        let decrypted = events.contains { event in
+            if case .appStoreDecrypted = event { return true }
+            return false
+        }
+        return ProvidedIPA(record: record, decrypted: decrypted)
     }
 
     /// Look up what IPA the build pipeline would use for the given app.
@@ -895,6 +1062,7 @@ final class ConfigStore: CLIStore {
         stripExtensions: Bool? = nil,
         stripSupportedDevices: Bool? = nil,
         compressionLevel: Int? = nil,
+        lcPin: AppOptionsDraft.LCPin? = nil,
         argsOverride: [String]? = nil
     ) async throws -> AppUpdatedRecord? {
         var args = [Flag.json, Flag.setAppOptions, Flag.app, appName]
@@ -935,6 +1103,18 @@ final class ConfigStore: CLIStore {
             args += [Flag.compressionLevel, String(compressionLevel)]
             request(.compressionLevel)
         }
+        // C-LCPIN: setting and clearing are two flags, and both report the one
+        // field name in `changed`.
+        switch lcPin {
+        case let .bundleId(id)?:
+            args += [Flag.lcBundleId, id]
+            request(.lcBundleId)
+        case .automatic?:
+            args.append(Flag.noLcBundleId)
+            request(.lcBundleId)
+        case nil:
+            break
+        }
 
         let record = try await mutate(
             argsOverride ?? args, failing: "Update app", succeeded: "App updated"
@@ -968,7 +1148,8 @@ final class ConfigStore: CLIStore {
             keepBundleId: draft.changed(\.keepBundleId),
             stripExtensions: draft.changed(\.stripExtensions),
             stripSupportedDevices: draft.changed(\.stripSupportedDevices),
-            compressionLevel: draft.changed(\.compressionLevel)
+            compressionLevel: draft.changed(\.compressionLevel),
+            lcPin: draft.changed(\.lcPin)
         )
     }
 }

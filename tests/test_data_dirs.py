@@ -610,7 +610,7 @@ def test_the_cli_migrates_before_a_verb_and_says_so(
     assert "example" in result.output
 
 
-def test_under_json_the_notice_is_a_warning_event(
+def test_under_json_the_notice_is_a_startup_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     roots = _cli_home(tmp_path, monkeypatch)
@@ -619,7 +619,7 @@ def test_under_json_the_notice_is_a_warning_event(
 
     assert result.exit_code == 0, result.output
     events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
-    warnings = [e for e in events if e.get("type") == "log" and e.get("source") == "warning"]
+    warnings = [e for e in events if e.get("type") == "log" and e.get("source") == "startup"]
     assert len(warnings) == 4
     assert {w["line"].split(" ")[1] for w in warnings} == {
         str(root / LEGACY_DIRNAME) for root in roots.values()

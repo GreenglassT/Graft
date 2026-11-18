@@ -21,8 +21,10 @@ when they have not, names the exact command to run.
 
 **The encrypted download carries the Apple ID's license**, so it lives only in
 a 0700 directory under `cache_dir/.appstore-tmp/` and is deleted on success and
-on failure alike. The decrypted IPA is always made with `--strip-account-data`,
-so what reaches the cache identifies nobody.
+on failure alike. The decrypted IPA is made with `--strip-account-data`, and
+staging (`provide_ipa.stage`) still removes `iTunesMetadata.plist` and every
+`SC_Info/` itself and checks the result, so what reaches the cache identifies
+nobody whatever UnfairPlay did.
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from . import ipatool, itunes, unfairplay
+from . import host, install_hints, ipatool, itunes, unfairplay
 from .config import AppStoreToolsConfig, Config
 from .errors import AppStoreError, ITunesError
 from .ipa_cache import find_in_cache
@@ -80,51 +82,74 @@ def status(tools: AppStoreToolsConfig) -> dict[str, Any]:
     when `auth info` gave no verdict (hung, crashed): "couldn't tell", which
     must not read as "sign in again".
     """
-    ipa_present = ipatool.present(tools.ipatool)
-    ipa_version = ipatool.version(tools.ipatool) if ipa_present else None
-    signed_in = ipatool.signed_in(tools.ipatool) if ipa_present else False
+    ipa_path = ipatool.locate(tools.ipatool)
+    ipa_present = ipatool.present(ipa_path)
+    ipa_version = ipatool.version(ipa_path) if ipa_present else None
+    signed_in = ipatool.signed_in(ipa_path) if ipa_present else False
     up_present = unfairplay.present(tools.unfairplay)
     up_version = unfairplay.version(tools.unfairplay) if up_present else None
     enrolled = unfairplay.enrolled(tools.unfairplay_models)
+    up_install: str | None = None
 
     warning = None
-    if ipa_version == ipatool.BROKEN_VERSION:
-        warning = (
-            f"ipatool {ipatool.BROKEN_VERSION} can't download (\"available "
-            f"storefronts request failed\", majd/ipatool#672) — use "
-            f"{ipatool.GOOD_VERSION}"
-        )
+    if ipa_version in ipatool.KNOWN_BAD_VERSIONS:
+        warning = ipatool.bad_version_hint(ipa_version, path=ipa_path, configured=tools.ipatool)
 
-    # Shell comments for the steps that are not one command (fetching a
-    # release, building from source) so the whole list stays safe to paste.
+    # The commands for whatever is missing, with what each is for as a shell
+    # comment above it, so the whole list stays safe to paste. Printed, never
+    # run. The install for each tool is also on its entry as `install`, one
+    # string, for a Copy button.
     commands: list[str] = []
+    ipa_install: str | None = None
     if not ipa_present or warning:
-        commands.append(f"# {ipatool.install_hint(tools.ipatool)}")
+        target = ipatool.install_target(ipa_path, tools.ipatool)
+        commands.append(
+            f"# {warning}" if warning
+            else f"# install ipatool {ipatool.GOOD_VERSION}, the release Graft is tested with, to {target}:"
+        )
+        commands += ipatool.install_steps(target)
+        ipa_install = ipatool.install_command(target)
     if ipa_present and signed_in is False:
-        commands.append(ipatool.login_command(tools.ipatool))
+        commands.append(ipatool.login_command(ipa_path))
     if ipa_present and signed_in is None:
         # Not the login command — nothing says the account is signed out — but
         # not nothing either: "couldn't tell" needs a next step.
         commands.append(
-            f"# run '{tools.ipatool} auth info' in Terminal to see why ipatool "
+            f"# run '{ipa_path} auth info' in Terminal to see why ipatool "
             "couldn't say whether it is signed in"
         )
-    if not up_present:
-        commands.append(f"# {unfairplay.install_hint(tools.unfairplay)}")
-    if not enrolled:
+    if (not up_present or not enrolled) and host.apple_silicon() is False:
+        # Building UnfairPlay and `sudo unfairplay setup` both lead nowhere on
+        # an Intel Mac, so neither is offered; the reason is.
+        commands.append(f"# App Store decryption can't be set up here: {host.INTEL_MAC}.")
+        commands.append(f"# {_INTEL_REASON}.")
+    elif not up_present:
+        steps = unfairplay.build_steps(tools.unfairplay)
         commands.append(
-            "# enroll once, with any iPhone/iPad app installed on this Mac from "
-            "the App Store under the same Apple ID:"
+            f"# build UnfairPlay {unfairplay.TESTED_TAG} from source to {tools.unfairplay}:"
+        )
+        if steps[0] == "brew install go":
+            note = install_hints.homebrew_note()
+            if note:
+                commands.append(f"# {note} (or install Go from https://go.dev/dl/)")
+        commands += steps
+        up_install = " && ".join(steps)
+    if not enrolled and host.apple_silicon() is not False:
+        commands.append(
+            "# enroll once, as root: install an iPhone/iPad app on this Mac from the "
+            "App Store, signed in with the same Apple ID, open it once, and put its "
+            "name in the path:"
         )
         commands.append(unfairplay.setup_command(tools.unfairplay))
 
     return {
         "ipatool": {
-            "path": str(tools.ipatool),
+            "path": str(ipa_path),
             "present": ipa_present,
             "version": ipa_version,
             "signed_in": signed_in,
             "warning": warning,
+            "install": ipa_install,
         },
         "unfairplay": {
             "path": str(tools.unfairplay),
@@ -132,6 +157,7 @@ def status(tools: AppStoreToolsConfig) -> dict[str, Any]:
             "version": up_version,
             "enrolled": enrolled,
             "model_dir": str(tools.unfairplay_models),
+            "install": up_install,
         },
         "setup_commands": commands,
     }
@@ -310,7 +336,27 @@ def _stage(emitter: JsonEmitter | None, say: Say, app_name: str, stage: str) -> 
     say({"download": "downloading…", "decrypt": "decrypting…", "stage": "staging…"}[stage])
 
 
+#: Why App Store decryption cannot be set up on an Intel Mac, said the same way
+#: by the refusal and by `--appstore-status`.
+_INTEL_REASON = (
+    "UnfairPlay enrolls with an iPhone or iPad app installed on this Mac from "
+    "the App Store, and only Apple silicon Macs can install those"
+)
+
+
 def _require_unfairplay(tools: AppStoreToolsConfig) -> None:
+    ready = unfairplay.present(tools.unfairplay) and unfairplay.enrolled(tools.unfairplay_models)
+    if not ready and host.apple_silicon() is False:
+        # Checked only when something is missing, so a working setup never
+        # pays for it — and an Intel Mac is told the real reason rather than
+        # handed an enrollment command that cannot succeed there.
+        raise AppStoreError(
+            f"decrypting App Store IPAs needs an Apple silicon Mac, and {host.INTEL_MAC}",
+            hint=(
+                f"{_INTEL_REASON}. Use an IPA that is already decrypted, or dump "
+                "one from a jailbroken device (--decrypt)"
+            ),
+        )
     if not unfairplay.present(tools.unfairplay):
         raise AppStoreError(
             f"UnfairPlay not found at {tools.unfairplay}",
@@ -402,22 +448,24 @@ def fetched(
     """
     app = cfg.get_app(app_name)
     tools = cfg.appstore
-    if not ipatool.present(tools.ipatool):
+    ipa_path = ipatool.locate(tools.ipatool)
+    if not ipatool.present(ipa_path):
         raise AppStoreError(
-            f"ipatool not found at {tools.ipatool}", hint=ipatool.install_hint(tools.ipatool)
+            f"ipatool not found at {ipa_path}", hint=ipatool.install_hint(ipa_path)
         )
     _require_unfairplay(tools)
-    if ipatool.version(tools.ipatool) == ipatool.BROKEN_VERSION:
-        warn(
-            f"ipatool {ipatool.BROKEN_VERSION} is known to fail downloads "
-            f"(majd/ipatool#672) — trying anyway; {ipatool.GOOD_VERSION} works"
+    found_version = ipatool.version(ipa_path)
+    if found_version in ipatool.KNOWN_BAD_VERSIONS:
+        raise AppStoreError(
+            f"ipatool {found_version} at {ipa_path} is known to fail downloads",
+            hint=ipatool.bad_version_hint(found_version, path=ipa_path, configured=tools.ipatool),
         )
-    account = ipatool.signed_in(tools.ipatool)
+    account = ipatool.signed_in(ipa_path)
     if account is None:
         raise AppStoreError(
             "couldn't tell whether ipatool is signed in — `auth info` gave no answer",
             hint=(
-                f"run `{shlex.quote(str(tools.ipatool))} auth info` in Terminal to "
+                f"run `{shlex.quote(str(ipa_path))} auth info` in Terminal to "
                 "see why, then try again"
             ),
         )
@@ -425,14 +473,14 @@ def fetched(
         raise AppStoreError(
             "ipatool is not signed in to the App Store",
             hint=(
-                f"sign in from Terminal: {ipatool.login_command(tools.ipatool)} — "
+                f"sign in from Terminal: {ipatool.login_command(ipa_path)} — "
                 "the first login can sit silent for ~8 minutes; that is normal"
             ),
         )
 
     with _stop_cleans_up(), private_workdir(cfg.cache_dir) as work:
         _stage(emitter, say, app_name, "download")
-        encrypted = ipatool.download(tools.ipatool, app.bundle_id, work)
+        encrypted = ipatool.download(ipa_path, app.bundle_id, work)
         decrypted = _decrypt(
             tools, encrypted, work,
             app_name=app_name, emitter=emitter, say=say,
@@ -460,7 +508,7 @@ def main_binary_encrypted(ipa: Path) -> bool:
             entry = zf.getinfo(member)
         except KeyError:
             return False
-        with tempfile.TemporaryDirectory(prefix="tb-cryptid-") as scratch:
+        with tempfile.TemporaryDirectory(prefix="graft-cryptid-") as scratch:
             binary = Path(scratch) / "main"
             with zf.open(entry) as src, binary.open("wb") as dst:
                 shutil.copyfileobj(src, dst)
@@ -481,7 +529,8 @@ def decrypted_if_encrypted(
     """Yield `source` itself, or a decrypted copy of it when it is still encrypted.
 
     The `--provide-ipa` half of the feature. An encrypted drop used to be
-    cached as-is and the build then died at stage 2.5; now it goes through the
+    cached as-is and the build carried an encrypted binary forward with only a
+    warning at stage 2.5; now it goes through the
     same decrypt as `fetched`, or — when UnfairPlay is missing or this Mac is
     not enrolled — is refused with the setup command, so a file the build would
     only reject later is never cached at all.

@@ -699,7 +699,7 @@ def test_a_malformed_delivery_record_is_unknown_rather_than_an_exception(
 
 def test_a_changed_cyan_option_is_named(temp_config_env: Path) -> None:
     """Spec §5.1 justifies storing cyan on the row with this exact promise:
-    the diff says "display name changed: Example → YT"."""
+    the diff says "display name changed: Example → Renamed"."""
     cfg = load_config(temp_config_env)
     _tweak(cfg, "a.deb", b"AAA")
     _tweak(cfg, "b.deb", b"BBB")
@@ -709,12 +709,12 @@ def test_a_changed_cyan_option_is_named(temp_config_env: Path) -> None:
         )
     )
     current = compute_inputs_digest(
-        cfg, _app(cyan=CyanOptions(display_name="YT")), source_version="21.16.2"
+        cfg, _app(cyan=CyanOptions(display_name="Renamed")), source_version="21.16.2"
     )
 
     state = diff_delivery(current, delivered)
 
-    assert state.reasons == ["display name changed: Example → YT"]
+    assert state.reasons == ["display name changed: Example → Renamed"]
     assert "build options changed" not in state.reasons
 
 
@@ -790,14 +790,14 @@ def test_two_changed_cyan_options_are_both_named_in_config_key_order(
     )
     current = compute_inputs_digest(
         cfg,
-        _app(cyan=CyanOptions(display_name="YT", compression_level=9)),
+        _app(cyan=CyanOptions(display_name="Renamed", compression_level=9)),
         source_version="21.16.2",
     )
 
     state = diff_delivery(current, delivered)
 
     assert state.reasons == [
-        "display name changed: Example → YT",
+        "display name changed: Example → Renamed",
         "compression level changed: 6 → 9",
     ]
 
@@ -849,7 +849,7 @@ def test_a_row_without_stored_cyan_falls_back_to_the_generic_reason(
     )
     legacy = replace(delivered, cyan=None)
     current = compute_inputs_digest(
-        cfg, _app(cyan=CyanOptions(display_name="YT")), source_version="21.16.2"
+        cfg, _app(cyan=CyanOptions(display_name="Renamed")), source_version="21.16.2"
     )
 
     state = diff_delivery(current, legacy)

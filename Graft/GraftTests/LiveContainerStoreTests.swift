@@ -341,6 +341,20 @@ final class LiveContainerStoreTests: XCTestCase {
         XCTAssertNil(store.run(for: "other"), "a run belongs to its device")
     }
 
+    /// C-NOTICE: a startup notice is about the machine, not this run.
+    @MainActor
+    func test_a_startup_notice_is_not_one_of_the_runs_notes() async {
+        let store = LiveContainerStore(runner: sh())
+        let lines = [
+            #"{"type":"log","source":"startup","line":"TB_SSH_PASS is set but no longer read; use GRAFT_SSH_PASS"}"#,
+            #"{"type":"lc-cleaned","udid":"U","bundle_id":"b","removed":[],"kept":0}"#,
+            #"{"type":"log","source":"graft","line":"nothing to clean"}"#,
+        ]
+        await store.clean(udid: "U", argsOverride: printing(lines))
+        XCTAssertEqual(store.run(for: "U")?.cleaned.count, 1, "premise: the run happened")
+        XCTAssertEqual(store.run(for: "U")?.notes, ["nothing to clean"])
+    }
+
     /// The CLI keeps waiting after it says so; if the run ends without an
     /// install (killed, failed) the notice must not outlive it.
     @MainActor
@@ -370,7 +384,59 @@ final class LiveContainerStoreTests: XCTestCase {
             #"{"type":"lc-cleaned","udid":"U","bundle_id":"b","removed":["example.ipa"],"kept":3}"#,
         ]))
         XCTAssertEqual(store.run(for: "U")?.action, .clean)
-        XCTAssertEqual(store.run(for: "U")?.cleaned?.removed, ["example.ipa"])
+        XCTAssertEqual(store.run(for: "U")?.cleaned.map(\.removed), [["example.ipa"]])
         XCTAssertNil(store.run(for: "U")?.pushed, "a new run starts clean")
+    }
+
+    /// `--lc-clean` reports one `lc-cleaned` per LiveContainer instance it
+    /// cleaned — the primary first, then LiveContainer2/3 — and the run used to
+    /// hold a single record, so the last instance's event overwrote the
+    /// primary's and the certificate's removal vanished from the report.
+    @MainActor
+    func test_a_clean_keeps_every_instances_record_in_order() async {
+        let store = LiveContainerStore(runner: sh())
+        await store.clean(udid: "U", argsOverride: printing([
+            #"{"type":"lc-cleaned","udid":"U","bundle_id":"com.example.lc.primary","removed":["AppleDevelopment.p12","example.ipa"],"kept":1}"#,
+            #"{"type":"lc-cleaned","udid":"U","bundle_id":"com.example.lc.second","removed":["other.ipa"],"kept":0}"#,
+        ]))
+        let cleaned = store.run(for: "U")?.cleaned ?? []
+        XCTAssertEqual(cleaned.map(\.bundleId), ["com.example.lc.primary", "com.example.lc.second"])
+        XCTAssertEqual(cleaned.map(\.removed), [["AppleDevelopment.p12", "example.ipa"], ["other.ipa"]])
+    }
+
+    /// One record reads as it always has. More than one names each instance —
+    /// by the name it calls itself when the status lists it, by bundle id when
+    /// it doesn't — so the user can tell which LiveContainer lost which file.
+    func test_the_clean_report_names_each_instance_when_there_is_more_than_one() throws {
+        func record(_ id: String, _ removed: [String]) throws -> LCCleanedRecord {
+            let names = removed.map { "\"\($0)\"" }.joined(separator: ",")
+            let line = #"{"type":"lc-cleaned","udid":"U","bundle_id":"\#(id)","removed":[\#(names)],"kept":0}"#
+            guard case let .lcCleaned(r)? = line.buildEvents().first else {
+                throw XCTSkip("fixture did not decode: \(line)")
+            }
+            return r
+        }
+        let primary = try record("com.kdt.livecontainer.ABCDE12345", ["AppleDevelopment.p12"])
+        let second = try record("com.kdt.LiveContainer2.ABCDE12345", [])
+        let unknown = try record("com.example.lc.other", ["a.ipa"])
+        guard case let .lcStatus(status)? = Self.ipadStatus.buildEvents().first else {
+            return XCTFail("status fixture did not decode")
+        }
+
+        XCTAssertEqual(
+            DeviceLiveContainerSection.cleanedLines([primary], instances: status.instances),
+            ["✓ Removed AppleDevelopment.p12"]
+        )
+        XCTAssertEqual(DeviceLiveContainerSection.cleanedLines([], instances: status.instances), [])
+        XCTAssertEqual(
+            DeviceLiveContainerSection.cleanedLines(
+                [primary, second, unknown], instances: status.instances
+            ),
+            [
+                "✓ LiveContainer: removed AppleDevelopment.p12",
+                "✓ LiveContainer2: nothing to clean up",
+                "✓ com.example.lc.other: removed a.ipa",
+            ]
+        )
     }
 }

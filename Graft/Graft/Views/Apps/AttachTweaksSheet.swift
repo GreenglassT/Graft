@@ -84,13 +84,43 @@ struct AttachTweaksSheet: View {
         }
     }
 
+    /// Whether a tweak is ticked, as a binding a `Toggle` can own.
+    ///
+    /// An already-attached tweak cannot be unticked here — the per-row detach
+    /// on the app pane is where that happens — so the setter ignores it as
+    /// well as the control being disabled.
+    private func isSelected(_ tweak: TweakRecord) -> Binding<Bool> {
+        Binding(
+            get: { selected.contains(tweak.filename) },
+            set: { on in
+                guard !alreadyAttached.contains(tweak.filename) else { return }
+                if on { selected.insert(tweak.filename) } else { selected.remove(tweak.filename) }
+            }
+        )
+    }
+
+    /// One tweak, as a real checkbox.
+    ///
+    /// It used to be an image of a checkbox and a tap gesture on the row,
+    /// which VoiceOver met as an `AXImage` called "Selected" with no action:
+    /// it could read the state and not change it. A `Toggle` is a checkbox to
+    /// the Accessibility API — named for the tweak, carrying its state,
+    /// pressable — and `TweakCheckboxStyle` keeps the row looking and clicking
+    /// as it did.
     private func row(for tweak: TweakRecord) -> some View {
         let isAttached = alreadyAttached.contains(tweak.filename)
-        let isChecked = selected.contains(tweak.filename)
-        return HStack(spacing: 10) {
-            (isChecked ? Symbols.checkboxOn : Symbols.checkboxOff)
-                .image(size: 16)
-                .foregroundStyle(isAttached ? Palette.textDim : (isChecked ? Palette.accent : Palette.textMuted))
+        return Toggle(isOn: isSelected(tweak)) {
+            rowLabel(for: tweak, isAttached: isAttached)
+        }
+        .toggleStyle(TweakCheckboxStyle(isAttached: isAttached))
+        .disabled(isAttached)
+        .accessibilityLabel(tweak.displayName)
+        .accessibilityHint(isAttached ? "Already attached to this app" : "")
+        .opacity(isAttached ? 0.6 : 1.0)
+    }
+
+    private func rowLabel(for tweak: TweakRecord, isAttached: Bool) -> some View {
+        HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 // The tweak's own name, same as the library row. This is the
                 // surface where the metadata earns the most: picking between
@@ -133,18 +163,6 @@ struct AttachTweaksSheet: View {
                     .foregroundStyle(Palette.textDim)
             }
         }
-        .contentShape(Rectangle())
-        .opacity(isAttached ? 0.6 : 1.0)
-        .onTapGesture {
-            // Already-attached rows can't be unchecked from here (use the
-            // per-row detach button in AppDetailView for that).
-            guard !isAttached else { return }
-            if isChecked {
-                selected.remove(tweak.filename)
-            } else {
-                selected.insert(tweak.filename)
-            }
-        }
     }
 
     private var footer: some View {
@@ -183,5 +201,28 @@ struct AttachTweaksSheet: View {
             }
             dismiss()
         }
+    }
+}
+
+/// The library checkbox: the app's own checkbox glyph, then the row, and a
+/// click anywhere on the row toggles it — the row it replaced, as a `Toggle`.
+private struct TweakCheckboxStyle: ToggleStyle {
+    let isAttached: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 10) {
+            (configuration.isOn ? Symbols.checkboxOn : Symbols.checkboxOff)
+                .image(size: 16)
+                .foregroundStyle(
+                    isAttached ? Palette.textDim
+                        : (configuration.isOn ? Palette.accent : Palette.textMuted)
+                )
+                // The glyph is drawing, not a second control; the row's own
+                // checkbox carries the state.
+                .accessibilityHidden(true)
+            configuration.label
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { configuration.isOn.toggle() }
     }
 }

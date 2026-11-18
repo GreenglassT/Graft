@@ -39,12 +39,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import data_dirs
-from .errors import GraftError
+from . import data_dirs, install_hints
+from .child_env import child_env
+from .child_env import which as child_which
+from .errors import EXIT_DECRYPT, GraftError
 
 
 class DecryptError(GraftError):
-    exit_code = 11
+    exit_code = EXIT_DECRYPT
 
 
 class AppWillNotRunError(DecryptError):
@@ -108,6 +110,11 @@ class DecryptResult:
 BAGBAK = "bagbak"
 FRIDA = "frida-ios-dump"
 
+#: The bagbak install command, the one copy every hint uses. Pinned: bagbak
+#: 5.x bundles frida 17, which cannot talk to the 16.x frida-server this
+#: project needs (see the pin in pyproject.toml).
+BAGBAK_INSTALL = "npm install -g bagbak@4.0.3"
+
 #: bagbak's argv and its transport both changed at 5.0, and the two majors need
 #: *different frida majors on the device* — which is the constraint that
 #: actually decides which one you can run:
@@ -128,6 +135,24 @@ _BAGBAK_SSH_MAJOR = 4
 #: works it out.
 FRIDA_DUMP_HOME: Path | None = None
 
+#: Where frida-ios-dump's launcher reads the device's root password from.
+FRIDA_DUMP_PASSWORD_ENV = "GRAFT_FRIDA_DUMP_SSH_PASSWORD"
+
+#: dump.py takes its SSH password as `-P <password>`, and a command line is
+#: readable by every user on the Mac (`ps -axww`) for the whole dump. So it is
+#: never started that way: this runs as `python -c`, takes the password out of
+#: the environment (so nothing dump.py starts inherits it either), puts `-P`
+#: into `sys.argv` in-process, and runs dump.py as the script it expects to be.
+#: `ps` shows the exec argv — `python -c <this> dump.py -o … <bundle>` — only.
+FRIDA_DUMP_LAUNCHER = (
+    "import os, runpy, sys\n"
+    "script = sys.argv[1]\n"
+    f"password = os.environ.pop({FRIDA_DUMP_PASSWORD_ENV!r}, None)\n"
+    "sys.argv = [script, *(['-P', password] if password is not None else []), *sys.argv[2:]]\n"
+    "sys.path.insert(0, os.path.dirname(os.path.abspath(script)))\n"
+    "runpy.run_path(script, run_name='__main__')\n"
+)
+
 
 def frida_dump_home() -> Path:
     """Where the frida-ios-dump clone and its venv live.
@@ -145,9 +170,58 @@ def frida_dump_home() -> Path:
     return data_dirs.data_dir() / "frida-ios-dump"
 
 
+def iproxy_install_hint() -> str:
+    """How to get iproxy, which every SSH-backed dump tunnels through."""
+    return install_hints.with_prerequisites(
+        "brew install libimobiledevice", macports="sudo port install libimobiledevice"
+    )
+
+
+#: frida-ios-dump's own repository, and the last commit whose dump.py speaks
+#: frida 16: its parent is the 2026-10-14 rewrite for Frida 17 (cdaec46), which
+#: needs a 17.x frida-server and an `npm install`. This project pins frida 16,
+#: so a plain clone of master would not run against the device.
+FRIDA_IOS_DUMP_REPO = "https://github.com/AloneMonkey/frida-ios-dump"
+FRIDA_IOS_DUMP_FRIDA16_COMMIT = "56e99b2138fc213fa759b3aeb9717a1fb4ec6a59"
+
+
+#: The other way to set frida-ios-dump up, said beside the command, never in it.
+FRIDA_IOS_DUMP_ELSEWHERE = "or set GRAFT_FRIDA_IOS_DUMP to a copy you already have"
+
+
+def frida_ios_dump_setup_command() -> str:
+    """The setup, as one shell command: clone, pin, venv, and what dump.py
+    imports. Only the command, so a Copy button copies something that runs.
+
+    Not `pip install -r requirements.txt`: that file lists `enum34`, which
+    replaces the standard library's `enum` on any Python 3 and breaks the
+    venv. dump.py imports frida, paramiko, scp and tqdm, and nothing else
+    outside the standard library.
+    """
+    home = frida_dump_home()
+    venv = home / ".venv"
+    q = shlex.quote
+    return (
+        f"git clone {FRIDA_IOS_DUMP_REPO} {q(str(home))} && "
+        f"git -C {q(str(home))} checkout {FRIDA_IOS_DUMP_FRIDA16_COMMIT} && "
+        f"python3 -m venv {q(str(venv))} && "
+        f"{q(str(venv / 'bin' / 'pip'))} install 'frida==16.*' paramiko scp tqdm"
+    )
+
+
+def frida_ios_dump_setup_hint() -> str:
+    """The command and the alternative, for a person reading a hint."""
+    return f"{frida_ios_dump_setup_command()} — {FRIDA_IOS_DUMP_ELSEWHERE}"
+
+
 def bagbak_available() -> str | None:
-    """The bagbak executable, or None — the preflight for the bagbak backend."""
-    return shutil.which("bagbak")
+    """The bagbak executable, or None — the preflight for the bagbak backend.
+
+    On absolute PATH entries only (`child_env.which`): 4.x is handed the
+    device's root password, so a `bagbak` in the current directory must not be
+    the one that gets it.
+    """
+    return child_which("bagbak")
 
 
 def bagbak_major(_cache: dict[str, int | None] = {}) -> int | None:  # noqa: B006 — the dict is the memo
@@ -164,7 +238,8 @@ def bagbak_major(_cache: dict[str, int | None] = {}) -> int | None:  # noqa: B00
     exe = bagbak_available()
     if exe:
         try:
-            proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
+            proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30,
+                                  env=child_env())
             m = re.search(r"(\d+)\.\d+", (proc.stdout or "") + (proc.stderr or ""))
             if m:
                 _cache["v"] = int(m.group(1))
@@ -263,7 +338,8 @@ def _with_tunnel(udid: str | None, work):
     # the tunnel a live dump is using.
     port = _free_port()
     args = [iproxy, f"{port}:22"] + (["-u", udid] if udid else [])
-    tunnel = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    tunnel = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              env=child_env())
     try:
         if not _wait_for_port(port):
             return None
@@ -563,7 +639,9 @@ def _run_streaming(
     transcript harder to read than either stream alone.
     """
     proc = subprocess.Popen(
-        cmd, cwd=cwd, env=env,
+        # A caller that hands over credentials builds them into `child_env`
+        # itself; with none, the child still gets the scrubbed environment.
+        cmd, cwd=cwd, env=child_env() if env is None else env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         # `errors="replace"`, because strict decoding turns one stray byte into
         # a crash. Device-side filenames are not guaranteed UTF-8 and bagbak
@@ -605,7 +683,7 @@ def _dump_bagbak(
     dry_run: bool = False,
     on_line=None,
 ) -> DecryptResult:
-    """Dump via bagbak — spawns the app, dumps over Frida transport, no SSH.
+    """Dump via bagbak — spawns the app and dumps it (4.x pulls over SSH, 5.x over Frida).
 
     Best-effort diagnosis of the failures worth naming — no frida-server, an app
     that is not installed, a locked device — because bagbak's own output for
@@ -614,7 +692,7 @@ def _dump_bagbak(
     if bagbak_available() is None:
         raise DecryptError(
             "bagbak not found in PATH",
-            hint="install it with: npm install -g bagbak (needs Node and Frida)",
+            hint=f"install it with: {BAGBAK_INSTALL} (needs Node)",
         )
     output_dir.mkdir(parents=True, exist_ok=True)
     cmd = build_command(bundle_id, output_dir, udid=udid, mode=mode)
@@ -623,7 +701,7 @@ def _dump_bagbak(
 
     try:
         returncode, combined = _run_streaming(
-            cmd, env={**os.environ, **bagbak_env(udid)}, on_line=on_line,
+            cmd, env=child_env(bagbak_env(udid)), on_line=on_line,
             # `cwd` is not incidental. bagbak 4.x makes a `.bagbak` scratch
             # directory *in its current working directory*, so where it runs
             # decides whether it can run at all:
@@ -661,8 +739,8 @@ def _dump_bagbak(
                 f"(bagbak {installed or '?'}.x)",
                 hint="bagbak 5.x bundles frida 17; this project pins frida 16 because "
                 "frida-ios-dump's agent needs pre-17 APIs, so the device runs a 16.x "
-                "frida-server and the majors don't match. Install the matching bagbak: "
-                "npm install -g bagbak@4.0.3",
+                f"frida-server and the majors don't match. Install the matching bagbak: "
+                f"{BAGBAK_INSTALL}",
             )
         if _NO_FRIDA_RE.search(combined):
             raise DecryptError(
@@ -1076,14 +1154,13 @@ def _dump_frida_ios_dump(
     if python is None:
         raise DecryptError(
             "frida-ios-dump is not set up",
-            hint=f"clone it into {frida_dump_home()} and create its .venv, or set "
-            "GRAFT_FRIDA_IOS_DUMP to your copy",
+            hint=frida_ios_dump_setup_hint(),
         )
     iproxy = shutil.which("iproxy")
     if iproxy is None:
         raise DecryptError(
             "iproxy not found (needed to reach the device over SSH)",
-            hint="brew install libimobiledevice",
+            hint=iproxy_install_hint(),
         )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1094,22 +1171,29 @@ def _dump_frida_ios_dump(
     # changed — which is common and good — is otherwise unreachable. These are
     # the device's own SSH login, not secrets of ours to hardcode.
     ssh_user = os.environ.get("GRAFT_SSH_USER", "root")
-    ssh_pass = resolve_ssh_password(udid)
     ssh_key = os.environ.get("GRAFT_SSH_KEY")
+    # A key is a path and goes on argv; a password never does (see
+    # `FRIDA_DUMP_LAUNCHER`), so it is handed over in the child's environment.
+    ssh_env = {} if ssh_key else {FRIDA_DUMP_PASSWORD_ENV: resolve_ssh_password(udid)}
+
     def build_cmd(port: int) -> list[str]:
         argv = [
-            str(python), str(script),
+            str(python), "-c", FRIDA_DUMP_LAUNCHER, str(script),
             "-o", str(out_ipa),
             "-H", "localhost", "-p", str(port),
             "-u", ssh_user,
         ]
-        argv += ["-K", ssh_key] if ssh_key else ["-P", ssh_pass]
+        if ssh_key:
+            argv += ["-K", ssh_key]
         return [*argv, bundle_id]
 
     if dry_run:
-        return DecryptResult(
-            ipa_path=out_ipa, bundle_id=bundle_id, stdout=" ".join(build_cmd(_free_port()))
-        )
+        # The launcher's source is noise in a rendered command; what it does
+        # with the password is the part worth showing.
+        shown = [a for a in build_cmd(_free_port()) if a not in ("-c", FRIDA_DUMP_LAUNCHER)]
+        if not ssh_key:
+            shown.insert(-1, f"-P <from ${FRIDA_DUMP_PASSWORD_ENV}, set in-process>")
+        return DecryptResult(ipa_path=out_ipa, bundle_id=bundle_id, stdout=" ".join(shown))
 
     outcome = ensure_frontmost(bundle_id, udid, on_line=on_line)
     if outcome != LAUNCH_OK:
@@ -1138,7 +1222,8 @@ def _dump_frida_ios_dump(
     tunnel_cmd = [iproxy, f"{port}:22"]
     if udid:
         tunnel_cmd += ["-u", udid]
-    tunnel = subprocess.Popen(tunnel_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    tunnel = subprocess.Popen(tunnel_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              env=child_env())
     try:
         # Confirmed rather than slept through. A `time.sleep(1.5)` cannot tell a
         # bound tunnel from an iproxy that exited on EADDRINUSE — silently, its
@@ -1153,7 +1238,7 @@ def _dump_frida_ios_dump(
                 "(`brew services list`, or replug the phone)",
             )
         returncode, combined = _run_streaming(
-            cmd, cwd=str(frida_dump_home()), on_line=on_line
+            cmd, cwd=str(frida_dump_home()), env=child_env(ssh_env), on_line=on_line
         )
     finally:
         tunnel.terminate()

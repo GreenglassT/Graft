@@ -18,10 +18,13 @@ from graft_ipa.config import (
 from graft_ipa.errors import SigningError
 from graft_ipa.signer import run_zsign
 
+from .test_lc_sign import _make_p12
 
-def make_cfg(tmp_path: Path) -> Config:
-    cert = tmp_path / "cert.p12"
-    cert.write_bytes(b"x")
+
+def make_cfg(tmp_path: Path, password: str = "supersecret") -> Config:
+    """A config whose cert is a real .p12 under `password`: a real run reads
+    it, to hand zsign a re-encrypted copy rather than the password."""
+    cert, _ = _make_p12(tmp_path, password)
     profile = tmp_path / "profile.mobileprovision"
     profile.write_bytes(b"x")
     return Config(
@@ -53,11 +56,16 @@ def test_dry_run_redacts_password(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv("TEST_P12_PASS", "supersecret")
     res = run_zsign(cfg, tmp_path / "in.ipa", tmp_path / "out.ipa", dry_run=True)
     assert "supersecret" not in res.stdout
-    assert "<TEST_P12_PASS>" in res.stdout
+    # What a real run hands zsign instead: a private copy, never the password.
+    assert f"-k <a private copy of {cfg.signing.cert}>" in res.stdout
+    assert "-p <its one-time password>" in res.stdout
 
 
 def test_wrong_password_hint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = make_cfg(tmp_path)
+    """zsign's own words for a .p12 it cannot open still read as a password
+    problem. (A password that is simply wrong is caught before zsign runs:
+    `test_signer_private_p12`.)"""
+    cfg = make_cfg(tmp_path, password="wrong")
     monkeypatch.setenv("TEST_P12_PASS", "wrong")
     fake = subprocess.CompletedProcess(
         args=[], returncode=1, stdout="", stderr="mac verify failure"

@@ -28,6 +28,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+from .child_env import child_env
+
 #: iOS private frameworks a tweak may link that macOS does not provide, and for
 #: which `tools/` has a stub. Keyed by framework name.
 #:
@@ -58,7 +60,8 @@ def linked_private_frameworks(macho: Path) -> list[str]:
     """
     try:
         out = subprocess.run(
-            ["otool", "-L", str(macho)], capture_output=True, text=True, check=True
+            ["otool", "-L", str(macho)], capture_output=True, text=True, check=True,
+            env=child_env(),
         ).stdout
     except FileNotFoundError as exc:
         raise PlayCoverPrepError(
@@ -106,7 +109,7 @@ def _run_tool(argv: list[str], *, doing: str) -> None:
     exists to avoid.
     """
     try:
-        subprocess.run(argv, capture_output=True, check=True)
+        subprocess.run(argv, capture_output=True, check=True, env=child_env())
     except FileNotFoundError as exc:
         raise PlayCoverPrepError(
             f"{argv[0]} is not installed, so {doing} is not possible",
@@ -163,7 +166,8 @@ def _rpaths(macho: Path) -> list[str]:
     """The LC_RPATH entries already on `macho`."""
     try:
         out = subprocess.run(
-            ["otool", "-l", str(macho)], capture_output=True, text=True, check=True
+            ["otool", "-l", str(macho)], capture_output=True, text=True, check=True,
+            env=child_env(),
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return []
@@ -222,7 +226,7 @@ def build_stub(framework: str, dest_dir: Path) -> Path:
         # build is not something this should depend on, and an installed copy
         # that is 0644 would fail with a bare PermissionError.
         subprocess.run(["/bin/sh", str(script), str(out)],
-                       capture_output=True, check=True)
+                       capture_output=True, check=True, env=child_env())
     except subprocess.CalledProcessError as exc:
         raise PlayCoverPrepError(
             f"couldn't build the {framework} stub",

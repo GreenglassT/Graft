@@ -80,7 +80,7 @@ def test_report_app_failure_survives_markup_shaped_text(
     from graft_ipa.cli import _report_app_failure
 
     _report_app_failure(
-        "yt", GraftError(CLOSING_TAG, hint=SWALLOWED_TAG), emitter=JsonEmitter()
+        "example", GraftError(CLOSING_TAG, hint=SWALLOWED_TAG), emitter=JsonEmitter()
     )
 
     captured = capsys.readouterr()
@@ -120,7 +120,7 @@ def test_a_build_end_still_follows_a_markup_shaped_history_failure(
 
     emitter = JsonEmitter()
     with cli_mod._BuildReport(
-        emitter, app_name="yt", bundle_id="com.example.app", delivery="sideload"
+        emitter, app_name="example", bundle_id="com.example.app", delivery="sideload"
     ) as report:
         report.log = log
 

@@ -95,8 +95,8 @@ enum BuildTarget: Equatable {
     ///
     /// **Not a certain failure**, which is why it stays distinct from
     /// `.overrideMissing` rather than folding into it. `installer.select_device`
-    /// walks `list_connected_devices_with_transport()`, and that is
-    /// `idevice_id -l -n` — a bare usbmux enumeration with no lockdown query, so
+    /// walks `list_connected_devices_with_transport()`, and that is a bare
+    /// usbmux enumeration through pymobiledevice3 with no lockdown query, so
     /// a passcode-locked phone is in the list it walks. The build resolves this
     /// udid and then may fail later, at the install, for a different reason.
     case overrideUnreadable(udid: String)
@@ -154,6 +154,10 @@ enum BuildTarget: Equatable {
     /// recursion is one level deep by construction, since the inner call passes
     /// nil.
     indirect case notDelivering(option: BuildOptions.Option, device: BuildTarget)
+    /// A `delivery: sideload` app in a config for a free Apple ID. Nothing on
+    /// the bench matters: the CLI refuses every build of it, dry runs and
+    /// skipped installs included, before it looks for a device.
+    case needsPaidAccount
 
     /// Whether this answer wants something done about it — amber on the bar
     /// rather than muted — and the one place that decision is written.
@@ -175,7 +179,8 @@ enum BuildTarget: Equatable {
     /// — is about *speculative* device problems. This one is not speculative.
     var needsAttention: Bool {
         switch self {
-        case .noDefault, .noDevice, .overrideMissing, .overrideUnreadable, .unreadable:
+        case .noDefault, .noDevice, .overrideMissing, .overrideUnreadable, .unreadable,
+             .needsPaidAccount:
             return true
         case .device, .scanning:
             return false
@@ -201,7 +206,8 @@ enum BuildTarget: Equatable {
     ///    *unpredictable* outcome this bar refuses to name a phone for, but it
     ///    is not a failure.
     ///  - `.unreadable` and `.overrideUnreadable` — the list `select_device`
-    ///    walks comes from `idevice_id -l -n`, which enumerates over usbmux
+    ///    walks comes from a usbmux enumeration (`preflight.
+    ///    list_connected_devices_with_transport`, through pymobiledevice3)
     ///    without a lockdown query, so a phone that defeated the descriptive
     ///    scan is still in it. The build resolves and may fail later, at the
     ///    install, which is a different claim and not one to make here.
@@ -217,7 +223,8 @@ enum BuildTarget: Equatable {
         switch self {
         case .noDevice: return "no device is connected."
         case .overrideMissing: return "the chosen device isn't connected."
-        case .device, .noDefault, .overrideUnreadable, .scanning, .unreadable, .notDelivering:
+        case .device, .noDefault, .overrideUnreadable, .scanning, .unreadable, .notDelivering,
+             .needsPaidAccount:
             return nil
         }
     }
@@ -232,6 +239,11 @@ enum BuildTarget: Equatable {
     /// a state added to one list and not the other would render amber with no
     /// sentence, or a sentence with no amber.
     var isCertainDeviceFailure: Bool { certainFailureClause != nil }
+
+    /// The bar's sentence for `.needsPaidAccount`: short, because the bar is
+    /// one line; the tooltip has the rest.
+    static let needsPaidAccountLine = "Sideload needs a paid Apple Developer account. "
+        + "Switch this app to LiveContainer with Edit…"
 }
 
 /// One line under the app pane's header saying where Build & Install will put
@@ -383,8 +395,13 @@ struct BuildTargetBar: View {
         overrideUDID: String? = nil,
         deviceErrors: [DeviceErrorRecord] = [],
         hasLoaded: Bool = true,
-        notDelivering: BuildOptions.Option? = nil
+        notDelivering: BuildOptions.Option? = nil,
+        account: AccountMode? = nil
     ) -> BuildTarget {
+        // Ahead of everything, the build options included: the refusal is the
+        // first thing a build of this app does, so no device and no option
+        // changes what Build & Install would do, which is fail.
+        if delivery == .sideload, account.isFree { return .needsPaidAccount }
         // Guarded on `suppressesDelivery` rather than on the option merely being
         // present: the parameter's name is a promise about which options belong
         // here, and an option that does not suppress delivery must not produce a
@@ -521,6 +538,8 @@ struct BuildTargetBar: View {
             // The sidebar's words, not a second set — see
             // `DevicesStore.scanningLine`.
             pending(DevicesStore.scanningLine)
+        case .needsPaidAccount:
+            missing(BuildTarget.needsPaidAccountLine)
         case let .notDelivering(option, device):
             // `??` cannot fire: `target(...)` only builds this case for an
             // option whose `suppressesDelivery` is non-nil. `defaultLabel` is
@@ -599,6 +618,7 @@ struct BuildTargetBar: View {
         // resolving a device — the glyph has to agree with the amber sentence
         // beside it, or the row says two things at once.
         case .notDelivering: return target.needsAttention ? Symbols.attention : Symbols.notDelivering
+        case .needsPaidAccount: return Symbols.attention
         }
     }
 
@@ -640,7 +660,10 @@ struct BuildTargetBar: View {
     /// sentences for `.noDefault`, where the CLI behaves differently depending
     /// on which of the two causes applies and only the user can tell them
     /// apart, and the dry-run caveat under `.notDelivering`.
-    private var explanation: String {
+    private var explanation: String { Self.explanation(for: target) }
+
+    /// `explanation`, as a value a test can read.
+    static func explanation(for target: BuildTarget) -> String {
         switch target {
         case let .device(name, mode):
             return "Build & Install sends this app to \(name) via \(mode). "
@@ -652,7 +675,7 @@ struct BuildTargetBar: View {
                 + "one naming an absent phone fails outright — so this pane cannot say "
                 + "where the next build lands."
         case .noDevice:
-            return "No iOS device is connected. A build can still sign an IPA with "
+            return "No iOS device is connected. A build can still make the IPA with "
                 + "Skip install under Build options, but it has nothing to deliver to."
         case let .overrideMissing(udid):
             return "Build options is set to device \(udid), which is not connected. "
@@ -664,8 +687,8 @@ struct BuildTargetBar: View {
             return "Build options is set to device \(udid), which is connected but could "
                 + "not be described by the CLI — usually a phone that is passcode-locked, "
                 + "or that has not been told to trust this Mac. This is not the same as "
-                + "its not being here: the installer enumerates over usbmux with "
-                + "`idevice_id -l -n`, which needs no lockdown handshake, so the build "
+                + "its not being here: the build asks usbmuxd for the phones on the bus, "
+                + "which needs no lockdown handshake, so the build "
                 + "will very likely still resolve this phone and may then fail at the "
                 + "install instead. Unlock it, or clear the device pill in Build options."
         case let .unreadable(count):
@@ -679,6 +702,12 @@ struct BuildTargetBar: View {
                 + "build may still reach it, because the installer enumerates over "
                 + "usbmux and usbmux can see a locked phone — but this pane cannot say "
                 + "whose phone it is, so it will not claim one."
+        case .needsPaidAccount:
+            return PaidOnly.sideloadApp + " This config has no signing: section, so it is "
+                + "set up for a free Apple ID, and Sideload signs the app with a paid "
+                + "account's certificate and profile: graft refuses every build of it, "
+                + "dry runs included. LiveContainer delivery signs nothing here; "
+                + "LiveContainer signs the app when you import it."
         case .scanning:
             return "The first device scan has not finished — a full listing costs about "
                 + "a second per phone in lockdown handshakes. Until it lands, an empty "
@@ -686,7 +715,7 @@ struct BuildTargetBar: View {
                 + "nothing has checked yet."
         case let .notDelivering(option, device):
             let reason = option.suppressesDelivery ?? option.defaultLabel
-            let opening = "\(reason) is set under Build options, so this build signs an "
+            let opening = "\(reason) is set under Build options, so this build makes the "
                 + "IPA and stops — nothing is sent to any phone, whatever is plugged in. "
             guard option.stillResolvesDevice else {
                 return opening
@@ -712,8 +741,11 @@ struct BuildTargetBar: View {
                     + "connected — so this build will stop with \"requested device … not "
                     + "connected\". Clear the device pill, plug that phone in, or use "
                     + "Skip install instead, which never looks."
+            // `.needsPaidAccount` never sits under `.notDelivering`: `target`
+            // returns it ahead of the options. Listed so the switch stays
+            // exhaustive without a `default:` that would hide a new case.
             case .device, .noDefault, .overrideUnreadable, .scanning, .unreadable,
-                 .notDelivering:
+                 .notDelivering, .needsPaidAccount:
                 return opening
                     + "One caveat worth knowing: a dry run still resolves a device "
                     + "before deciding to do nothing, so it can still fail with \"no iOS "

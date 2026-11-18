@@ -59,7 +59,12 @@ struct SettingsDraft: Equatable {
 
     init(_ record: SettingsRecord? = nil) {
         baseline = record
+        // Not when the whole file failed to parse (C-SETTINGS): every setting
+        // is null then because nothing was read, and `--set-settings` refuses
+        // that file — counting it lit Revert over a pane with nothing in it
+        // anybody had changed, and nothing a save could replace.
         countUnreadable = record != nil && record?.archiveKeep == nil
+            && record?.parseError == nil
         var fields = Fields()
         if let record {
             // "" is the wire form of "no default device" in both directions:

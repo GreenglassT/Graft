@@ -21,6 +21,14 @@ from typing import Any, TextIO
 # instead of being silently dropped by Swift's `try?` line decoding.
 EVENT_TYPES: frozenset[str] = frozenset(
     {
+        # `--list`'s first line, exactly once: `account`, `"free"` or
+        # `"paid"`. Its own event because `--list` on a config with no apps
+        # emits no `app` to carry the field, and that is every fresh install.
+        "account",
+        # One configured app, from `--list`: its config fields, plus
+        # `account` — `"free"` (no `signing:` section: a free Apple ID,
+        # LiveContainer delivery only) or `"paid"`. Config-wide, repeated on
+        # every app because this is the event the GUI reads at launch.
         "app",
         "app-added",
         "app-removed",
@@ -29,11 +37,14 @@ EVENT_TYPES: frozenset[str] = frozenset(
         #
         # What the App Store path needs and has, from `--appstore-status`,
         # exactly once: `ipatool` {path, present, version, signed_in,
-        # warning} and `unfairplay` {path, present, version, enrolled,
-        # model_dir}, plus `setup_commands` — the Terminal commands for
-        # whatever is missing, because signing in and enrolling are never done
-        # by this tool. `signed_in` is a bool and nothing more: the account's
-        # email and name are never on the wire.
+        # warning, install} and `unfairplay` {path, present, version,
+        # enrolled, model_dir, install}, plus `setup_commands` — the Terminal
+        # commands for whatever is missing, because installing, signing in and
+        # enrolling are never done by this tool. `install` is the one command
+        # that installs that tool (a string, for a Copy button), or null when
+        # it needs none or none can work here (UnfairPlay on an Intel Mac).
+        # `signed_in` is a bool and nothing more: the account's email and name
+        # are never on the wire.
         "appstore-status",
         # One app's App Store version against what is cached: `app`,
         # `bundle_id`, `store_version`, `cached_version`, `update_available`,
@@ -203,7 +214,17 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # files it left alone (`kept`).
         "lc-cleaned",
         "log",
+        # One `--check` row: `name`, `ok`, `detail`, `install`, and `hint` /
+        # `action_key` when there is one. `install` is on every row: the exact
+        # command that installs what a failing tool row found missing
+        # ("brew install zsign"), or null — for a passing row, a row that is
+        # not a tool, or a builtin. The hint still says "install with: <it>"
+        # for a reader that predates the field. `info: true` marks a row that
+        # reports a fact rather than passing a test (a free Apple ID's
+        # account row); it is always `ok`.
         "preflight-check",
+        # `ok_count`, `fail_count`, and `account` (`"free"` or `"paid"`),
+        # so the mode is known even for a config with no apps.
         "preflight-end",
         "prune-end",
         "repo",
@@ -386,8 +407,10 @@ CYAN_OPTION_FIELDS: frozenset[str] = frozenset(
 # Composing them means such a typo lands in this set too, where
 # _do_set_app_options' parameter-set check catches it immediately.
 APP_OPTION_FIELDS: frozenset[str] = CYAN_OPTION_FIELDS | frozenset(
-    # Stored at the app's top level, not under `cyan:`.
-    {"preferred_version", "delivery"}
+    # Stored at the app's top level, not under `cyan:`. `lc_bundle_id` is the
+    # app's LiveContainer pin, set by `--lc-bundle-id` and cleared by
+    # `--no-lc-bundle-id`; either one reports it changed.
+    {"preferred_version", "delivery", "lc_bundle_id"}
 )
 
 

@@ -9,7 +9,7 @@ from graft_ipa.build_log import BuildLog, sha256_of
 def test_record_and_recent(tmp_path: Path) -> None:
     log = BuildLog(tmp_path / "log.sqlite")
     log.record(
-        app="yt",
+        app="example",
         bundle_id="com.example.app",
         version="21.16.2",
         tweaks=["a.deb", "b.deb"],
@@ -20,7 +20,7 @@ def test_record_and_recent(tmp_path: Path) -> None:
     )
     rows = log.recent()
     assert len(rows) == 1
-    assert rows[0]["app"] == "yt"
+    assert rows[0]["app"] == "example"
     assert rows[0]["tweaks"] == "a.deb,b.deb"
     assert rows[0]["success"] == 1
 
@@ -98,14 +98,14 @@ def test_a_deliveries_table_missing_a_column_is_migrated(tmp_path: Path) -> None
         )
         conn.execute(
             "INSERT INTO deliveries (timestamp, app, bundle_id, tweaks, source_version,"
-            " delivery) VALUES ('2026-08-03', 'yt', 'com.example.app', '[]',"
+            " delivery) VALUES ('2026-08-03', 'example', 'com.example.app', '[]',"
             " '21.16.2', 'livecontainer')"
         )
 
-    row = BuildLog(db).latest_delivery("yt")
+    row = BuildLog(db).latest_delivery("example")
 
     assert row is not None
-    assert row["app"] == "yt", "the pre-existing row must survive the migration"
+    assert row["app"] == "example", "the pre-existing row must survive the migration"
     # NULL in a column that didn't exist is exactly the legacy signal every
     # reader already handles.
     assert row["inputs_digest"] is None
@@ -359,18 +359,61 @@ def test_an_lc_install_is_remembered_for_its_device_only(tmp_path: Path) -> None
     assert log.lc_installed_bundle_ids("iphone") == set()
 
 
-def test_pushed_remote_names_are_per_livecontainer(tmp_path: Path) -> None:
-    """`--lc-clean` deletes only what we pushed, into the container it cleans."""
+def test_pushed_by_instance_is_per_device_and_per_livecontainer(tmp_path: Path) -> None:
+    """`--lc-clean` deletes on this, and a push overwrites on it: only rows for
+    this device count, each under the container it went into."""
     log = BuildLog(tmp_path / "log.sqlite")
     common = dict(
         bundle_id="b", inputs_digest=None, digest_version=None, cyan=None, tweaks=[],
-        source_version="1", ipa_sha256=None, delivery="livecontainer", udid="ipad",
+        source_version="1", ipa_sha256=None, delivery="livecontainer",
     )
-    log.record_delivery(app="example", lc_bundle_id="LC1", remote_name="example.ipa", **common)
-    log.record_delivery(app="bravo", lc_bundle_id="LC2", remote_name="bravo.ipa", **common)
-    log.record_delivery(app="delta", lc_bundle_id="LC1", remote_name=None, **common)
+    log.record_delivery(app="example", lc_bundle_id="LC1", remote_name="example.ipa",
+                        udid="ipad", **common)
+    log.record_delivery(app="bravo", lc_bundle_id="LC2", remote_name="bravo.ipa",
+                        udid="ipad", **common)
+    log.record_delivery(app="delta", lc_bundle_id="LC1", remote_name=None, udid="ipad", **common)
+    log.record_delivery(app="echo", lc_bundle_id="LC1", remote_name="echo.ipa",
+                        udid="iphone", **common)
+    # No device recorded: proves nothing about any one device.
+    log.record_delivery(app="fox", lc_bundle_id="LC1", remote_name="fox.ipa", udid=None,
+                        **common)
 
-    assert log.pushed_remote_names("LC1") == {"example.ipa"}
+    assert log.pushed_by_instance("ipad") == {"LC1": {"example.ipa"}, "LC2": {"bravo.ipa"}}
+    assert log.pushed_by_instance("iphone") == {"LC1": {"echo.ipa"}}
+    assert log.pushed_by_instance("ipod") == {}
+
+
+def test_a_cert_push_is_recorded_per_device_and_forgotten_once_cleaned(tmp_path: Path) -> None:
+    log = BuildLog(tmp_path / "log.sqlite")
+    log.record_cert_push(udid="ipad", bundle_id="LC1", name="AppleDevelopment.p12")
+    log.record_cert_push(udid="iphone", bundle_id="LC1", name="AppleDevelopment.p12")
+
+    assert log.cert_pushes("ipad") == {"LC1": {"AppleDevelopment.p12"}}
+
+    log.forget_cert_push(udid="ipad", bundle_id="LC1")
+
+    assert log.cert_pushes("ipad") == {}
+    assert log.cert_pushes("iphone") == {"LC1": {"AppleDevelopment.p12"}}
+
+
+def test_a_v1_database_gains_the_cert_pushes_table_and_keeps_its_deliveries(
+    tmp_path: Path,
+) -> None:
+    """A log.sqlite from 1.0 has deliveries with lc_bundle_id, remote_name and
+    udid (all `--lc-clean` and the push need) and no cert_pushes table."""
+    db = tmp_path / "log.sqlite"
+    log = BuildLog(db)
+    log.record_delivery(app="example", bundle_id="b", inputs_digest=None, digest_version=None,
+                        cyan=None, tweaks=[], source_version="1", ipa_sha256=None,
+                        delivery="livecontainer", lc_bundle_id="LC1",
+                        remote_name="example.ipa", udid="ipad")
+    with sqlite3.connect(db) as conn:
+        conn.execute("DROP TABLE cert_pushes")
+
+    reopened = BuildLog(db)
+
+    assert reopened.cert_pushes("ipad") == {}
+    assert reopened.pushed_by_instance("ipad") == {"LC1": {"example.ipa"}}
 
 
 def test_a_database_from_before_lc_installs_gains_the_table(tmp_path: Path) -> None:

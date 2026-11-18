@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import USER_AGENT, mobileprovision
-from .errors import GraftError
+from .errors import EXIT_PORTAL, GraftError
 
 # `requests` is imported inside `ASCClient.__init__` and `ASCClient._request`,
 # and `jwt` inside `make_jwt` — not here; see those comments for the measured
@@ -43,7 +43,7 @@ JWT_LIFETIME_SECONDS = 1200  # 20 min max per Apple
 class PortalError(GraftError):
     """Raised by App Store Connect API operations."""
 
-    exit_code = 10
+    exit_code = EXIT_PORTAL
 
 
 class AppIdNotRegistered(PortalError):

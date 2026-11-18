@@ -128,7 +128,7 @@ def test_2_8_1_is_told_to_pin_2_8_0(fakes: FakeTools, tmp_path: Path) -> None:
     fakes.set(ipatool_version="2.8.1")
     err = _download_error(fakes, tmp_path, "request failed with status 404")
 
-    assert "install ipatool 2.8.0" in err.hint
+    assert "Install ipatool 2.8.0" in err.hint
     assert "#672" in err.hint
 
 

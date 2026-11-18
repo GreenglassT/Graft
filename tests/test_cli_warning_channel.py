@@ -417,7 +417,7 @@ def test_the_warning_precedes_the_devices_it_is_about() -> None:
 def _lc_result(others: list[str]) -> MagicMock:
     result = MagicMock()
     result.bundle_id = "com.kdt.livecontainer.TEAM1"
-    result.documents_path = "Documents/yt.ipa"
+    result.documents_path = "Documents/example.ipa"
     result.size_bytes = 1024
     result.others = others
     return result
@@ -443,7 +443,7 @@ def test_multiple_livecontainers_are_reported_once_on_each_channel(
     from graft_ipa import cli as cli_mod
 
     cli_mod._report_lc_choice(
-        JsonEmitter(), app_name="yt", result=_lc_result(["com.kdt.LiveContainer2.TEAM1"])
+        JsonEmitter(), app_name="example", result=_lc_result(["com.kdt.LiveContainer2.TEAM1"])
     )
 
     captured = capsys.readouterr()
@@ -455,7 +455,7 @@ def test_multiple_livecontainers_are_reported_once_on_each_channel(
     assert not [e for e in events if e["type"] == "log"], (
         "the GUI decodes livecontainer-choice, so a log event duplicates it"
     )
-    assert "lc_bundle_id" in captured.err
+    assert "--lc-bundle-id" in captured.err
 
 
 def test_a_single_livecontainer_is_not_reported_at_all(
@@ -465,8 +465,32 @@ def test_a_single_livecontainer_is_not_reported_at_all(
     skip lines."""
     from graft_ipa import cli as cli_mod
 
-    cli_mod._report_lc_choice(JsonEmitter(), app_name="yt", result=_lc_result([]))
+    cli_mod._report_lc_choice(JsonEmitter(), app_name="example", result=_lc_result([]))
 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == ""
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+def test_the_choice_warning_names_the_pin_command_or_says_it_is_pinned(
+    pinned: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """It told the user to edit `lc_bundle_id:` in config.yaml, and suggested a
+    pin even to an app that already had one — what a real paid build with three
+    LiveContainers printed. Unpinned, it names the command that sets a pin;
+    pinned, it says the IPA went where the pin points."""
+    from graft_ipa import cli as cli_mod
+
+    cli_mod._report_lc_choice(
+        None, app_name="example", result=_lc_result(["com.kdt.LiveContainer2.TEAM1"]),
+        pinned=pinned,
+    )
+
+    said = " ".join(capsys.readouterr().err.split())
+    assert "config.yaml" not in said
+    if pinned:
+        assert "the one it is pinned to" in said
+        assert "--lc-bundle-id" not in said
+    else:
+        assert "graft --set-app-options --app example --lc-bundle-id <id>" in said

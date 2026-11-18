@@ -29,7 +29,7 @@ import Foundation
 /// looking for, which is what stops a third copy being written by someone who
 /// found neither.
 func stagedIPARecord(
-    bundleId: String = "com.a.one", displayName: String = "Sample",
+    bundleId: String = "com.a.one", displayName: String = "ExamplePlayer",
     version: String = "1.0", filename: String = "com.a.one_1.0.ipa",
     sizeBytes: Int = 128_299_008, preferred: Bool = true, stripped: String = "[]",
     lost: String? = nil, importance: String? = nil

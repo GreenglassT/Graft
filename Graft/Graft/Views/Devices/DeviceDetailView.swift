@@ -375,7 +375,9 @@ struct DeviceDetailView: View {
                     // Last on the pane: what's configured, then what can be
                     // decrypted, then everything else on the phone — top-down
                     // from the narrowest question to the broadest one.
-                    DeviceLiveContainerSection(device: device, store: liveContainer)
+                    DeviceLiveContainerSection(
+                        device: device, store: liveContainer, account: config.account
+                    )
                     InstalledAppsSection(
                         device: device,
                         deviceApps: deviceApps,

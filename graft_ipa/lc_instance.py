@@ -39,6 +39,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .child_env import child_env
 from .lc_runner import LiveContainerError
 
 #: Upstream's own bundle id, before any team suffix.
@@ -256,5 +257,5 @@ def archive_payload(root: Path, ipa_out: Path) -> None:
     ipa_out.unlink(missing_ok=True)
     subprocess.run(
         ["zip", "-qry", str(ipa_out.resolve()), "Payload"],
-        cwd=root, check=True, capture_output=True,
+        cwd=root, check=True, capture_output=True, env=child_env(),
     )

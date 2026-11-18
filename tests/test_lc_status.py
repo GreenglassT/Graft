@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from graft_ipa import lc_manage
+from graft_ipa import lc_discovery, lc_manage
 
 TEAM = "ABCDE12345"
 PRIMARY = f"com.kdt.livecontainer.{TEAM}"
@@ -43,7 +43,7 @@ def _status(apps: dict, *, ours: set[str] = frozenset(), latest=NIGHTLY) -> dict
     ],
 )
 def test_roles(bundle_id: str, role: str | None) -> None:
-    assert lc_manage.role_of(bundle_id, TEAM) == role
+    assert lc_discovery.role_of(bundle_id, TEAM) == role
 
 
 def test_the_ipad_today() -> None:

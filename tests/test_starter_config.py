@@ -96,3 +96,31 @@ def test_init_writes_the_empty_starter_and_imports_nothing(
     assert list((tmp_path / "cfg" / "graft" / "tweaks").iterdir()) == []
     assert "old-build" not in out.getvalue()
     assert "--add-app" in out.getvalue()
+
+
+def _init_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.delenv("GRAFT_P12_PASS", raising=False)
+    monkeypatch.setattr(init_flow.Prompt, "ask", staticmethod(lambda *a, default=None, **k: default))
+    monkeypatch.setattr(init_flow.Confirm, "ask", staticmethod(lambda *a, default=None, **k: True))
+    monkeypatch.setattr(init_flow, "list_connected_devices", lambda: [])
+    out = StringIO()
+    init_flow.run_init(Console(file=out, width=200))
+    return out.getvalue()
+
+
+def test_init_points_the_p12_password_at_the_keychain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Mac app is started by launchd, not by a shell, so a variable exported
+    in ~/.zshrc never reaches the CLI it runs: a password kept only there fails
+    the app's `.p12 password` check on every sideload build. The Keychain is the
+    one place both can read, so that is what setup has to recommend."""
+    text = _init_output(tmp_path, monkeypatch)
+    step = text.split("Signing password", 1)[1].split("Provisioning profile", 1)[0]
+
+    assert "graft --set-p12-password" in step
+    # The shell variable may still be offered, but never as the advice on its own.
+    assert "~/.zshrc" not in step or "Mac app" in step
