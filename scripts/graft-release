@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Build a distributable Graft.app: Release configuration, hardened runtime,
+# secure timestamp, signed inside-out with a Developer ID identity.
+#
+#   GRAFT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+#     scripts/graft-release [output-dir]
+#
+# GRAFT_SIGN_IDENTITY may also be the identity's SHA-1 (see
+# `security find-identity -v -p codesigning`). The output directory defaults to
+# ./build/release and must not already contain a Graft.app.
+#
+# This does NOT notarize. Submit the resulting zip with `xcrun notarytool`,
+# then `xcrun stapler staple Graft.app` and re-zip the stapled app.
+#
+# Unlike scripts/graft-install (a developer build that installs into
+# /Applications and records this checkout so the app can rebuild itself), a
+# release build carries no repository path, so the app's rebuild-on-launch
+# behaviour stays off.
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+OUT_DIR="${1:-$REPO_ROOT/build/release}"
+IDENTITY="${GRAFT_SIGN_IDENTITY:?set GRAFT_SIGN_IDENTITY to a Developer ID Application identity}"
+
+if [[ -e "$OUT_DIR/Graft.app" ]]; then
+  echo "error: $OUT_DIR/Graft.app already exists; move it away first" >&2
+  exit 1
+fi
+
+DERIVED="$(mktemp -d -t graft-release)"
+trap 'rm -rf "$DERIVED"' EXIT
+
+# The committed project is used as-is; regenerating would only churn its GUIDs.
+if [[ ! -d "$REPO_ROOT/Graft/Graft.xcodeproj" ]]; then
+  echo "→ generating the Xcode project…"
+  (cd "$REPO_ROOT/Graft" && xcodegen generate --quiet)
+fi
+
+echo "→ building Release…"
+xcodebuild \
+  -project "$REPO_ROOT/Graft/Graft.xcodeproj" \
+  -scheme Graft \
+  -configuration Release \
+  -destination 'generic/platform=macOS' \
+  -derivedDataPath "$DERIVED" \
+  CODE_SIGN_IDENTITY=- \
+  build >"$DERIVED/build.log" 2>&1 || {
+    tail -40 "$DERIVED/build.log" >&2
+    echo "error: build failed (full log above)" >&2
+    exit 1
+  }
+
+BUILT="$DERIVED/Build/Products/Release/Graft.app"
+[[ -d "$BUILT" ]] || { echo "error: no Graft.app at $BUILT" >&2; exit 1; }
+
+if /usr/libexec/PlistBuddy -c "Print :GraftRepoPath" "$BUILT/Contents/Info.plist" >/dev/null 2>&1; then
+  echo "error: release build carries GraftRepoPath; refusing to ship it" >&2
+  exit 1
+fi
+
+mkdir -p "$OUT_DIR"
+APP="$OUT_DIR/Graft.app"
+ditto "$BUILT" "$APP"
+
+sign() {
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$1"
+}
+
+echo "→ signing inside-out with: $IDENTITY"
+# Nested code first (deepest paths first), then the app itself.
+while IFS= read -r -d '' item; do
+  sign "$item"
+done < <(find "$APP/Contents" -depth \
+  \( -name '*.framework' -o -name '*.dylib' -o -name '*.appex' -o -name '*.xpc' -o -name '*.bundle' \) \
+  -print0)
+sign "$APP"
+
+echo "→ verifying…"
+codesign --verify --deep --strict --verbose=2 "$APP"
+codesign -dv --verbose=2 "$APP" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|Runtime Version|flags)=' || true
+
+ZIP="$OUT_DIR/Graft.zip"
+rm -f "$ZIP"
+ditto -c -k --keepParent "$APP" "$ZIP"
+echo "✓ $APP"
+echo "✓ $ZIP (not notarized)"

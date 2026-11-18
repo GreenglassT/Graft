@@ -1,0 +1,100 @@
+[build-system]
+# 1.27 is the first hatchling that reads an SPDX `license` string (PEP 639).
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "graft-ipa"
+version = "1.0.0"
+description = "IPA signer and tweak injector for paid Apple Developer accounts: inject tweaks, sign, and install or deliver to LiveContainer."
+readme = "README.md"
+requires-python = ">=3.11"
+# Graft's own code is MIT. It depends on pymobiledevice3, which is
+# GPL-3.0-or-later; pip installs that separately, so this package stays MIT.
+# A bundled or frozen CLI (PyInstaller, py2app, a zipapp with dependencies
+# vendored, etc.) would include pymobiledevice3 and would have to be
+# distributed under the GPL.
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "GreenglassT", email = "73795969+GreenglassT@users.noreply.github.com" },
+]
+keywords = ["ios", "ipa", "ipa-signer", "tweak", "sideload", "livecontainer", "cyan", "zsign"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "PyYAML>=6.0",
+    "requests>=2.31",
+    "rich>=13.7",
+    "typer>=0.12",
+    "pyjwt[crypto]>=2.8",
+    "cryptography>=42.0",
+    "pymobiledevice3>=4.0",
+    # Used to detect whether an app is running on the device before an attach-
+    # based decrypt (frida-ios-dump backend). pymobiledevice3 lists installed
+    # apps; only frida reports live pids.
+    #
+    # Pinned to 16.x, and it must match the device's frida-server major: the
+    # wire protocol changed at 17.0, so a 17.x client cannot talk to a 16.x
+    # server (or vice-versa). frida-ios-dump's agent also relies on pre-17 APIs
+    # (the ObjC bridge, `Memory.read*` statics) that 17.0 removed. Run a 16.x
+    # frida-server on the device; a mismatched major makes the decrypt backend
+    # time out. 16.1.5 is the floor with rootless deb support.
+    "frida>=16.1.5,<17",
+    # SSH, for the decrypt path. frida-ios-dump pulls the app bundle over it and
+    # bagbak 4.x does too, but both reach it through their own interpreters — so
+    # without this the CLI could *use* SSH and not *check* it, and the readiness
+    # probe reported "no SSH server answered" for a phone whose SSH was fine.
+    "paramiko>=3.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-mock>=3.12",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+graft = "graft_ipa.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/GreenglassT/Graft"
+Issues = "https://github.com/GreenglassT/Graft/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["graft_ipa"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer's whole API is `param: T = typer.Option(...)` in the signature — the
+# call in the default *is* the declaration, evaluated once at import by design.
+# B008 only catches the handful whose annotation ruff can't prove immutable
+# (`list[str]`, `Path | None`), so without this it fires on an arbitrary 3 of
+# the ~60 identical declarations in `main()`. Exempting the two constructors
+# keeps B008 live for every other call-in-default.
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"

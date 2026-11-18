@@ -1,0 +1,50 @@
+# No trailing slash: `.venv/` matches a directory only, and a git worktree's
+# natural way to get one is a *symlink* to the main checkout's. That left the
+# symlink untracked and one `git add -A` from being committed — and worse, a
+# worktree without it silently skips `CLIRunnerTests`'s real-`rich` test, which
+# reports as a green run with one skip rather than as a gap in verification.
+.venv
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.superpowers/
+.DS_Store
+build/
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.worktrees/
+
+# Large binary artefacts that occasionally end up in the working tree
+*.ipa
+*.deb
+*.profraw
+
+# Xcode DerivedData, pinned to the repo by scripts/graft-install.
+#
+# The glob rather than the exact name: concurrent agents need *separate*
+# derived-data paths, because two `xcodebuild` runs sharing one path collide.
+# The first time that happened the second path — `.derived-data-b/` — was not
+# covered here and reached 561MB of untracked content, a single `git add -A`
+# from being committed.
+.derived-data*/
+
+# bagbak 4.x scratch dir. `decrypt_runner` now runs it with `cwd` set to the
+# temp dump directory so our own dumps no longer land one here — this is for
+# bagbak invoked by hand from the repo root, which still does.
+.bagbak/
+
+# Decrypted apps, signing material, injected libraries and secrets never
+# belong in the repo.
+decrypted/
+*.dylib
+*.p12
+*.p8
+*.mobileprovision
+*.cer
+.env
+
+# Local tool state.
+.claude/
+.ruff_cache/
