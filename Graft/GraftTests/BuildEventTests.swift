@@ -45,12 +45,12 @@ final class BuildEventTests: XCTestCase {
     }
 
     func test_decode_build_end_event_failure() throws {
-        let json = #"{"type":"build-end","app":"yt","ok":false,"error":"cyan failed"}"#
+        let json = #"{"type":"build-end","app":"example","ok":false,"error":"cyan failed"}"#
         let event = try BuildEvent.decode(line: json)
-        guard case let .buildEnd(app, ok, error, _) = event else {
+        guard case let .buildEnd(app, ok, error, _, _) = event else {
             return XCTFail("expected .buildEnd")
         }
-        XCTAssertEqual(app, "yt")
+        XCTAssertEqual(app, "example")
         XCTAssertFalse(ok)
         XCTAssertEqual(error, "cyan failed")
     }
@@ -261,7 +261,7 @@ final class BuildEventTests: XCTestCase {
     // a user can act on.
 
     private static let encryptedLine = #"""
-    {"type":"encrypted-binaries","app":"example","count":2,"binaries":[{"path":"Payload/YT.app/YT","cryptids":[1]},{"path":"Payload/YT.app/Frameworks/Core.framework/Core","cryptids":[1,1]}]}
+    {"type":"encrypted-binaries","app":"example","count":2,"binaries":[{"path":"Payload/Example.app/Example","cryptids":[1]},{"path":"Payload/Example.app/Frameworks/Core.framework/Core","cryptids":[1,1]}]}
     """#
 
     private func encryptedRecord(
@@ -284,7 +284,7 @@ final class BuildEventTests: XCTestCase {
         XCTAssertEqual(record.count, 2)
         XCTAssertEqual(
             record.binaries.map(\.path),
-            ["Payload/YT.app/YT", "Payload/YT.app/Frameworks/Core.framework/Core"]
+            ["Payload/Example.app/Example", "Payload/Example.app/Frameworks/Core.framework/Core"]
         )
         XCTAssertEqual(record.binaries.last?.cryptids, [1, 1])
     }
@@ -353,8 +353,8 @@ final class BuildEventTests: XCTestCase {
     }
 
     func test_encrypted_path_line_names_every_binary() {
-        let record = encryptedRecord(paths: ["Payload/YT.app/YT", "Payload/YT.app/x.dylib"])
-        XCTAssertEqual(record.pathLine, "Payload/YT.app/YT · Payload/YT.app/x.dylib")
+        let record = encryptedRecord(paths: ["Payload/Example.app/Example", "Payload/Example.app/x.dylib"])
+        XCTAssertEqual(record.pathLine, "Payload/Example.app/Example · Payload/Example.app/x.dylib")
     }
 
     /// A CLI that counted without naming leaves the card with nothing to put
@@ -366,9 +366,9 @@ final class BuildEventTests: XCTestCase {
     }
 
     func test_encrypted_log_line_carries_the_paths() {
-        let line = encryptedRecord(count: 1, paths: ["Payload/YT.app/YT"]).logLine
+        let line = encryptedRecord(count: 1, paths: ["Payload/Example.app/Example"]).logLine
         XCTAssertTrue(line.hasPrefix("✗ "), line)
-        XCTAssertTrue(line.hasSuffix(": Payload/YT.app/YT"), line)
+        XCTAssertTrue(line.hasSuffix(": Payload/Example.app/Example"), line)
     }
 
     // MARK: - livecontainer-choice
@@ -483,7 +483,7 @@ final class BuildEventTests: XCTestCase {
     /// and rendering those would bury the build under housekeeping.
     func test_replayed_log_ignores_events_outside_the_build_stream() throws {
         XCTAssertTrue(try replayed(
-            #"{"type":"build-pruned","app":"yt","filename":"yt-1.ipa","path":"/b/yt-1.ipa","size_bytes":10,"trash_path":null,"build_ids":[],"dry_run":true}"#
+            #"{"type":"build-pruned","app":"example","filename":"example-1.ipa","path":"/b/example-1.ipa","size_bytes":10,"trash_path":null,"build_ids":[],"dry_run":true}"#
         ).isEmpty)
         XCTAssertTrue(BuildLogView.lines(
             for: .unknown(type: "brand-new", raw: ["type": "brand-new"])
@@ -538,7 +538,7 @@ final class BuildEventTests: XCTestCase {
     /// A dry run reports `trash_path: null` — nothing moved, so there is
     /// nowhere for it to have landed.
     func test_decode_build_pruned_event_dry_run_has_no_trash_path() throws {
-        let json = #"{"type":"build-pruned","app":"yt","filename":"yt-1.ipa","path":"/b/yt-1.ipa","size_bytes":10,"trash_path":null,"build_ids":[],"dry_run":true}"#
+        let json = #"{"type":"build-pruned","app":"example","filename":"example-1.ipa","path":"/b/example-1.ipa","size_bytes":10,"trash_path":null,"build_ids":[],"dry_run":true}"#
         let event = try BuildEvent.decode(line: json)
         guard case let .buildPruned(record) = event else {
             return XCTFail("expected .buildPruned")
@@ -631,7 +631,7 @@ final class BuildEventTests: XCTestCase {
     }
 
     func test_progress_maps_build_end_failure() {
-        let event = BuildEvent.buildEnd(app: "yt", ok: false, error: "cyan failed", elapsedSeconds: nil)
+        let event = BuildEvent.buildEnd(app: "example", ok: false, error: "cyan failed", elapsedSeconds: nil)
         XCTAssertEqual(event.progress, .finished(ok: false, error: "cyan failed", elapsed: nil))
     }
 
@@ -860,5 +860,86 @@ final class BuildEventTests: XCTestCase {
             return XCTFail("expected .stagedIPAsEnd")
         }
         XCTAssertEqual(count, 10)
+    }
+}
+
+// MARK: - C-STOP: a stopped build-end is a stop, not a failure
+
+extension BuildEventTests {
+    /// The CLI's own word that it was stopped (SIGTERM/SIGINT). `ok` is false
+    /// on the wire and `error` null, and the old reading of exactly that pair
+    /// was "failed" — the red "Last build failed / 143" this contract ends.
+    func test_a_stopped_build_end_is_a_stop_not_a_failure() throws {
+        let line = #"{"type":"build-end","app":"example","ok":false,"stopped":true,"error":null,"elapsed_seconds":4.2}"#
+        let event = try BuildEvent.decode(line: line)
+        guard case let .buildEnd(_, ok, _, _, stopped) = event else {
+            return XCTFail("expected .buildEnd")
+        }
+        XCTAssertFalse(ok)
+        XCTAssertTrue(stopped)
+        XCTAssertEqual(event.progress, .stopped(elapsed: 4.2))
+        XCTAssertTrue(BuildProgress.stopReported(in: [event]))
+    }
+
+    /// Absent is not stopped: every CLI from before C-STOP, and every real
+    /// failure after it, still reads as the verdict it always was.
+    func test_a_build_end_without_stopped_is_still_a_verdict() throws {
+        let absent = try BuildEvent.decode(
+            line: #"{"type":"build-end","app":"example","ok":false,"error":"cyan failed"}"#
+        )
+        XCTAssertEqual(absent.progress, .finished(ok: false, error: "cyan failed", elapsed: nil))
+        let explicit = try BuildEvent.decode(
+            line: #"{"type":"build-end","app":"example","ok":true,"stopped":false,"elapsed_seconds":3.0}"#
+        )
+        XCTAssertEqual(explicit.progress, .finished(ok: true, error: nil, elapsed: 3.0))
+        XCTAssertFalse(BuildProgress.stopReported(in: [absent, explicit]))
+    }
+
+    /// The stop is found wherever it sits in the stream, and only a
+    /// `build-end` can report one.
+    func test_a_stop_is_found_among_the_rest_of_the_stream() {
+        let stream = """
+        {"type":"build-start","app":"example","bundle_id":"com.example.app","delivery":"livecontainer"}
+        {"type":"stage","name":"cyan","status":"start"}
+        {"type":"log","source":"cyan","line":"stopped"}
+        {"type":"build-end","app":"example","ok":false,"stopped":true,"error":null}
+        """
+        XCTAssertTrue(BuildProgress.stopReported(in: stream.buildEvents()))
+        XCTAssertFalse(BuildProgress.stopReported(in: Array(stream.buildEvents().dropLast())))
+    }
+
+    /// Replayed, a stop is amber and says so — never the `✗` of a failure.
+    func test_a_replayed_stop_is_not_drawn_as_a_failure() throws {
+        let event = try BuildEvent.decode(
+            line: #"{"type":"build-end","app":"example","ok":false,"stopped":true,"error":null,"elapsed_seconds":4.2}"#
+        )
+        let lines = BuildLogView.lines(for: event)
+        XCTAssertEqual(lines.map(\.text), ["■ stopped (4.2s)"])
+        XCTAssertEqual(lines.first?.kind, .warn)
+    }
+}
+
+// MARK: - K12 / C-DRYRUN: where a dry run would have pushed
+
+extension BuildEventTests {
+    func test_a_dry_runs_push_target_is_in_the_transcript() throws {
+        let event = try BuildEvent.decode(line: #"{"type":"stage","name":"lc-push","status":"end","bundle_id":"com.kdt.livecontainer.ABCDE12345","size_bytes":117000000,"others":[],"dry_run":true,"documents_path":"Documents/example.ipa"}"#)
+        let texts = BuildLogView.lines(for: event).map(\.text)
+        XCTAssertEqual(texts.first, "  ✓ lc-push")
+        XCTAssertEqual(texts.count, 2, "\(texts)")
+        XCTAssertTrue(texts[1].hasPrefix("    would push "), texts[1])
+        XCTAssertTrue(texts[1].hasSuffix(" to Documents/example.ipa in com.kdt.livecontainer.ABCDE12345"),
+                      texts[1])
+    }
+
+    /// A real push, and a CLI from before C-DRYRUN, add nothing.
+    func test_only_a_dry_run_says_would_push() throws {
+        for line in [
+            #"{"type":"stage","name":"lc-push","status":"end","bundle_id":"com.kdt.livecontainer.ABCDE12345","size_bytes":117000000,"others":[],"dry_run":false,"documents_path":"Documents/example.ipa"}"#,
+            #"{"type":"stage","name":"lc-push","status":"end","bundle_id":"com.kdt.livecontainer.ABCDE12345","size_bytes":117000000,"others":[]}"#,
+        ] {
+            XCTAssertEqual(BuildLogView.lines(for: try BuildEvent.decode(line: line)).map(\.text),
+                           ["  ✓ lc-push"], line)
+        }
     }
 }

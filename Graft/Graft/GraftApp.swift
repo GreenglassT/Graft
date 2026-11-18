@@ -3,17 +3,16 @@ import SwiftUI
 @main
 struct GraftApp: App {
     @State private var rebuild = RebuildCoordinator()
-    @State private var store = ConfigStore(
-        runner: CLIRunner(
-            executable: defaultGraftExecutable(),
-            environment: ProcessEnvironment.forCLI()
-        )
-    )
+    @State private var store = ConfigStore(runner: CLIRunner.forApp())
 
     init() {
         // Before any view reads a preference: settings saved while the app
         // was TweakBuild live under the old bundle id. See `LegacyDefaults`.
         LegacyDefaults.migrateOnLaunch()
+        // Start asking the login shell now, off the main thread, so its answer
+        // is usually in before the first CLI call waits on it. Touching
+        // `shared` is what starts it.
+        _ = ShellEnvironment.shared
     }
 
     var body: some Scene {
@@ -79,18 +78,4 @@ struct GraftApp: App {
             CommandGroup(replacing: .newItem) {}
         }
     }
-}
-
-private func defaultGraftExecutable() -> URL {
-    let home = FileManager.default.homeDirectoryForCurrentUser
-    let candidates = [
-        home.appendingPathComponent(".local/bin/graft").path,
-        "/opt/homebrew/bin/graft",
-        "/usr/local/bin/graft",
-    ]
-    let fm = FileManager.default
-    if let found = candidates.first(where: { fm.isExecutableFile(atPath: $0) }) {
-        return URL(fileURLWithPath: found)
-    }
-    return URL(fileURLWithPath: "/usr/bin/env")
 }

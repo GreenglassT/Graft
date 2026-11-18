@@ -38,11 +38,16 @@ def _seed_build(
     target: str = "device",
 ) -> int:
     log = BuildLog(cfg.state_dir / "log.sqlite")
+    # The delivery the app has now, as the build path records it: these rows
+    # stand for builds made in the app's current mode. A row from before the
+    # column existed, or one made in the other mode, is
+    # tests/test_reinstall_delivery.py's business.
     log.record(
         app=app, bundle_id=f"com.example.{app}", version="1.0",
         tweaks=[], ipa_path=ipa_path,
         signing_team="TEAM", udid="00008130-x", success=success,
         target=target,
+        delivery=cfg.apps[app].delivery if app in cfg.apps else None,
     )
     import sqlite3
     with sqlite3.connect(cfg.state_dir / "log.sqlite") as conn:
@@ -390,6 +395,41 @@ def test_a_reinstall_pushes_into_the_pinned_livecontainer(
         cli_mod._do_reinstall_build(cfg, build_id)
 
     assert push.call_args.kwargs["lc_bundle_id"] == pin
+
+
+def test_a_reinstall_may_overwrite_only_what_this_device_recorded(
+    temp_config_env: Path, tmp_path: Path
+) -> None:
+    """The push refuses to replace a same-named file it has no record of; the
+    re-install hands it the records for the device it is pushing to."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.build_log import BuildLog
+    from graft_ipa.lc_runner import LCDeliveryResult
+
+    _seed_app_in_config(temp_config_env, "echo", delivery="livecontainer")
+    cfg = load_config(temp_config_env)
+    ipa = tmp_path / "echo.ipa"
+    ipa.write_bytes(b"x" * 1024)
+    build_id = _seed_build(cfg, "echo", ipa)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    for udid in ("00008130-test", "another-phone"):
+        log.record_delivery(
+            app="echo", bundle_id="com.echo.app", inputs_digest=None, digest_version=None,
+            cyan=None, tweaks=[], source_version="1", ipa_sha256=None, delivery="livecontainer",
+            lc_bundle_id=f"LC-{udid}", remote_name="echo.ipa", udid=udid,
+        )
+
+    lc_result = LCDeliveryResult(
+        udid="00008130-test", bundle_id="LC-00008130-test",
+        documents_path="Documents/echo.ipa", size_bytes=1024,
+    )
+    with patch.object(cli_mod, "select_device", return_value=("00008130-test", "usb")), \
+         patch.object(
+             cli_mod.lc_runner, "push_ipa_to_livecontainer", return_value=lc_result
+         ) as push:
+        cli_mod._do_reinstall_build(cfg, build_id)
+
+    assert push.call_args.kwargs["ours"] == {"LC-00008130-test": {"echo.ipa"}}
 
 
 class TestAMacBuildIsNotAPhoneBuild:

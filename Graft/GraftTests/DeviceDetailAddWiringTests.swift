@@ -48,7 +48,7 @@ import XCTest
 /// out: the worry at the time was that a click landing on the sheet's own
 /// Add button would leave `submit()` blocked reading stdin from the
 /// harness's unstubbed `/bin/sh`. Measured directly against the exact argv
-/// `submit()` builds — `/bin/sh --json --add-app-manual --name bookplayer
+/// `submit()` builds — `/bin/sh --json --add-app-manual --name exampleplayer
 /// --bundle-id com.a.one` — that exits **immediately** (`--json: invalid
 /// option`, rc 2), because `sh` rejects the long option before reading a
 /// byte. Every call this harness's `submit()` could make starts with
@@ -142,7 +142,7 @@ final class DeviceDetailAddWiringTests: XCTestCase {
     /// The stub CLI is a temp script that captures its own argv and answers
     /// every invocation with one `app-added` event naming a *different* key
     /// than whatever `--name` it was sent — the shape `add_app_manual`
-    /// produces on a collision (`bookplayer` → `bookplayer_2`). The idiom —
+    /// produces on a collision (`exampleplayer` → `exampleplayer_2`). The idiom —
     /// script-with-sentinel, poll for two invocations (the add, then
     /// `mutate`'s reload) — is `AddAppSheetPrefillTests.
     /// test_clicking_add_on_a_prefilled_sheet_sends_the_staged_name_and_bundle_id`'s
@@ -158,16 +158,16 @@ final class DeviceDetailAddWiringTests: XCTestCase {
         let capturePath = dir + "device_detail_add_wiring_captured_\(UUID().uuidString).txt"
         let scriptPath = dir + "device_detail_add_wiring_capture_\(UUID().uuidString).sh"
         let sentinel = "__INVOCATION_END__"
-        // Answers "bookplayer_2" regardless of what --name it was sent —
+        // Answers "exampleplayer_2" regardless of what --name it was sent —
         // standing in for `add_app_manual` deduping past an existing
-        // "bookplayer" key, which is exactly the case where forwarding the
+        // "exampleplayer" key, which is exactly the case where forwarding the
         // sheet's own `suggestedName` instead of this answer would select a
         // config key that does not exist.
         let script = """
         #!/bin/sh
         for arg in "$@"; do printf '%s\\n' "$arg" >> "\(capturePath)"; done
         printf '%s\\n' "\(sentinel)" >> "\(capturePath)"
-        printf '{"type":"app-added","name":"bookplayer_2","bundle_id":"com.a.one","display_name":"BookPlayer","delivery":"sideload"}\\n'
+        printf '{"type":"app-added","name":"exampleplayer_2","bundle_id":"com.a.one","display_name":"ExamplePlayer","delivery":"sideload"}\\n'
         """
         try script.write(toFile: scriptPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
@@ -179,7 +179,7 @@ final class DeviceDetailAddWiringTests: XCTestCase {
         let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: scriptPath)))
         let prefill = AddAppSheet.Prefill(staged: try stagedIPARecord(), installedVersion: "1.0")
         XCTAssertEqual(
-            prefill.suggestedName, "bookplayer",
+            prefill.suggestedName, "exampleplayer",
             "premise: the locally-derived name and the CLI's answer must actually differ, "
             + "or this test cannot tell the two apart"
         )
@@ -225,7 +225,7 @@ final class DeviceDetailAddWiringTests: XCTestCase {
             return XCTFail("onAdded never fired within 5s; captured so far: \(seen)")
         }
         XCTAssertEqual(
-            captured, "bookplayer_2",
+            captured, "exampleplayer_2",
             "onAdded must hand back the CLI's own settled key, not the sheet's "
             + "locally-derived suggestion — a caller selecting the latter would select "
             + "nothing, since no row exists under it"

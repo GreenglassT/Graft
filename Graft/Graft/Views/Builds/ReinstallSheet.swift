@@ -89,12 +89,11 @@ struct ReinstallSheet: View {
             }
             .foregroundStyle(Palette.danger)
         case .cancelled:
-            // Unreachable today and deliberately not folded into `.failed`.
-            // Nothing here sets it: a re-install has no Stop button, because
-            // it has no `store.launchBuild` handle — this sheet owns its own
-            // Task and dismissing it is what ends the wait, not the work. The
-            // case exists so that adding a cancel here later is a visible
-            // decision rather than a state that silently renders as a failure.
+            // Deliberately not folded into `.failed`. A re-install has no Stop
+            // button — it has no `store.launchBuild` handle; this sheet owns
+            // its own Task — so the one way here is the CLI reporting a stop
+            // it was sent from elsewhere (C-STOP's `build-end` with
+            // `stopped: true`), which is not a failure either.
             HStack(spacing: 6) {
                 Circle().fill(Palette.warn).frame(width: 7, height: 7)
                 Text("Stopped").font(AppFont.label).labelCaps()
@@ -125,7 +124,12 @@ struct ReinstallSheet: View {
             ) { event in
                 handle(event: event)
             }
-            if result.exitCode != 0 {
+            // A stop the CLI reported (C-STOP) is not a failure, whatever the
+            // exit status: read off the collected events, which — unlike the
+            // callback's — are all in by now.
+            if BuildProgress.stopReported(in: result.events) {
+                state = .cancelled
+            } else if result.exitCode != 0 {
                 report(unexplained: result)
             }
         } catch {
@@ -180,6 +184,8 @@ struct ReinstallSheet: View {
             state = .running(stage: name)
         case .finished(let ok, let error, _):
             state = ok ? .ok : .failed(message: error ?? "failed")
+        case .stopped:
+            state = .cancelled
         default:
             break
         }

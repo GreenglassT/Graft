@@ -36,6 +36,12 @@ struct AppStoreSettingsSection: View {
         let ok: Bool
         let detail: String
         let warning: String?
+        /// The CLI's one-string install command for this tool
+        /// (`appstore-status`'s `install`), which the row's Copy puts on the
+        /// pasteboard: the command, and nothing to edit out of it first. The
+        /// "Run in Terminal" block below still holds every step, comments and
+        /// all, for its own Copy.
+        var install: String? = nil
     }
 
     private static func account(_ signedIn: Bool?) -> String {
@@ -58,7 +64,8 @@ struct AppStoreSettingsSection: View {
                 detail: ipa.present
                     ? "\(ipa.version ?? "unknown version") · \(Self.account(ipa.signedIn))"
                     : "not found at \(ipa.path)",
-                warning: ipa.warning
+                warning: ipa.warning,
+                install: ipa.install
             ),
             Row(
                 name: "UnfairPlay",
@@ -66,7 +73,8 @@ struct AppStoreSettingsSection: View {
                 detail: up.present
                     ? "\(up.version ?? "unknown version") · \(up.enrolled ? "enrolled" : "not enrolled")"
                     : "not found at \(up.path)",
-                warning: nil
+                warning: nil,
+                install: up.install
             ),
         ]
     }
@@ -156,6 +164,13 @@ struct AppStoreSettingsSection: View {
                     }
                 }
                 Spacer(minLength: 0)
+                if let install = row.install {
+                    Button("Copy install command") { Pasteboard.copy(install) }
+                        .buttonStyle(.borderless)
+                        .font(AppFont.label)
+                        .foregroundStyle(Palette.accent)
+                        .help(install)
+                }
             }
             .padding(Metrics.cardPadding)
             .cardStyle()

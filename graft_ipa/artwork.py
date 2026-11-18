@@ -250,9 +250,9 @@ _INFO_PLIST = re.compile(r"^Payload/[^/]+\.app/Info\.plist$")
 #: cap, a hostile IPA that declares a deflate-bombed PNG as its icon gets it
 #: read preferentially. 2 MiB clears both real-world marks in the reference
 #: cache with room to spare: 18,485 bytes for the largest file any app there
-#: actually gets *selected* as its icon (Speedtest's), and 402,410 bytes for
-#: the largest flat PNG anywhere in any `.app` root, matched or not (Bravo's
-#: `france_ppo.png`, not an icon at all). A 1024x1024 PNG icon fits well
+#: actually gets *selected* as its icon (one app's), and 402,410 bytes for
+#: the largest flat PNG anywhere in any `.app` root, matched or not (another
+#: app's image asset, not an icon at all). A 1024x1024 PNG icon fits well
 #: inside it too.
 _MAX_ICON_BYTES = 2 * 1024 * 1024
 
@@ -324,7 +324,7 @@ def _read_icon_from_ipa(ipa: Path) -> bytes | None:
     findable is a clean miss — there is no name-matching fallback. That
     heuristic used to stand in here, and on real apps in this cache it does
     not degrade gracefully: it returns LiveContainer's placeholder-for-guests
-    icon and Speedtest's carrier-branded icon as those apps' own artwork,
+    icon and another app's carrier-branded icon as those apps' own artwork,
     silently, under a sidecar that then claims the resolution is done. A miss
     costs one App Store lookup; a wrong picture is sticky.
 

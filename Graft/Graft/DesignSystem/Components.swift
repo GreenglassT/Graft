@@ -30,6 +30,24 @@ extension View {
     }
 }
 
+extension View {
+    /// A paid-only control on a free Apple ID: disabled, with the reason as its
+    /// tooltip (`PaidOnly` holds the sentences). Nil — a paid account, or one
+    /// not known yet — leaves the control exactly as it was, with no tooltip
+    /// added: an empty `.help("")` still draws an empty bubble on hover.
+    ///
+    /// Composes with the control's own `.disabled(_:)`, which SwiftUI ORs, so
+    /// a control busy for its own reasons stays disabled either way.
+    @ViewBuilder
+    func paidOnly(_ reason: String?) -> some View {
+        if let reason {
+            self.disabled(true).help(reason)
+        } else {
+            self
+        }
+    }
+}
+
 extension Binding {
     /// Drive an `isPresented:` from an optional payload: true while it's set,
     /// and clearing it on dismiss. `.alert(_:isPresented:presenting:)` wants

@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from graft_ipa import appstore, itunes
+from graft_ipa import appstore, ipatool, itunes, unfairplay
 from graft_ipa.config import Config, load_config
 from graft_ipa.errors import AppStoreError, ConfigError, ITunesError
 from graft_ipa.json_output import JsonEmitter
@@ -62,12 +62,12 @@ def test_status_reports_both_tools_ready(cfg: Config, fakes: FakeTools) -> None:
     assert appstore.status(cfg.appstore) == {
         "ipatool": {
             "path": str(fakes.ipatool), "present": True, "version": "2.8.0",
-            "signed_in": True, "warning": None,
+            "signed_in": True, "warning": None, "install": None,
         },
         "unfairplay": {
             "path": str(fakes.unfairplay), "present": True,
             "version": "dev-d7503082a59e", "enrolled": True,
-            "model_dir": str(fakes.models),
+            "model_dir": str(fakes.models), "install": None,
         },
         "setup_commands": [],
     }
@@ -104,10 +104,47 @@ def test_not_enrolled_names_the_setup_command(cfg: Config, fakes: FakeTools) -> 
     payload = appstore.status(cfg.appstore)
 
     assert payload["unfairplay"]["enrolled"] is False
-    assert f"sudo {fakes.unfairplay} setup --app /Applications/YOUR_IPAD_APP.app" in (
-        payload["setup_commands"]
-    )
+    assert unfairplay.setup_command(fakes.unfairplay) in payload["setup_commands"]
+    assert f"sudo {fakes.unfairplay} setup --app " in unfairplay.setup_command(fakes.unfairplay)
     assert not any("auth login" in c for c in payload["setup_commands"])
+
+
+def _on_intel(monkeypatch: pytest.MonkeyPatch) -> None:
+    from graft_ipa import host
+
+    monkeypatch.setattr(host, "_sysctl_arm64", lambda: None)  # no such sysctl: Intel
+
+
+def test_on_an_intel_mac_status_does_not_offer_an_enrollment_that_cannot_work(
+    cfg: Config, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`unfairplay setup` enrolls with an iPhone/iPad app installed on this Mac
+    from the App Store, and only Apple silicon Macs can install those. Handing
+    an Intel user that `sudo` line sends them through a setup that cannot
+    succeed; the status has to say why instead."""
+    _on_intel(monkeypatch)
+    (fakes.models / "enrollment.bin").unlink()
+
+    commands = appstore.status(cfg.appstore)["setup_commands"]
+
+    assert not any(" setup --app " in c for c in commands)
+    assert any("Apple silicon" in c for c in commands)
+    # Every line stays safe to paste into a shell.
+    assert all(c.startswith("#") or "auth login" in c for c in commands)
+
+
+def test_on_an_intel_mac_an_unenrolled_get_says_why(
+    cfg: Config, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _on_intel(monkeypatch)
+    (fakes.models / "enrollment.bin").unlink()
+
+    with pytest.raises(AppStoreError) as e:
+        _fetch(cfg)
+
+    assert "Apple silicon" in e.value.message
+    assert "setup" not in (e.value.hint or "")
+    assert not [c for c in fakes.calls("ipatool") if c["argv"][0] == "download"]
 
 
 def test_2_8_1_is_warned_about(cfg: Config, fakes: FakeTools) -> None:
@@ -123,8 +160,12 @@ def test_2_8_0_is_not_warned_about(cfg: Config) -> None:
     assert appstore.status(cfg.appstore)["ipatool"]["warning"] is None
 
 
-def test_nothing_installed(tmp_path: Path) -> None:
+def test_nothing_installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from graft_ipa.config import AppStoreToolsConfig
+
+    # Discovery also looks in ~/.local/bin and on PATH: keep this machine's out of it.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
     tools = AppStoreToolsConfig(
         ipatool=tmp_path / "no-ipatool", unfairplay=tmp_path / "no-up",
@@ -136,6 +177,7 @@ def test_nothing_installed(tmp_path: Path) -> None:
     assert payload["ipatool"] == {
         "path": str(tmp_path / "no-ipatool"), "present": False, "version": None,
         "signed_in": False, "warning": None,
+        "install": ipatool.install_command(tmp_path / "no-ipatool"),
     }
     assert payload["unfairplay"]["present"] is False
     # Not "sign in": there is no ipatool to sign in with yet.
@@ -392,12 +434,15 @@ def test_not_owned_carries_the_tap_get_hint(cfg: Config, fakes: FakeTools) -> No
     assert "tap Get" in e.value.hint
 
 
-def test_2_8_1_warns_and_still_tries(cfg: Config, fakes: FakeTools) -> None:
+def test_2_8_1_is_refused_before_any_download(cfg: Config, fakes: FakeTools) -> None:
     fakes.set(ipatool_version="2.8.1")
 
-    _, _, warnings = _fetch(cfg)
+    with pytest.raises(AppStoreError) as e:
+        _fetch(cfg)
 
-    assert any("2.8.1" in w and "#672" in w for w in warnings)
+    assert "2.8.1" in e.value.message
+    assert "#672" in e.value.hint
+    assert not [c for c in fakes.calls("ipatool") if c["argv"][0] == "download"]
 
 
 # ---------------------------------------------------------------------------

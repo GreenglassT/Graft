@@ -3,6 +3,13 @@ import SwiftUI
 struct EditAppSheet: View {
     let app: AppRecord
     @Bindable var store: ConfigStore
+    /// `ContentView`'s, injected through the app pane: the LiveContainer
+    /// picker lists what `--lc-status` found on the default device, and the
+    /// device pane reads the same store, so a phone already checked there
+    /// shows its answer here at once while this sheet re-reads it.
+    let liveContainer: LiveContainerStore
+    /// `ContentView`'s polled store, for which phone is the default.
+    let devices: DevicesStore
     let onClose: () -> Void
 
     /// The whole form, plus the baseline it will be diffed against. One list of
@@ -13,11 +20,156 @@ struct EditAppSheet: View {
     /// Held so the sheet can cancel the write if it goes away underneath it.
     @State private var saveTask: Task<Void, Never>?
 
-    init(app: AppRecord, store: ConfigStore, onClose: @escaping () -> Void) {
+    init(
+        app: AppRecord, store: ConfigStore, liveContainer: LiveContainerStore,
+        devices: DevicesStore, onClose: @escaping () -> Void
+    ) {
         self.app = app
         self._store = Bindable(wrappedValue: store)
+        self.liveContainer = liveContainer
+        self.devices = devices
         self.onClose = onClose
         _draft = State(initialValue: AppOptionsDraft(app: app))
+    }
+
+    private var defaultDevice: DeviceRecord? { devices.devices.first(where: \.isDefault) }
+
+    /// Whether the LiveContainer picker is on the sheet: for an app being
+    /// delivered into LiveContainer, by a CLI that reports the pin (C-LCPIN).
+    /// An older CLI reports neither the pin nor the flag that sets it, so a
+    /// picker there would show "Automatic" over a hand-written pin and send a
+    /// flag the CLI refuses.
+    static func offersLCPin(app: AppRecord, delivery: DeliveryMode) -> Bool {
+        app.reportsLCPin && delivery == .livecontainer
+    }
+
+    /// One entry in the LiveContainer picker.
+    struct LCPinChoice: Hashable {
+        let pin: AppOptionsDraft.LCPin
+        let label: String
+    }
+
+    /// The picker's entries: Automatic, each LiveContainer on the default
+    /// device, and the current pin when it names none of them.
+    ///
+    /// The current pin is matched the way the CLI matches it
+    /// (`pinnedInstance`). The matching instance then carries the pin's own
+    /// spelling as its tag, so the picker shows it selected rather than
+    /// showing nothing; a pin that matches nothing — another phone's, or one
+    /// deleted since — stays listed, because dropping it would silently
+    /// re-point the app at Automatic on the next save.
+    ///
+    /// - Parameter instances: what the default device answered, or nil when
+    ///   it has not — no default device, its status not read yet, or a phone
+    ///   that could not be read. Only an answer can say a pin is "not on" the
+    ///   phone; without one the pin is listed by itself, and `lcPinNote` says
+    ///   why there is no list.
+    static func lcPinChoices(
+        instances: [LCInstanceRecord]?, current: String?, deviceName: String?
+    ) -> [LCPinChoice] {
+        let listed = instances ?? []
+        let pinned = current.flatMap { pinnedInstance($0, in: listed) }
+        var choices = [LCPinChoice(pin: .automatic, label: "Automatic")]
+        for instance in listed {
+            let isPinned = pinned == instance
+            // The name alone fits the sheet's popup; the bundle id joins it
+            // only when the name is not enough — two primaries from two
+            // Apple IDs are both "LiveContainer", which is the very case a
+            // pin exists to settle.
+            let shared = listed.filter { $0.displayName == instance.displayName }.count > 1
+            let label = shared && instance.displayName != instance.bundleId
+                ? "\(instance.displayName) — \(instance.bundleId)"
+                : instance.displayName
+            choices.append(LCPinChoice(
+                pin: .bundleId(isPinned ? (current ?? instance.bundleId) : instance.bundleId),
+                label: label
+            ))
+        }
+        if let current, pinned == nil {
+            let label = instances == nil
+                ? current
+                : deviceName.map { "\(current) (not on \($0))" } ?? current
+            choices.append(LCPinChoice(pin: .bundleId(current), label: label))
+        }
+        return choices
+    }
+
+    /// The LiveContainer a pin names, matched exactly as the CLI's
+    /// `lc_discovery._pinned` matches it, or nil where the CLI would refuse
+    /// the pin.
+    ///
+    /// Ignoring case; an exact match first — the one spelled as pinned, if
+    /// two differ only in case — and only failing that, the one id the pin is
+    /// a dotted prefix of. Exact and prefix matches used to be counted
+    /// together, so `com.kdt.livecontainer` beside
+    /// `com.kdt.livecontainer.ABCDE12345` found two, and the picker listed the
+    /// pin a second time as "(not on …)", with the same tag as the row it was
+    /// installed as. A pin outside the LiveContainer family matches nothing:
+    /// the CLI refuses it before looking.
+    static func pinnedInstance(_ pin: String, in instances: [LCInstanceRecord]) -> LCInstanceRecord? {
+        let want = pin.lowercased()
+        guard want.hasPrefix(liveContainerFamily) else { return nil }
+        let exact = instances.filter { $0.bundleId.lowercased() == want }
+        if !exact.isEmpty {
+            return exact.first { $0.bundleId == pin } ?? exact[0]
+        }
+        let prefixed = instances.filter { $0.bundleId.lowercased().hasPrefix(want + ".") }
+        return prefixed.count == 1 ? prefixed[0] : nil
+    }
+
+    /// Every LiveContainer bundle id starts with this, in any case
+    /// (`lc_discovery.FAMILY_PREFIX`).
+    private static let liveContainerFamily = "com.kdt.livecontainer"
+
+    /// The instances a status lists, or nil when there is no list to trust:
+    /// nothing read yet, or a phone that did not answer.
+    static func instances(from status: LCStatusRecord?) -> [LCInstanceRecord]? {
+        guard let status, status.reachable else { return nil }
+        return status.instances
+    }
+
+    /// The phone the picker's list is read from, or nil when there is nothing
+    /// to read: no picker, or no default device connected.
+    ///
+    /// The sheet's `.task` is keyed on this, so it runs again whenever the
+    /// answer changes. Keyed on whether the picker shows, it ran once as the
+    /// sheet opened — and with the phone not plugged in yet, returned and
+    /// never ran again.
+    static func lcPinLoadTarget(app: AppRecord, delivery: DeliveryMode, defaultUDID: String?) -> String? {
+        offersLCPin(app: app, delivery: delivery) ? defaultUDID : nil
+    }
+
+    /// The line under the picker: where its list comes from, and what
+    /// Automatic does.
+    ///
+    /// - Parameter otherDevicesConnected: whether any phone is connected. With
+    ///   one plugged in and none of them the default — "Ask each time", or a
+    ///   default that is another phone — plugging one in is not what is
+    ///   missing.
+    static func lcPinNote(
+        deviceName: String?, hasLoaded: Bool, status: LCStatusRecord?,
+        otherDevicesConnected: Bool = false
+    ) -> String {
+        let automatic = "Automatic uses the only LiveContainer on the phone, or its "
+            + "primary. Pin one to push into another, or when there are two primaries."
+        guard let deviceName else {
+            if otherDevicesConnected {
+                return "No connected device is your default. Choose a default device in "
+                    + "Settings to list its LiveContainers. " + automatic
+            }
+            return "Plug in your default device (Settings) to choose from its "
+                + "LiveContainers. " + automatic
+        }
+        guard hasLoaded else { return "Looking for LiveContainers on \(deviceName)…" }
+        if let status, !status.reachable {
+            return "Couldn't read \(deviceName): \(status.error ?? "no answer"). " + automatic
+        }
+        return automatic
+    }
+
+    /// The default device's LiveContainers, or nil until it has answered.
+    private var defaultInstances: [LCInstanceRecord]? {
+        Self.instances(from: defaultDevice.flatMap { liveContainer.status[$0.udid] })
     }
 
     var body: some View {
@@ -46,6 +198,18 @@ struct EditAppSheet: View {
                         Text(mode.displayName).tag(mode)
                     }
                 }
+                .paidOnly(Self.deliveryLocked(original: app.delivery, account: store.account)
+                          ? PaidOnly.sideload : nil)
+                if Self.offersLCPin(app: app, delivery: draft.edited.delivery) {
+                    Picker("LiveContainer", selection: $draft.edited.lcPin) {
+                        ForEach(Self.lcPinChoices(
+                            instances: defaultInstances, current: app.lcBundleId,
+                            deviceName: defaultDevice?.name
+                        ), id: \.self) { choice in
+                            Text(choice.label).tag(choice.pin)
+                        }
+                    }
+                }
                 Toggle("Keep bundle id", isOn: $draft.edited.keepBundleId)
                 Toggle("Strip extensions", isOn: $draft.edited.stripExtensions)
                 Toggle("Strip supported devices", isOn: $draft.edited.stripSupportedDevices)
@@ -53,6 +217,28 @@ struct EditAppSheet: View {
                         value: $draft.edited.compressionLevel, in: 0...9)
             }
             .formStyle(.grouped)
+
+            if Self.offersLCPin(app: app, delivery: draft.edited.delivery) {
+                Text(Self.lcPinNote(
+                    deviceName: defaultDevice?.name,
+                    hasLoaded: defaultDevice.map { liveContainer.hasLoaded.contains($0.udid) } ?? false,
+                    status: defaultDevice.flatMap { liveContainer.status[$0.udid] },
+                    otherDevicesConnected: !devices.devices.isEmpty
+                ))
+                .font(AppFont.monoSmall)
+                .foregroundStyle(Palette.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // The reason, whenever the account is free. Warn-coloured while
+            // the draft is still Sideload: that is an app no build will accept,
+            // and the picker above is how it gets out of that state.
+            if store.account.isFree {
+                Text(PaidOnly.sideload)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(draft.edited.delivery == .sideload ? Palette.warn : Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if !draft.edited.keepBundleId {
                 Text("Some apps tie sign-in to their original bundle id, so changing it "
@@ -92,6 +278,39 @@ struct EditAppSheet: View {
         // changes, or the window closes. Cancel the Task so its result can't
         // be written into @State that no longer exists.
         .onDisappear { saveTask?.cancel() }
+        // Re-read each time the picker appears rather than once per session:
+        // installing LiveContainer2 on the device pane and coming straight
+        // here is the way someone arrives wanting to pin it. The store keeps
+        // its last answer on screen while this runs. Read again whenever the
+        // default device changes too — plugged in with the sheet open, or
+        // another phone made the default (`lcPinLoadTarget`).
+        .task(id: Self.lcPinLoadTarget(
+            app: app, delivery: draft.edited.delivery, defaultUDID: defaultDevice?.udid
+        )) {
+            guard let udid = Self.lcPinLoadTarget(
+                app: app, delivery: draft.edited.delivery, defaultUDID: defaultDevice?.udid
+            ), !liveContainer.loading.contains(udid) else { return }
+            await liveContainer.load(udid: udid)
+        }
+        // A pin only means something for LiveContainer delivery. Switching
+        // the app to Sideload hides the picker, and a pin edited before that
+        // must not ride along on the save unseen.
+        .onChange(of: draft.edited.delivery) { _, delivery in
+            if !Self.offersLCPin(app: app, delivery: delivery) {
+                draft.edited.lcPin = draft.original.lcPin
+            }
+        }
+    }
+
+    /// Whether the delivery picker is disabled: on a free Apple ID, for an app
+    /// that is already LiveContainer, since Sideload is the only other choice
+    /// and the CLI refuses it.
+    ///
+    /// A *sideload* app in a free config keeps the picker live. It is the way
+    /// out — no build of it will run until it is LiveContainer — and choosing
+    /// Sideload there is no change, so nothing refused can be sent.
+    static func deliveryLocked(original: DeliveryMode, account: AccountMode?) -> Bool {
+        account.isFree && original == .livecontainer
     }
 
     private func startSave() {

@@ -196,6 +196,12 @@ struct ContentView: View {
     /// config", which `store.apps.isEmpty` alone cannot — see the `.none`
     /// branch of `sectionContent`.
     @State private var didLoadApps = false
+    /// The missing tools the user closed the window's notice on, so it stays
+    /// closed for that list and comes back if a different tool goes missing.
+    @State private var dismissedToolsNotice: [MissingTool]?
+    /// Whether a return refresh is running, and when the last one finished:
+    /// returns that come in a burst cost one refresh. See `ReturnRefreshGate`.
+    @State private var returnRefresh = ReturnRefreshGate()
 
     /// - Parameter selection: what to open on, for a test that needs to reach a
     ///   pane it cannot click its way to.
@@ -258,33 +264,66 @@ struct ContentView: View {
                 // widened at the same time.)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
         } detail: {
-            sectionContent
+            // Over every pane, not only the app pane: each of them runs the
+            // same CLI against the same missing config, and each would put up
+            // its own alert about it. The sidebar stays — empty, but usable.
+            if let need = store.setupNeed {
+                SetupView(
+                    need: need, isChecking: store.isCheckingSetup,
+                    onCheckAgain: { Task { await checkSetup(refreshingEnvironment: true) } },
+                    onContinueWithoutTools: { store.continueWithoutTools() }
+                )
+            } else {
+                sectionContent
+                    // Non-modal and below the pane, not over it: a missing
+                    // tool is worth knowing before a build fails on it, and
+                    // not worth interrupting anything else for.
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        if let missing = Self.toolsNotice(
+                            missing: settingsStore.missingTools,
+                            dismissed: dismissedToolsNotice,
+                            showingSettings: selection == .section(.settings)
+                        ) {
+                            MissingToolsNotice(
+                                count: missing.count,
+                                onShow: { selection = .section(.settings) },
+                                onDismiss: { dismissedToolsNotice = missing }
+                            )
+                        }
+                    }
+            }
         }
         .task {
-            do {
-                let apps = try await store.loadApps()
-                didLoadApps = true
-                // Artwork is deliberately *not* kicked off here. The line that
-                // used to do it ran alongside the `.onChange` below, which the
-                // very same `loadApps()` also fires — `store.apps` genuinely
-                // moves from `[]` to the real list, and `initial: false`
-                // suppresses only the appearance fire, not a real value change.
-                // Two subprocesses per launch, ~150ms of duplicated work and
-                // two NSCache repopulations, for one set of icons.
-                //
-                // Open on an app rather than on a placeholder. There is no
-                // "Apps" row to land on any more — the apps *are* the top of
-                // the sidebar — so with no selection the first thing the user
-                // sees would be an empty pane beside a list of them.
-                //
-                // Only when nothing is selected yet: this task also re-runs on
-                // a new window, and stealing an in-progress selection back to
-                // the first app would be a navigation the user didn't make.
-                if selection == nil, let first = apps.first {
-                    selection = .app(first.id)
+            await checkSetup()
+        }
+        // Coming back to the window is the moment a user who just ran the
+        // command in Terminal expects the app to have noticed. On the setup
+        // screen that is Check again, shell and all: what the user just ran may
+        // have been `pipx ensurepath`.
+        //
+        // Once set up, it is a quiet re-read of the app list (`refreshOnReturn`).
+        // This used to do nothing at all past setup, and the list is what
+        // carries the account every pane gates on — so `graft --init` in
+        // Terminal turning a free config paid (or a hand edit removing
+        // `signing:`) went unnoticed until an app was added or removed, or
+        // until Settings' Re-run happened to be pressed: entering Settings
+        // runs `--check` only while it has no rows, which after the launch
+        // scan is never.
+        //
+        // Only a return from `.inactive` (`isReturn`), and the refresh is
+        // coalesced (`returnRefresh`): a sheet or an alert taking key is not
+        // the window coming back, and a run of them must not be a run of
+        // subprocesses.
+        .onChange(of: controlActiveState) { previous, active in
+            guard Self.isReturn(from: previous, to: active) else { return }
+            if store.setupNeed != nil {
+                Task { await checkSetup(refreshingEnvironment: true) }
+            } else if didLoadApps, returnRefresh.begin() {
+                Task {
+                    await Self.refreshOnReturn(config: store, settings: settingsStore)
+                    returnRefresh.end()
                 }
             }
-            catch { store.lastError = error.localizedDescription }
         }
         // No launch-time `--settings` read for the DEFAULT TARGET chip any
         // more. That used to be the only channel `default_device_udid`
@@ -350,7 +389,13 @@ struct ContentView: View {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
-        .task(id: selection) {
+        // Keyed on readiness as well as the selection. While the setup screen
+        // is up no pane is on screen, and a section's load would only fail
+        // into that pane's `lastError` — an alert waiting for whoever opens it
+        // after setup. Keyed this way, the load runs when setup finishes for
+        // whatever is selected by then.
+        .task(id: [AnyHashable(selection), AnyHashable(store.setupNeed == nil)]) {
+            guard store.setupNeed == nil else { return }
             // Selecting an app or a phone is a selection change too now that
             // both share this column, so this task restarts on every one of
             // them. Nothing below it wants to run for either — `AppDetailView`
@@ -396,6 +441,12 @@ struct ContentView: View {
             if section == .tweaks {
                 do { _ = try await tweaksStore.loadTweaks() }
                 catch { report(error) { tweaksStore.lastError = $0 } }
+                // The folder the empty state names, as the CLI resolves it.
+                // Read once; a failure costs the path in one sentence, which
+                // then names no folder rather than a wrong one.
+                if settingsStore.paths == nil {
+                    _ = try? await settingsStore.loadSettings()
+                }
             }
             if section == .repos && repoStore.repos.isEmpty {
                 do { _ = try await repoStore.loadRepos() }
@@ -504,6 +555,105 @@ struct ContentView: View {
             guard let completed else { return }
             Task { await artworkStore.load(app: completed.app, refresh: true) }
         }
+        // Settings' `--check` reported a different account from the one the
+        // app list was read under: config.yaml changed account while the app
+        // was open (`graft --init` in Terminal). Re-read the list, which
+        // carries the account every pane gates on, and the delivery of every
+        // app without a `delivery:` key, which follows the account.
+        .onChange(of: settingsStore.account) { _, reported in
+            guard let reported, reported != store.account else { return }
+            Task { try? await store.reload() }
+        }
+    }
+
+    /// The first load of the app list — and the setup screen's Check again,
+    /// and the re-check on coming back to the window.
+    ///
+    /// `ConfigStore.checkSetup` decides between the setup screen and the
+    /// alert; what is left here is what only this view owns.
+    private func checkSetup(refreshingEnvironment: Bool = false) async {
+        let loaded = await store.checkSetup(
+            refreshingEnvironment: refreshingEnvironment,
+            toolChecks: {
+                // The same scan, and the same store, Settings shows: one
+                // `--check` answers the setup step, the notice and the pane.
+                do { try await settingsStore.runChecks() } catch { return nil }
+                return settingsStore.checks
+            }
+        )
+        guard let apps = loaded else { return }
+        didLoadApps = true
+        // The window's notice, for a user who did not come through the setup
+        // screen: one scan per launch, in the background of a list that is
+        // already showing. Not when the setup step just ran one.
+        if !settingsStore.hasChecked {
+            Task { try? await settingsStore.runChecks() }
+        }
+        // Artwork is deliberately *not* kicked off here. The line that
+        // used to do it ran alongside the `.onChange` below, which the
+        // very same `loadApps()` also fires — `store.apps` genuinely
+        // moves from `[]` to the real list, and `initial: false`
+        // suppresses only the appearance fire, not a real value change.
+        // Two subprocesses per launch, ~150ms of duplicated work and
+        // two NSCache repopulations, for one set of icons.
+        //
+        // Open on an app rather than on a placeholder. There is no
+        // "Apps" row to land on any more — the apps *are* the top of
+        // the sidebar — so with no selection the first thing the user
+        // sees would be an empty pane beside a list of them.
+        //
+        // Only when nothing is selected yet: this task also re-runs on
+        // a new window, and stealing an in-progress selection back to
+        // the first app would be a navigation the user didn't make.
+        if selection == nil, let first = apps.first {
+            selection = .app(first.id)
+        }
+    }
+
+    /// What returning to a set-up window re-reads: the app list, which carries
+    /// the account; the preflight, while the window's notice says tools are
+    /// missing — so installing one in Terminal takes the notice down — or
+    /// when the account the list now reports is not the one the last scan
+    /// was for; and the settings, while they say config.yaml does not parse.
+    ///
+    /// The account case is F2's second half. `graft --init` in Terminal
+    /// turning a free config paid, with no tool missing, was picked up by the
+    /// list and by nothing else: Settings' Preflight rows went on showing the
+    /// free set, the notice never mentioned the paid-only tools, and the
+    /// first build failed at preflight. The parse-error case is K4's: the
+    /// notice says "fix it in a text editor, then come back to Settings", and
+    /// coming back read only the list, so the notice and the frozen editor
+    /// stayed up over a config that now parsed until the pane was re-entered.
+    ///
+    /// Quiet, like the device poll: nobody pressed anything, and `lastError`
+    /// is a modal alert. A config broken in Terminal leaves the list as it was
+    /// read last, and the next build or Settings visit says what is wrong.
+    /// Each is one subprocess (~150–300ms), and the second and third run only
+    /// when they have something to clear.
+    ///
+    /// Static, taking the stores, so a test can drive it without a window.
+    static func refreshOnReturn(config: ConfigStore, settings: SettingsStore) async {
+        try? await config.reload()
+        if settings.parseError != nil {
+            _ = try? await settings.loadSettings()
+        }
+        let accountMoved = settings.account != nil && config.account != nil
+            && settings.account != config.account
+        if !settings.missingTools.isEmpty || accountMoved, !settings.isBusy {
+            try? await settings.runChecks()
+        }
+    }
+
+    /// Whether a change of `controlActiveState` is the window coming back to
+    /// the front: a change *from* `.inactive`.
+    ///
+    /// Anything but `.inactive` used to count, so `.key` → `.active` — a sheet
+    /// or an alert taking key, on the classic reading of the value — and back
+    /// was two refreshes per sheet. On this deployment target `.active` is
+    /// not produced at all (see `controlActiveState`), so the two rules agree
+    /// in practice; this is the one that is right under both readings.
+    static func isReturn(from previous: ControlActiveState, to current: ControlActiveState) -> Bool {
+        previous == .inactive && current != .inactive
     }
 
     @ViewBuilder
@@ -531,6 +681,9 @@ struct ContentView: View {
                     staged: stagedIPAStore,
                     // Shared with Settings, which shows the same tools' status.
                     appStore: appStoreStore,
+                    // The Edit sheet's LiveContainer picker reads the same
+                    // `--lc-status` answers the device pane shows.
+                    liveContainer: liveContainerStore,
                     // The build-target bar's Change control. `selection` is
                     // owned here, so the pane is handed the navigation rather
                     // than a binding into this view's state — it has no other
@@ -576,7 +729,7 @@ struct ContentView: View {
                 placeholder(text: "That device isn't connected right now.")
             }
         case .section(.tweaks):
-            TweaksView(store: tweaksStore, config: store)
+            TweaksView(store: tweaksStore, config: store, tweaksDir: settingsStore.paths?.tweaksDir)
         case .section(.canister):
             CanisterView(store: canisterStore)
         case .section(.repos):
@@ -626,7 +779,10 @@ struct ContentView: View {
         case .section(.builds):
             BuildsView(store: buildsStore, config: store, artwork: artworkStore, staged: stagedIPAStore)
         case .section(.settings):
-            SettingsView(store: settingsStore, devicesStore: devicesStore, appStore: appStoreStore)
+            SettingsView(
+                store: settingsStore, devicesStore: devicesStore, appStore: appStoreStore,
+                account: store.account
+            )
         case .none:
             // Three ways to be here, and they are not interchangeable: before
             // the first load finishes, after a load that *failed*, and after
@@ -652,5 +808,89 @@ struct ContentView: View {
             .foregroundStyle(Palette.textMuted)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Palette.bg)
+    }
+
+    /// The tools the window's notice is about, or nil when it should not
+    /// show: none missing, the user closed it on this same list, or Settings
+    /// — which lists them in full — is the pane on screen.
+    static func toolsNotice(
+        missing: [MissingTool], dismissed: [MissingTool]?, showingSettings: Bool
+    ) -> [MissingTool]? {
+        guard !missing.isEmpty, !showingSettings, missing != dismissed else { return nil }
+        return missing
+    }
+}
+
+/// Whether the window's return refresh may run now: not while one is
+/// running, and not within two seconds of the last one finishing.
+///
+/// Nothing coalesced these, so focus flicking away and back — a sheet, an
+/// alert, a click into another app and straight back — was one `--list` per
+/// flick, plus a `--check` per flick while tools were missing. Two seconds is
+/// shorter than anyone takes to switch to Terminal, run a command and come
+/// back, which is the change a return refresh exists to notice.
+struct ReturnRefreshGate {
+    static let quietPeriod: Duration = .seconds(2)
+    private var running = false
+    private var finishedAt: ContinuousClock.Instant?
+
+    /// Claim the refresh, or refuse it. A claim must be ended with `end`.
+    mutating func begin(at now: ContinuousClock.Instant = .now) -> Bool {
+        guard !running else { return false }
+        if let finishedAt, now - finishedAt < Self.quietPeriod { return false }
+        running = true
+        return true
+    }
+
+    mutating func end(at now: ContinuousClock.Instant = .now) {
+        running = false
+        finishedAt = now
+    }
+}
+
+/// "2 tools missing — see Settings": the main window's word that `--check`
+/// found tools a build needs, before a build fails for want of one.
+///
+/// A strip under the pane, in the window's own colours with a warning mark:
+/// not the red `ErrorBanner`, because nothing has failed yet, and not an
+/// alert, because nothing needs answering.
+struct MissingToolsNotice: View {
+    let count: Int
+    let onShow: () -> Void
+    let onDismiss: () -> Void
+
+    static func text(count: Int) -> String {
+        "\(pluralized(count, "tool")) missing — see Settings"
+    }
+
+    var body: some View {
+        HStack(spacing: Metrics.controlGap) {
+            Symbols.attention.image(size: 12)
+                .foregroundStyle(Palette.warn)
+                .accessibilityHidden(true)
+            Text(Self.text(count: count))
+                .font(AppFont.body)
+                .foregroundStyle(Palette.text)
+            Spacer(minLength: Metrics.controlGap)
+            Button("Open Settings", action: onShow)
+                .buttonStyle(.borderless)
+                .font(AppFont.body)
+                .foregroundStyle(Palette.accent)
+            Button(action: onDismiss) {
+                Symbols.dismiss.image(size: 10)
+                    .foregroundStyle(Palette.textMuted)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Dismiss")
+            .help("Hide until a different tool goes missing")
+        }
+        .padding(.horizontal, Metrics.paneGutter)
+        .padding(.vertical, Metrics.innerPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surface)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Palette.line).frame(height: 1)
+        }
+        .accessibilityElement(children: .contain)
     }
 }

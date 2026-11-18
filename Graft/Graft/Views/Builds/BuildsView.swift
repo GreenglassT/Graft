@@ -4,7 +4,7 @@ struct BuildsView: View {
     @Bindable var store: BuildsStore
     /// Passed straight through to ReinstallSheet: a re-install pushes to the
     /// phone, so it moves the delivery badges the Apps section renders off
-    /// this store. Nothing else in this view reads it.
+    /// this store. Read here only for `reinstallRefusal`.
     let config: ConfigStore
     /// Also passed straight through, and to both sheets rather than one: the
     /// build-log and re-install headers each draw the app's icon. Nothing in
@@ -40,6 +40,79 @@ struct BuildsView: View {
     static func action(for build: BuildRecord) -> RowAction {
         guard build.success, build.ipaPath != nil else { return .none }
         return build.isForThisMac ? .installToMac : .reinstall
+    }
+
+    /// Why Re-install would be refused for this row, or nil when it would run.
+    ///
+    /// `--reinstall-build` installs a sideload archive as a normal app under
+    /// the paid team's profile, so on a free Apple ID the CLI refuses it for
+    /// an app that is still `delivery: sideload` — by the app's mode *now*,
+    /// which is what the CLI reads, not the mode it was built with. Disabled
+    /// with this as its tooltip rather than offered and failed.
+    static func reinstallRefusal(
+        for build: BuildRecord, apps: [AppRecord], account: AccountMode?
+    ) -> String? {
+        guard account.isFree,
+              apps.first(where: { $0.name == build.app })?.delivery == .sideload
+        else { return nil }
+        return PaidOnly.sideloadApp
+    }
+
+    private func reinstallRefusal(for build: BuildRecord) -> String? {
+        Self.reinstallRefusal(for: build, apps: config.apps, account: config.account)
+    }
+
+    /// One item in a row's menu: what it says, and whether it can be chosen.
+    ///
+    /// **A disabled item carries its reason in its title.** A `.help` on a
+    /// menu item is never shown — AppKit draws no tooltip inside an open menu —
+    /// so `.paidOnly`, which explains itself only as a tooltip, left
+    /// "Re-install…" greyed out with nothing anywhere saying why.
+    struct MenuItem: Equatable {
+        let title: String
+        let enabled: Bool
+    }
+
+    /// The install item for a row, from the same `action(for:)` the row menu
+    /// and the context menu both read — the context menu used to decide for
+    /// itself, on `success && ipaPath != nil`, and so offered Re-install… on a
+    /// Mac build: the stub-linked archive this type exists to keep off phones
+    /// (the CLI refuses it too, after the sheet is already open).
+    static func installItem(for build: BuildRecord, refusal: String?) -> MenuItem {
+        switch action(for: build) {
+        case .reinstall:
+            return refusal == nil
+                ? MenuItem(title: "Re-install…", enabled: true)
+                : MenuItem(title: "Re-install… (needs a paid account)", enabled: false)
+        case .installToMac:
+            return MenuItem(title: "Install to Mac…", enabled: true)
+        case .none:
+            // Labelled for the target it *is*, so a failed Mac build never
+            // shows the phone verb even greyed out.
+            let verb = build.isForThisMac ? "Install to Mac…" : "Re-install…"
+            let why = build.success ? "archive not kept" : "build failed"
+            return MenuItem(title: "\(verb) (\(why))", enabled: false)
+        }
+    }
+
+    static func logItem(for build: BuildRecord) -> MenuItem {
+        build.logPath == nil
+            ? MenuItem(title: "View log… (not saved)", enabled: false)
+            : MenuItem(title: "View log…", enabled: true)
+    }
+
+    static func revealItem(for build: BuildRecord) -> MenuItem {
+        build.ipaPath == nil
+            ? MenuItem(title: "Reveal in Finder (no archive)", enabled: false)
+            : MenuItem(title: "Reveal in Finder", enabled: true)
+    }
+
+    private func install(_ record: BuildRecord) {
+        switch Self.action(for: record) {
+        case .reinstall: reinstallTarget = record
+        case .installToMac: installToMac(record)
+        case .none: break
+        }
     }
 
     var body: some View {
@@ -103,25 +176,19 @@ struct BuildsView: View {
             .width(180)
             TableColumn("") { record in
                 Menu {
-                    Button("View log…") { logTarget = record }
-                        .disabled(record.logPath == nil)
-                    switch Self.action(for: record) {
-                    case .reinstall:
-                        Button("Re-install…") { reinstallTarget = record }
-                    case .installToMac:
-                        Button("Install to Mac…") { installToMac(record) }
-                    case .none:
-                        // Disabled rather than missing, so the menu keeps its
-                        // shape — but labelled for the target it *is*, so a
-                        // failed Mac build never shows the phone verb even
-                        // greyed out.
-                        Button(record.isForThisMac ? "Install to Mac…" : "Re-install…") {}
-                            .disabled(true)
-                    }
-                    Button("Reveal in Finder") {
+                    let log = Self.logItem(for: record)
+                    Button(log.title) { logTarget = record }
+                        .disabled(!log.enabled)
+                    // Disabled rather than missing, so the menu keeps its
+                    // shape — with the reason in the title (`MenuItem`).
+                    let install = Self.installItem(for: record, refusal: reinstallRefusal(for: record))
+                    Button(install.title) { self.install(record) }
+                        .disabled(!install.enabled)
+                    let reveal = Self.revealItem(for: record)
+                    Button(reveal.title) {
                         Task { await store.reveal(record.id) }
                     }
-                    .disabled(record.ipaPath == nil)
+                    .disabled(!reveal.enabled)
                     Button("Copy build command") {
                         Pasteboard.copy("graft \(record.app)")
                     }
@@ -142,8 +209,12 @@ struct BuildsView: View {
                 if record.logPath != nil {
                     Button("View log…") { logTarget = record }
                 }
-                if record.success && record.ipaPath != nil {
-                    Button("Re-install…") { reinstallTarget = record }
+                // Only an artifact there is something to do with; which verb
+                // is `action(for:)`'s, as in the row menu.
+                if Self.action(for: record) != .none {
+                    let install = Self.installItem(for: record, refusal: reinstallRefusal(for: record))
+                    Button(install.title) { self.install(record) }
+                        .disabled(!install.enabled)
                 }
             }
         } primaryAction: { ids in

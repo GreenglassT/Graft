@@ -52,7 +52,12 @@ final class LiveContainerStore {
         var notes: [String] = []
         var installed: [LCInstalledRecord] = []
         var pushed: LCCertPushedRecord?
-        var cleaned: LCCleanedRecord?
+        /// One record per LiveContainer instance `--lc-clean` cleaned, in the
+        /// order it reported them: the primary first (the only one that ever
+        /// holds the certificate), then LiveContainer2/3. A single record
+        /// here used to be overwritten by each event, so the last instance's
+        /// answer replaced the primary's.
+        var cleaned: [LCCleanedRecord] = []
         var error: String?
     }
 
@@ -265,7 +270,10 @@ final class LiveContainerStore {
         case let .lcCertPushed(r):
             run?.pushed = r
         case let .lcCleaned(r):
-            run?.cleaned = r
+            run?.cleaned.append(r)
+        case let .log(source, _) where source == CLIContract.startupLogSource:
+            // About the machine, not this run (C-NOTICE).
+            break
         case let .log(source, line) where source != "warning":
             run?.notes.append(line)
         case let .log(_, line):

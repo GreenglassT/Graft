@@ -22,8 +22,8 @@ def _stub_config(tmp_path: Path) -> Config:
         tweaks_dir=tmp_path / "tweaks",
         state_dir=tmp_path / "state",
         apps={
-            "yt": AppConfig(
-                name="yt",
+            "example": AppConfig(
+                name="example",
                 bundle_id="com.example.app",
                 preferred_version="latest",
                 tweaks=["a.deb"],
@@ -54,13 +54,13 @@ def test_build_emits_stage_events_in_order_via_json_mode(tmp_path: Path, capsys)
         cyan.return_value.output_ipa.write_bytes(b"x")
         lc.push_ipa_to_livecontainer.return_value.size_bytes = 1024
         lc.push_ipa_to_livecontainer.return_value.bundle_id = "com.kdt.livecontainer"
-        lc.push_ipa_to_livecontainer.return_value.documents_path = "Documents/yt.ipa"
+        lc.push_ipa_to_livecontainer.return_value.documents_path = "Documents/example.ipa"
         lc.push_ipa_to_livecontainer.return_value.others = []
 
         from graft_ipa.build_log import BuildLog
         log = BuildLog(tmp_path / "log.sqlite")
         cli_mod._build_one(
-            cfg=cfg, log=log, app_name="yt", dry_run=False,
+            cfg=cfg, log=log, app_name="example", dry_run=False,
             skip_install=False,
             skip_decrypt_check=False, verbose=False, device=None,
             emitter=em,
@@ -98,7 +98,7 @@ def test_encrypted_binaries_reach_the_event_stream(tmp_path: Path, capsys) -> No
         # Built from the directory the caller passes so the reported path is
         # relative to the real extract dir, as the production code renders it.
         return [
-            CryptidResult(binary=extract_dir / "Payload/YT.app/YT", cryptids=[1]),
+            CryptidResult(binary=extract_dir / "Payload/Example.app/Example", cryptids=[1]),
             CryptidResult(binary=extract_dir / "Payload/YT.app/Frameworks/ok.dylib",
                           cryptids=[0]),
         ]
@@ -119,7 +119,7 @@ def test_encrypted_binaries_reach_the_event_stream(tmp_path: Path, capsys) -> No
         from graft_ipa.build_log import BuildLog
         log = BuildLog(tmp_path / "log.sqlite")
         cli_mod._build_one(
-            cfg=cfg, log=log, app_name="yt", dry_run=False,
+            cfg=cfg, log=log, app_name="example", dry_run=False,
             skip_install=True,
             skip_decrypt_check=False, verbose=False, device=None,
             emitter=em,
@@ -131,10 +131,10 @@ def test_encrypted_binaries_reach_the_event_stream(tmp_path: Path, capsys) -> No
 
     bad = [e for e in events if e["type"] == "encrypted-binaries"]
     assert len(bad) == 1, "the one machine-readable signal that a binary is encrypted"
-    assert bad[0]["app"] == "yt"
+    assert bad[0]["app"] == "example"
     assert bad[0]["count"] == 1
     assert bad[0]["binaries"] == [
-        {"path": "Payload/YT.app/YT", "cryptids": [1]}
+        {"path": "Payload/Example.app/Example", "cryptids": [1]}
     ], "the offending binary, named, not just counted"
 
     # And on the channel a consumer that has never heard of the event still

@@ -15,20 +15,35 @@ The user then opens LiveContainer and taps the new app to register it.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .errors import GraftError
+from .errors import EXIT_LIVECONTAINER, GraftError
 
 
 class LiveContainerError(GraftError):
-    exit_code = 11
+    exit_code = EXIT_LIVECONTAINER
 
 
-# Default upstream bundle id. AltStore-installed LC has team-id suffix
-# appended (com.kdt.livecontainer.<TEAM>), so the actual bundle id can be
-# overridden per-config or auto-detected.
-LC_BUNDLE_ID = "com.kdt.livecontainer"
+#: What a dry run reports as its target when the device did not answer and
+#: no pin names one: the push finds it there, and guessing an id would claim
+#: a container the device may not have.
+DRY_RUN_TARGET = "the LiveContainer found on the device"
+
+
+class _ListedNoApps(Exception):
+    """The device listed no apps at all, which is how a locked phone answers
+    (`lc_manage.install` refuses on the same evidence).
+
+    Deliberately not a LiveContainerError: it is no answer, not the answer
+    "no LiveContainer here", and every caller already has a way of reading a
+    phone that did not answer. The early check defers to the push, a dry run
+    leaves the target unknown, and the push fails asking whether the phone is
+    unlocked. Read as an answer, it failed a build before cyan with the steps
+    for installing a LiveContainer the phone already had.
+    """
 
 
 @dataclass
@@ -36,53 +51,21 @@ class LCDeliveryResult:
     udid: str
     bundle_id: str
     documents_path: str  # path inside LC's sandbox, e.g. "Documents/example.ipa"
-    size_bytes: int
+    # None only on a dry run whose IPA was never made (a dry run skips cyan).
+    size_bytes: int | None
     others: list[str] = field(default_factory=list)  # other LiveContainers also installed
-
-
-def _choose_lc_bundle_id(installed: list[str], preferred: str) -> tuple[str, list[str]]:
-    """Pick which LiveContainer to push into, and report any others.
-
-    Multiple LiveContainers can be installed side by side (the app shipped as
-    `com.kdt.livecontainer`, then `com.kdt.LiveContainer2`, `com.kdt.LiveContainer3`,
-    each with a team-id suffix). Pushing into the wrong one means the IPA silently
-    never appears where the user imports — so we surface every LiveContainer found
-    and refuse to guess when the preferred id matches none of them.
-
-    Returns (chosen_bundle_id, other_livecontainer_bundle_ids).
-    """
-    family = sorted({b for b in installed if b.lower().startswith("com.kdt.livecontainer")})
-    if preferred in installed:
-        chosen = preferred
-    elif not family:
-        raise LiveContainerError(
-            f"no installed app matches LiveContainer (looked for '{preferred}')",
-            hint="install LiveContainer first (via SideStore/AltStore).",
-        )
-    else:
-        # The preferred prefix (default: the original lowercase id) uniquely names one.
-        pref_matches = sorted(
-            {b for b in family if b == preferred or b.startswith(preferred + ".")}
-        )
-        if len(pref_matches) == 1:
-            chosen = pref_matches[0]
-        elif len(family) == 1:
-            chosen = family[0]
-        else:
-            raise LiveContainerError(
-                f"multiple LiveContainers installed and none matches '{preferred}': "
-                f"{', '.join(family)}",
-                hint="set `lc_bundle_id: <exact id>` on this app in config.yaml.",
-            )
-    return chosen, [b for b in family if b != chosen]
 
 
 def push_ipa_to_livecontainer(
     ipa: Path,
     udid: str,
     *,
-    lc_bundle_id: str = LC_BUNDLE_ID,
+    lc_bundle_id: str | None = None,
+    team: str | None = None,
+    free_account: bool = False,
     inner_filename: str | None = None,
+    ours: Mapping[str, Collection[str]] | None = None,
+    archives: Iterable[Path] = (),
     dry_run: bool = False,
 ) -> LCDeliveryResult:
     """Push `ipa` into LiveContainer's Documents folder over usbmux.
@@ -91,15 +74,45 @@ def push_ipa_to_livecontainer(
     enumerated by usbmuxd, and that includes one paired over Wi-Fi. Verified
     pushing 117 MB to a phone with no cable attached.
 
-    The phone must be connected, LiveContainer must be installed (com.kdt.livecontainer
-    by default), and the .ipa needs to be cryptid 0 (LC won't run encrypted binaries).
+    `lc_bundle_id` is the app's pin, None for none; `team` the configured team
+    id, None for a free Apple ID. Which LiveContainer that means on this device
+    is `lc_discovery.choose`'s answer, asked of the apps actually installed.
+    The .ipa needs to be cryptid 0 (LC won't run encrypted binaries).
+
+    `ours` is what Graft's deliveries recorded pushing on this device, per
+    LiveContainer (`BuildLog.pushed_by_instance(udid)`). A file already at the
+    target name is overwritten only when it is one of those: re-pushing our
+    own earlier delivery is the normal case, but a same-named file the user
+    put there is theirs, and is refused rather than replaced. None means no
+    records, so any existing file is refused.
+
+    `archives` are this app's archived builds. A same-named file with no
+    record whose bytes are one of them is ours too: Graft pushed it, and the
+    record is gone (a state reset, a fresh Mac with the same phone). Read only
+    when an archive of its size exists, since reading it means moving the
+    whole file off the phone.
+
+    A dry run asks the device the same question and writes nothing. It names
+    the container the push would choose, and raises what the push would raise
+    (none installed, or several and no way to pick). A device that does not
+    answer leaves it unknown: the pin if there is one, else `DRY_RUN_TARGET`,
+    never an id the device may not have.
     """
     if dry_run:
+        try:
+            target_bid, others = asyncio.run(_choose_async(
+                udid, pinned=lc_bundle_id, team=team, free_account=free_account,
+            ))
+        except LiveContainerError:
+            raise
+        except Exception:
+            target_bid, others = lc_bundle_id or DRY_RUN_TARGET, []
         return LCDeliveryResult(
             udid=udid,
-            bundle_id=lc_bundle_id,
+            bundle_id=target_bid,
             documents_path=f"Documents/{inner_filename or ipa.name}",
-            size_bytes=ipa.stat().st_size if ipa.exists() else 0,
+            size_bytes=ipa.stat().st_size if ipa.exists() else None,
+            others=others,
         )
 
     if not ipa.exists():
@@ -109,15 +122,19 @@ def push_ipa_to_livecontainer(
     size = ipa.stat().st_size
 
     try:
-        target_bid, others = asyncio.run(_push_async(ipa, target_name, udid, lc_bundle_id))
+        target_bid, others = asyncio.run(_push_async(
+            ipa, target_name, udid,
+            pinned=lc_bundle_id, team=team, free_account=free_account, ours=ours or {},
+            archives=list(archives),
+        ))
     except LiveContainerError:
         raise
     except Exception as e:
         raise LiveContainerError(
             f"failed to push {ipa.name} into LiveContainer: {e}",
             hint=(
-                "is LiveContainer installed (com.kdt.livecontainer) and is the phone "
-                "unlocked + plugged in? run `pymobiledevice3 apps list` to confirm"
+                "is the phone unlocked, trusted and connected (USB or Wi-Fi)? "
+                f"`graft --lc-status --device {udid}` lists the LiveContainers Graft can see"
             ),
         ) from e
 
@@ -170,8 +187,106 @@ async def _listdir_async(udid: str, lc_bundle_id: str) -> list[str]:
         await lock.close()
 
 
+def check_push_target(
+    udid: str,
+    *,
+    inner_filename: str,
+    lc_bundle_id: str | None,
+    team: str | None,
+    free_account: bool,
+    ours: Mapping[str, Collection[str]],
+    archives: Iterable[Path] = (),
+) -> str | None:
+    """Before the build does its work, what the push would refuse at the end.
+
+    The LiveContainer the push would choose, after checking that a file
+    already at `Documents/<inner_filename>` there is one the push may
+    overwrite (`_is_foreign`). Raises the push's own LiveContainerError
+    (none installed, several and no pin, a stranger's file), so a build fails
+    before cyan rather than after it. A phone that does not answer is None:
+    it may answer by stage 5, and the push asks again. So is one that lists
+    no apps (`_ListedNoApps`): a locked phone, which may be unlocked by then.
+    """
+    try:
+        return asyncio.run(_check_async(
+            udid, inner_filename, pinned=lc_bundle_id, team=team, free_account=free_account,
+            ours=ours, archives=list(archives),
+        ))
+    except LiveContainerError:
+        raise
+    except Exception:
+        return None
+
+
+async def _check_async(
+    udid: str, target_name: str, *, pinned: str | None, team: str | None,
+    free_account: bool, ours: Mapping[str, Collection[str]], archives: list[Path],
+) -> str:
+    from pymobiledevice3.lockdown import create_using_usbmux
+    from pymobiledevice3.services.house_arrest import HouseArrestService
+
+    from .device_session import closing_best_effort
+
+    lock = await create_using_usbmux(serial=udid)
+    async with closing_best_effort(lock):
+        target_bid, _ = await _resolve_lc_bundle_id(
+            lock, pinned=pinned, team=team, free_account=free_account
+        )
+        try:
+            ha = await HouseArrestService.create(lockdown=lock, bundle_id=target_bid)
+        except Exception:
+            return target_bid  # the push says why the sandbox would not open
+        async with closing_best_effort(ha):
+            if await _is_foreign(ha, target_name, target_bid, ours, archives):
+                raise _foreign_file(target_bid, udid, target_name)
+    return target_bid
+
+
+async def _is_foreign(
+    ha, target_name: str, target_bid: str, ours: Mapping[str, Collection[str]],
+    archives: list[Path],
+) -> bool:
+    """A file is at `Documents/<target_name>` and nothing says Graft put it there.
+
+    The evidence is a delivery record for that name in that container, or
+    the file's bytes being one of this app's archived builds.
+    """
+    path = f"Documents/{target_name}"
+    if target_name in ours.get(target_bid, ()) or not await ha.exists(path):
+        return False
+    return not await _is_an_archive(ha, path, archives)
+
+
+async def _is_an_archive(ha, path: str, archives: list[Path]) -> bool:
+    try:
+        size = int((await ha.stat(path))["st_size"])
+    except Exception:
+        return False
+    same_size = [a for a in archives if a.is_file() and a.stat().st_size == size]
+    if not same_size:
+        return False
+    remote = hashlib.sha256(await ha.get_file_contents(path)).hexdigest()
+    from .build_log import sha256_of
+
+    return any(sha256_of(a) == remote for a in same_size)
+
+
+def _foreign_file(target_bid: str, udid: str, target_name: str) -> LiveContainerError:
+    path = f"Documents/{target_name}"
+    return LiveContainerError(
+        f"{target_bid} on {udid} already has a {path} that Graft did not "
+        "push; not overwriting it",
+        hint=(
+            f"rename or remove {target_name} in LiveContainer's Documents "
+            "(Files app, On My iPhone > LiveContainer), then try again"
+        ),
+    )
+
+
 async def _push_async(
-    ipa: Path, target_name: str, udid: str, lc_bundle_id: str
+    ipa: Path, target_name: str, udid: str, *,
+    pinned: str | None, team: str | None, free_account: bool,
+    ours: Mapping[str, Collection[str]], archives: list[Path],
 ) -> tuple[str, list[str]]:
     # Import lazily so test runs without pymobiledevice3 don't blow up at collection.
     from pymobiledevice3.lockdown import create_using_usbmux
@@ -179,22 +294,32 @@ async def _push_async(
 
     lock = await create_using_usbmux(serial=udid)
     try:
-        target_bid, others = await _resolve_lc_bundle_id(lock, lc_bundle_id)
+        target_bid, others = await _resolve_lc_bundle_id(
+            lock, pinned=pinned, team=team, free_account=free_account
+        )
         try:
             ha = await HouseArrestService.create(
                 lockdown=lock, bundle_id=target_bid
             )
         except Exception as e:
+            # Not "set LiveContainer up": discovery just found it installed.
             raise LiveContainerError(
                 f"could not open sandbox for {target_bid} on {udid}: {e}",
                 hint=(
-                    "install LiveContainer first: `graft --lc-install --device <udid>` "
-                    "(or through AltStore/SideStore)"
+                    f"{target_bid} is installed, but iOS would not open its Documents: "
+                    "unlock the phone, open LiveContainer once, and try again"
                 ),
             ) from e
         try:
+            path = f"Documents/{target_name}"
+            # Before a single byte: set_file_contents replaces whatever is
+            # there, and a same-named file nothing says Graft pushed is the
+            # user's (their own copy of the app, kept in SideStore's
+            # LiveContainer), not a stale push of ours.
+            if await _is_foreign(ha, target_name, target_bid, ours, archives):
+                raise _foreign_file(target_bid, udid, target_name)
             data = ipa.read_bytes()
-            await ha.set_file_contents(f"Documents/{target_name}", data)
+            await ha.set_file_contents(path, data)
         finally:
             await ha.close()
     finally:
@@ -202,15 +327,37 @@ async def _push_async(
     return target_bid, others
 
 
-async def _resolve_lc_bundle_id(lock, preferred: str) -> tuple[str, list[str]]:
+async def _choose_async(
+    udid: str, *, pinned: str | None, team: str | None, free_account: bool
+) -> tuple[str, list[str]]:
+    """`_resolve_lc_bundle_id` over a session of its own, for the dry run."""
+    from pymobiledevice3.lockdown import create_using_usbmux
+
+    from .device_session import closing_best_effort
+
+    lock = await create_using_usbmux(serial=udid)
+    async with closing_best_effort(lock):
+        return await _resolve_lc_bundle_id(
+            lock, pinned=pinned, team=team, free_account=free_account
+        )
+
+
+async def _resolve_lc_bundle_id(
+    lock, *, pinned: str | None, team: str | None, free_account: bool
+) -> tuple[str, list[str]]:
     """Find the installed LiveContainer to push into, plus any others present.
 
-    SideStore/AltStore append a team-id suffix (`com.kdt.livecontainer.<TEAM>`), and
-    multiple LiveContainer generations can be installed at once. See
-    `_choose_lc_bundle_id` for the selection rules. Returns (chosen, others).
-    """
-    from pymobiledevice3.services.installation_proxy import InstallationProxyService
+    Installers append a team-id suffix (`com.kdt.livecontainer.<TEAM>`), and up
+    to three instances can be installed at once. `lc_discovery.choose` holds the
+    selection rules, for this and for `--lc-status`; it is asked of every app
+    on the device, System ones included. Returns (chosen, others).
 
-    ipx = InstallationProxyService(lockdown=lock)
-    apps = await ipx.get_apps()
-    return _choose_lc_bundle_id(list(apps), preferred)
+    A listing with no apps in it raises `_ListedNoApps` rather than asking
+    `choose`, whose answer to nothing is "no LiveContainer found".
+    """
+    from . import lc_discovery
+
+    installed = await lc_discovery.installed_bundle_ids(lock)
+    if not installed:
+        raise _ListedNoApps("the device listed no apps at all, which is how a locked phone answers")
+    return lc_discovery.choose(installed, pinned=pinned, team=team, free_account=free_account)

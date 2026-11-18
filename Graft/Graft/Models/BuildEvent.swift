@@ -13,11 +13,27 @@ struct AppRecord: Decodable, Identifiable, Hashable {
     let stripExtensions: Bool
     let stripSupportedDevices: Bool
     let compressionLevel: Int
+    /// The config's account, repeated on every app. `ConfigStore.account`
+    /// reads `--list`'s own `account` event first; this is what it falls back
+    /// on for a CLI that predates that event and still has apps to describe.
+    /// Optional, unlike the rest: it is config-wide rather than this app's, a
+    /// CLI from before free mode never sends it, and an app must not stop
+    /// decoding over a field that is not about the app.
+    let account: AccountMode?
+    /// The LiveContainer this app is pinned to (`lc_bundle_id:`), or nil when
+    /// it is not: the CLI then picks one per push (`lc_discovery.choose`).
+    let lcBundleId: String?
+    /// Whether the CLI reported the pin at all (C-LCPIN). Separate from
+    /// `lcBundleId == nil`, which on its own cannot tell "unpinned" from "a
+    /// CLI too old to say" — and the second also has no `--lc-bundle-id` to
+    /// send, so the Edit sheet offers the picker only when this is true.
+    let reportsLCPin: Bool
 
     var id: String { name }
 
     enum CodingKeys: String, CodingKey {
-        case name, tweaks, delivery
+        case name, tweaks, delivery, account
+        case lcBundleId = "lc_bundle_id"
         case bundleId = "bundle_id"
         case preferredVersion = "preferred_version"
         case displayName = "display_name"
@@ -55,6 +71,13 @@ struct AppRecord: Decodable, Identifiable, Hashable {
         stripExtensions = try c.decode(Bool.self, forKey: .stripExtensions)
         stripSupportedDevices = try c.decode(Bool.self, forKey: .stripSupportedDevices)
         compressionLevel = try c.decode(Int.self, forKey: .compressionLevel)
+        // `try?`: an account spelling this app does not know reads as "not
+        // known", which disables nothing, rather than dropping the app.
+        account = (try? c.decodeIfPresent(AccountMode.self, forKey: .account)) ?? nil
+        // Optional like `account`, and for the same reason: absent from every
+        // CLI before C-LCPIN, and not worth dropping the app over.
+        reportsLCPin = c.contains(.lcBundleId)
+        lcBundleId = (try? c.decodeIfPresent(String.self, forKey: .lcBundleId)) ?? nil
     }
 }
 
@@ -114,7 +137,7 @@ struct CachedIPARecord: Decodable, Hashable {
 struct StagedIPARecord: Decodable, Hashable {
     let bundleId: String
     let version: String
-    /// From the IPA's own plist, so the prefilled sheet reads "BookPlayer"
+    /// From the IPA's own plist, so the prefilled sheet reads "ExamplePlayer"
     /// rather than a slug — and so the decrypt card, which has no device
     /// listing behind it, can prefill at all.
     let displayName: String
@@ -257,11 +280,33 @@ struct TweakUpdateRecord: Decodable, Hashable {
     /// before `1.0` — and a second implementation in Swift would be a second
     /// thing to be wrong.
     let updateAvailable: Bool
+    /// The lookup could not be made at all — offline, or the service refused
+    /// — which is not "nothing newer" (that is `latest` nil with this false).
+    /// The summary already counts these (`TweakUpdatesEndRecord.unchecked`);
+    /// this says *which* rows. False when absent, from a CLI too old to say.
+    var unchecked: Bool = false
 
     enum CodingKeys: String, CodingKey {
-        case filename, installed, latest, source
+        case filename, installed, latest, source, unchecked
         case packageId = "package_id"
         case updateAvailable = "update_available"
+    }
+}
+
+extension TweakUpdateRecord {
+    /// Written out for `unchecked` alone: a synthesised decoder reads a
+    /// non-optional `Bool` with `decode`, default value or not, so a CLI that
+    /// does not send it would fail the whole row. In an extension so the
+    /// memberwise initialiser survives.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        filename = try c.decode(String.self, forKey: .filename)
+        packageId = try c.decodeIfPresent(String.self, forKey: .packageId)
+        installed = try c.decodeIfPresent(String.self, forKey: .installed)
+        latest = try c.decodeIfPresent(String.self, forKey: .latest)
+        source = try c.decodeIfPresent(String.self, forKey: .source)
+        updateAvailable = try c.decode(Bool.self, forKey: .updateAvailable)
+        unchecked = try c.decodeIfPresent(Bool.self, forKey: .unchecked) ?? false
     }
 }
 
@@ -395,11 +440,16 @@ struct DecryptCheckRecord: Decodable, Hashable {
         /// misreading commit 79f6251 set out to remove. Defaults to true so an
         /// older CLI's checks stay conservative rather than silently softening.
         let blocking: Bool
+        /// Which failure this is, as a stable word, for a check whose
+        /// failures need different responses — today the `ssh` check's
+        /// `CLIContract.DecryptCheck.SSHReason`. Nil when `ok`, for every
+        /// other check, and from a CLI older than the field.
+        let reason: String?
 
         var id: String { key }
 
         enum CodingKeys: String, CodingKey {
-            case key, label, ok, detail, fix, blocking
+            case key, label, ok, detail, fix, blocking, reason
         }
 
         init(from decoder: Decoder) throws {
@@ -410,6 +460,8 @@ struct DecryptCheckRecord: Decodable, Hashable {
             detail = try c.decode(String.self, forKey: .detail)
             fix = try c.decodeIfPresent(String.self, forKey: .fix)
             blocking = try c.decodeIfPresent(Bool.self, forKey: .blocking) ?? true
+            // `try?`: an unreadable reason costs the distinction, never the check.
+            reason = (try? c.decodeIfPresent(String.self, forKey: .reason)) ?? nil
         }
     }
 
@@ -529,10 +581,71 @@ struct SettingsRecord: Decodable, Hashable, Equatable {
     let signingCert: String?
     let signingProfile: String?
     let signingTeamId: String?
+    /// Where this config puts everything, as the CLI resolves it. Only
+    /// `--settings` reports it — `--set-settings`' echo does not — so nil means
+    /// "not on this event", and `SettingsStore` keeps the last one it saw.
+    var paths: SettingsPaths? = nil
+    /// Why config.yaml could not be read, as the parser put it, or nil when it
+    /// parsed (C-SETTINGS). Set, every setting above is null *because nothing
+    /// was read*, not because nothing is set — and `--set-settings` refuses to
+    /// write a file it cannot parse, so nothing here can be saved either.
+    var parseError: String? = nil
+    /// Whether `paths` are the defaults rather than what this config says,
+    /// which is what they are when the config did not parse (C-SETTINGS).
+    var pathsAreDefaults: Bool = false
 
     /// The contract enum itself, not a second copy of its five spellings —
     /// see `CLIContract.SettingField`.
     typealias CodingKeys = CLIContract.SettingField
+}
+
+extension SettingsRecord {
+    private enum PathsKey: String, CodingKey {
+        case paths
+        case parseError = "parse_error"
+        case pathsAreDefaults = "paths_are_defaults"
+    }
+
+    /// Written out because `paths` is not a setting: the five settings keep
+    /// decoding through `CLIContract.SettingField`, and this one key is read
+    /// beside them. In an extension so the memberwise initialiser survives.
+    init(from decoder: Decoder) throws {
+        let settings = try decoder.container(keyedBy: CLIContract.SettingField.self)
+        defaultDeviceUDID = try settings.decodeIfPresent(String.self, forKey: .defaultDeviceUDID)
+        archiveKeep = try settings.decodeIfPresent(Int.self, forKey: .archiveKeep)
+        signingCert = try settings.decodeIfPresent(String.self, forKey: .signingCert)
+        signingProfile = try settings.decodeIfPresent(String.self, forKey: .signingProfile)
+        signingTeamId = try settings.decodeIfPresent(String.self, forKey: .signingTeamId)
+        // `try?`: a malformed `paths` costs the Paths section, never the
+        // settings editor beside it.
+        let extra = try? decoder.container(keyedBy: PathsKey.self)
+        paths = (try? extra?.decodeIfPresent(SettingsPaths.self, forKey: .paths)) ?? nil
+        // Both optional, and both absent from every CLI before C-SETTINGS:
+        // that CLI's answer to a broken file is the defaults with no word
+        // about it, which is what decoding to nil/false reproduces.
+        parseError = (try? extra?.decodeIfPresent(String.self, forKey: .parseError)) ?? nil
+        pathsAreDefaults = (try? extra?.decodeIfPresent(Bool.self, forKey: .pathsAreDefaults)) ?? false
+    }
+}
+
+/// The directories the CLI resolves for this config — `XDG_*_HOME`, and the
+/// config's own `cache_dir` / `built_dir` / `state_dir` / `tweaks_dir`, all
+/// applied. What Settings → Paths shows, so it names the directories a build
+/// actually uses rather than the defaults it might not.
+struct SettingsPaths: Decodable, Hashable {
+    let configDir: String
+    let cacheDir: String
+    let builtDir: String
+    let stateDir: String
+    let tweaksDir: String
+
+    enum CodingKeys: String, CodingKey {
+        case configDir = "config_dir"
+        case cacheDir = "cache_dir"
+        case builtDir = "built_dir"
+        case stateDir = "state_dir"
+        case tweaksDir = "tweaks_dir"
+    }
 }
 
 /// Which global settings a `--set-settings` call actually wrote.
@@ -872,12 +985,70 @@ struct PreflightCheck: Decodable, Identifiable, Hashable {
     let detail: String?
     let hint: String?
     let actionKey: String?
+    /// The row reports a fact rather than passing a test — today only a free
+    /// Apple ID's `account` row, which is always `ok`. Rendered as
+    /// information, and counted as neither OK nor Fail: a free account is not
+    /// a check that passed. Absent on the wire for every other row.
+    let info: Bool?
+    /// The exact command that installs this row's tool, or nil when there is
+    /// none to give — a row that is not a tool (no phone connected), or a
+    /// tool with no one-line install.
+    let install: String?
+    /// Whether the CLI sent `install` at all, null included. A CLI from
+    /// before the field existed did not, and for it the command is read back
+    /// out of the hint instead; see `installCommand`.
+    let reportsInstall: Bool
 
     var id: String { name }
+    var isInfo: Bool { info == true }
+
+    /// The command to show beside this row with a Copy button.
+    ///
+    /// `install` when the CLI reports it — including its null, which is the
+    /// CLI saying there is no command, and is not second-guessed from prose.
+    /// From an older CLI, the hint's own `install with: <command>` shape,
+    /// which is how `--check` has phrased every tool row's hint since the
+    /// first release; any other hint is advice, not a command.
+    var installCommand: String? {
+        if reportsInstall { return install.flatMap { $0.isEmpty ? nil : $0 } }
+        guard let hint, hint.hasPrefix(Self.installHintPrefix) else { return nil }
+        let command = hint.dropFirst(Self.installHintPrefix.count)
+            .trimmingCharacters(in: .whitespaces)
+        return command.isEmpty ? nil : command
+    }
+
+    static let installHintPrefix = "install with: "
 
     enum CodingKeys: String, CodingKey {
-        case name, ok, detail, hint
+        case name, ok, detail, hint, info, install
         case actionKey = "action_key"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        name = try c.decode(String.self, forKey: .name)
+        ok = try c.decode(Bool.self, forKey: .ok)
+        detail = try c.decodeIfPresent(String.self, forKey: .detail)
+        hint = try c.decodeIfPresent(String.self, forKey: .hint)
+        actionKey = try c.decodeIfPresent(String.self, forKey: .actionKey)
+        info = try c.decodeIfPresent(Bool.self, forKey: .info)
+        reportsInstall = c.contains(.install)
+        // `try?`: a malformed `install` costs the Copy button, never the row.
+        install = (try? c.decodeIfPresent(String.self, forKey: .install)) ?? nil
+    }
+
+    init(
+        name: String, ok: Bool, detail: String? = nil, hint: String? = nil,
+        actionKey: String? = nil, info: Bool? = nil, install: String?? = .none
+    ) {
+        self.name = name
+        self.ok = ok
+        self.detail = detail
+        self.hint = hint
+        self.actionKey = actionKey
+        self.info = info
+        self.reportsInstall = install != nil
+        self.install = install ?? nil
     }
 }
 
@@ -1132,6 +1303,9 @@ enum CanisterFetchResult: Equatable {
 }
 
 enum BuildEvent {
+    /// `--list`'s first line: which account config.yaml is for. Its own event
+    /// because a config with no apps has no `app` to carry it.
+    case account(AccountMode)
     case app(AppRecord)
     case tweak(TweakRecord)
     case tweakUpdate(TweakUpdateRecord)
@@ -1148,7 +1322,10 @@ enum BuildEvent {
     case buildStart(app: String, bundleId: String, delivery: DeliveryMode?)
     case stage(name: String, status: String, fields: [String: Any])
     case log(source: String, line: String)
-    case buildEnd(app: String, ok: Bool, error: String?, elapsedSeconds: Double?)
+    /// `stopped` is the CLI saying the build ended because it was told to
+    /// stop (SIGTERM/SIGINT), not because anything went wrong: C-STOP. False
+    /// when absent, which is every CLI from before that contract.
+    case buildEnd(app: String, ok: Bool, error: String?, elapsedSeconds: Double?, stopped: Bool = false)
     case canisterResult(CanisterPackage)
     case canisterSearchEnd(count: Int)
     case canisterFetchStart(target: String)
@@ -1195,7 +1372,8 @@ enum BuildEvent {
     case deviceError(DeviceErrorRecord)
     case devicesEnd(count: Int)
     case preflightCheck(PreflightCheck)
-    case preflightEnd(okCount: Int, failCount: Int)
+    /// `account` is nil from a CLI that predates free mode.
+    case preflightEnd(okCount: Int, failCount: Int, account: AccountMode?)
     // App Store acquisition — records in `AppStoreRecords.swift`.
     case appStoreStatus(AppStoreStatusRecord)
     case appStoreVersion(AppStoreVersionRecord)
@@ -1241,8 +1419,10 @@ enum BuildEvent {
         let ok: Bool?
         let error: String?
         let elapsedSeconds: Double?
+        /// Optional on the wire: a CLI from before C-STOP never sends it.
+        let stopped: Bool?
         enum CodingKeys: String, CodingKey {
-            case app, ok, error
+            case app, ok, error, stopped
             case elapsedSeconds = "elapsed_seconds"
         }
     }
@@ -1258,10 +1438,24 @@ enum BuildEvent {
     private struct PreflightEndPayload: Decodable {
         let okCount: Int?
         let failCount: Int?
+        let account: AccountMode?
         enum CodingKeys: String, CodingKey {
             case okCount = "ok_count"
             case failCount = "fail_count"
+            case account
         }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            okCount = try c.decodeIfPresent(Int.self, forKey: .okCount)
+            failCount = try c.decodeIfPresent(Int.self, forKey: .failCount)
+            // An unknown spelling is "not known", as on `AppRecord`.
+            account = (try? c.decodeIfPresent(AccountMode.self, forKey: .account)) ?? nil
+        }
+    }
+
+    private struct AccountPayload: Decodable {
+        let account: AccountMode
     }
 
     private struct CanisterFetchStartPayload: Decodable {
@@ -1323,6 +1517,8 @@ enum BuildEvent {
         let head = try decoder.decode(TypeOnly.self, from: data)
 
         switch head.type {
+        case "account":
+            return .account(try decoder.decode(AccountPayload.self, from: data).account)
         case "app":
             return .app(try decoder.decode(AppRecord.self, from: data))
         case "tweak":
@@ -1361,7 +1557,8 @@ enum BuildEvent {
                 app: p.app ?? "",
                 ok: p.ok ?? false,
                 error: p.error,
-                elapsedSeconds: p.elapsedSeconds
+                elapsedSeconds: p.elapsedSeconds,
+                stopped: p.stopped ?? false
             )
         case "stage":
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -1416,7 +1613,9 @@ enum BuildEvent {
             return .preflightCheck(try decoder.decode(PreflightCheck.self, from: data))
         case "preflight-end":
             let p = try decoder.decode(PreflightEndPayload.self, from: data)
-            return .preflightEnd(okCount: p.okCount ?? 0, failCount: p.failCount ?? 0)
+            return .preflightEnd(
+                okCount: p.okCount ?? 0, failCount: p.failCount ?? 0, account: p.account
+            )
         case "canister-result":
             return .canisterResult(try decoder.decode(CanisterPackage.self, from: data))
         case "canister-search-end":
@@ -1574,6 +1773,25 @@ enum BuildProgress: Equatable {
     /// obvious next action is not the one they are about to take.
     case liveContainerChoice(LiveContainerChoiceRecord)
     case finished(ok: Bool, error: String?, elapsed: Double?)
+    /// The build was stopped, and the CLI said so: a `build-end` with
+    /// `stopped: true` (C-STOP). Its own case rather than `finished(ok:
+    /// false)`, because that is the one reading it must never get — a stop is
+    /// the thing the user asked for, not a failure, and every panel that
+    /// switches over this type has to decide what it shows for one.
+    ///
+    /// The CLI writes no history row for it, so there is no "last build" to
+    /// describe it either: what the panel had is all there is.
+    case stopped(elapsed: Double?)
+
+    /// Whether a build stream reported being stopped.
+    ///
+    /// Read off `RunResult.events` once the subprocess has returned — the
+    /// callback that would also see it may not have run yet — so that a stop
+    /// the app did not start (a `kill` from Terminal, the CLI's own SIGINT)
+    /// is read as a stop and not as the non-zero exit that follows it.
+    static func stopReported(in events: [BuildEvent]) -> Bool {
+        events.contains { if case .stopped? = $0.progress { return true }; return false }
+    }
 }
 
 extension Optional where Wrapped == DeliveryMode {
@@ -1608,7 +1826,10 @@ extension BuildEvent {
             return .encrypted(record)
         case let .liveContainerChoice(record):
             return .liveContainerChoice(record)
-        case let .buildEnd(_, ok, error, elapsedSeconds):
+        case let .buildEnd(_, ok, error, elapsedSeconds, stopped):
+            // Ahead of `ok`: a stopped build-end carries `ok: false`, and
+            // that is not a verdict on the build.
+            if stopped { return .stopped(elapsed: elapsedSeconds) }
             return .finished(ok: ok, error: error, elapsed: elapsedSeconds)
         default:
             return nil

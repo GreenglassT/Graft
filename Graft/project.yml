@@ -30,6 +30,8 @@ targets:
       path: Graft/Info.plist
       properties:
         CFBundleDisplayName: Graft
+        CFBundleShortVersionString: "1.1"
+        CFBundleVersion: "2"
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSPrincipalClass: NSApplication

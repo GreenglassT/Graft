@@ -105,6 +105,10 @@ PROLOGUE_INERT_CALLS: dict[str, str] = {
         "Arguments are held to the same lookup-only rule as the envelope "
         "prologue, so it cannot interpolate something that raises on the way in."
     ),
+    "err_console.print": (
+        "The same usage error under --json, where stdout is the event stream: "
+        "the same console class pointed at stderr, and the same arguments."
+    ),
 }
 
 # Expression nodes allowed before `__enter__`.

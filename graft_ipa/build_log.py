@@ -27,6 +27,11 @@ CREATE TABLE IF NOT EXISTS builds (
     target TEXT,                 -- 'device' or 'mac'; NULL means a row written
                                  -- before this column existed, which is a
                                  -- device build. Read through `_target_of`.
+    delivery TEXT,               -- 'sideload' or 'livecontainer': how the
+                                 -- archive was built (zsign-signed, or
+                                 -- unsigned for LiveContainer). NULL is a row
+                                 -- from before the column; `--reinstall-build`
+                                 -- reads the archive itself then.
     success INTEGER NOT NULL,
     error TEXT
 );
@@ -61,11 +66,18 @@ CREATE TABLE IF NOT EXISTS deliveries (
     -- distinction is not cosmetic: an archive's build inputs were never
     -- recorded and cannot be reconstructed (the tweak files on disk now are
     -- not necessarily the ones inside it), so such a row carries no digest and
-    -- must never be read as `current`. NULL is a row written before this
-    -- column existed, i.e. a build.
+    -- must never be read as `current`. 'reinstall-recorded' is the exception
+    -- that proves it: a re-ship of bytes (same ipa_sha256) that an earlier
+    -- push recorded the inputs of, so it carries that push's digest and is
+    -- compared like a build. NULL is a row written before this column
+    -- existed, i.e. a build.
     origin TEXT,
     reconciled_at TEXT,
-    reconcile_ok INTEGER
+    reconcile_ok INTEGER,
+    -- When `--lc-clean` removed what this row pushed. A cleaned row no longer
+    -- vouches for a file of that name (`pushed_by_instance`): one the user puts
+    -- there afterwards is theirs. NULL: not cleaned, or from before the column.
+    cleaned_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_deliveries_app ON deliveries(app);
@@ -81,6 +93,18 @@ CREATE TABLE IF NOT EXISTS lc_installs (
     version TEXT NOT NULL,
     channel TEXT,
     ipa_sha256 TEXT
+);
+
+-- Certificates `--lc-push-cert` put into a LiveContainer's Documents, per
+-- device, until `--lc-clean` removes them. The only evidence `--lc-clean` takes
+-- that an `AppleDevelopment.p12` there is ours: the name is generic, and one
+-- pushed before this table existed is reported, not deleted.
+CREATE TABLE IF NOT EXISTS cert_pushes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL,
+    udid TEXT NOT NULL,
+    bundle_id TEXT NOT NULL,
+    name TEXT NOT NULL
 );
 """
 
@@ -149,25 +173,20 @@ class BuildLog:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.executescript(SCHEMA)
-            cols = {row[1] for row in conn.execute("PRAGMA table_info(builds)").fetchall()}
-            if "ipa_path" not in cols:
-                conn.execute("ALTER TABLE builds ADD COLUMN ipa_path TEXT")
-            if "log_path" not in cols:
-                conn.execute("ALTER TABLE builds ADD COLUMN log_path TEXT")
-            if "target" not in cols:
-                conn.execute("ALTER TABLE builds ADD COLUMN target TEXT")
-            # `deliveries` gets the general form of the three lines above.
             # CREATE TABLE IF NOT EXISTS is a no-op against a database that
             # already has the table, so a column added to SCHEMA never reaches
             # one — and every reader indexes rows by name, which makes a
             # missing column an IndexError on `--list`, the GUI's whole app
             # list. Added bare (no NOT NULL, no default) because that is all
             # ALTER TABLE ADD COLUMN can do; every nullable column here already
-            # reads NULL as "written before this existed".
-            live = {row[1] for row in conn.execute("PRAGMA table_info(deliveries)").fetchall()}
-            for name, decl in _declared_columns("deliveries"):
-                if name not in live:
-                    conn.execute(f"ALTER TABLE deliveries ADD COLUMN {name} {decl}")
+            # reads NULL as "written before this existed". `builds` had three
+            # hand-written ALTERs (ipa_path, log_path, target) before it got
+            # this general form too, with `delivery`.
+            for table in ("builds", "deliveries"):
+                live = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+                for name, decl in _declared_columns(table):
+                    if name not in live:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -192,7 +211,11 @@ class BuildLog:
         error: str | None = None,
         log_path: Path | None = None,
         target: str = "device",
+        delivery: str | None = None,
     ) -> int:
+        """One build's row. `delivery` is the app's mode the build ran in,
+        which decides what the archive is: zsign-signed for `sideload`,
+        unsigned for `livecontainer`."""
         ipa_hash = sha256_of(ipa_path) if ipa_path and ipa_path.exists() else None
         with self._connect() as conn:
             cur = conn.execute(
@@ -200,8 +223,8 @@ class BuildLog:
                 INSERT INTO builds (
                     timestamp, app, bundle_id, version, tweaks,
                     ipa_sha256, ipa_path, log_path, signing_team, udid, target,
-                    success, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    delivery, success, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.now(UTC).isoformat(),
@@ -215,6 +238,7 @@ class BuildLog:
                     signing_team,
                     udid,
                     target,
+                    delivery,
                     1 if success else 0,
                     error,
                 ),
@@ -338,6 +362,22 @@ class BuildLog:
             )
             return int(cur.lastrowid or 0)
 
+    def recorded_delivery_of(self, app: str, ipa_sha256: str) -> sqlite3.Row | None:
+        """The newest delivery of `app` that shipped exactly these bytes and
+        recorded what went into them, or None.
+
+        What lets a re-install of an archive vouch for its inputs: the archive
+        is byte-for-byte what that push shipped. A row with no digest (a plain
+        'reinstall') is no evidence, so it is never returned.
+        """
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            return conn.execute(
+                "SELECT * FROM deliveries WHERE app = ? AND ipa_sha256 = ?"
+                " AND inputs_digest IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (app, ipa_sha256),
+            ).fetchone()
+
     def latest_delivery(self, app: str, *, udid: str | None = None) -> sqlite3.Row | None:
         """The most recent delivery recorded for `app`, or None.
 
@@ -392,15 +432,68 @@ class BuildLog:
                 (datetime.now(UTC).isoformat(), udid, bundle_id, version, channel, ipa_sha256),
             )
 
-    def pushed_remote_names(self, lc_bundle_id: str) -> set[str]:
-        """Every file name a delivery pushed into `lc_bundle_id`'s Documents."""
+    def pushed_by_instance(self, udid: str) -> dict[str, set[str]]:
+        """Every LiveContainer a delivery to `udid` went into, with the file names pushed.
+
+        The evidence `--lc-clean` deletes on, and the push overwrites on, so it
+        is exactly that: rows for this device and this container. A row with
+        no device recorded proves nothing about this one; both push sites have
+        stored the udid since the table existed (v1.0 included), so only a
+        hand-made row lacks it.
+        """
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT DISTINCT remote_name FROM deliveries"
-                " WHERE lc_bundle_id = ? AND remote_name IS NOT NULL",
-                (lc_bundle_id,),
+                "SELECT DISTINCT lc_bundle_id, remote_name FROM deliveries"
+                " WHERE lc_bundle_id IS NOT NULL AND remote_name IS NOT NULL"
+                " AND udid = ? AND cleaned_at IS NULL",
+                (udid,),
             ).fetchall()
-        return {r[0] for r in rows}
+        out: dict[str, set[str]] = {}
+        for bundle_id, name in rows:
+            out.setdefault(bundle_id, set()).add(name)
+        return out
+
+    def forget_pushes(self, *, udid: str, bundle_id: str) -> None:
+        """`--lc-clean` emptied `bundle_id` of what Graft pushed to `udid`: those
+        records stop vouching for the names they pushed, so a file the user
+        later puts there under one of them is theirs, and the push refuses it.
+
+        Marked, not deleted: the rows are delivery history too.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE deliveries SET cleaned_at = ? WHERE udid = ? AND lc_bundle_id = ?"
+                " AND cleaned_at IS NULL",
+                (datetime.now(UTC).isoformat(), udid, bundle_id),
+            )
+
+    def record_cert_push(self, *, udid: str, bundle_id: str, name: str) -> None:
+        """Note that `--lc-push-cert` put `name` into `bundle_id`'s Documents."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO cert_pushes (timestamp, udid, bundle_id, name) VALUES (?, ?, ?, ?)",
+                (datetime.now(UTC).isoformat(), udid, bundle_id, name),
+            )
+
+    def cert_pushes(self, udid: str) -> dict[str, set[str]]:
+        """Where on `udid` a certificate push is recorded and not yet cleaned:
+        LiveContainer bundle id → the file names pushed."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT bundle_id, name FROM cert_pushes WHERE udid = ?", (udid,)
+            ).fetchall()
+        out: dict[str, set[str]] = {}
+        for bundle_id, name in rows:
+            out.setdefault(bundle_id, set()).add(name)
+        return out
+
+    def forget_cert_push(self, *, udid: str, bundle_id: str) -> None:
+        """`--lc-clean` took the certificate out of `bundle_id`: the record goes
+        with it, so a certificate the user puts there later is not ours."""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM cert_pushes WHERE udid = ? AND bundle_id = ?", (udid, bundle_id)
+            )
 
     def lc_installed_bundle_ids(self, udid: str) -> set[str]:
         """Every LiveContainer bundle id this tool has installed on `udid`."""

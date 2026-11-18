@@ -25,9 +25,13 @@ struct AppStoreStatusRecord: Decodable, Equatable {
         let signedIn: Bool?
         /// Set for a version known to be broken (2.8.1, whose downloads fail).
         let warning: String?
+        /// The one command that installs the release Graft is tested with,
+        /// for a Copy button; nil when nothing needs installing (and from a
+        /// CLI too old to say).
+        var install: String? = nil
 
         enum CodingKeys: String, CodingKey {
-            case path, present, version, warning
+            case path, present, version, warning, install
             case signedIn = "signed_in"
         }
     }
@@ -39,9 +43,14 @@ struct AppStoreStatusRecord: Decodable, Equatable {
         /// A recovered enrollment model exists. Without one nothing decrypts.
         let enrolled: Bool
         let modelDir: String
+        /// The build-from-source steps as one command, for a Copy button; nil
+        /// when it is present (or this Mac cannot run it, or the CLI is too
+        /// old to say). Enrolling is not in it: that needs root and an app
+        /// name only the user knows, and stays in `setupCommands`.
+        var install: String? = nil
 
         enum CodingKeys: String, CodingKey {
-            case path, present, version, enrolled
+            case path, present, version, enrolled, install
             case modelDir = "model_dir"
         }
     }

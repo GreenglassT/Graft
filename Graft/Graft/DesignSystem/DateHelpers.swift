@@ -24,6 +24,20 @@ enum DateHelpers {
         return f
     }()
 
+    /// How long ago `date` was, for a timestamp the CLI wrote.
+    ///
+    /// Within a minute either side of `now` it is "just now". The CLI stamps a
+    /// build with its own clock, a moment after the app last read `now` — and
+    /// `RelativeDateTimeFormatter` rounds a zero-or-future interval into the
+    /// future tense, so a build that had just finished read "LAST BUILD in 0s".
+    /// No reader wants the seconds of a minute-old event anyway.
+    static let justNowWindow: TimeInterval = 60
+
+    static func relativeToNow(_ date: Date, now: Date = .now) -> String {
+        guard abs(date.timeIntervalSince(now)) >= justNowWindow else { return "just now" }
+        return relative.localizedString(for: date, relativeTo: now)
+    }
+
     /// Parse a CLI-emitted ISO 8601 timestamp. Tries the fractional-seconds
     /// variant first (what `datetime.now(timezone.utc).isoformat()` produces),
     /// then falls back to the default format for safety.

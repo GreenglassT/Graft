@@ -30,6 +30,41 @@ final class SettingsStoreTests: XCTestCase {
         try await store.runChecks(argsOverride: ["-c", script])
         XCTAssertEqual(store.checks.first?.actionKey, "set-p12-password")
     }
+
+    /// Exit 3 is "some checks failed" — the pane's whole subject — and must
+    /// still parse, notice line and all.
+    @MainActor
+    func test_a_scan_with_failures_is_data_not_an_error() async throws {
+        let store = SettingsStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+        let script = #"""
+        printf '%s\n' '{"type":"log","source":"startup","line":"TB_SSH_PASS is set but no longer read; use GRAFT_SSH_PASS"}' '{"type":"preflight-check","name":"zsign","ok":false,"detail":"not found","hint":"brew install zsign"}' '{"type":"preflight-end","ok_count":0,"fail_count":1}'
+        exit 3
+        """#
+        try await store.runChecks(argsOverride: ["-c", script])
+        XCTAssertEqual(store.checks.map(\.name), ["zsign"], "the notice is not a check row")
+    }
+
+    /// K6(b): a config that will not load exits 2, and the startup notice
+    /// in front of it used to make stdout non-empty — so the pane got no
+    /// checks and no error. It is an error.
+    @MainActor
+    func test_a_scan_that_could_not_run_throws_even_with_a_notice_on_stdout() async throws {
+        let store = SettingsStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+        let script = #"""
+        printf '%s\n' '{"type":"log","source":"startup","line":"TB_SSH_PASS is set but no longer read; use GRAFT_SSH_PASS"}'
+        printf 'error: config.yaml: mapping values are not allowed here\n' >&2
+        exit 2
+        """#
+        do {
+            try await store.runChecks(argsOverride: ["-c", script])
+            XCTFail("a scan that never ran reported success")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("mapping values are not allowed here"),
+                          error.localizedDescription)
+        }
+        XCTAssertTrue(store.hasChecked, "it finished, badly")
+        XCTAssertFalse(store.isRunning)
+    }
 }
 
 // MARK: - Writing settings
@@ -460,7 +495,8 @@ final class SettingsDefaultDeviceRescanTests: XCTestCase {
         return (
             SettingsView(
                 store: settings, devicesStore: devices,
-                appStore: AppStoreStore(runner: cli.runner)
+                appStore: AppStoreStore(runner: cli.runner),
+                account: .paid
             ),
             settings, devices
         )

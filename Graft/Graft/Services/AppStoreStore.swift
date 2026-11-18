@@ -95,6 +95,47 @@ final class AppStoreStore {
     /// The most recent completion for any app — what `ContentView` watches to
     /// refresh that app's artwork, whichever pane is showing.
     private(set) var lastCompleted: Completion?
+
+    /// What the last finished get or drop staged, per app — the line the app
+    /// pane shows under the Source IPA section until the next action.
+    ///
+    /// The pane used to return to exactly the state it was in before a drop,
+    /// so one that worked looked like one that did nothing. Cleared when the
+    /// next get or drop for the app starts. A build is the third "next
+    /// action", and it is not cleared here: builds start from two buttons
+    /// (Build & Install, Build for this Mac) and only one of them used to
+    /// remember to clear it. The pane compares `Staged.at` with
+    /// `ConfigStore.buildStartedAt` instead, which every build sets on its way
+    /// through the one build slot — `AppDetailView.stagedConfirmation`.
+    struct Staged: Equatable {
+        enum Source: Equatable {
+            case appStore
+            /// The file the user dropped or chose, by name.
+            case drop(filename: String)
+        }
+
+        let source: Source
+        let version: String
+        /// The CLI decrypted it on the way in. Always so for a get; for a drop,
+        /// only when the IPA came straight from the App Store encrypted.
+        let decrypted: Bool
+        /// When it landed, against `ConfigStore.buildStartedAt`: a build that
+        /// started after this is the next action, and the line is old news.
+        var at: ContinuousClock.Instant = .now
+
+        var message: String {
+            switch source {
+            case .appStore:
+                return "✓ Staged \(version) from the App Store"
+            case let .drop(filename):
+                return decrypted
+                    ? "✓ Decrypted and staged \(version) from \(filename)"
+                    : "✓ Staged \(version) from \(filename)"
+            }
+        }
+    }
+
+    private(set) var staged: [String: Staged] = [:]
     private var serial = 0
     private var tasks: [String: Task<Void, Never>] = [:]
 
@@ -195,8 +236,9 @@ final class AppStoreStore {
         activity[app] = .getting
         errors[app] = nil
         stages[app] = nil
+        staged[app] = nil
         tasks[app] = Task { [weak self] in
-            await self?.run(app: app) { try await $0.streamGet(app: app) }
+            await self?.run(app: app, source: .appStore) { try await $0.streamGet(app: app) }
         }
         return true
     }
@@ -227,8 +269,9 @@ final class AppStoreStore {
         }
         activity[app] = .providing
         errors[app] = nil
+        staged[app] = nil
         tasks[app] = Task { [weak self] in
-            await self?.run(app: app) { store in
+            await self?.run(app: app, source: .drop(filename: fileURL.lastPathComponent)) { store in
                 try await config.provideIPA(appName: app, fileURL: fileURL) { [weak store] stage in
                     store?.noteStage(stage, for: app)
                 }
@@ -242,11 +285,13 @@ final class AppStoreStore {
     /// first has staged — and nothing after that point writes `activity`, so a
     /// new operation's claim cannot be clobbered by this one finishing.
     private func run(
-        app: String, _ work: (AppStoreStore) async throws -> CachedIPARecord?
+        app: String, source: Staged.Source,
+        _ work: (AppStoreStore) async throws -> ConfigStore.ProvidedIPA?
     ) async {
         var failure: Error?
+        var provided: ConfigStore.ProvidedIPA?
         do {
-            _ = try await work(self)
+            provided = try await work(self)
         } catch {
             failure = error
         }
@@ -259,6 +304,12 @@ final class AppStoreStore {
             return
         }
         guard !cancelled else { return }
+        if let provided {
+            staged[app] = Staged(
+                source: source, version: provided.record.version,
+                decrypted: provided.decrypted
+            )
+        }
         serial += 1
         completions[app, default: 0] += 1
         lastCompleted = Completion(app: app, serial: serial)
@@ -269,16 +320,13 @@ final class AppStoreStore {
     /// work `startGet` runs in its slot, never called outside one. Throws the
     /// CLI's own message and hint, which is where "tap Get on a device first"
     /// and the login command come from.
-    private func streamGet(app: String) async throws -> CachedIPARecord? {
+    private func streamGet(app: String) async throws -> ConfigStore.ProvidedIPA? {
         let events = try await runner.streamEvents(
             Self.getArgs(app: app), failing: "Get from App Store"
         ) { [weak self] event in
             self?.note(event, forGetOf: app)
         }
-        return events.lazy.compactMap { event -> CachedIPARecord? in
-            if case let .ipaProvided(record) = event { return record }
-            return nil
-        }.first
+        return ConfigStore.provided(in: events)
     }
 
     /// Apply one streamed event to `app`'s progress — only while its work runs.

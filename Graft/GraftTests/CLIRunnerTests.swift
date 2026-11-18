@@ -61,6 +61,127 @@ final class CLIRunnerTests: XCTestCase {
         XCTAssertEqual(ProcessEnvironment.usagePanelColumns, 80, "Rich's own default")
     }
 
+    /// MacPorts installs libimobiledevice (idevice_id, ideviceinstaller, iproxy)
+    /// into /opt/local/bin. A Finder-launched app never sees the user's shell
+    /// PATH, so without this the CLI's pre-flight reported those tools missing
+    /// and told the user to `brew install` something they already had.
+    func test_augmented_environment_includes_macports() throws {
+        let env = ProcessEnvironment.augmented(
+            base: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"], home: "/Users/x"
+        )
+        let dirs = (env["PATH"] ?? "").split(separator: ":").map(String.init)
+        let macports = try XCTUnwrap(dirs.firstIndex(of: "/opt/local/bin"))
+        XCTAssertLessThan(macports, try XCTUnwrap(dirs.firstIndex(of: "/usr/bin")))
+    }
+
+    // MARK: - Finding the graft CLI
+
+    func test_graft_is_found_in_the_first_tool_dir_that_has_it() throws {
+        let present: Set<String> = ["/opt/homebrew/bin/graft", "/Users/x/.local/bin/graft"]
+        let found = GraftExecutable.locate(
+            home: "/Users/x", path: "/usr/bin:/bin", isExecutable: present.contains
+        )
+        XCTAssertEqual(found?.path, "/Users/x/.local/bin/graft", "pipx's default wins")
+    }
+
+    func test_graft_is_found_under_macports() throws {
+        let found = GraftExecutable.locate(
+            home: "/Users/x", path: "/usr/bin:/bin", isExecutable: { $0 == "/opt/local/bin/graft" }
+        )
+        XCTAssertEqual(found?.path, "/opt/local/bin/graft")
+    }
+
+    /// A pipx with a custom `PIPX_BIN_DIR` puts graft somewhere none of the
+    /// fixed directories name. When the app was given a PATH that has it
+    /// (started from a shell), that PATH is searched too.
+    func test_graft_is_found_on_the_inherited_path() throws {
+        let found = GraftExecutable.locate(
+            home: "/Users/x", path: "/Users/x/tools/bin:/usr/bin",
+            isExecutable: { $0 == "/Users/x/tools/bin/graft" }
+        )
+        XCTAssertEqual(found?.path, "/Users/x/tools/bin/graft")
+    }
+
+    /// A relative PATH entry names the app's working directory, which is not
+    /// a place anyone installed graft. Skipped, even when a predicate would
+    /// say yes to it.
+    func test_relative_path_entries_are_never_searched() {
+        var asked: [String] = []
+        _ = GraftExecutable.locate(home: "/Users/x", path: ".:bin::/a", isExecutable: {
+            asked.append($0)
+            return false
+        })
+        // Exactly these: `URL(fileURLWithPath: ".")` resolves against the
+        // working directory, so a relative entry would show up here as an
+        // absolute path under it rather than as itself.
+        XCTAssertEqual(
+            asked,
+            ProcessEnvironment.toolDirs(home: "/Users/x").map { "\($0)/graft" } + ["/a/graft"]
+        )
+    }
+
+    /// The predicate the app passes: a regular file this user can run, a
+    /// symlink to one included (pipx's `~/.local/bin/graft` is one), and
+    /// nothing else.
+    func test_the_production_predicate_wants_a_runnable_regular_file() throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("graft-runnable-\(UUID().uuidString)")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+
+        let program = dir.appendingPathComponent("program")
+        try "#!/bin/sh\n".write(to: program, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: program.path)
+        let plain = dir.appendingPathComponent("plain")
+        try "x".write(to: plain, atomically: true, encoding: .utf8)
+        try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: plain.path)
+        let folder = dir.appendingPathComponent("folder")
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let link = dir.appendingPathComponent("link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: program)
+        let linkToFolder = dir.appendingPathComponent("link-to-folder")
+        try fm.createSymbolicLink(at: linkToFolder, withDestinationURL: folder)
+
+        XCTAssertTrue(GraftExecutable.isRunnableFile(program.path))
+        XCTAssertTrue(GraftExecutable.isRunnableFile(link.path))
+        XCTAssertFalse(GraftExecutable.isRunnableFile(plain.path), "not executable")
+        XCTAssertFalse(GraftExecutable.isRunnableFile(folder.path), "a directory")
+        XCTAssertFalse(GraftExecutable.isRunnableFile(linkToFolder.path), "a link to a directory")
+        XCTAssertFalse(GraftExecutable.isRunnableFile(dir.appendingPathComponent("absent").path))
+    }
+
+    /// The old fallback was `/usr/bin/env` run with graft's own arguments and
+    /// no `graft` in front of them — `env --json --list` — so a Mac without
+    /// the CLI showed "exit 1: usage: env [-0iv] …" on every pane. What runs
+    /// instead must be a path that fails to launch, so the failure is the one
+    /// `RunError` explains.
+    func test_without_graft_anywhere_the_app_does_not_run_env() throws {
+        let resolved = GraftExecutable.resolve(
+            home: "/Users/x", path: "/usr/bin:/bin", isExecutable: { _ in false }
+        )
+        XCTAssertNotEqual(resolved.path, "/usr/bin/env")
+        XCTAssertEqual(resolved.lastPathComponent, "graft")
+        XCTAssertNil(GraftExecutable.locate(
+            home: "/Users/x", path: nil, isExecutable: { _ in false }
+        ))
+    }
+
+    /// What a user who installed the app but not the CLI is shown: the banner
+    /// text is `error.localizedDescription`, so the launch failure itself has
+    /// to say what is missing and the command that installs it.
+    func test_a_missing_cli_explains_how_to_install_it() async throws {
+        let missing = "/nonexistent-\(UUID().uuidString)/graft"
+        let runner = CLIRunner(executable: URL(fileURLWithPath: missing))
+        do {
+            _ = try await runner.runOnce(arguments: ["--list", "--json"])
+            XCTFail("launching a missing executable must throw")
+        } catch {
+            let text = error.localizedDescription
+            XCTAssertTrue(text.contains(GraftExecutable.installCommand), text)
+            XCTAssertTrue(text.contains(missing), text)
+        }
+    }
+
     func test_augmented_environment_handles_missing_path() throws {
         let env = ProcessEnvironment.augmented(base: [:], home: "/Users/x")
         let dirs = (env["PATH"] ?? "").split(separator: ":").map(String.init)
@@ -320,6 +441,30 @@ final class CLIRunnerTests: XCTestCase {
 
         XCTAssertFalse(processExists(marker),
                        "cancelling the Task must terminate the subprocess, not orphan it")
+    }
+
+    /// A Stop's SIGTERM is graft's cue to delete the build's work dir: a real
+    /// app's unpacked tree took graft 2.1-3.1s to remove, and the 2s grace
+    /// before SIGKILL cut it off: exit 9, no `build-end`, 442 MB left in
+    /// $TMPDIR. A CLI that needs 3s to clean up must get them.
+    func test_a_stopped_cli_gets_time_to_clean_up_before_sigkill() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("graft-grace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cleaned = dir.appendingPathComponent("cleaned")
+        let script = "trap 'sleep 3; touch \"\(cleaned.path)\"; exit 143' TERM; "
+            + "while :; do sleep 0.1; done"
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+
+        let task = Task { try await runner.runOnce(arguments: ["-c", script]) }
+        try await Task.sleep(nanoseconds: 800_000_000)
+        task.cancel()
+        try await Task.sleep(nanoseconds: 5_000_000_000)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cleaned.path),
+                      "SIGKILL landed before the CLI finished cleaning up")
+        XCTAssertGreaterThanOrEqual(cliStopGrace, 10)
     }
 
     func test_stream_cancellation_kills_the_subprocess() async throws {
@@ -697,6 +842,55 @@ final class CLIRunnerTests: XCTestCase {
             CLIFailure.logText(exitCode: 1, stderr: Self.unfoldedPathStderr),
             ["✗ nothing to re-install for build 41: \(Self.foldedPath) is missing"]
         )
+    }
+
+    // MARK: - coloured stderr
+
+    /// What Rich writes for `_fatal` once something forces colour: the exact
+    /// bytes a `FORCE_COLOR=1` run of `graft --json --list` produced
+    /// against a missing config, path shortened.
+    private static let colouredMissingConfig =
+        "\u{1B}[31merror:\u{1B}[0m config file not found at "
+        + "\u{1B}[35m/Users/x/.config/graft/\u{1B}[0m\u{1B}[95mconfig.yaml\u{1B}[0m\n"
+        + "  \u{1B}[33mhint:\u{1B}[0m run `graft --init` to create one\n"
+
+    func test_coloured_stderr_parses_as_the_plain_message() throws {
+        let parsed = try XCTUnwrap(CLIFailure.parse(stderr: Self.colouredMissingConfig))
+        XCTAssertEqual(parsed.error, "config file not found at /Users/x/.config/graft/config.yaml")
+        XCTAssertEqual(parsed.hint, "run `graft --init` to create one")
+    }
+
+    /// Every surface reads stderr through `stderrLines`, so a traceback in
+    /// colour reaches a banner without an escape byte too.
+    func test_no_escape_byte_survives_into_any_rendering() {
+        let traceback = "Traceback (most recent call last):\n"
+            + "  \u{1B}[2mFile \"x.py\"\u{1B}[0m\n\u{1B}[1;31mKeyError\u{1B}[0m: 'x'\n"
+        for text in [
+            CLIFailure.summary(exitCode: 1, stderr: traceback),
+            CLIFailure.detail(exitCode: 1, stderr: traceback),
+            CLIFailure.logText(exitCode: 1, stderr: traceback).joined(separator: "\n"),
+            CLIError.exited(doing: "Load", code: 1, stderr: traceback).localizedDescription,
+        ] {
+            XCTAssertFalse(text.unicodeScalars.contains("\u{1B}"), text)
+        }
+        XCTAssertEqual(
+            CLIFailure.summary(exitCode: 1, stderr: traceback), "exit 1: KeyError: 'x'"
+        )
+    }
+
+    /// The sequence shapes Rich and the tools it runs emit: SGR colour, a
+    /// cursor move, an OSC 8 hyperlink terminated either way, and a two-byte
+    /// escape. Plain text, including non-ASCII, passes through untouched.
+    func test_terminal_escapes_are_stripped_and_nothing_else() {
+        let strip = CLIFailure.strippingTerminalEscapes
+        XCTAssertEqual(strip("\u{1B}[1;38;5;208mbold\u{1B}[0m"), "bold")
+        XCTAssertEqual(strip("a\u{1B}[2Kb"), "ab")
+        XCTAssertEqual(
+            strip("\u{1B}]8;id=1;https://example.com\u{1B}\\link\u{1B}]8;;\u{1B}\\"), "link"
+        )
+        XCTAssertEqual(strip("\u{1B}]8;;https://example.com\u{07}link\u{1B}]8;;\u{07}"), "link")
+        XCTAssertEqual(strip("x\u{1B}=y\u{1B}"), "xy")
+        XCTAssertEqual(strip("✓ plain — ünïcode [brackets] ok"), "✓ plain — ünïcode [brackets] ok")
     }
 
     // MARK: - against the Rich the CLI actually runs

@@ -104,10 +104,68 @@ def test_the_control_without_the_handler_leaks_it(tmp_path: Path) -> None:
 def test_the_previous_handlers_come_back(sig: signal.Signals) -> None:
     from graft_ipa import lc_manage
 
-    before = signal.getsignal(sig)
-    with lc_manage.exit_on_termination():
-        assert signal.getsignal(sig) is not before
-    assert signal.getsignal(sig) is before
+    # From the default, whatever this suite inherited: run under `nohup`, its
+    # SIGHUP arrives ignored, which the guard deliberately leaves alone.
+    inherited = signal.signal(sig, signal.SIG_DFL)
+    try:
+        before = signal.getsignal(sig)
+        with lc_manage.exit_on_termination():
+            assert signal.getsignal(sig) is not before
+        assert signal.getsignal(sig) is before
+    finally:
+        signal.signal(sig, inherited)
+
+
+# --- `nohup graft …` (P2) --------------------------------------------------------
+#
+# The guard installed its SIGHUP handler over whatever was there, SIG_IGN
+# included. `nohup graft example &` sets SIGHUP to SIG_IGN precisely so that
+# closing the terminal does not end the run; with the handler on, it ended it
+# as a Stop (exit 129). An ignored SIGHUP is now left ignored. SIGTERM is
+# always taken: it is the Stop.
+
+HUP_CHILD = r'''
+import os, signal, sys, time
+from graft_ipa import lc_manage
+
+with lc_manage.exit_on_termination():
+    os.kill(os.getpid(), getattr(signal, sys.argv[1]))
+    time.sleep(0.5)
+print("survived", flush=True)
+'''
+
+
+@pytest.mark.parametrize(("sig", "code", "out"), [
+    ("SIGHUP", 0, "survived\n"),                # the hang-up nohup protects from
+    ("SIGTERM", 128 + signal.SIGTERM, ""),     # and still a Stop
+])
+def test_under_nohup_a_hang_up_does_not_stop_the_run(
+    tmp_path: Path, sig: str, code: int, out: str
+) -> None:
+    proc = subprocess.run(
+        ["nohup", sys.executable, "-c", HUP_CHILD, sig],
+        capture_output=True, text=True, timeout=30, cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+
+    assert (proc.returncode, proc.stdout) == (code, out), proc.stderr
+
+
+def test_an_ignored_sighup_is_left_ignored_and_sigterm_is_still_taken() -> None:
+    from graft_ipa import lc_manage
+
+    inherited = {sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGTERM)}
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        with lc_manage.exit_on_termination():
+            assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+            assert callable(signal.getsignal(signal.SIGTERM))
+        assert signal.getsignal(signal.SIGHUP) == signal.SIG_IGN
+        assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+    finally:
+        for sig, handler in inherited.items():
+            signal.signal(sig, handler)
 
 
 def test_off_the_main_thread_it_is_a_no_op_not_a_crash() -> None:

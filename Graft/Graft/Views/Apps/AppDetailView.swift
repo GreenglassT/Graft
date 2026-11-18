@@ -65,6 +65,10 @@ struct AppDetailView: View {
     /// `@State`, because a get takes minutes and this view is reused across
     /// app switches.
     let appStore: AppStoreStore
+    /// `ContentView`'s LiveContainer store, for the Edit sheet's LiveContainer
+    /// picker (C-LCPIN): it lists the default device's instances from the same
+    /// `--lc-status` answers the device pane shows.
+    let liveContainer: LiveContainerStore
     /// What the build-target bar's Change control does: in the app, select the
     /// Settings section.
     ///
@@ -118,6 +122,7 @@ struct AppDetailView: View {
         tweaksStore: TweaksStore,
         staged: StagedIPAStore,
         appStore: AppStoreStore,
+        liveContainer: LiveContainerStore,
         showSettings: @escaping () -> Void
     ) {
         self.app = app
@@ -128,6 +133,7 @@ struct AppDetailView: View {
         self.tweaksStore = tweaksStore
         self.staged = staged
         self.appStore = appStore
+        self.liveContainer = liveContainer
         self.showSettings = showSettings
     }
 
@@ -307,7 +313,9 @@ struct AppDetailView: View {
         // the store unconditionally for the same reason: a build that finishes
         // while the user is in another section must still update them.
         .sheet(isPresented: $showingEditSheet) {
-            EditAppSheet(app: app, store: store) { showingEditSheet = false }
+            EditAppSheet(
+                app: app, store: store, liveContainer: liveContainer, devices: devices
+            ) { showingEditSheet = false }
         }
         // Confirmed rather than immediate, because what a cancel costs depends
         // on where the build has got to and the user cannot see that from the
@@ -423,7 +431,8 @@ struct AppDetailView: View {
                 // Nor while this app's source IPA is being replaced: a build
                 // started mid-get would read whichever file happened to sit at
                 // the canonical name.
-                .disabled(store.buildingApp != nil || appStore.isBusy(app.name))
+                .disabled(store.buildingApp != nil || appStore.isBusy(app.name)
+                          || buildRefusal != nil)
                 .help(buildButtonHelp)
 
                 if store.buildingApp == app.name {
@@ -439,6 +448,9 @@ struct AppDetailView: View {
                 }
                 .controlSize(.small)
                 .help("Build options")
+                // The glyph's own name is "Go Down", which is what VoiceOver
+                // read for this button; `.help` is a tooltip, not a name.
+                .accessibilityLabel("Build options")
                 .disabled(isBuilding)
                 .popover(isPresented: $showingOptions, arrowEdge: .bottom) {
                     buildOptionsPopover
@@ -544,14 +556,31 @@ struct AppDetailView: View {
                 overrideUDID: buildOptions.deviceUDID,
                 deviceErrors: devices.deviceErrors,
                 hasLoaded: devices.hasLoaded,
-                notDelivering: buildOptions.deliverySuppressor
+                notDelivering: buildOptions.deliverySuppressor,
+                account: store.account
             ),
             onChange: showSettings
         )
     }
 
     private var buildButtonHelp: String {
-        store.busy?.explanation ?? "Build and install \(app.name)"
+        buildRefusal ?? store.busy?.explanation ?? "Build and install \(app.name)"
+    }
+
+    /// Why no build of this app can run on this account, or nil when one can.
+    ///
+    /// A `delivery: sideload` app left in a config for a free Apple ID —
+    /// added while the account was paid, or by hand. The CLI refuses every
+    /// build of it (`PaidAccountRequiredError`), so Build & Install and Build
+    /// for this Mac are disabled with this as their tooltip, and the build
+    /// target bar beneath says the same, rather than offering a press that
+    /// can only fail. The way out is Edit…, whose picker stays live for it.
+    private var buildRefusal: String? {
+        Self.buildRefusal(delivery: app.delivery, account: store.account)
+    }
+
+    static func buildRefusal(delivery: DeliveryMode, account: AccountMode?) -> String? {
+        account.isFree && delivery == .sideload ? PaidOnly.sideloadApp : nil
     }
 
     /// Pills and the options chevron freeze while a build runs, so the header
@@ -569,9 +598,12 @@ struct AppDetailView: View {
                 .labelCaps()
 
             Toggle("Dry run", isOn: $buildOptions.dryRun)
-                .help("Print the cyan/zsign/install commands without executing them")
+                .help("Show what the build would run and where it would send the "
+                      + "IPA, without doing any of it")
+            // Not "build and sign": a LiveContainer build signs nothing —
+            // LiveContainer signs the app when it is imported.
             Toggle("Skip install", isOn: $buildOptions.skipInstall)
-                .help("Build and sign only — don't push to the device")
+                .help("Build the IPA only — don't send it to the device")
             Toggle("Skip decryption check", isOn: $buildOptions.skipDecryptCheck)
                 .help("Skip the cryptid-0 verification. Only if the check is "
                       + "wrong about a known-decrypted IPA — injecting into an "
@@ -689,11 +721,14 @@ struct AppDetailView: View {
                     // is this pane's own state and says nothing about a build
                     // running for another app. Also not while this app's
                     // source IPA is being replaced, as Build & Install.
-                    .disabled(store.buildingApp != nil || appStore.isBusy(app.name))
-                    .help("Build with the stub framework PlayCover needs, then "
+                    .disabled(store.buildingApp != nil || appStore.isBusy(app.name)
+                              || buildRefusal != nil)
+                    // A Mac build of a sideload app is refused too: the
+                    // refusal is the build's first step, whatever its target.
+                    .help(buildRefusal ?? ("Build with the stub framework PlayCover needs, then "
                           + "hand it to PlayCover to install here. Nothing is "
                           + "sent to the phone, and the artifact is not one a "
-                          + "phone can use.")
+                          + "phone can use."))
             }
         }
         .font(AppFont.body)
@@ -704,6 +739,16 @@ struct AppDetailView: View {
         // the device Picker's label earlier. A 300pt popover is not a pane.
         .padding(Metrics.popoverGutter)
         .frame(width: 300)
+    }
+
+    /// The staged line to show, or nil once a build has started since it
+    /// landed — whichever button started it. See `ConfigStore.buildStartedAt`.
+    static func stagedConfirmation(
+        _ staged: AppStoreStore.Staged?, buildStartedAt: ContinuousClock.Instant?
+    ) -> AppStoreStore.Staged? {
+        guard let staged else { return nil }
+        if let buildStartedAt, buildStartedAt >= staged.at { return nil }
+        return staged
     }
 
     /// Build this app for this Mac, then hand the result to PlayCover.
@@ -820,9 +865,17 @@ struct AppDetailView: View {
                 value: Self.deliveryStateValue(store.deliveryStates[app.name])
             )
             MetaCell(label: "Tweaks", value: "\(app.tweaks.count)")
-            MetaCell(label: "Profile", value: app.autoProfile ? "auto" : "manual")
-            MetaCell(label: "Last build", value: lastBuildSummary)
+            MetaCell(label: "Profile", value: Self.profileValue(app, account: store.account))
+            MetaCell(label: "Last build", value: Self.lastBuildSummary(lastBuild))
         }
+    }
+
+    /// The Profile cell's value. A free Apple ID has no provisioning profile
+    /// at all (LiveContainer signs the app on import), so "manual" there
+    /// would name a setting that does not exist.
+    static func profileValue(_ app: AppRecord, account: AccountMode?) -> String {
+        if account.isFree { return "not used" }
+        return app.autoProfile ? "auto" : "manual"
     }
 
     /// The delivery-state cell's value.
@@ -853,10 +906,12 @@ struct AppDetailView: View {
         state?.kind.stateLabel ?? "—"
     }
 
-    private var lastBuildSummary: String {
+    /// The Last build cell's value. Static for `deliveryStateValue`'s reason:
+    /// a test pins what the tile says without hosting the pane.
+    static func lastBuildSummary(_ lastBuild: BuildRecord?, now: Date = .now) -> String {
         guard let lb = lastBuild else { return "—" }
         let date = lb.date ?? .distantPast
-        let rel = DateHelpers.relative.localizedString(for: date, relativeTo: .now)
+        let rel = DateHelpers.relativeToNow(date, now: now)
         return lb.success ? rel : "failed \(rel)"
     }
 
@@ -1263,6 +1318,18 @@ struct AppDetailView: View {
                     }
                 }
             )
+            // What the last get or drop staged, until the next action — a
+            // drop that worked used to look exactly like one that did nothing.
+            if let staged = Self.stagedConfirmation(
+                appStore.staged[app.name], buildStartedAt: store.buildStartedAt[app.name]
+            ) {
+                Text(staged.message)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.success)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let ipaError {
                 ErrorBanner(message: ipaError, onDismiss: { self.ipaError = nil })
             }
@@ -1526,9 +1593,26 @@ struct AppDetailView: View {
     private var logSection: some View {
         VStack(alignment: .leading, spacing: Metrics.titleGap) {
             SectionTitle(text: "Last build log")
-            BuildLogPanel(lines: logLines)
+            BuildLogPanel(lines: logLines, emptyMessage: Self.emptyLogMessage(lastBuild: lastBuild))
                 .frame(minHeight: 160)
         }
+    }
+
+    /// What the log panel says before this session has built the app.
+    ///
+    /// The panel holds only this session's output, so "No build yet" was true
+    /// of the panel and false of the app whenever the CLI had a build on
+    /// record — the tile beside it said "21h ago". Which sentence is right
+    /// depends on that record: a build run from Terminal without `--json`
+    /// saved no log (`log_path` null), and one that did save a log can be
+    /// replayed from Builds.
+    static func emptyLogMessage(lastBuild: BuildRecord?) -> String {
+        guard let lastBuild else { return "No build yet for this app." }
+        guard lastBuild.logPath != nil else {
+            return "The last build ran from Terminal, so its log wasn't saved. "
+                + "Builds started here keep theirs."
+        }
+        return "Nothing built since Graft opened. The last build's log is in Builds."
     }
 
     /// - Parameter options: the run's own options, passed rather than read off
@@ -1560,9 +1644,19 @@ struct AppDetailView: View {
         // has no meta strip to fill, and its record would land in the other
         // app's.
         let handingOver = built && options.forPlaycover
-        let finished = (logOwner == owner || handingOver)
-            ? await lastBuildRecord(of: owner)
-            : nil
+        // Read outside this Task when a Stop cancelled it: `runOnce` in a
+        // cancelled Task kills its own child at once, so the read came back
+        // nil and "Last build" went from "just now" to "—" over a history the
+        // stop had not touched (a stop writes no row). An unstructured Task
+        // does not inherit the cancellation.
+        let finished: BuildRecord?
+        if logOwner == owner || handingOver {
+            finished = Task.isCancelled
+                ? await Task { await lastBuildRecord(of: owner) }.value
+                : await lastBuildRecord(of: owner)
+        } else {
+            finished = nil
+        }
         if logOwner == owner {
             lastBuild = finished
         }
@@ -1634,7 +1728,14 @@ struct AppDetailView: View {
             // old `if result.exitCode != 0` took neither branch. The queued
             // `.finished` event is meanwhile dropped by `handle`'s cancelled
             // guard, so the pane sat painted as a running build forever.
-            if store.wasCancelled(owner) {
+            // A stop the CLI reported counts too (C-STOP), read off the
+            // collected events rather than the callback: a stop nobody pressed
+            // here — `kill` from Terminal — exits non-zero, and without this it
+            // painted a red Retry over a build that only did as it was told.
+            // Ahead of the exit status for the same reason as the cancel: a
+            // stopped Mac build must never fall through to the PlayCover
+            // handoff, which would hand over an *earlier* build's archive.
+            if store.wasCancelled(owner) || BuildProgress.stopReported(in: result.events) {
                 noteCancelled(result: result, owner: owner)
                 return false
             } else if result.exitCode != 0 {
@@ -1805,34 +1906,60 @@ struct AppDetailView: View {
         let aftermath = store.deviceExposure.cancelAftermath
         store.noteBuildCancelled(appName: owner)
         guard logOwner == owner else { return }
+        logLines += Self.stopTranscript(stage: stage, aftermath: aftermath, result: result)
+        buildState = .cancelled
+    }
 
+    /// What a stopped build adds to the log, under whatever the stream had
+    /// already put there.
+    ///
+    /// Static and pure, like `handoffFilename`, so the sentence a Stop leaves
+    /// is checkable without hosting the pane or running a build.
+    ///
+    /// - Parameters:
+    ///   - stage: the stage the build was in when it was stopped, read before
+    ///     the store was told.
+    ///   - aftermath: what the stop left on the phone, from the same folded
+    ///     value the confirmation used.
+    ///   - result: the subprocess's result, or nil when no subprocess ran.
+    static func stopTranscript(
+        stage: String?, aftermath: String?, result: CLIRunner.RunResult?
+    ) -> [LogLine] {
         // Names the stage it actually died at, which the confirmation could
         // not: that sheet was written when it was presented, and the build
         // went on advancing while the user read it. A cancel that says "Stopped
         // during lc-push" is the only version of this the user can act on,
         // because it is the only one taken after the fact.
-        logLines.append(LogLine(kind: .warn, text: stage.map { "Stopped during \($0)." }
-                                ?? "Stopped."))
+        var lines = [LogLine(kind: .warn, text: stage.map { "Stopped during \($0)." } ?? "Stopped.")]
         // From the same folded value the confirmation used, so the two cannot
         // disagree. Reading `buildStage` here was the bug: it is nil in exactly
         // the window the warning had just described, so the sentence the user
         // was warned about was the one the log then declined to write.
         if let aftermath {
-            logLines.append(LogLine(kind: .warn, text: aftermath))
+            lines.append(LogLine(kind: .warn, text: aftermath))
         }
-        // The CLI's own last words still reach the log. Skipping this whole
-        // path on a cancel threw away the explanation for a build that had
-        // genuinely failed a second before the kill landed — the phone
-        // unplugged, the app gone from config.yaml — leaving an empty pane and
-        // no hint. It is rendered as transcript, not as a failure: the header
-        // says `.cancelled`, and `report(unexplained:)` is still the only
-        // thing that paints a build red.
-        if let result, result.exitCode != 0 {
-            logLines += CLIFailure
+        // The CLI's own last words reach the log when they can explain
+        // something. Skipping this whole path on a cancel threw away the
+        // explanation for a build that had genuinely failed a second before
+        // the kill landed — the phone unplugged, the app gone from config.yaml
+        // — leaving an empty pane and no hint. It is rendered as transcript,
+        // not as a failure: the header says `.cancelled`, and
+        // `report(unexplained:)` is still the only thing that paints a build
+        // red.
+        //
+        // **Not when the CLI reported the stop (C-STOP).** Then it ended
+        // where it was told to, and its stderr has no `error:` block in it —
+        // under `--json` it is the build's own narration, which the CLI sends
+        // there to keep stdout for events. Dumping it put "✗ exit 143" under
+        // "Stopped during cyan." and then replayed every stage line the panel
+        // had already shown. A build that failed before the kill reports
+        // `build-end ok: false`, not `stopped: true`, so it still gets here.
+        if let result, result.exitCode != 0, !BuildProgress.stopReported(in: result.events) {
+            lines += CLIFailure
                 .logText(exitCode: result.exitCode, stderr: result.stderr)
                 .map { LogLine(kind: .warn, text: $0) }
         }
-        buildState = .cancelled
+        return lines
     }
 
     /// A non-zero exit the event stream never accounted for.
@@ -1973,6 +2100,10 @@ struct AppDetailView: View {
             buildState = .running(stage: name)
         case .finished(let ok, let error, _):
             buildState = ok ? .ok : .failed(message: error ?? "failed")
+        case .stopped:
+            // `noteCancelled` writes the transcript line, naming the stage.
+            buildState = .cancelled
+            return
         default:
             break
         }

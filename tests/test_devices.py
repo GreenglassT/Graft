@@ -15,6 +15,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from graft_ipa import devices as devices_mod
 from graft_ipa.devices import BriefDevice, DeviceInfo
 
@@ -249,7 +251,7 @@ def test_describing_a_device_closes_both_connections_it_opened() -> None:
     connection, which is why removing either `finally` alone still leaks.
     """
     proxy = MagicMock()
-    proxy.browse = AsyncMock(return_value=[{"CFBundleIdentifier": "com.kdt.livecontainer.X"}])
+    proxy.lookup = AsyncMock(return_value={"com.kdt.livecontainer.X": {"CFBundleIdentifier": "com.kdt.livecontainer.X"}})
     proxy.close = AsyncMock()
 
     with _a_phone_that_describes(proxy) as lock:
@@ -268,7 +270,7 @@ def test_both_connections_are_closed_when_the_describe_fails() -> None:
     so nothing downstream would ever hint that a connection was left open.
     """
     proxy = MagicMock()
-    proxy.browse = AsyncMock(side_effect=ConnectionResetError("device went away"))
+    proxy.lookup = AsyncMock(side_effect=ConnectionResetError("device went away"))
     proxy.close = AsyncMock()
 
     with _a_phone_that_describes(proxy) as lock:
@@ -294,10 +296,10 @@ def test_a_proxy_that_fails_costs_the_bundle_id_and_nothing_else() -> None:
 
     Stronger than the sibling test below, and worth keeping separate: there it
     is only the *close* that must not cost the device, here it is every failure
-    in the function, `browse` included.
+    in the function, the listing included.
     """
     proxy = MagicMock()
-    proxy.browse = AsyncMock(side_effect=ConnectionResetError("device went away"))
+    proxy.lookup = AsyncMock(side_effect=ConnectionResetError("device went away"))
     proxy.close = AsyncMock(side_effect=OSError("and the close failed too"))
 
     with _a_phone_that_describes(proxy) as lock:
@@ -325,7 +327,7 @@ def test_a_phone_that_drops_off_at_teardown_keeps_the_answer_it_gave() -> None:
     the case that motivated it is a real one.
     """
     proxy = MagicMock()
-    proxy.browse = AsyncMock(return_value=[{"CFBundleIdentifier": "com.kdt.livecontainer.X"}])
+    proxy.lookup = AsyncMock(return_value={"com.kdt.livecontainer.X": {"CFBundleIdentifier": "com.kdt.livecontainer.X"}})
     proxy.close = AsyncMock()
 
     with _a_phone_that_describes(proxy) as lock:
@@ -336,3 +338,65 @@ def test_a_phone_that_drops_off_at_teardown_keeps_the_answer_it_gave() -> None:
     assert [d.udid for d in listing.devices] == ["00008130-A"]
     assert [d.livecontainer_bundle_id for d in listing.devices] == ["com.kdt.livecontainer.X"]
     lock.close.assert_awaited_once()
+
+
+# ---- which LiveContainer the sidebar names: the push's answer -------------------
+#
+# `_detect_livecontainer_async` had a discovery of its own: a case-sensitive
+# `startswith("com.kdt.livecontainer")` over User apps, first match wins. So a
+# phone with only `com.kdt.LiveContainer2.<TEAM>` (an extra instance), only a
+# capitalised primary, or a TrollStore install (a System app) showed "no LC" in
+# the sidebar while the push found it fine; and with two installed, the sidebar
+# named whichever the phone listed first, not the one the push goes into.
+
+TEAM = "ABCDE12345"
+
+
+def _detect(monkeypatch, installed: list[str], *, system: tuple[str, ...] = ()) -> str | None:
+    from .test_lc_discovery import fake_device
+
+    lookups: list[dict] = []
+    fake_device(monkeypatch, installed, system=list(system), lookups=lookups)
+    found = asyncio.run(devices_mod._detect_livecontainer_async(object()))
+    # Asked the way the push asks: every application type, bundle ids only.
+    assert lookups == [{"ApplicationType": "Any", "ReturnAttributes": ["CFBundleIdentifier"]}]
+    return found
+
+
+@pytest.mark.parametrize("only", [
+    f"com.kdt.LiveContainer2.{TEAM}",
+    f"com.kdt.LiveContainer.{TEAM}",
+    f"COM.KDT.LIVECONTAINER3.{TEAM}",
+])
+def test_a_capitalised_or_secondary_livecontainer_is_found(monkeypatch, only: str) -> None:
+    assert _detect(monkeypatch, ["com.example.app", only]) == only
+
+
+def test_a_livecontainer_installed_as_a_system_app_is_found(monkeypatch) -> None:
+    assert _detect(monkeypatch, ["com.example.app"], system=("com.kdt.livecontainer",)) == (
+        "com.kdt.livecontainer"
+    )
+
+
+def test_the_sidebar_names_the_livecontainer_the_push_chooses(monkeypatch) -> None:
+    from graft_ipa import lc_discovery
+
+    ids = [f"com.kdt.livecontainer3.{TEAM}", f"com.kdt.livecontainer.{TEAM}"]
+
+    found = _detect(monkeypatch, ids)
+
+    assert found == lc_discovery.choose(ids)[0] == f"com.kdt.livecontainer.{TEAM}"
+
+
+def test_two_primaries_still_report_a_livecontainer(monkeypatch) -> None:
+    """The push needs a pin there and says so; the sidebar's question is only
+    "is there one", and the answer is the first the push's refusal names."""
+    other = "com.kdt.livecontainer.FGHIJ67890"
+
+    assert _detect(monkeypatch, [other, f"com.kdt.livecontainer.{TEAM}"]) == (
+        f"com.kdt.livecontainer.{TEAM}"
+    )
+
+
+def test_no_livecontainer_is_none(monkeypatch) -> None:
+    assert _detect(monkeypatch, ["com.example.app", "com.example.livecontainer.X"]) is None

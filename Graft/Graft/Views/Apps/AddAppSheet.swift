@@ -275,12 +275,12 @@ struct AddAppSheet: View {
     }
 
     @State private var mode: Mode = .url
-    @State private var urlDelivery: DeliveryMode = .sideload
+    @State private var urlDelivery: DeliveryMode = AddAppSheet.defaultDelivery
     @State private var appStoreURL: String = ""
     @State private var manualName: String = ""
     @State private var manualBundleId: String = ""
     @State private var manualDisplayName: String = ""
-    @State private var manualDelivery: DeliveryMode = .sideload
+    @State private var manualDelivery: DeliveryMode = AddAppSheet.defaultDelivery
     @State private var stagedIPAURL: URL?
     @State private var stagedIPASize: Int = 0
     @State private var isWorking: Bool = false
@@ -289,7 +289,26 @@ struct AddAppSheet: View {
     /// where the last one left off. Shared with the unprefilled sheet: it is a
     /// fact about this bench (a jailbroken phone runs LiveContainer; a stock
     /// one is sideloaded), not about which surface asked.
-    @AppStorage("lastDeliveryMode") private var lastDelivery: DeliveryMode = .sideload
+    @AppStorage("lastDeliveryMode") private var lastDelivery: DeliveryMode = AddAppSheet.defaultDelivery
+
+    /// Where the picker starts before any add has gone through: LiveContainer,
+    /// the mode the README recommends. It was Sideload, so the first app a new
+    /// user added went the other way from the instructions they had just read.
+    static let defaultDelivery: DeliveryMode = .livecontainer
+
+    /// The delivery an add actually sends, for both add paths: on a free
+    /// Apple ID always LiveContainer, whatever the picker or `lastDeliveryMode`
+    /// holds, because the CLI refuses `--delivery sideload` there; otherwise
+    /// what was chosen.
+    ///
+    /// Applied when the picker is drawn *and* when the add is sent, not only
+    /// to seed the picker. A `lastDeliveryMode` of sideload remembered from a
+    /// paid account outlives a switch to a free one, and seeding alone would
+    /// send it from a sheet opened before the first `--list` had said which
+    /// account this is.
+    static func delivery(chosen: DeliveryMode, account: AccountMode?) -> DeliveryMode {
+        account.isFree ? .livecontainer : chosen
+    }
 
     var body: some View {
         // Let the sheet size to content; the previous fixed height clipped
@@ -508,18 +527,36 @@ struct AddAppSheet: View {
         }
     }
 
+    /// On a free Apple ID the picker shows LiveContainer and is disabled, with
+    /// the reason under it: Sideload stays on screen, greyed, so the user can
+    /// see the option exists and why it is not theirs, rather than wonder
+    /// where it went.
     private func deliveryPicker(selection: Binding<DeliveryMode>) -> some View {
-        HStack {
-            Text("Delivery").font(AppFont.bodyMedium).foregroundStyle(Palette.text)
-            Picker("", selection: selection) {
-                // Through `displayName` rather than as literals, because the
-                // app pane's build-target bar now says the same two words in a
-                // sentence and the two must not drift apart.
-                Text(DeliveryMode.sideload.displayName).tag(DeliveryMode.sideload)
-                Text(DeliveryMode.livecontainer.displayName).tag(DeliveryMode.livecontainer)
+        let account = store.account
+        let shown = Binding(
+            get: { Self.delivery(chosen: selection.wrappedValue, account: account) },
+            set: { selection.wrappedValue = $0 }
+        )
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Delivery").font(AppFont.bodyMedium).foregroundStyle(Palette.text)
+                Picker("", selection: shown) {
+                    // Through `displayName` rather than as literals, because the
+                    // app pane's build-target bar now says the same two words in a
+                    // sentence and the two must not drift apart.
+                    Text(DeliveryMode.sideload.displayName).tag(DeliveryMode.sideload)
+                    Text(DeliveryMode.livecontainer.displayName).tag(DeliveryMode.livecontainer)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .paidOnly(account.isFree ? PaidOnly.sideload : nil)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            if account.isFree {
+                Text(PaidOnly.sideload)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -576,7 +613,7 @@ struct AddAppSheet: View {
                 case .url:
                     addedName = try await store.addApp(
                         appStoreURL: appStoreURL,
-                        delivery: urlDelivery
+                        delivery: Self.delivery(chosen: urlDelivery, account: store.account)
                     )
                 case .manual:
                     let trimmedDisplay = manualDisplayName
@@ -585,7 +622,7 @@ struct AddAppSheet: View {
                         name: manualName.trimmingCharacters(in: .whitespaces),
                         bundleId: manualBundleId.trimmingCharacters(in: .whitespaces),
                         displayName: trimmedDisplay.isEmpty ? nil : trimmedDisplay,
-                        delivery: manualDelivery
+                        delivery: Self.delivery(chosen: manualDelivery, account: store.account)
                     )
                 }
             } catch {
@@ -612,6 +649,12 @@ struct AddAppSheet: View {
             // the app itself was created (the early `return` above), leaves
             // this untouched, so neither can change what the next sheet
             // defaults to.
+            //
+            // The picker's state, not what was sent. On a free Apple ID the two
+            // differ: LiveContainer is sent whatever the picker holds, and the
+            // disabled picker still holds the choice a paid account made, which
+            // a free add must not overwrite. Writing `delivery(chosen:account:)`
+            // here would.
             lastDelivery = mode == .url ? urlDelivery : manualDelivery
             dismiss()
         }

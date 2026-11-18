@@ -7,6 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import install_hints
+from .child_env import child_env
 from .errors import InstallError
 from .preflight import list_connected_devices_with_transport
 
@@ -53,7 +55,10 @@ def install(
     if shutil.which("ideviceinstaller") is None:
         raise InstallError(
             "ideviceinstaller not found in PATH",
-            hint="brew install ideviceinstaller",
+            hint=install_hints.with_prerequisites(
+                "brew install ideviceinstaller",
+                macports="sudo port install ideviceinstaller",
+            ),
         )
 
     cmd = ["ideviceinstaller"]
@@ -67,7 +72,7 @@ def install(
         return InstallResult(udid=udid, stdout=" ".join(cmd), stderr="")
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=child_env())
     except FileNotFoundError as e:
         raise InstallError("ideviceinstaller not found in PATH") from e
 

@@ -29,7 +29,7 @@ from graft_ipa.json_output import JsonEmitter
 
 
 def test_a_store_signed_app_is_encrypted():
-    """Verified against a real device: LinkedIn and DoorDash both carry this
+    """Verified against a real device: two App Store apps both carry this
     signer and are FairPlay-encrypted."""
     app = _to_app({"CFBundleIdentifier": "com.x", "SignerIdentity": _STORE_SIGNER})
     assert app is not None and app.encrypted

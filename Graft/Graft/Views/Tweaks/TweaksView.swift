@@ -6,6 +6,11 @@ struct TweaksView: View {
     /// apps list has to reflect it. Passed in for the one action this pane
     /// offers that isn't about the file — same shape as `BuildsView(store:config:)`.
     let config: ConfigStore
+    /// Where this config keeps its tweaks, as the CLI resolved it
+    /// (`--settings`' `paths.tweaks_dir`), or nil before that has been read.
+    /// Named by the empty state, which used to say `~/.config/graft/tweaks/`
+    /// whatever the config's own `tweaks_dir` or `XDG_CONFIG_HOME` said.
+    var tweaksDir: String? = nil
     @State private var query: String = ""
     @State private var orphansOnly: Bool = false
     @State private var pendingDelete: TweakRecord?
@@ -215,6 +220,17 @@ struct TweaksView: View {
         .help("Check canister and your repos for newer versions")
     }
 
+    /// The row line for a lookup the CLI could not make (`tweak-update`'s
+    /// `unchecked`): offline, or the service refused.
+    static let uncheckedLine = "Couldn't check for a newer version"
+
+    /// Whether a row says its lookup could not be made. Not when an update is
+    /// on offer: that row already has the line that matters.
+    static func couldNotCheck(_ update: TweakUpdateRecord?) -> Bool {
+        guard let update else { return false }
+        return update.unchecked && !update.updateAvailable
+    }
+
     private func summary(_ last: TweakUpdatesEndRecord, outdated: Int) -> String {
         if outdated > 0 { return "\(outdated) update\(outdated == 1 ? "" : "s")" }
         if last.unchecked > 0 { return "\(last.unchecked) couldn't be checked" }
@@ -262,7 +278,9 @@ struct TweaksView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: Metrics.rowGap) {
                 if rows.isEmpty {
-                    Text(emptyText)
+                    Text(Self.emptyText(
+                        libraryIsEmpty: tweaks.isEmpty, orphansOnly: orphansOnly, tweaksDir: tweaksDir
+                    ))
                         .font(AppFont.body)
                         .foregroundStyle(Palette.textDim)
                         .padding(.vertical, 30)
@@ -327,6 +345,18 @@ struct TweaksView: View {
                     }
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.accent)
+                }
+                // Per row, which lookups could not be made. The header's
+                // "N couldn't be checked" said how many and not which, so the
+                // quiet rows under it were indistinguishable: current, or
+                // never asked.
+                if Self.couldNotCheck(store.update(for: tweak)) {
+                    HStack(spacing: 5) {
+                        Symbols.attention.image(size: 11)
+                        Text(Self.uncheckedLine)
+                    }
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.warn)
                 }
                 // Kept even when a name is shown: it is what the app's tweak
                 // list, the build log and the cyan command all name, so it has
@@ -427,8 +457,14 @@ struct TweaksView: View {
         return "Attached to \(tweak.usedBy.joined(separator: ", ")) — detach first"
     }
 
-    private var emptyText: String {
-        if tweaks.isEmpty { return "No tweaks in ~/.config/graft/tweaks/." }
+    /// What the list says when it has no rows. The folder is the CLI's, never
+    /// a default this app guesses at; before it is known the sentence names
+    /// no path rather than a wrong one.
+    static func emptyText(libraryIsEmpty: Bool, orphansOnly: Bool, tweaksDir: String?) -> String {
+        if libraryIsEmpty {
+            guard let tweaksDir, !tweaksDir.isEmpty else { return "No tweaks in your tweaks folder yet." }
+            return "No tweaks in \(tweaksDir)."
+        }
         if orphansOnly { return "No orphan tweaks — every file is attached to at least one app." }
         return "No tweaks match the filter."
     }

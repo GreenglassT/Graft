@@ -36,6 +36,42 @@ func click(at point: NSPoint, in window: NSWindow) {
     }
 }
 
+/// Click the button the accessibility tree names `name`, through the
+/// window's own event pipeline. Not `AccessibilityTree.press`: that
+/// performs the action from the background thread the query runs on, and
+/// a SwiftUI `Button` traps when its action is not on the main actor.
+///
+/// Here rather than in `SetupTests`, where it was written, once a second test
+/// (`StoppedBuildPaneTests`) needed it — the fate of `click(at:in:)` above is
+/// what a second private copy turns into.
+@MainActor
+func clickButton(named name: String, in window: NSWindow) throws {
+    let nodes = try AccessibilityTree.nodes(in: window)
+    let button = try XCTUnwrap(
+        nodes.first { $0.role == kAXButtonRole && $0.name == name }, "no \(name) button"
+    )
+    let element = button.element
+    let frame = AccessibilityTree.offMain { () -> CGRect? in
+        guard let position = AccessibilityTree.attribute(element, kAXPositionAttribute),
+              let size = AccessibilityTree.attribute(element, kAXSizeAttribute)
+        else { return nil }
+        var origin = CGPoint.zero
+        var extent = CGSize.zero
+        AXValueGetValue(position as! AXValue, .cgPoint, &origin)
+        AXValueGetValue(size as! AXValue, .cgSize, &extent)
+        return CGRect(origin: origin, size: extent)
+    } ?? nil
+    let onScreen = try XCTUnwrap(frame, "\(name) has no frame")
+    // The accessibility frame is top-left based on the primary screen;
+    // the window's frame and its base coordinates are bottom-left based.
+    let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+    let point = NSPoint(
+        x: onScreen.midX - window.frame.minX,
+        y: (primaryHeight - onScreen.midY) - window.frame.minY
+    )
+    click(at: point, in: window)
+}
+
 /// Renders `view` at a fixed width and its own natural height — sized
 /// exactly to its content (`fittingSize`, not a size picked by hand), so
 /// there is no slack left for SwiftUI's default placement rules to hide a
@@ -55,6 +91,20 @@ func click(at point: NSPoint, in window: NSWindow) {
 /// zero taps; ordering the window key first, the identical sweep hit on
 /// every single point. AppKit's own event routing evidently declines to
 /// dispatch to a view whose window has never been made key, headless or not.
+///
+/// **Ordered in with no window animation** (`animationBehavior = .none`), for
+/// all three helpers here. The default open animation is an
+/// `_NSWindowTransformAnimation` that AppKit runs threaded: half a second of
+/// `-[NSAnimation _runBlocking]` on a GCD worker, per window, every time one
+/// is ordered front. On a run where those never finished (2026-11-18, macOS
+/// not serving the accessibility tree) each one kept its worker for good, and
+/// the suite orders ~70 windows in: a sample of the hung test host showed 65
+/// workers parked there, which is the pool. From then on nothing that needs a
+/// worker ran — `CLIRunner`'s pipe readers never started, so the next test
+/// awaiting a subprocess (`SetupTests.test_checks_that_could_not_run_do_not_
+/// hold_up_setup`) hung for 40+ minutes, and the test before it waited 30s on
+/// an accessibility query that could not be scheduled. A test window has no
+/// reason to animate, so it doesn't.
 ///
 /// One shared copy, after four independent files arrived at a byte-identical
 /// `click(at:in:)` and three of four arrived at this same `hosted(_:width:)`
@@ -76,6 +126,7 @@ func hosted<V: View>(_ view: V, width: CGFloat) -> Hosted {
         contentRect: NSRect(x: 0, y: 0, width: size.width, height: size.height),
         styleMask: [.titled], backing: .buffered, defer: false
     )
+    window.animationBehavior = .none
     window.contentView = host
     host.frame = NSRect(x: 0, y: 0, width: size.width, height: size.height)
     host.layoutSubtreeIfNeeded()
@@ -107,6 +158,8 @@ func hosted<V: View>(
     let window = NSWindow(
         contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false
     )
+    // No open animation: see `hosted(_:width:)`.
+    window.animationBehavior = .none
     window.contentView = host
     window.makeKeyAndOrderFront(nil)
     host.layoutSubtreeIfNeeded()
@@ -143,7 +196,9 @@ func settle(_ hosted: Hosted, seconds: TimeInterval = 0.4) {
 /// the accessibility tree is not populated either — `accessibilityChildren()`
 /// comes back nil and an in-process `AXUIElement` query returns -25208,
 /// measured, with or without the window made key. So a row is countable and
-/// its text is not.
+/// its text is not — from the main thread. Asked from a background thread
+/// while the main one pumps its run loop, the same `AXUIElement` query does
+/// answer, cell contents included; `AccessibilityTests` reads the tree that way.
 ///
 /// One definition, after four independent copies of this same six-line walk
 /// arrived in this target. `SidebarDeviceLayoutTests.listTable` is now a
@@ -211,6 +266,9 @@ func laidOutForMeasurement<V: View>(
         contentRect: NSRect(x: 0, y: 0, width: width, height: height),
         styleMask: [.titled, .resizable], backing: .buffered, defer: false
     )
+    // Not ordered in here, but a caller may (`AccessibilityTests`); no open
+    // animation if it does — see `hosted(_:width:)`.
+    window.animationBehavior = .none
     window.contentView = host
     host.frame = NSRect(x: 0, y: 0, width: width, height: height)
     host.layoutSubtreeIfNeeded()

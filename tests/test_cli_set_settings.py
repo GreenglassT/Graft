@@ -134,13 +134,21 @@ def test_paths_are_expanded_but_not_required_to_exist(temp_config_env: Path):
     assert "~" not in written
 
 
-def test_signing_block_is_created_when_absent(temp_config_env: Path):
+def test_signing_block_is_not_created_when_absent(temp_config_env: Path):
+    """No `signing:` section is a free Apple ID now. This used to write
+    `signing: {team_id: NEW}` — one key of four, which `load_config` rejects,
+    so every other verb then failed on a config that had just worked. Becoming
+    paid is `--init` or a whole section added on purpose; see
+    test_free_account_config.py for the refusal's wording."""
+    from graft_ipa.errors import PaidAccountRequiredError
+
     raw = _raw(temp_config_env)
     del raw["signing"]
     temp_config_env.write_text(yaml.safe_dump(raw))
 
-    set_settings(temp_config_env, signing_team_id="NEW")
-    assert _raw(temp_config_env)["signing"]["team_id"] == "NEW"
+    with pytest.raises(PaidAccountRequiredError):
+        set_settings(temp_config_env, signing_team_id="NEW")
+    assert "signing" not in _raw(temp_config_env)
 
 
 def test_the_verb_emits_what_changed_and_the_state_that_produced(temp_config_env: Path):
@@ -162,7 +170,10 @@ def test_the_verb_emits_what_changed_and_the_state_that_produced(temp_config_env
     assert [e["type"] for e in events] == ["settings-updated", "settings"]
     assert events[0]["changed"] == ["archive_keep"]
     assert events[1]["archive_keep"] == 6, "the reported state predates the write"
-    assert set(events[1]) == {"type", *SETTINGS}
+    # The same shape `--settings` emits, less `paths`: a write only lands in a
+    # config that parsed (C-SETTINGS).
+    assert set(events[1]) == {"type", "parse_error", "paths_are_defaults", *SETTINGS}
+    assert (events[1]["parse_error"], events[1]["paths_are_defaults"]) == (None, False)
 
 
 # --- the mapping and the sibling preservation the mutation runs found bare ---
@@ -291,6 +302,23 @@ def test_a_signing_block_that_is_not_a_mapping_reads_as_unset(temp_config_env: P
     values = read_settings(temp_config_env)
     assert values["signing_cert"] is None
     assert values["signing_team_id"] is None
+
+
+@pytest.mark.parametrize("signing", ["TODO", ["a", "list"], 7])
+def test_a_signing_block_that_is_not_a_mapping_can_be_repaired(temp_config_env: Path, signing):
+    """The reader above shows it as unset; the writer must then be able to set
+    it. A `signing:` that is present but broken is a paid config being
+    repaired, not a free one, so the free-account refusal does not apply: the
+    non-mapping is replaced with a mapping holding what was written."""
+    raw = _raw(temp_config_env)
+    raw["signing"] = signing
+    temp_config_env.write_text(yaml.safe_dump(raw))
+
+    assert set_settings(temp_config_env, signing_team_id="ABCDE12345") == ["signing_team_id"]
+
+    after = _raw(temp_config_env)
+    assert after["signing"] == {"team_id": "ABCDE12345"}
+    assert after["apps"] == raw["apps"]
 
 
 def test_a_setting_with_no_flag_to_write_it_is_refused_at_the_verb(

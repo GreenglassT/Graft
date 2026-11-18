@@ -92,8 +92,8 @@ def _build_cfg(tmp_path: Path):
         tweaks_dir=tmp_path / "tweaks",
         state_dir=tmp_path / "state",
         apps={
-            "yt": AppConfig(
-                name="yt",
+            "example": AppConfig(
+                name="example",
                 bundle_id="com.example.app",
                 preferred_version="latest",
                 tweaks=[],
@@ -137,7 +137,7 @@ def test_the_saved_log_is_a_complete_record_of_the_build(tmp_path: Path, capsys)
         cyan.return_value.stdout = ""
         cyan.return_value.stderr = ""
         cli_mod._build_one(
-            cfg=cfg, log=log, app_name="yt", dry_run=False,
+            cfg=cfg, log=log, app_name="example", dry_run=False,
             skip_install=True,
             skip_decrypt_check=True, verbose=False, device=None,
             emitter=JsonEmitter(), trash_dir=tmp_path / "Trash",
@@ -150,6 +150,6 @@ def test_the_saved_log_is_a_complete_record_of_the_build(tmp_path: Path, capsys)
         json.loads(line) for line in Path(saved).read_text().splitlines() if line.strip()
     ]
     assert events[0]["type"] == "build-start"
-    assert events[0]["app"] == "yt"
+    assert events[0]["app"] == "example"
     assert events[-1]["type"] == "build-end"
     assert events[-1]["ok"] is True

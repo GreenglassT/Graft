@@ -6,13 +6,16 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import stat
 import subprocess
 import zipfile
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .child_env import child_env
 from .errors import IPAInspectionError
 
 IPA_ZIP_MAGIC = b"PK\x03\x04"
@@ -203,6 +206,7 @@ def check_cryptid(binary: Path) -> CryptidResult:
             check=True,
             capture_output=True,
             text=True,
+            env=child_env(),
         ).stdout
     except FileNotFoundError as e:
         raise IPAInspectionError(
@@ -463,6 +467,103 @@ def repack_ipa(extract_dir: Path, output_ipa: Path) -> Path:
             elif path.is_file():
                 zf.write(path, path.relative_to(extract_dir))
     return output_ipa
+
+
+#: The two things in an App Store IPA that identify the Apple ID that bought
+#: it: `iTunesMetadata.plist` at the root (the account's email and ids), and an
+#: `SC_Info/` directory in the app and in each extension (the FairPlay licence
+#: issued to that account). Nothing a build or a device needs.
+ACCOUNT_METADATA = "itunesmetadata.plist"
+LICENSE_DIR = "sc_info"
+
+
+def _is_account_data(name: str) -> bool:
+    """Whether the zip entry `name` is one of them. Case-insensitively, as
+    the volumes these unpack onto are."""
+    parts = [p.casefold() for p in name.removeprefix("./").split("/")]
+    if parts == [ACCOUNT_METADATA]:
+        return True
+    # Directory entries end in "/", so their last part is empty.
+    return LICENSE_DIR in parts[:-1] or parts[-1] == LICENSE_DIR
+
+
+def account_data_in(ipa: Path) -> list[str]:
+    """The entries of `ipa` that identify the account it was bought with."""
+    with zipfile.ZipFile(ipa) as zf:
+        return [n for n in zf.namelist() if _is_account_data(n)]
+
+
+def sealed_account_data(ipa: Path) -> set[str]:
+    """The account-data entries of `ipa` that a code signature in it seals.
+
+    A zsign-signed archive was signed with the app's `SC_Info/` present, and
+    zsign lists every file in the bundle in `_CodeSignature/CodeResources`, so
+    removing one of those breaks the seal and iOS refuses the install.
+    Re-signing is a rebuild, so they stay. Read per bundle — the app and each
+    extension seal their own `SC_Info/` — and only for a bundle that has a
+    CodeResources to read: a decrypted App Store IPA's licences were added
+    after Apple signed it and are sealed by nothing. `iTunesMetadata.plist`
+    sits outside every bundle and is never sealed.
+    """
+    sealed: set[str] = set()
+    seals: dict[str, set[str]] = {}
+    with zipfile.ZipFile(ipa) as zf:
+        for name in zf.namelist():
+            if not _is_account_data(name) or name.endswith("/"):
+                continue
+            parts = name.removeprefix("./").split("/")
+            at = next((i for i, p in enumerate(parts) if p.casefold() == LICENSE_DIR), None)
+            if not at:
+                continue
+            bundle, inside = "/".join(parts[:at]), "/".join(parts[at:])
+            if bundle not in seals:
+                seals[bundle] = _sealed_paths(zf, f"{bundle}/_CodeSignature/CodeResources")
+            if inside in seals[bundle]:
+                sealed.add(name)
+    return sealed
+
+
+def _sealed_paths(zf: zipfile.ZipFile, name: str) -> set[str]:
+    try:
+        resources = plistlib.loads(zf.read(name))
+    except Exception:
+        return set()
+    found: set[str] = set()
+    for key in ("files", "files2"):
+        section = resources.get(key) if isinstance(resources, dict) else None
+        if isinstance(section, dict):
+            found.update(section)
+    return found
+
+
+def strip_account_data(src: Path, dest: Path, *, keep: Collection[str] = ()) -> list[str]:
+    """Write `src` to `dest` without its account data; return what was left out.
+
+    Entry by entry, streamed, with each entry's compression, timestamp and
+    mode (and so its symlink-ness) carried over. `dest` is opened for writing
+    as it is, so a caller that created it 0600 gets a 0600 IPA. Entries named
+    in `keep` (`sealed_account_data`) are carried over like any other.
+    """
+    keep = set(keep)
+    removed: list[str] = []
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dest, "w") as zout:
+        for info in zin.infolist():
+            if _is_account_data(info.filename) and info.filename not in keep:
+                removed.append(info.filename)
+                continue
+            # A fresh ZipInfo: writing through the source's own would rewrite
+            # fields `zin` is still reading from.
+            out = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+            out.compress_type = info.compress_type
+            out.external_attr = info.external_attr
+            out.create_system = info.create_system
+            out.file_size = info.file_size  # decides zip64 up front
+            if info.is_dir():
+                zout.writestr(out, b"")
+                continue
+            with zin.open(info) as source, zout.open(out, "w") as target:
+                shutil.copyfileobj(source, target, 1 << 20)
+    return removed
 
 
 #: Sidecar recording that a staged IPA is not a complete dump.

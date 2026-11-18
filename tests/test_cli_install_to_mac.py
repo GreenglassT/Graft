@@ -177,6 +177,27 @@ def test_playcover_missing_fails_naming_it(tmp_path: Path) -> None:
     assert e.value.message == "PlayCover is not installed, or could not launch"
 
 
+def test_on_an_intel_mac_a_failed_handoff_says_playcover_needs_apple_silicon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The release app is universal, so it runs on Intel Macs, where PlayCover
+    cannot run at all. "Not installed, or could not launch" sends that user off
+    to install something that will never work; the reason is the processor."""
+    from graft_ipa import host
+
+    monkeypatch.setattr(host, "_sysctl_arm64", lambda: None)  # no such sysctl: Intel
+    cache = tmp_path / "cache"
+    path = _ipa(cache)
+    with patch.object(cli_mod.subprocess, "run") as run:
+        run.return_value = SimpleNamespace(
+            returncode=1, stdout="", stderr=OPEN_MISSING_BUNDLE_STDERR,
+        )
+        with pytest.raises(ConfigError) as e:
+            cli_mod._do_install_to_mac(_cfg(cache), filename=path.name, emitter=None)
+    assert "Apple silicon" in e.value.message
+    assert "Intel" in e.value.message
+
+
 def test_it_turns_off_the_two_settings_that_make_a_handed_over_app_unusable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

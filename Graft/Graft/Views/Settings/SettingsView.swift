@@ -11,6 +11,9 @@ struct SettingsView: View {
     let devicesStore: DevicesStore
     /// ContentView's, shared with the app pane's "Get latest from App Store".
     let appStore: AppStoreStore
+    /// `ConfigStore.account`, the one answer every pane gates on. Nil until
+    /// the app list has loaded, and nil disables nothing (`AccountMode`).
+    let account: AccountMode?
 
     var body: some View {
         ScrollView {
@@ -19,6 +22,9 @@ struct SettingsView: View {
             // separating the groups was no larger than the space inside one and
             // "Paths" read as another row of the Preflight list.
             VStack(alignment: .leading, spacing: Metrics.groupGap) {
+                if let parseError = store.parseError {
+                    parseErrorNotice(parseError)
+                }
                 preflightSection
                 settingsSection
                 AppStoreSettingsSection(store: appStore)
@@ -123,6 +129,67 @@ struct SettingsView: View {
         _ = try? await devicesStore.load()
     }
 
+    // MARK: A config.yaml that does not parse
+
+    /// The pane-level notice for a config.yaml the CLI could not parse
+    /// (C-SETTINGS' `parse_error`).
+    ///
+    /// The CLI still answers `--settings` for that file — every setting null,
+    /// the default paths — so the pane has something to show, and before this
+    /// it showed exactly that with nothing to say why: empty fields that read
+    /// as "nothing is set", a Paths section naming directories the config may
+    /// not use, and a retention caption saying "saving replaces it" over a
+    /// Save that `--set-settings` refuses (exit 2) on a file it cannot parse.
+    static func parseErrorLines(_ error: String) -> (title: String, detail: String) {
+        (
+            "config.yaml can't be read: \(error)",
+            "Fix it in a text editor, then come back to Settings. Until it parses, "
+                + "nothing here can be saved, the settings below show as unset, and "
+                + "Paths shows the defaults."
+        )
+    }
+
+    private func parseErrorNotice(_ error: String) -> some View {
+        let lines = Self.parseErrorLines(error)
+        return HStack(alignment: .top, spacing: 8) {
+            Symbols.attention.image(size: 12)
+                .foregroundStyle(Palette.warn)
+                .padding(.top, 2)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(lines.title)
+                    .font(AppFont.bodyMedium)
+                    .foregroundStyle(Palette.text)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(lines.detail)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(Metrics.cardPadding)
+        .cardStyle()
+    }
+
+    /// The caption beside the retention stepper.
+    ///
+    /// `archive_keep` null means the CLI could not read the value, and the
+    /// stepper shows the default. Which of two things that is depends on why:
+    /// a value the CLI refuses (a string, a negative) is one a save overwrites,
+    /// but a file that does not parse at all is one no save can touch — and
+    /// "saving replaces it" there sent the user to a Save that fails.
+    static func archiveKeepNote(parseError: String?, archiveKeep: Int?) -> (text: String, warns: Bool) {
+        if parseError != nil { return ("config.yaml doesn't parse — see above", true) }
+        if archiveKeep == nil { return ("config.yaml's value can't be read — saving replaces it", true) }
+        return ("per app, pruned after each build", false)
+    }
+
+    /// Said under Paths when they are the defaults rather than this config's.
+    static let pathsAreDefaultsNote = "These are the defaults: config.yaml doesn't parse, "
+        + "so any directories it sets aren't applied here."
+
     // MARK: Preflight
 
     private var preflightSection: some View {
@@ -223,7 +290,13 @@ struct SettingsView: View {
                     Task { await saveAndRescanIfDefaultDeviceMoved() }
                 }
                     .controlSize(.small)
-                    .disabled(!store.draft.hasChanges || store.isSaving)
+                    .disabled(!store.draft.hasChanges || store.isSaving || store.parseError != nil)
+            }
+
+            if let account {
+                accountRow(account)
+                    .padding(Metrics.cardPadding)
+                    .cardStyle()
             }
 
             if store.settings == nil {
@@ -235,15 +308,30 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: Metrics.rowGap) {
                     devicePicker
                     keepStepper
-                    signingField("Signing certificate (.p12)", $store.draft.edited.signingCert)
-                    signingField("Provisioning profile", $store.draft.edited.signingProfile)
-                    signingField("Team ID", $store.draft.edited.signingTeamId, mono: false)
+                    // Shown and disabled on a free Apple ID, never hidden: the
+                    // CLI refuses `--signing-*` on a config with no `signing:`
+                    // section rather than write half of one, and a field that
+                    // vanished would leave the user wondering where it went.
+                    Group {
+                        signingField("Signing certificate (.p12)", $store.draft.edited.signingCert)
+                        signingField("Provisioning profile", $store.draft.edited.signingProfile)
+                        signingField("Team ID", $store.draft.edited.signingTeamId, mono: false)
+                    }
+                    .paidOnly(account.isFree ? PaidOnly.signingSettings : nil)
+                    if account.isFree {
+                        Text(PaidOnly.signingSettings)
+                            .font(AppFont.monoSmall)
+                            .foregroundStyle(Palette.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 // Frozen for the round trip. `save()` reseeds the draft from
                 // what the CLI reports afterwards, so anything typed during
                 // those three subprocesses would be silently thrown away —
-                // and only Save and Revert were disabled before.
-                .disabled(store.isSaving)
+                // and only Save and Revert were disabled before. And frozen
+                // while config.yaml does not parse: an edit there has nowhere
+                // to go (the notice at the top says why).
+                .disabled(store.isSaving || store.parseError != nil)
                 .padding(Metrics.cardPadding)
                 .cardStyle()
             }
@@ -264,6 +352,24 @@ struct SettingsView: View {
                 .foregroundStyle(Palette.textDim)
                 .frame(width: 150, alignment: .leading)
             content()
+        }
+    }
+
+    /// Which account config.yaml is for, and what that means. Information,
+    /// not a setting: the CLI has no verb that changes it, because becoming
+    /// paid is `graft --init` (or a whole `signing:` section) on purpose.
+    private func accountRow(_ account: AccountMode) -> some View {
+        settingRow("Account") {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(account.summary)
+                    .font(AppFont.body)
+                    .foregroundStyle(Palette.text)
+                Text(account.detail)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -311,15 +417,12 @@ struct SettingsView: View {
             // the same as absent — every build fails on that config. The
             // stepper has to show *something*, so it shows the default and says
             // so, rather than presenting it as what is on disk.
-            if store.settings?.archiveKeep == nil {
-                Text("config.yaml's value can't be read — saving replaces it")
-                    .font(AppFont.monoSmall)
-                    .foregroundStyle(Palette.warn)
-            } else {
-                Text("per app, pruned after each build")
-                    .font(AppFont.monoSmall)
-                    .foregroundStyle(Palette.textDim)
-            }
+            let note = Self.archiveKeepNote(
+                parseError: store.parseError, archiveKeep: store.settings?.archiveKeep
+            )
+            Text(note.text)
+                .font(AppFont.monoSmall)
+                .foregroundStyle(note.warns ? Palette.warn : Palette.textDim)
         }
     }
 
@@ -335,20 +438,67 @@ struct SettingsView: View {
 
     // MARK: Paths
 
+    /// The directories the CLI resolved for this config, not the defaults.
+    ///
+    /// This used to be four hardcoded `~/.config/graft`-style paths, which
+    /// named the wrong directory for anyone with `XDG_*_HOME` set or a
+    /// `cache_dir` / `tweaks_dir` of their own — the pane pointed Reveal at a
+    /// folder the build never used. They come from `--settings` now
+    /// (`SettingsStore.paths`), so they are whatever a build would use.
     private var pathsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionTitle(text: "Paths")
-            VStack(spacing: Metrics.rowGap) {
-                ForEach(Self.paths, id: \.label) { entry in
-                    PathRow(label: entry.label, path: entry.path)
+            if let paths = store.paths {
+                if store.pathsAreDefaults {
+                    Text(Self.pathsAreDefaultsNote)
+                        .font(AppFont.monoSmall)
+                        .foregroundStyle(Palette.warn)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                VStack(spacing: Metrics.rowGap) {
+                    ForEach(Self.entries(paths), id: \.label) { entry in
+                        PathRow(label: entry.label, path: entry.path)
+                    }
+                }
+            } else {
+                // Not a guess at the defaults: a wrong path with a Reveal
+                // button is what this section used to be.
+                Text(store.settings == nil
+                     ? "Shown once graft has read your config."
+                     : "This version of graft doesn't report its paths. "
+                        + "Update it to see them here.")
+                    .font(AppFont.body)
+                    .foregroundStyle(Palette.textDim)
+                    .padding(.vertical, Metrics.cardPadding)
             }
         }
+    }
+
+    /// One row per directory, in the order a user goes looking: the config
+    /// they edit, then the files a build reads and writes, then its records.
+    static func entries(_ paths: SettingsPaths) -> [PathEntry] {
+        [
+            .init(label: "Config", path: paths.configDir),
+            .init(label: "Tweaks", path: paths.tweaksDir),
+            .init(label: "IPA cache", path: paths.cacheDir),
+            .init(label: "Built IPAs", path: paths.builtDir),
+            .init(label: "State", path: paths.stateDir),
+        ]
     }
 
     private func actionFor(_ check: PreflightCheck) -> PreflightRowAction? {
         guard !check.ok, let key = check.actionKey else { return nil }
         switch key {
+        case "set-p12-password" where account.isFree:
+            // `--set-p12-password` is refused on a free Apple ID, whose
+            // `--check` has no .p12 row to carry this key. Disabled with the
+            // reason rather than dropped, should one ever arrive.
+            return PreflightRowAction(
+                label: "Set Password…",
+                mark: Marks.signingCertificate,
+                disabledReason: PaidOnly.p12Password,
+                action: {}
+            )
         case "set-p12-password":
             // The .p12 *is* the signing certificate, so this is one of the two
             // places the app genuinely names that noun — the other is the sheet
@@ -367,17 +517,7 @@ struct SettingsView: View {
         }
     }
 
-    private static let paths: [PathEntry] = {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return [
-            .init(label: "Config", path: home.appending(path: ".config/graft").path),
-            .init(label: "Built IPAs", path: home.appending(path: ".cache/graft/built").path),
-            .init(label: "State", path: home.appending(path: ".local/state/graft").path),
-            .init(label: "Tweaks", path: home.appending(path: ".config/graft/tweaks").path),
-        ]
-    }()
-
-    private struct PathEntry {
+    struct PathEntry: Equatable {
         let label: String
         let path: String
     }
@@ -392,6 +532,8 @@ struct PreflightRowAction {
     /// four. Declared before `action` so the existing trailing-closure call
     /// sites are untouched.
     var mark: Mark? = nil
+    /// Why the button is disabled, shown as its tooltip; nil leaves it live.
+    var disabledReason: String? = nil
     let action: () -> Void
 }
 
@@ -401,10 +543,19 @@ private struct PreflightRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Circle()
-                .fill(check.ok ? Palette.success : Palette.danger)
-                .frame(width: 9, height: 9)
-                .padding(.top, 6)
+            // An `info` row reports a fact, not a pass: no green dot for
+            // "you have a free Apple ID", which is neither good nor bad.
+            if check.isInfo {
+                Symbols.advisory.image(size: 11)
+                    .foregroundStyle(Palette.accent)
+                    .padding(.top, 4)
+                    .accessibilityLabel("Information")
+            } else {
+                Circle()
+                    .fill(check.ok ? Palette.success : Palette.danger)
+                    .frame(width: 9, height: 9)
+                    .padding(.top, 6)
+            }
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(check.name)
@@ -423,6 +574,7 @@ private struct PreflightRow: View {
                             }
                         }
                         .controlSize(.small)
+                        .paidOnly(onAction.disabledReason)
                     }
                 }
                 if let detail = check.detail, !detail.isEmpty {
@@ -524,6 +676,10 @@ private struct PathRow: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(Palette.accent)
+            // An icon alone names nothing to VoiceOver; the symbol's own
+            // description would be "arrow up right square".
+            .accessibilityLabel("Show \(label) in Finder")
+            .help("Show in Finder")
         }
         .padding(.horizontal, Metrics.cardPadding).padding(.vertical, Metrics.innerPadding)
         .cardStyle()

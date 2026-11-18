@@ -79,7 +79,10 @@ def test_the_cli_warns_on_stderr(tmp_path, monkeypatch: pytest.MonkeyPatch) -> N
     assert "warning: TB_SSH_KEY is set but no longer read; set GRAFT_SSH_KEY instead" in result.output
 
 
-def test_under_json_it_is_a_warning_event(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_under_json_it_is_a_startup_notice(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`source: startup` (C-NOTICE), never `warning`: it goes out before the
+    verb, and a store reading `log` events as the verb's results — the device
+    check did — reported this sentence as every Check device result."""
     _config(tmp_path, monkeypatch)
     monkeypatch.setenv("TB_SSH_PASS", "pw")
 
@@ -87,5 +90,23 @@ def test_under_json_it_is_a_warning_event(tmp_path, monkeypatch: pytest.MonkeyPa
 
     assert result.exit_code == 0, result.output
     events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
-    assert {"type": "log", "source": "warning",
+    assert {"type": "log", "source": "startup",
             "line": "TB_SSH_PASS is set but no longer read; set GRAFT_SSH_PASS instead"} in events
+    assert not [e for e in events if e["type"] == "log" and e["source"] != "startup"]
+
+
+def test_a_directory_migration_is_a_startup_notice(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other startup notice: a pre-rename directory moved to its new name."""
+    _config(tmp_path, monkeypatch)
+    legacy = tmp_path / "xdg-cache" / "tweak-build"
+    legacy.mkdir(parents=True)
+    (legacy / "kept.txt").write_text("x")
+
+    result = CliRunner().invoke(cli.app, ["--json", "--list"])
+
+    assert result.exit_code == 0, result.output
+    events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    notices = [e for e in events if e["type"] == "log"]
+    assert len(notices) == 1 and notices[0]["source"] == "startup"
+    assert "moved" in notices[0]["line"]
+    assert "warning: moved" in result.stderr

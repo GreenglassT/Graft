@@ -25,19 +25,19 @@ import XCTest
 final class AddAppSheetPrefillTests: XCTestCase {
     func test_the_slug_comes_from_the_display_name_lowercased() throws {
         let prefill = AddAppSheet.Prefill(staged: try stagedIPARecord(), installedVersion: "1.0")
-        XCTAssertEqual(prefill.suggestedName, "bookplayer")
+        XCTAssertEqual(prefill.suggestedName, "exampleplayer")
         XCTAssertEqual(prefill.bundleId, "com.a.one")
-        XCTAssertEqual(prefill.displayName, "BookPlayer")
+        XCTAssertEqual(prefill.displayName, "ExamplePlayer")
     }
 
     /// A single-word name is a weak witness for a regex port: a bare
     /// `.lowercased()` or a `.filter(\.isLetter)` would both pass it too.
     /// Multiple words collapse to one `_` at each gap — including the run of
     /// *two* separator characters (space, then `&`, then space) between
-    /// "Navigation" and "Live" — which is `config.py`'s `_SLUG_RE =
+    /// "Maps" and "Live" — which is `config.py`'s `_SLUG_RE =
     /// re.compile(r"[^a-z0-9]+")` collapsing a whole run to a single `_`, not
     /// one `_` per separator character. A wrong port that emitted one `_` per
-    /// character would produce `waze_navigation___live_traffic`, not this.
+    /// character would produce `example_maps___live_traffic`, not this.
     ///
     /// The trailing "2" also closes the one charset this file otherwise never
     /// exercises: no other fixture contains a digit, so deleting the digit
@@ -46,10 +46,10 @@ final class AddAppSheetPrefillTests: XCTestCase {
     /// disambiguator apps actually use.
     func test_a_multi_word_name_collapses_separator_runs_to_one_underscore() throws {
         let prefill = AddAppSheet.Prefill(
-            staged: try stagedIPARecord(displayName: "Waze Navigation & Live Traffic 2"),
+            staged: try stagedIPARecord(displayName: "Example Maps & Live Traffic 2"),
             installedVersion: "1.0"
         )
-        XCTAssertEqual(prefill.suggestedName, "waze_navigation_live_traffic_2")
+        XCTAssertEqual(prefill.suggestedName, "example_maps_live_traffic_2")
     }
 
     /// Leading/trailing separators are trimmed, not turned into leading or
@@ -333,9 +333,9 @@ final class AddAppSheetPrefillTests: XCTestCase {
     /// add (`installedName` defaults to nil). Passes through unchanged.
     func test_a_real_display_name_is_used_as_is() throws {
         let prefill = AddAppSheet.Prefill(
-            staged: try stagedIPARecord(displayName: "BookPlayer"), installedVersion: "1.0"
+            staged: try stagedIPARecord(displayName: "ExamplePlayer"), installedVersion: "1.0"
         )
-        XCTAssertEqual(prefill.prefilledDisplayName, "BookPlayer")
+        XCTAssertEqual(prefill.prefilledDisplayName, "ExamplePlayer")
     }
 
     /// The bug this finding pins: before the fix this property did not
@@ -362,10 +362,10 @@ final class AddAppSheetPrefillTests: XCTestCase {
     /// to.
     func test_the_phones_own_name_wins_over_the_plists_when_both_are_present() throws {
         let prefill = AddAppSheet.Prefill(
-            staged: try stagedIPARecord(displayName: "BookPlayer"),
-            installedVersion: "1.0", installedName: "BookPlayer Pro"
+            staged: try stagedIPARecord(displayName: "ExamplePlayer"),
+            installedVersion: "1.0", installedName: "ExamplePlayer Pro"
         )
-        XCTAssertEqual(prefill.prefilledDisplayName, "BookPlayer Pro")
+        XCTAssertEqual(prefill.prefilledDisplayName, "ExamplePlayer Pro")
     }
 
     /// The case Finding 4 specifically calls out `installedName` for: the
@@ -441,7 +441,7 @@ final class AddAppSheetPrefillTests: XCTestCase {
         #!/bin/sh
         for arg in "$@"; do printf '%s\\n' "$arg" >> "\(capturePath)"; done
         printf '%s\\n' "\(sentinel)" >> "\(capturePath)"
-        printf '{"type":"app-added","name":"bookplayer","bundle_id":"com.a.one","display_name":"BookPlayer","delivery":"sideload"}\\n'
+        printf '{"type":"app-added","name":"exampleplayer","bundle_id":"com.a.one","display_name":"ExamplePlayer","delivery":"sideload"}\\n'
         """
         try script.write(toFile: scriptPath, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptPath)
@@ -501,7 +501,7 @@ final class AddAppSheetPrefillTests: XCTestCase {
         guard let nameIdx = lines.firstIndex(of: "--name"), nameIdx + 1 < lines.count else {
             return XCTFail("CLI never received --name; captured: \(lines)")
         }
-        XCTAssertEqual(lines[nameIdx + 1], "bookplayer")
+        XCTAssertEqual(lines[nameIdx + 1], "exampleplayer")
         guard let bundleIdx = lines.firstIndex(of: "--bundle-id"), bundleIdx + 1 < lines.count else {
             return XCTFail("CLI never received --bundle-id; captured: \(lines)")
         }

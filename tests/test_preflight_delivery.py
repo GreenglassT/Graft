@@ -49,8 +49,10 @@ def test_livecontainer_requires_device_when_installing(tmp_path: Path) -> None:
     names = _names(
         run_all_checks(_cfg(tmp_path), delivery="livecontainer", will_install=True)
     )
-    assert "idevice_id" in names
     assert "connected ios device(s)" in names
+    # Found through pymobiledevice3, so no libimobiledevice tool is needed.
+    assert "idevice_id" not in names
+    assert "ideviceinstaller" not in names
     # still no signing requirements
     assert "zsign" not in names
     assert ".p12 password" not in names
@@ -64,7 +66,6 @@ def test_sideload_default_requires_full_signing_identity(tmp_path: Path) -> None
         "cyan",
         "zsign",
         "ideviceinstaller",
-        "idevice_id",
         "otool",
         "signing.cert (.p12)",
         "signing profile (.mobileprovision)",

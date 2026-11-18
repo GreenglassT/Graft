@@ -28,11 +28,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import install_hints
+from .child_env import child_env
 from .errors import AppStoreError
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 PROJECT_URL = "https://github.com/DrWhax/unfairplay"
+
+#: The release Graft is tested with; `cmd/unfairplay` is its command at this tag.
+TESTED_TAG = "v0.4.0"
 
 _VERSION_RE = re.compile(r"version\s+v?(\S+)")
 
@@ -49,25 +54,52 @@ def present(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
+#: What goes in the enrollment command's `--app` path: said in words, since
+#: which app it is is the user's choice.
+APP_PLACEHOLDER = "<an iPhone/iPad app from the Mac App Store, opened once>"
+
+
 def setup_command(path: Path) -> str:
     """What to type in Terminal to enroll this Mac. Never run from here.
 
     Needs root and an iPhone/iPad app installed on this Mac from the App Store
-    under the same Apple ID; which app is the user's choice, so it is left as a
-    placeholder rather than guessed.
+    under the same Apple ID, and opened once; which app is the user's choice,
+    so the path names what it has to be rather than guessing one.
     """
-    return f"sudo {shlex.quote(str(path))} setup --app /Applications/YOUR_IPAD_APP.app"
+    return f'sudo {shlex.quote(str(path))} setup --app "/Applications/{APP_PLACEHOLDER}.app"'
+
+
+def build_steps(path: Path) -> list[str]:
+    """The Terminal commands that build UnfairPlay TESTED_TAG into `path`.
+
+    Go first if there is none (from Homebrew), then the tagged source, built
+    straight to where Graft looks for it. Printed by `--appstore-status`, never
+    run by Graft.
+    """
+    steps = [] if install_hints.go_present() else ["brew install go"]
+    return [
+        *steps,
+        f"git clone {PROJECT_URL}",
+        f"git -C unfairplay checkout {TESTED_TAG}",
+        f"mkdir -p {shlex.quote(str(path.parent))}",
+        f"go -C unfairplay build -o {shlex.quote(str(path))} ./cmd/unfairplay",
+    ]
 
 
 def install_hint(path: Path) -> str:
-    return f"build UnfairPlay v0.4.0 from {PROJECT_URL} and put the binary at {path}"
+    """For an error message; the commands are in `--appstore-status`."""
+    return (
+        f"build UnfairPlay {TESTED_TAG} from source to {path} — "
+        "`graft --appstore-status` prints the commands"
+    )
 
 
 def version(path: Path, *, run: Runner = subprocess.run) -> str | None:
     if not present(path):
         return None
     try:
-        proc = run([str(path), "--version"], capture_output=True, text=True, timeout=15)
+        proc = run([str(path), "--version"], capture_output=True, text=True, timeout=15,
+                   env=child_env())
     except (OSError, subprocess.SubprocessError):
         return None
     match = _VERSION_RE.search(f"{proc.stdout}\n{proc.stderr}")
@@ -128,7 +160,8 @@ def decrypt(
     """Decrypt `input_ipa` to `output_ipa`, always with `--strip-account-data`.
 
     `--strip-account-data` drops the SC_Info license files and the Apple ID
-    fields from iTunesMetadata.plist, so the staged IPA identifies nobody.
+    fields from iTunesMetadata.plist. It is asked for, not relied on: staging
+    (`provide_ipa.stage`) removes both itself and checks they are gone.
 
     `--report` sends the private report where the caller asked — a temp dir it
     is about to delete. Without it the report lands *beside the input*, which
@@ -151,7 +184,7 @@ def decrypt(
                     "--model", str(model_dir),
                     "--strip-account-data",
                 ],
-                capture_output=True, text=True,
+                capture_output=True, text=True, env=child_env(),
             )
         except OSError as e:
             raise AppStoreError(f"couldn't run UnfairPlay at {path}: {e}") from e

@@ -28,6 +28,8 @@ import os
 import subprocess
 from typing import Any
 
+from .child_env import child_env
+
 SERVICE = "graft"
 
 #: The service name before the rename. Only ever read, never written.
@@ -54,7 +56,11 @@ def _run_security(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess
         return subprocess.CompletedProcess(
             argv, 1, empty, message if kwargs.get("text") else message.encode()
         )
-    return subprocess.run(argv, **kwargs)
+    # Always `child_env()`, and written where the package-wide scan can see
+    # it (tests/test_child_env.py): no caller has a reason to hand `security`
+    # another environment.
+    kwargs.pop("env", None)
+    return subprocess.run(argv, **kwargs, env=child_env())
 
 
 #: How `security` is run. A seam so the test suite can swap in a fake and

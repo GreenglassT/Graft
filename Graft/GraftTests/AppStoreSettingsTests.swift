@@ -105,4 +105,26 @@ final class AppStoreSettingsTests: XCTestCase {
             .loaded(s)
         )
     }
+
+    // MARK: - K12: each tool's own install command
+
+    /// `appstore-status` carries one install string per tool for a Copy
+    /// button; each row takes its own, and a CLI without them still decodes.
+    func test_each_row_carries_its_tools_install_command() throws {
+        let line = ##"{"type":"appstore-status","ipatool":{"path":"/u/.local/bin/ipatool","present":false,"version":null,"signed_in":false,"warning":null,"install":"mkdir -p /u/.local/bin && curl -fL https://example.invalid/ipatool.tar.gz | tar -xzf -"},"unfairplay":{"path":"/u/up","present":false,"version":null,"enrolled":false,"model_dir":"/u/models","install":"git clone https://example.invalid/unfairplay && go -C unfairplay build ./cmd/unfairplay"},"setup_commands":["# install ipatool"]}"##
+        guard case let .appStoreStatus(record)? = line.buildEvents().first else {
+            return XCTFail("did not decode")
+        }
+        let rows = AppStoreSettingsSection.rows(for: record)
+        XCTAssertEqual(rows.map(\.install), [
+            "mkdir -p /u/.local/bin && curl -fL https://example.invalid/ipatool.tar.gz | tar -xzf -",
+            "git clone https://example.invalid/unfairplay && go -C unfairplay build ./cmd/unfairplay",
+        ])
+
+        let old = #"{"type":"appstore-status","ipatool":{"path":"/i","present":true,"version":"2.8.0","signed_in":true,"warning":null},"unfairplay":{"path":"/u","present":true,"version":"v0.4.0","enrolled":true,"model_dir":"/m"},"setup_commands":[]}"#
+        guard case let .appStoreStatus(older)? = old.buildEvents().first else {
+            return XCTFail("a status without `install` must still decode")
+        }
+        XCTAssertEqual(AppStoreSettingsSection.rows(for: older).map(\.install), [nil, nil])
+    }
 }

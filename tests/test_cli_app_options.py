@@ -373,7 +373,7 @@ def test_set_app_options_still_accepts_every_flag_it_consumes(
         [
             "--json", "--set-app-options", "--app", "example",
             "--preferred-version", "21.16.2",
-            "--display-name", "YT+",
+            "--display-name", "Example+",
             "--delivery", "livecontainer",
             "--no-keep-bundle-id",
             "--strip-extensions",
@@ -391,7 +391,7 @@ def test_set_app_options_still_accepts_every_flag_it_consumes(
     app_cfg = load_config(temp_config_env).get_app("example")
     assert app_cfg.preferred_version == "21.16.2"
     assert app_cfg.delivery == "livecontainer"
-    assert app_cfg.cyan.display_name == "YT+"
+    assert app_cfg.cyan.display_name == "Example+"
     assert app_cfg.cyan.keep_bundle_id is False
     assert app_cfg.cyan.strip_extensions is True
     assert app_cfg.cyan.strip_supported_devices is False

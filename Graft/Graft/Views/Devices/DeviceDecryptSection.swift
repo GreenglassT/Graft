@@ -165,6 +165,54 @@ struct DeviceDecryptSection: View {
     /// because the automatic answer is right nearly always, and the override
     /// exists for the case where it isn't.
     @State private var backendOverride: String?
+    /// Whether the user opened the checks on a phone `isUnavailable` says
+    /// cannot be dumped. Closed again for each phone.
+    @State private var showsUnavailableDetails = false
+
+    /// The readiness answer says this phone cannot be dumped from here.
+    private var unavailable: Bool { readiness.map(Self.isUnavailable) ?? false }
+
+    /// Whether the checks, the options and the Decrypt button are on show.
+    private var showsDetails: Bool { !unavailable || showsUnavailableDetails }
+
+    /// Nothing on the phone answered SSH — the check every dump backend needs
+    /// — so nothing can dump it from this Mac. That is what a phone without a
+    /// jailbreak looks like, which is most phones.
+    ///
+    /// **That one SSH failure, not any.** The check also fails when this Mac
+    /// has no `iproxy`, and when a jailbroken phone's OpenSSH answered and
+    /// refused the stored root password. Both are fixable from here — the
+    /// second by the Set root password button this card carries — and
+    /// collapsing them into "needs a jailbroken device" hid that fix under a
+    /// sentence that was untrue of the phone. The CLI's `reason` decides
+    /// (`CLIContract.DecryptCheck.SSHReason`); a CLI older than that field is
+    /// read by its detail sentence for the same outcome.
+    ///
+    /// SSH and not frida: frida answers on stock iOS 17+ phones over RemoteXPC
+    /// with no jailbreak at all (`decrypt_ready.check` records the
+    /// measurement), so a frida-green, SSH-red phone is the commonest stock
+    /// phone, not a nearly-ready one. A frida failure alone is often this Mac's
+    /// own client — a missing module, a version skew — which the user can fix
+    /// here, so it keeps the checks on show.
+    ///
+    /// This card used to draw every check in red with its fix underneath on
+    /// such a phone: respring, restart OpenSSH from Sileo, open Dopamine. A
+    /// user with no jailbreak has none of those, and read the wall of red as
+    /// the app being broken.
+    static func isUnavailable(_ readiness: DecryptCheckRecord) -> Bool {
+        guard !readiness.ready,
+              let ssh = readiness.checks.first(where: { $0.key == CLIContract.DecryptCheck.ssh }),
+              !ssh.ok
+        else { return false }
+        if let reason = ssh.reason {
+            return reason == CLIContract.DecryptCheck.SSHReason.noServer
+        }
+        return ssh.detail.hasPrefix(CLIContract.DecryptCheck.noServerDetail)
+    }
+
+    /// What the card says instead of its checks on such a phone.
+    static let unavailableLine = "On-device decryption needs a jailbroken device with "
+        + "frida-server. To get an IPA without one, use Get latest from App Store on an app."
     /// Refuse the partial dump. Off by default, because dropping extensions no
     /// tool can decrypt is what makes a one-click dump possible at all — and
     /// what went is always named afterwards.
@@ -202,12 +250,15 @@ struct DeviceDecryptSection: View {
                         .font(AppFont.bodyMedium)
                         .foregroundStyle(Palette.text)
                     // Was "Open the app on the phone and keep it on screen"
-                    // — an errand the dump now runs itself.
-                    Text("One click. The app is launched on the phone, dumped, and verified.")
-                        .font(AppFont.monoSmall)
-                        .foregroundStyle(Palette.textDim)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
+                    // — an errand the dump now runs itself. Not said on a
+                    // phone that cannot be dumped at all; there it is untrue.
+                    if !unavailable {
+                        Text("One click. The app is launched on the phone, dumped, and verified.")
+                            .font(AppFont.monoSmall)
+                            .foregroundStyle(Palette.textDim)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 Spacer()
                 // No device picker beside it any more: see this type's doc.
@@ -221,11 +272,13 @@ struct DeviceDecryptSection: View {
                 // reason `DeviceHeader`'s chip has it: the label is a constant
                 // of this app, and a button reading "Set root pass…" is worse
                 // than a subtitle that wraps.
-                Button("Set root password…", action: onSetSSHPassword)
-                    .controlSize(.small)
-                    .fixedSize()
-                    .help("Stored in your login Keychain for this phone. "
-                          + "frida-ios-dump pulls the app bundle off over SSH.")
+                if showsDetails {
+                    Button("Set root password…", action: onSetSSHPassword)
+                        .controlSize(.small)
+                        .fixedSize()
+                        .help("Stored in your login Keychain for this phone. "
+                              + "frida-ios-dump pulls the app bundle off over SSH.")
+                }
                 Button {
                     Task { await deviceApps.checkReadiness(udid: device.udid) }
                 } label: {
@@ -242,9 +295,14 @@ struct DeviceDecryptSection: View {
                 .disabled(deviceApps.isChecking)
             }
 
-            readinessChecks
-            decryptOptions
-            decryptAction
+            if unavailable {
+                unavailableNotice
+            }
+            if showsDetails {
+                readinessChecks
+                decryptOptions
+                decryptAction
+            }
             dumpNotes
             dumpTranscript
 
@@ -369,7 +427,34 @@ struct DeviceDecryptSection: View {
         // is unchanged from the picker this replaces — the summary names the
         // bundle id it staged, so it is not misattributed, only stale.
         .task(id: device.udid) {
+            showsUnavailableDetails = false
             await deviceApps.checkReadiness(udid: device.udid)
+        }
+    }
+
+    /// One neutral line in place of the checks, and the way to them.
+    ///
+    /// Neutral on purpose — the info glyph, dim text — because nothing is
+    /// wrong: the phone is an ordinary phone. The checks stay one click away
+    /// for the user who does have a jailbreak and wants to know which part of
+    /// it did not answer (a stopped OpenSSH, a changed root password).
+    private var unavailableNotice: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Symbols.advisory.image(size: 11)
+                    .foregroundStyle(Palette.textDim)
+                    .accessibilityHidden(true)
+                Text(Self.unavailableLine)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button(showsUnavailableDetails ? "Hide details" : "Show details") {
+                showsUnavailableDetails.toggle()
+            }
+            .buttonStyle(.borderless)
+            .font(AppFont.label)
+            .foregroundStyle(Palette.accent)
         }
     }
 
@@ -424,13 +509,50 @@ struct DeviceDecryptSection: View {
                 }
                 // Only worth showing when it changes what the user can do: a
                 // backend that cannot run, or one carrying a caveat.
-                ForEach(r.backends.filter { !$0.usable || $0.note != nil }) { backend in
-                    Text("\(backend.name): \(backend.reason ?? backend.note ?? "")")
+                ForEach(Array(Self.backendLines(r.backends).enumerated()), id: \.offset) { _, line in
+                    Text(line.text)
                         .font(AppFont.monoSmall)
                         .foregroundStyle(Palette.textDim)
-                        .lineLimit(3)
+                        // A note is often the command that fixes the reason
+                        // above it; selectable, so it can be copied whole.
+                        .textSelection(.enabled)
+                        .lineLimit(line.isNote ? 6 : 3)
                         .fixedSize(horizontal: false, vertical: true)
+                        .padding(.leading, line.isNote ? 12 : 0)
                 }
+            }
+        }
+    }
+
+    /// One line of the backends' account of themselves.
+    struct BackendLine: Equatable {
+        let text: String
+        /// The backend's `note`, set under its own line rather than in it.
+        let isNote: Bool
+    }
+
+    /// What the card says about each backend that cannot run, or runs with a
+    /// caveat: its reason, and then its note — both, when both are set.
+    ///
+    /// It was `reason ?? note`, which read as "one or the other" and was
+    /// really "never the note" for every backend that is not usable — and that
+    /// is the case that sets both: frida-ios-dump not set up has a reason ("is
+    /// not set up") *and* a note holding the commands that set it up, and the
+    /// commands were the half the card dropped.
+    static func backendLines(_ backends: [DecryptCheckRecord.Backend]) -> [BackendLine] {
+        backends.flatMap { backend -> [BackendLine] in
+            switch (backend.usable ? nil : backend.reason, backend.note) {
+            case let (reason?, note?):
+                return [BackendLine(text: "\(backend.name): \(reason)", isNote: false),
+                        BackendLine(text: note, isNote: true)]
+            case let (reason?, nil):
+                return [BackendLine(text: "\(backend.name): \(reason)", isNote: false)]
+            case let (nil, note?):
+                return [BackendLine(text: "\(backend.name): \(note)", isNote: false)]
+            case (nil, nil):
+                // Unusable with nothing said about why — still worth a line:
+                // the button it explains is greyed out.
+                return backend.usable ? [] : [BackendLine(text: "\(backend.name): unavailable", isNote: false)]
             }
         }
     }

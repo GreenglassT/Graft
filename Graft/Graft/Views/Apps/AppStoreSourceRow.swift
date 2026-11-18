@@ -60,6 +60,9 @@ struct AppStoreSourceRow: View {
                     .buttonStyle(.borderless)
                     .foregroundStyle(Palette.accent)
                     .help("Check the App Store again")
+                    // Named for what it does: the glyph alone reads "Refresh",
+                    // and there are two refreshes on this pane.
+                    .accessibilityLabel("Check the App Store again")
             }
             Spacer(minLength: Metrics.controlGap)
             if isGetting {

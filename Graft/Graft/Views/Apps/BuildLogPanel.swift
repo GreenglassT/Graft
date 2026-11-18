@@ -9,6 +9,10 @@ struct LogLine: Identifiable, Hashable {
 
 struct BuildLogPanel: View {
     let lines: [LogLine]
+    /// What the panel says while it has no lines. The app pane passes a
+    /// sentence about the last recorded build (`AppDetailView.emptyLogMessage`),
+    /// because "No build yet" under a tile reading "21h ago" contradicted it.
+    var emptyMessage: String = "No build yet for this app."
 
     private static let scrollAnchorID = "build-log-tail"
 
@@ -17,8 +21,9 @@ struct BuildLogPanel: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if lines.isEmpty {
-                        Text("No build yet for this app.")
+                        Text(emptyMessage)
                             .font(AppFont.mono).foregroundStyle(Palette.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
                             .padding(.vertical, 8)
                     } else {
                         ForEach(lines) { line in

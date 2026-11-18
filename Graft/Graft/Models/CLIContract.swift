@@ -90,6 +90,11 @@ enum CLIContract {
         static let stripSupportedDevices = "--strip-supported-devices"
         static let noStripSupportedDevices = "--no-strip-supported-devices"
         static let compressionLevel = "--compression-level"
+        /// The app's LiveContainer pin (`lc_bundle_id:`), and clearing it
+        /// (C-LCPIN). The Edit sheet's LiveContainer picker sends one or the
+        /// other, never both.
+        static let lcBundleId = "--lc-bundle-id"
+        static let noLcBundleId = "--no-lc-bundle-id"
 
         // TweaksStore
         static let tweaks = "--tweaks"
@@ -286,6 +291,7 @@ enum CLIContract {
             signingCert, signingProfile, signingTeamId,
             keepBundleId, noKeepBundleId, stripExtensions, noStripExtensions,
             stripSupportedDevices, noStripSupportedDevices, compressionLevel,
+            lcBundleId, noLcBundleId,
             tweaks, tweakUpdates, updateTweak, deviceApps, decrypt, decryptFrontmost,
             stripEncryptedExtensions, keepEncryptedExtensions, decryptBackend,
             decryptCheck, verbose,
@@ -320,9 +326,49 @@ enum CLIContract {
     /// of per-file progress lines.
     static let selfLogSource = "graft"
 
+    /// `source` on the `log` events the CLI writes *before* the verb runs:
+    /// a data directory moved from its pre-rename name, an environment
+    /// variable still set by its old name (C-NOTICE). They describe the
+    /// machine, not the verb, so no store reads them as that verb's result —
+    /// a device check whose only "warning" is a renamed variable did check
+    /// the device. A build transcript still shows them, as the context line
+    /// they are.
+    static let startupLogSource = "startup"
+
     enum DecryptBackend {
         static let bagbak = "bagbak"
         static let frida = "frida-ios-dump"
+    }
+
+    /// `key` values on `--decrypt-check`'s checks that the GUI branches on
+    /// (`decrypt_ready.check`), under `Stage`'s rule: named here when
+    /// something depends on one, not because it exists.
+    enum DecryptCheck {
+        /// SSH login to the phone — the check every dump backend needs, and so
+        /// the one whose failure means "this phone cannot be dumped from here"
+        /// (`DeviceDecryptSection.isUnavailable`). frida is no such signal:
+        /// it answers on stock iOS 17+ phones too.
+        static let ssh = "ssh"
+
+        /// The `ssh` check's `reason` (`decrypt_ready.SSH_*`). Only
+        /// `noServer` means the phone cannot be dumped from here; the other
+        /// two are a jailbroken phone with something fixable in the way.
+        /// Pinned from both sides: tests/test_decrypt_check_keys.py reads
+        /// these literals, and `DecryptCheckContractTests` reads the Python.
+        enum SSHReason {
+            /// Nothing answered on the phone's port 22: no jailbreak, or
+            /// OpenSSH stopped.
+            static let noServer = "no_server"
+            /// This Mac has no `iproxy` (libimobiledevice).
+            static let noIproxy = "no_iproxy"
+            /// OpenSSH answered and refused the stored root password.
+            static let loginRejected = "login_rejected"
+        }
+
+        /// The `ssh` check's detail for `noServer`, from a CLI older than
+        /// `reason`. The fallback only; the structured field decides when
+        /// it is there.
+        static let noServerDetail = "no SSH server answered"
     }
 
 
@@ -416,6 +462,26 @@ enum CLIContract {
         /// GUI branches on it, not when it renders it") applies just as well
         /// here: the Cache pane's delete confirmation is exactly that branch.
         static let stagedIPAInUse: Int32 = 17
+
+        /// `ConfigError`: the config is missing, unreadable or incomplete.
+        /// Shared by every config problem — and by Click's own usage errors,
+        /// which also exit 2 — so the status alone never decides anything
+        /// here; `Message.configNotFound` says which one it was.
+        static let configError: Int32 = 2
+    }
+
+    /// Sentences the CLI prints that the GUI branches on.
+    ///
+    /// Text, not structure, and kept to the one case where nothing structured
+    /// exists: a `--list` with no config.yaml fails before the CLI has an
+    /// event stream to report into, so `error:` on stderr is all there is.
+    /// `CLIContractTests.test_a_missing_config_is_reported_the_way_the_setup_
+    /// screen_expects` runs the installed CLI against an empty home and checks
+    /// this prefix, and the Python suite pins the same sentence from its side.
+    enum Message {
+        /// `config._load_raw`'s message for a config.yaml that does not exist,
+        /// up to the path it names — the setup screen's "create your config".
+        static let configNotFound = "config file not found at "
     }
 
     /// Every flag the app passes to the CLI.
@@ -447,6 +513,7 @@ enum CLIContract {
     // MARK: eventsHandled — one quoted event per line; the Python side parses
     // this literal. Keep the formatting regular.
     static let eventsHandled: Set<String> = [
+        "account",
         "app",
         "tweak",
         "tweak-update",
@@ -556,6 +623,9 @@ enum CLIContract {
         case stripExtensions = "strip_extensions"
         case stripSupportedDevices = "strip_supported_devices"
         case compressionLevel = "compression_level"
+        /// `--lc-bundle-id` and `--no-lc-bundle-id` both report this one name
+        /// in `changed` (C-LCPIN).
+        case lcBundleId = "lc_bundle_id"
     }
 
     static let appOptionFieldsSent: Set<String> = Set(

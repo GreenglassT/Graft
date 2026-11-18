@@ -1325,11 +1325,80 @@ final class DeviceDetailLayoutTests: XCTestCase {
 @MainActor
 final class DeviceStatStripValueTests: XCTestCase {
 
+    /// "35.73 GB free of 128 GB" did not fit the cell and read "35.73 GB f…f
+    /// 128 GB". One unit, the total's, said once, and whole numbers from ten up.
     func test_storage_reads_free_of_total() {
         XCTAssertEqual(
             DeviceStatStrip.storageValue(free: 35_728_093_184, total: 128_000_000_000),
-            "35.73 GB free of 128 GB"
+            "36 of 128 GB free"
         )
+        XCTAssertEqual(
+            DeviceStatStrip.storageValue(free: 8_460_000_000, total: 64_000_000_000),
+            "8.5 of 64 GB free", "a decimal below ten, where a whole number would hide a gigabyte"
+        )
+        XCTAssertEqual(
+            DeviceStatStrip.storageValue(free: 312_000_000_000, total: 1_000_000_000_000),
+            "0.3 of 1 TB free", "the total's unit, for both"
+        )
+    }
+
+    /// The value has to be readable in the narrowest cell the pane draws:
+    /// four cells across a 900pt window with the sidebar dragged to its 360pt
+    /// maximum leave ~117pt each (`AppDetailLayoutTests` measures the same
+    /// strip shape), and the cell's own padding takes 20 of that. The storage
+    /// and battery cells also claim at least their own value's width
+    /// (`DeviceStatStrip.cellMinWidth`), taking it from the two that truncate
+    /// anyway — a bundle id and a UDID, both in full on hover.
+    func test_the_storage_and_battery_values_fit_the_width_they_claim() {
+        let storage = DeviceStatStrip.storageValue(free: 128_000_000_000, total: 128_000_000_000)
+        XCTAssertEqual(storage, "128 of 128 GB free", "premise: the widest a 128 GB phone reads")
+        let battery = DeviceStatStrip.batteryValue(percent: 100, charging: true)
+        let claimed = DeviceStatStrip.cellMinWidth(for: storage)
+            + DeviceStatStrip.cellMinWidth(for: battery)
+        // What a 900pt window at the widest sidebar leaves the strip, less the
+        // two cells left to absorb it at a usable width each.
+        let strip: CGFloat = 4 * 117 + 3 * Metrics.controlGap
+        XCTAssertLessThanOrEqual(claimed + 2 * 80 + 3 * Metrics.controlGap, strip)
+        XCTAssertGreaterThan(
+            DeviceStatStrip.cellMinWidth(for: storage), 2 * Metrics.innerPadding + 60,
+            "premise: the claim is the text's width plus the padding, not a constant"
+        )
+    }
+
+    /// The strip, hosted at the narrowest width the pane gives it, lays the
+    /// storage value out at least as wide as the text itself — read back off
+    /// the accessibility tree (`AccessibilityTree`, which skips when macOS is
+    /// not serving it), since a SwiftUI `Text` has no view of its own to
+    /// measure. Equal cells gave it ~97pt for a ~130pt string.
+    func test_the_storage_value_is_laid_out_whole_in_the_narrowest_strip() async throws {
+        try AccessibilityTree.requireServed()
+        let udid = "00008030-0000000000000001"
+        let device = #"{"type":"device","udid":"\#(udid)","name":"Example Phone","model":"iPhone16,1","ios_version":"26.1","connection_type":"USB","livecontainer_bundle_id":"com.kdt.livecontainer.ABCDE12345","is_default":false}"#
+        let info = #"{"type":"device-info","udid":"\#(udid)","reachable":true,"total_bytes":128000000000,"free_bytes":128000000000,"battery_percent":100,"battery_charging":true}"#
+        guard case let .device(record)? = device.buildEvents().first,
+              case let .deviceInfo(reading)? = info.buildEvents().first else {
+            return XCTFail("fixtures did not decode")
+        }
+        let strip: CGFloat = 4 * 117 + 3 * Metrics.controlGap
+        let hosted = hosted(DeviceStatStrip(device: record, info: reading), width: strip)
+        settle(hosted)
+
+        let value = DeviceStatStrip.storageValue(free: 128_000_000_000, total: 128_000_000_000)
+        let node = try AccessibilityTree.nodes(in: hosted.window)
+            .first { $0.role == kAXStaticTextRole && ($0.value as? String) == value }
+        let element = try XCTUnwrap(node?.element, "no text reading \(value)")
+        let width = try XCTUnwrap(AccessibilityTree.offMain { () -> Double? in
+            var raw: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &raw) == .success,
+                  let raw, CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+            var size = CGSize.zero
+            AXValueGetValue(raw as! AXValue, .cgSize, &size)
+            return Double(size.width)
+        } ?? nil)
+        let needed = (value as NSString).size(
+            withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)]
+        ).width
+        XCTAssertGreaterThanOrEqual(width + 0.5, Double(needed), "the value was cut to \(width)pt")
     }
 
     /// Both halves come from one lockdown reading, so a half-answer is not a

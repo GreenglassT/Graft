@@ -9,8 +9,8 @@ code, and both stay in the user's Terminal, never in this process or the GUI.
 
 Pinned to **2.8.0**, which is what was installed and proven on 2026-11-17.
 2.8.1 (Homebrew's current at the time) breaks `download` with "available
-storefronts request failed" (majd/ipatool#672); `BROKEN_VERSION` is how status
-and errors say so.
+storefronts request failed" (majd/ipatool#672); `KNOWN_BAD_VERSIONS` is how status
+and errors say so, wherever the binary was found (`locate`).
 
 `run` is injectable for the odd unit test, but the real seam is the path: tests
 point it at a fake executable that prints what the real one prints.
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
 import shlex
 import subprocess
@@ -27,10 +28,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from . import child_env
 from .errors import AppStoreError
 
 GOOD_VERSION = "2.8.0"
-BROKEN_VERSION = "2.8.1"
+KNOWN_BAD_VERSIONS = frozenset({"2.8.1"})
 RELEASE_URL = f"https://github.com/majd/ipatool/releases/tag/v{GOOD_VERSION}"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
@@ -51,10 +53,114 @@ def login_command(path: Path) -> str:
     return f"{shlex.quote(str(path))} auth login --email YOUR_APPLE_ID_EMAIL"
 
 
+def default_path() -> Path:
+    """Where Graft looks after the configured path, and where it says to install."""
+    return Path.home() / ".local" / "bin" / "ipatool"
+
+
+def mac_arch() -> str:
+    """The release asset's architecture for this Mac: arm64 or amd64.
+
+    Asked of the kernel (`host.apple_silicon`), so a Python running under
+    Rosetta still gets the arm64 binary; `platform.machine` only when the
+    kernel would not say.
+    """
+    from . import host
+
+    arm = host.apple_silicon()
+    if arm is None:
+        arm = platform.machine() in ("arm64", "aarch64")
+    return "arm64" if arm else "amd64"
+
+
+def install_steps(target: Path, arch: str | None = None) -> list[str]:
+    """The Terminal commands that put ipatool GOOD_VERSION at `target`.
+
+    The macOS release asset for this Mac's processor (`mac_arch`), unpacked into
+    the user's own `$TMPDIR` — the tarball holds `bin/ipatool-<v>-macos-<arch>`
+    — made executable, and moved into place. Printed by `--appstore-status`,
+    never run by Graft.
+    """
+    name = f"ipatool-{GOOD_VERSION}-macos-{arch or mac_arch()}"
+    url = f"https://github.com/majd/ipatool/releases/download/v{GOOD_VERSION}/{name}.tar.gz"
+    return [
+        f"mkdir -p {shlex.quote(str(target.parent))}",
+        f'curl -fL {url} | tar -xzf - -C "$TMPDIR" bin/{name}',
+        f'chmod +x "$TMPDIR/bin/{name}"',
+        f'mv "$TMPDIR/bin/{name}" {shlex.quote(str(target))}',
+    ]
+
+
+def install_command(target: Path, arch: str | None = None) -> str:
+    """`install_steps` as one command, for the GUI's Copy button."""
+    return " && ".join(install_steps(target, arch))
+
+
+def install_target(located: Path, configured: Path) -> Path:
+    """Where installing GOOD_VERSION fixes what `locate` found.
+
+    The located binary itself when it is the configured one or the default one
+    (replacing it is the fix); otherwise — a bad one on PATH — the default,
+    which `locate` prefers to PATH.
+    """
+    return located if located in (configured, default_path()) else default_path()
+
+
+def locate(configured: Path) -> Path:
+    """Where the ipatool to run is: configured path, then ~/.local/bin, then PATH.
+
+    A Homebrew install lives on PATH (/opt/homebrew/bin), and used to be
+    ignored. When nothing is found the configured path comes back unchanged, so
+    "not found at ..." names the place the user was told to put it.
+    """
+    if present(configured):
+        return configured
+    default = default_path()
+    if present(default):
+        return default
+    # Absolute PATH entries only: the binary found here is handed the signed-in
+    # Apple ID's session, and a relative entry would let one in the current
+    # directory answer for it.
+    found = child_env.which("ipatool")
+    if found and present(Path(found)):
+        return Path(found)
+    return configured
+
+
 def install_hint(path: Path) -> str:
+    """For an error message: where to install it, and where the commands are.
+
+    The commands themselves are long, and the app shortens a banner's hint
+    from the middle; `--appstore-status` prints them whole, and its event
+    carries them as `install`.
+    """
     return (
-        f"install ipatool {GOOD_VERSION} (not Homebrew's {BROKEN_VERSION}, whose "
-        f"downloads fail — majd/ipatool#672) from {RELEASE_URL} to {path}"
+        f"install ipatool {GOOD_VERSION} to {path} — `graft --appstore-status` "
+        "prints the commands"
+    )
+
+
+def bad_version_hint(bad: str, *, path: Path | None = None, configured: Path | None = None) -> str:
+    """What to do about a known-bad ipatool, worded to stay true as releases move.
+
+    `path` is where the bad one was found and `configured` is `appstore.ipatool`.
+    When they are the same non-default path, installing GOOD_VERSION to
+    ~/.local/bin would change nothing — the configured path is looked at first
+    — so the hint names the config key and that binary instead.
+    """
+    head = (
+        f"Graft is tested with ipatool {GOOD_VERSION}; {bad} has a download bug "
+        f"(majd/ipatool#672)."
+    )
+    if path is not None and path == configured and configured != default_path():
+        return (
+            f"{head} appstore.ipatool in config.yaml points at {path}, so that is the one "
+            f"Graft runs: replace it with ipatool {GOOD_VERSION} from {RELEASE_URL}, or "
+            f"point appstore.ipatool at a {GOOD_VERSION} binary."
+        )
+    return (
+        f"{head} Install ipatool {GOOD_VERSION} from {RELEASE_URL} to "
+        "~/.local/bin/ipatool, which Graft uses before one on PATH, or set appstore.ipatool."
     )
 
 
@@ -63,7 +169,8 @@ def version(path: Path, *, run: Runner = subprocess.run) -> str | None:
     if not present(path):
         return None
     try:
-        proc = run([str(path), "--version"], capture_output=True, text=True, timeout=15)
+        proc = run([str(path), "--version"], capture_output=True, text=True, timeout=15,
+                   env=child_env.child_env())
     except (OSError, subprocess.SubprocessError):
         return None
     match = _VERSION_RE.search(f"{proc.stdout}\n{proc.stderr}")
@@ -111,7 +218,7 @@ def signed_in(
     try:
         proc = run(
             [str(path), "auth", "info", "--format", "json"],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=timeout, env=child_env.child_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -153,10 +260,14 @@ def explain(error: str, *, bundle_id: str, path: Path, reported_version: str | N
                 "US account itself (majd/ipatool#666)"
             ),
         )
-    if reported_version == BROKEN_VERSION or "storefront" in lower:
+    if reported_version in KNOWN_BAD_VERSIONS or "storefront" in lower:
         return AppStoreError(
             f"ipatool couldn't download {bundle_id}: {error}",
-            hint=install_hint(path),
+            hint=(
+                bad_version_hint(reported_version)
+                if reported_version in KNOWN_BAD_VERSIONS
+                else install_hint(path)
+            ),
         )
     return AppStoreError(
         f"ipatool couldn't download {bundle_id}: {error}",
@@ -183,7 +294,7 @@ def download(
                 str(path), "download", "-b", bundle_id, "-o", str(out_dir),
                 "--format", "json", "--non-interactive",
             ],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=child_env.child_env(),
         )
     except OSError as e:
         raise AppStoreError(f"couldn't run ipatool at {path}: {e}") from e

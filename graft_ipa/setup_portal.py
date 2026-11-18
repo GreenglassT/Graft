@@ -16,20 +16,33 @@ from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
 from . import apple_portal
-from .config import default_config_path, load_config, set_app_store_connect
+from .config import (
+    ACCOUNT_FREE,
+    account_of,
+    default_config_path,
+    load_config,
+    paid_account_required,
+    set_app_store_connect,
+)
 from .errors import GraftError
 
 
-def run_setup_portal(console: Console | None = None) -> None:
+def run_setup_portal(console: Console | None = None, cfg_path: Path | None = None) -> None:
+    """`cfg_path` is `--config`'s, the default config without one."""
     console = console or Console()
     console.rule("App Store Connect API key setup")
 
-    cfg_path = default_config_path()
+    cfg_path = cfg_path or default_config_path()
     if not cfg_path.exists():
         raise GraftError(
             f"config not found at {cfg_path}",
             hint="run `graft --init` first",
         )
+    # Before a single prompt: an App Store Connect API key exists only for a
+    # paid Apple Developer Program team, and what it is for here — creating
+    # profiles that sign builds — is a paid-only path.
+    if account_of(cfg_path) == ACCOUNT_FREE:
+        raise paid_account_required("--setup-portal", cfg_path)
 
     console.print(
         "Open [bold]https://appstoreconnect.apple.com/access/integrations/api[/bold] "

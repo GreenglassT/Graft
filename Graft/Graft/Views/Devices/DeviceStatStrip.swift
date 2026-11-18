@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Four numbers about one phone: storage, battery, LiveContainer, UDID.
@@ -31,12 +32,11 @@ struct DeviceStatStrip: View {
         // they take the default corner radius and the tighter gutter.
         HStack(spacing: Metrics.controlGap) {
             storageCell
-            MetaCell(
-                label: "Battery",
-                value: Self.batteryValue(
-                    percent: info?.batteryPercent, charging: info?.batteryCharging
-                )
+            let battery = Self.batteryValue(
+                percent: info?.batteryPercent, charging: info?.batteryCharging
             )
+            MetaCell(label: "Battery", value: battery)
+                .frame(minWidth: Self.cellMinWidth(for: battery))
             MetaCell(
                 label: "LiveContainer",
                 value: Self.liveContainerValue(device.livecontainerBundleId)
@@ -54,11 +54,26 @@ struct DeviceStatStrip: View {
     /// the cell's own `Metrics.innerPadding`, in the blank the padding already
     /// reserves below the value text.
     private var storageCell: some View {
-        MetaCell(
-            label: "Storage",
-            value: Self.storageValue(free: info?.freeBytes, total: info?.totalBytes)
-        )
-        .overlay(alignment: .bottom) { usedBar }
+        let value = Self.storageValue(free: info?.freeBytes, total: info?.totalBytes)
+        return MetaCell(label: "Storage", value: value)
+            .overlay(alignment: .bottom) { usedBar }
+            .frame(minWidth: Self.cellMinWidth(for: value))
+    }
+
+    /// The width a cell needs to show `value` whole: the text at the cell's
+    /// own font, plus its padding on both sides.
+    ///
+    /// Claimed by the storage and battery cells only. The four cells used to
+    /// split the strip evenly, which at 900pt with a wide sidebar left ~97pt of
+    /// text in each — and "35.73 GB free of 128 GB" came out "35.73 GB f…f
+    /// 128 GB", the one number on the strip a user reads for its value. The
+    /// LiveContainer bundle id and the UDID give the width back: both are
+    /// longer than any cell at any window size, truncate in the middle, and
+    /// show in full on hover (`MetaCell`'s `.help`).
+    static func cellMinWidth(for value: String) -> CGFloat {
+        let font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)  // `AppFont.mono`
+        let text = (value as NSString).size(withAttributes: [.font: font]).width
+        return ceil(text) + 2 * Metrics.innerPadding + 2
     }
 
     /// Height of the usage bar, and how far it sits above the cell's bottom
@@ -95,15 +110,31 @@ struct DeviceStatStrip: View {
     private static let missing = "—"
 
 
-    /// `35.73 GB free of 128 GB`.
+    /// `36 of 128 GB free`.
+    ///
+    /// One unit, the total's, said once; whole numbers from ten up and one
+    /// decimal below, where rounding would hide most of a gigabyte. It used to
+    /// be "35.73 GB free of 128 GB", which the cell cut to "35.73 GB f…f 128 GB".
     ///
     /// Both halves come from one lockdown reading, so a half-answer is not a
     /// shape the CLI produces today. It still gets the dash rather than a
-    /// sentence with a hole in it, because "35.73 GB free of —" would read as a
-    /// bug in the app rather than a gap in the data.
+    /// sentence with a hole in it, because "36 of — free" would read as a bug
+    /// in the app rather than a gap in the data.
     static func storageValue(free: Int?, total: Int?) -> String {
         guard let free, let total else { return missing }
-        return "\(human(free)) free of \(human(total))"
+        // 1000-based, the units Apple quotes capacity in (see `human`).
+        let units: [(size: Double, name: String)] = [(1e12, "TB"), (1e9, "GB"), (1e6, "MB")]
+        guard let unit = units.first(where: { Double(total) >= $0.size }) else {
+            return "\(human(free)) free of \(human(total))"
+        }
+        func amount(_ bytes: Int) -> String {
+            let value = Double(bytes) / unit.size
+            let formatter = NumberFormatter()
+            formatter.numberStyle = .decimal
+            formatter.maximumFractionDigits = value >= 10 ? 0 : 1
+            return formatter.string(from: NSNumber(value: value)) ?? String(Int(value))
+        }
+        return "\(amount(free)) of \(amount(total)) \(unit.name) free"
     }
 
     /// `.file` via the shared `fileSize`, so the units are the 1000-based ones

@@ -10,7 +10,9 @@ import fcntl
 import functools
 import os
 import re
+import shlex
 import tempfile
+import textwrap
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -20,8 +22,8 @@ from typing import Any, Literal, TypeVar
 
 import yaml
 
-from . import data_dirs
-from .errors import ConfigError
+from . import child_env, data_dirs
+from .errors import ConfigError, PaidAccountRequiredError
 
 T = TypeVar("T")
 
@@ -269,6 +271,200 @@ def _archive_keep(raw: Any) -> int:
     return raw
 
 
+# --- account mode -----------------------------------------------------------
+#
+# Two kinds of user, told apart by one thing: whether config.yaml has a
+# `signing:` section.
+#
+# * **paid** — a paid Apple Developer Program membership. `signing:` names the
+#   .p12, the profile and the team, and everything works: `delivery: sideload`,
+#   `--lc-install`, App Store Connect provisioning.
+# * **free** — a free Apple ID. LiveContainer is already on the device,
+#   installed and refreshed every 7 days by SideStore, AltStore, iloader or
+#   Impactor with that Apple ID. Graft pushes unsigned IPAs into it and never
+#   signs anything or touches the Apple ID, so there is nothing for a
+#   `signing:` section to say. Absent means free.
+#
+# Free is a mode, not a broken paid config: it loads, `--check` reports it as
+# information, and each paid-only path refuses with the same sentence
+# (`paid_account_required`).
+
+ACCOUNT_FREE = "free"
+ACCOUNT_PAID = "paid"
+
+#: The delivery modes an app can have.
+DELIVERIES = ("sideload", "livecontainer")
+
+#: What `--init` writes for a team id it could not read off a profile. A team
+#: id of this value is "not configured", the same as an empty one.
+TEAM_ID_PLACEHOLDER = "REPLACEME"
+
+
+# --- what a free Apple ID is told -------------------------------------------
+#
+# One copy of each, formatted by everything that says it: the free starter's
+# header (`_free_account_header`), `--init`'s closing steps, the "no
+# LiveContainer found" hint (`lc_discovery.FREE_SETUP_HINT`) and the paid-only
+# refusal (`paid_account_required`). There were four hand-written copies, and
+# tests/test_free_account_text.py now checks they agree.
+
+SIDESTORE_URL = "https://sidestore.io"
+ILOADER_URL = "https://github.com/nab138/iloader"
+LIVECONTAINER_SETUP_URL = "https://livecontainer.github.io/docs/installation/lc_sidestore"
+#: What installs LiveContainer with a free Apple ID and refreshes it every 7 days.
+FREE_INSTALLERS = "SideStore, AltStore, iloader or Impactor"
+
+#: What a free Apple ID sets up outside Graft, in order: the installer,
+#: LiveContainer, and the step that lets it sign guest apps; then Graft.
+FREE_SETUP_STEPS = (
+    f"Install SideStore ({SIDESTORE_URL}), or use iloader ({ILOADER_URL}), with "
+    "your free Apple ID. It installs LiveContainer and refreshes it every 7 days.",
+    f"Install LiveContainer: {LIVECONTAINER_SETUP_URL} (the LiveContainer+SideStore "
+    "build uses one app slot for both).",
+    "In LiveContainer, import the certificate from SideStore (LiveContainer's "
+    "Settings), so it can sign the apps you import.",
+    "Add an app: `graft --add-app <App Store URL>`, then run `graft --check`.",
+)
+#: The steps that happen on the device, without the last one (Graft's own).
+FREE_DEVICE_STEPS = FREE_SETUP_STEPS[:-1]
+
+#: How a free config becomes a paid one, after "with a paid membership, ":
+#: exactly what `--init` does to an existing free config when the answer is
+#: yes (`init_flow._upgrade_to_paid`, `add_signing_section`). A template:
+#: `paid_upgrade` fills in the command and the file.
+PAID_UPGRADE = (
+    "run `{init}` and answer yes: it asks for your .p12 and profile and adds a "
+    "signing: section to {config}, keeping its apps, repos and settings. Apps "
+    "with no delivery: key are given delivery: livecontainer, so they stay in "
+    "LiveContainer"
+)
+#: `PAID_UPGRADE` cut to what fits an error banner: the paid-only refusal and
+#: the `--check` row for a sideload app. The app's banner shows 420
+#: characters and cuts the rest from the middle; the long form, with a config
+#: path named twice, ran past it on its own.
+PAID_UPGRADE_SHORT = (
+    "run `{init}` and answer yes: it adds a signing: section and keeps your apps"
+)
+#: How a free Apple ID builds instead.
+FREE_ALTERNATIVE = "With a free Apple ID, use delivery: livecontainer"
+
+
+def paid_upgrade(
+    path: Path | None = None, *, config: str | None = None, short: bool = False
+) -> str:
+    """`PAID_UPGRADE` for the config at `path` (`PAID_UPGRADE_SHORT` with `short`).
+
+    `--init` edits the default config unless given `--config`, so a config
+    anywhere else is named in the command too; `config` replaces how the file
+    is referred to (the starter's own header says "this file").
+    """
+    if path is None or os.path.realpath(path) == os.path.realpath(default_config_path()):
+        init = "graft --init"
+    else:
+        init = f"graft --config {shlex.quote(str(path))} --init"
+    if short:
+        return PAID_UPGRADE_SHORT.format(init=init)
+    where = config or (str(path) if path is not None else "your config.yaml")
+    return PAID_UPGRADE.format(init=init, config=where)
+
+
+#: The keys of a `signing:` section, all required.
+SIGNING_KEYS = ("cert", "cert_password_env", "profile", "team_id")
+
+
+def _signing_section(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """config.yaml's `signing:` mapping, or None when the config has none.
+
+    Absent, `signing:` with nothing under it (YAML null) and `signing: {}` all
+    mean free mode: each says "no signing identity", and a user who comments
+    out every key under the heading should not get a different answer from one
+    who deletes the heading. The loader, `set_settings` and `account_of` read
+    the mode through this one function so they cannot disagree about it.
+
+    Unless signing keys sit at the top level instead (`_misplaced_signing_keys`).
+    """
+    section = raw.get("signing")
+    if section is None or section == {}:
+        _misplaced_signing_keys(raw, {})
+        return None
+    if not isinstance(section, dict):
+        raise ConfigError(
+            "'signing' must be a mapping (cert, cert_password_env, profile, team_id)",
+            hint="remove the section to use a free Apple ID with LiveContainer delivery",
+        )
+    _misplaced_signing_keys(raw, section)
+    return section
+
+
+def _declares_signing(raw: dict[str, Any]) -> bool:
+    """Whether config.yaml has a `signing:` section at all, usable or not.
+
+    For `set_settings`, which repairs as well as edits. A free config declares
+    none (absent, null or `{}`, as `_signing_section` reads it). One that is
+    present but broken, a bare string or a list, is a paid config somebody is
+    repairing, and refusing it as free would leave the editor no way to.
+    Signing keys stranded at the top level still raise.
+    """
+    section = raw.get("signing")
+    if section is None or section == {}:
+        _misplaced_signing_keys(raw, {})
+        return False
+    return True
+
+
+def _misplaced_signing_keys(raw: dict[str, Any], section: dict[str, Any]) -> None:
+    """Refuse signing keys at the top level that the section is missing.
+
+    Lose the indent under `signing:` and YAML reads the heading as null and
+    `cert:`, `profile:`, `team_id:` as stray top-level keys. Read that way,
+    the paid config is a free one: Graft says there is no signing identity,
+    and every app without `delivery:` silently becomes a LiveContainer app.
+    Only keys the section lacks count, so a stray copy of one it has (noise
+    that has always loaded) still loads.
+    """
+    stray = [k for k in SIGNING_KEYS if k in raw and k not in section]
+    if stray:
+        raise ConfigError(
+            f"{', '.join(stray)} {'is' if len(stray) == 1 else 'are'} at the top level of "
+            "config.yaml, but belong under signing:",
+            hint="indent them under `signing:` (two spaces). A free Apple ID has no "
+            "signing keys at all: delete them instead",
+        )
+
+
+def _default_delivery(*, free_account: bool) -> str:
+    """See `Config.default_delivery`; shared with the loader, which needs the
+    answer before there is a Config to ask."""
+    return "livecontainer" if free_account else "sideload"
+
+
+def account_of(path: Path) -> str:
+    """`free` or `paid` for the config at `path`, without validating the rest.
+
+    For the paths that must answer before (or without) a full `load_config`:
+    `--setup-portal` runs with no loaded config at all.
+    """
+    return ACCOUNT_PAID if _signing_section(_load_raw(path)) is not None else ACCOUNT_FREE
+
+
+def paid_account_required(what: str, path: Path | None = None) -> PaidAccountRequiredError:
+    """The one refusal every paid-only path raises in free mode.
+
+    `what` names the thing that was asked for, as the user would recognise it
+    (`--lc-install`, `delivery: sideload (app 'example')`). The hint gives both
+    ways forward, because which one applies depends on whether the user has
+    the membership: add it, or stay on LiveContainer delivery. Adding it is
+    `paid_upgrade`, the path `--init` really takes, in its short form: the
+    message is a whole sentence on its own, and with the hint it fits the
+    app's error banner (420 characters).
+    """
+    return PaidAccountRequiredError(
+        f"{what} needs a paid Apple Developer Program membership; this config is "
+        "set up for a free Apple ID (it has no signing: section)",
+        hint=f"with a paid membership, {paid_upgrade(path, short=True)}. {FREE_ALTERNATIVE}",
+    )
+
+
 @dataclass
 class SigningConfig:
     cert: Path
@@ -276,16 +472,25 @@ class SigningConfig:
     profile: Path
     team_id: str
 
+    def __post_init__(self) -> None:
+        # The variable holds the .p12 password, so no tool Graft runs inherits
+        # it (`child_env`). Registered here rather than in `load_config`, so a
+        # `SigningConfig` built any other way is covered too.
+        child_env.register_secret(self.cert_password_env)
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SigningConfig:
-        missing = [k for k in ("cert", "cert_password_env", "profile", "team_id") if k not in data]
+        missing = [k for k in SIGNING_KEYS if k not in data]
         if missing:
             raise ConfigError(f"signing section missing keys: {', '.join(missing)}")
         return cls(
             cert=_expand(data["cert"]),
             cert_password_env=str(data["cert_password_env"]),
             profile=_expand(data["profile"]),
-            team_id=str(data["team_id"]),
+            # A bare `team_id:` is YAML null, which `str()` makes "None": a
+            # team id that passed every check and named no team. Empty is
+            # what it means, and `Config.team_id` reads empty as unset.
+            team_id="" if data["team_id"] is None else str(data["team_id"]),
         )
 
 
@@ -375,6 +580,28 @@ class AppStoreToolsConfig:
         return cls(**paths)
 
 
+def _text(value: Any) -> str | None:
+    """A text field as text. YAML types what it finds — `display_name: 2048`
+    is an int — and the app decodes every one of these as a string: a number
+    there made its `AppRecord` throw, and `try?` dropped the app unseen."""
+    return None if value is None else str(value)
+
+
+def _names(value: Any, *, where: str) -> list[str]:
+    """A list of names (tweak files, cyan arguments), each as text.
+
+    A bare string is a list of one: `list("a.deb")` is five tweaks named after
+    its letters. Anything else that is not a list is refused, naming `where`.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        raise ConfigError(f"{where} must be a list, got {type(value).__name__}: {value!r}")
+    return [str(v) for v in value if v is not None]
+
+
 @dataclass
 class CyanOptions:
     display_name: str | None = None
@@ -386,16 +613,24 @@ class CyanOptions:
     extra_args: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> CyanOptions:
+    def from_dict(cls, data: dict[str, Any] | None, *, app: str = "?") -> CyanOptions:
         data = data or {}
+        level = data.get("compression_level", 6)
+        try:
+            compression_level = int(level)
+        except (TypeError, ValueError):
+            raise ConfigError(
+                f"app '{app}': cyan.compression_level must be a whole number from 0 "
+                f"to 9, got {level!r}"
+            ) from None
         return cls(
-            display_name=data.get("display_name"),
+            display_name=_text(data.get("display_name")),
             keep_bundle_id=bool(data.get("keep_bundle_id", True)),
-            new_bundle_id=data.get("new_bundle_id"),
+            new_bundle_id=_text(data.get("new_bundle_id")),
             strip_extensions=bool(data.get("strip_extensions", False)),
             strip_supported_devices=bool(data.get("strip_supported_devices", True)),
-            compression_level=int(data.get("compression_level", 6)),
-            extra_args=list(data.get("extra_args", []) or []),
+            compression_level=compression_level,
+            extra_args=_names(data.get("extra_args"), where=f"app '{app}': cyan.extra_args"),
         )
 
 
@@ -413,11 +648,15 @@ class AppConfig:
     lc_bundle_id: str | None = None  # pin which LiveContainer to push into (livecontainer delivery)
 
     @classmethod
-    def from_dict(cls, name: str, data: dict[str, Any]) -> AppConfig:
+    def from_dict(
+        cls, name: str, data: dict[str, Any], *, default_delivery: str = "sideload"
+    ) -> AppConfig:
+        """`default_delivery` is what an entry with no `delivery:` key means,
+        which depends on the account: `Config.default_delivery`."""
         if "bundle_id" not in data:
             raise ConfigError(f"app '{name}': missing bundle_id")
         profile_override = data.get("profile")
-        delivery = str(data.get("delivery", "sideload")).lower()
+        delivery = str(data.get("delivery", default_delivery)).lower()
         if delivery not in ("sideload", "livecontainer"):
             raise ConfigError(
                 f"app '{name}': invalid delivery '{delivery}' (must be 'sideload' or 'livecontainer')"
@@ -426,8 +665,8 @@ class AppConfig:
             name=name,
             bundle_id=str(data["bundle_id"]),
             preferred_version=str(data.get("preferred_version", "latest")),
-            tweaks=list(data.get("tweaks", []) or []),
-            cyan=CyanOptions.from_dict(data.get("cyan")),
+            tweaks=_names(data.get("tweaks"), where=f"app '{name}': tweaks"),
+            cyan=CyanOptions.from_dict(data.get("cyan"), app=name),
             auto_profile=bool(data.get("auto_profile", False)),
             exact_app_id=bool(data.get("exact_app_id", False)),
             profile_override=_expand(profile_override) if profile_override else None,
@@ -459,7 +698,10 @@ class ConfiguredRepo:
 @dataclass
 class Config:
     path: Path
-    signing: SigningConfig
+    #: None in free mode (no `signing:` section). Read it through
+    #: `free_account`, `team_id` or `require_paid_account`, never directly on
+    #: a path that free mode can reach.
+    signing: SigningConfig | None
     cache_dir: Path
     built_dir: Path
     tweaks_dir: Path
@@ -470,6 +712,67 @@ class Config:
     app_store_connect: AppStoreConnectConfig | None = None
     archive_keep: int = DEFAULT_ARCHIVE_KEEP
     appstore: AppStoreToolsConfig = field(default_factory=AppStoreToolsConfig)
+
+    @property
+    def free_account(self) -> bool:
+        """A free Apple ID: no `signing:` section, LiveContainer delivery only."""
+        return self.signing is None
+
+    @property
+    def account(self) -> str:
+        """`"free"` or `"paid"` — the spelling the JSON events carry."""
+        return ACCOUNT_FREE if self.free_account else ACCOUNT_PAID
+
+    @property
+    def default_delivery(self) -> str:
+        """What an app with no `delivery:` key, or one added without
+        `--delivery`, is delivered by. Sideload needs the paid signing
+        identity, so a free account's default is the only mode it has."""
+        return _default_delivery(free_account=self.free_account)
+
+    @property
+    def team_id(self) -> str | None:
+        """The configured team id, or None: free mode, blank, or `--init`'s
+        placeholder. Callers that find None look for LiveContainer by bundle
+        id pattern instead (`lc_discovery`).
+
+        The one definition of "a team id is configured", and the one value
+        to key anything by: the `--check` row, the Keychain entry
+        `--set-p12-password` writes and every reader of it all ask this, so
+        a padded or placeholder `signing.team_id` cannot store a password
+        under one name and look for it under another.
+        """
+        if self.signing is None:
+            return None
+        team = self.signing.team_id.strip()
+        return team if team and team != TEAM_ID_PLACEHOLDER else None
+
+    def require_paid_account(self, what: str) -> SigningConfig:
+        """The signing section, or the free-mode refusal naming `what`."""
+        if self.signing is None:
+            raise paid_account_required(what, self.path)
+        return self.signing
+
+    def require_delivery(self, delivery: str, *, app: str | None = None) -> None:
+        """Refuse a delivery mode this account cannot do, before anything acts on it.
+
+        The one check behind every door a delivery mode comes through: a
+        build or re-install of an app (`app` names it), `--delivery` on
+        `--add-app`, `--add-app-manual` and `--set-app-options`, and the
+        pre-flight row for a sideload app on a free config. An unknown mode is
+        a ConfigError; sideload on a free Apple ID is the paid-only refusal.
+        Signing itself keeps a guard of its own at the boundary
+        (`signer._signing_for`), for any path that reaches it some other way.
+        """
+        if delivery not in DELIVERIES:
+            raise ConfigError(
+                f"invalid delivery {delivery!r} (must be one of: "
+                f"{', '.join(sorted(DELIVERIES))})"
+            )
+        if delivery == "sideload":
+            self.require_paid_account(
+                f"delivery: sideload (app '{app}')" if app else "--delivery sideload"
+            )
 
     def get_app(self, name: str) -> AppConfig:
         if name not in self.apps:
@@ -513,9 +816,11 @@ def load_config(path: Path | None = None) -> Config:
     cfg_path = path or default_config_path()
     raw = _load_raw(cfg_path)
 
-    if "signing" not in raw:
-        raise ConfigError("config missing 'signing' section")
-    signing = SigningConfig.from_dict(raw["signing"])
+    # Optional: no section is a free Apple ID (see "account mode" above), and
+    # what an app without `delivery:` means follows from it.
+    section = _signing_section(raw)
+    signing = SigningConfig.from_dict(section) if section is not None else None
+    default_delivery = _default_delivery(free_account=signing is None)
 
     cache_dir = _expand(raw.get("cache_dir") or default_cache_dir())
     built_dir = _expand(raw.get("built_dir") or default_built_dir())
@@ -525,7 +830,27 @@ def load_config(path: Path | None = None) -> Config:
     apps_raw = raw.get("apps") or {}
     if not isinstance(apps_raw, dict):
         raise ConfigError("'apps' must be a mapping of name -> app config")
-    apps = {name: AppConfig.from_dict(name, data) for name, data in apps_raw.items()}
+    for name, data in apps_raw.items():
+        # Not coerced: every writer looks the entry up by the name the user
+        # passes, which is text, and would not find `2048` under "2048".
+        if not isinstance(name, str):
+            raise ConfigError(
+                f"app name {name!r} in {cfg_path} must be text",
+                hint=f'quote it: "{name}":',
+            )
+        if not isinstance(data, dict):
+            # An edit, not a command: every command that could remove or fix
+            # the entry (`--remove-app`, `--set-app-options`) loads this
+            # config first, and would fail with this same error.
+            raise ConfigError(
+                f"app '{name}' in {cfg_path} must be a mapping with at least a bundle_id",
+                hint=f"edit {cfg_path}: delete the `{name}:` entry under `apps:`, or make "
+                "it a mapping with a `bundle_id:` key",
+            )
+    apps = {
+        name: AppConfig.from_dict(name, data, default_delivery=default_delivery)
+        for name, data in apps_raw.items()
+    }
 
     asc = AppStoreConnectConfig.from_dict(
         raw.get("app_store_connect"),
@@ -546,7 +871,7 @@ def load_config(path: Path | None = None) -> Config:
         state_dir=state_dir,
         apps=apps,
         repos=repos,
-        default_device_udid=raw.get("default_device_udid"),
+        default_device_udid=_text(raw.get("default_device_udid")),
         app_store_connect=asc,
         archive_keep=_archive_keep(raw.get("archive_keep")),
         appstore=AppStoreToolsConfig.from_dict(raw.get("appstore")),
@@ -554,28 +879,146 @@ def load_config(path: Path | None = None) -> Config:
 
 
 @_locked
-def write_default_config(path: Path, **overrides: Any) -> None:
-    """Write a starter config file. Used by --init."""
+def write_default_config(path: Path, *, free_account: bool = False, **overrides: Any) -> None:
+    """Write a starter config file. Used by --init.
+
+    `free_account` writes the free-Apple-ID starter: no `signing:` section,
+    which is what makes it one, and a header saying so and how to change it.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_dir = path.parent
-    template: dict[str, Any] = {
-        "signing": {
-            "cert": str(overrides.get("cert", cfg_dir / "AppleDevelopment.p12")),
-            "cert_password_env": "GRAFT_P12_PASS",
-            "profile": str(overrides.get("profile", cfg_dir / "wildcard.mobileprovision")),
-            "team_id": overrides.get("team_id", "REPLACEME"),
-        },
-        "cache_dir": str(default_cache_dir()),
-        "tweaks_dir": str(default_tweaks_dir()),
-    }
+    template: dict[str, Any] = {}
+    if not free_account:
+        template["signing"] = _signing_template(path.parent, **overrides)
+    template["cache_dir"] = str(default_cache_dir())
+    template["tweaks_dir"] = str(default_tweaks_dir())
     if "default_device_udid" in overrides:
         template["default_device_udid"] = overrides["default_device_udid"]
 
     # Written as text so the example can stay a comment: the file configures
     # no apps until the user adds one, and `yaml.safe_dump` has no way to say
     # "here is what one looks like" without configuring it.
-    _atomic_write_text(path, yaml.safe_dump(template, sort_keys=False) + _STARTER_APPS)
+    head = _free_account_header(path) if free_account else ""
+    tail = _STARTER_APPS.replace(
+        "<DELIVERY>",
+        "livecontainer       # the only mode a free Apple ID has"
+        if free_account
+        else "sideload          # or livecontainer",
+    )
+    _atomic_write_text(path, head + yaml.safe_dump(template, sort_keys=False) + tail)
 
+
+def _signing_template(cfg_dir: Path, **overrides: Any) -> dict[str, Any]:
+    """The `signing:` section `--init` writes: the files it copied into
+    `cfg_dir`, the password variable, and the team id it read (or the
+    placeholder). Shared by the paid starter and the free-to-paid upgrade."""
+    return {
+        "cert": str(overrides.get("cert", cfg_dir / "AppleDevelopment.p12")),
+        "cert_password_env": "GRAFT_P12_PASS",
+        "profile": str(overrides.get("profile", cfg_dir / "wildcard.mobileprovision")),
+        "team_id": overrides.get("team_id", TEAM_ID_PLACEHOLDER),
+    }
+
+
+@_locked
+def add_signing_section(path: Path, **overrides: Any) -> list[str]:
+    """Make the free config at `path` a paid one, keeping everything else in it.
+
+    What `--init` does when a free config exists and the answer to "paid
+    membership?" is yes. The section is `_signing_template`'s (`overrides`
+    are its cert, profile and team_id); apps, repos, `app_store_connect` and
+    every other setting stay as they are, under the same lock and atomic
+    write as every other mutator.
+
+    One thing would not stay as it is on its own: an app with no `delivery:`
+    key is a LiveContainer app in free mode and a sideload app in paid mode.
+    Each such entry is given an explicit `delivery: livecontainer`, so the
+    upgrade moves no app; their names are returned, for `--init` to say so.
+
+    Note: rewrites config.yaml via yaml.safe_dump — YAML comments are not
+    preserved, the free starter's header included (it describes a free
+    config, which this no longer is).
+    """
+    raw = _load_raw(path)
+    if _signing_section(raw) is not None:
+        raise ConfigError(
+            f"{path} already has a signing: section",
+            hint="edit it with `graft --set-settings --signing-cert/--signing-profile/"
+            "--signing-team-id`",
+        )
+    apps = raw.get("apps")
+    if apps is not None and not isinstance(apps, dict):
+        raise ConfigError("'apps' must be a mapping of name -> app config")
+    pinned = []
+    for name, entry in (apps or {}).items():
+        if isinstance(entry, dict) and "delivery" not in entry:
+            entry["delivery"] = "livecontainer"
+            pinned.append(name)
+    upgraded: dict[str, Any] = {"signing": _signing_template(path.parent, **overrides)}
+    upgraded.update((key, value) for key, value in raw.items() if key != "signing")
+    _atomic_write_yaml(path, upgraded)
+    return pinned
+
+
+@_locked
+def remove_signing_section(path: Path) -> list[str]:
+    """Make the paid config at `path` a free one, keeping everything else in it.
+
+    What `--init` does when a paid config exists, the answer to "paid
+    membership?" is no, and the user agrees to switch: the mirror of
+    `add_signing_section`. Only `signing:` goes; apps, repos,
+    `app_store_connect` and every setting stay (an App Store Connect key is
+    inert on a free Apple ID, and needed again if they come back). The
+    signing files on disk are not touched.
+
+    Nothing is written into the apps. One with no `delivery:` key becomes a
+    LiveContainer app, the free default and the only delivery a free Apple ID
+    has. One with an explicit `delivery: sideload` is left as written, so
+    `--check` names it with its fix and its builds are refused with the
+    paid-only sentence, rather than this quietly rewriting what the user
+    chose. Their names are returned, for `--init` to say so.
+
+    Note: rewrites config.yaml via yaml.safe_dump — YAML comments are not
+    preserved.
+    """
+    raw = _load_raw(path)
+    if not _declares_signing(raw):
+        raise ConfigError(f"{path} has no signing: section; it is already a free Apple ID's")
+    apps = raw.get("apps")
+    if apps is not None and not isinstance(apps, dict):
+        raise ConfigError("'apps' must be a mapping of name -> app config")
+    sideloads = [
+        name for name, entry in (apps or {}).items()
+        if isinstance(entry, dict) and str(entry.get("delivery", "")).lower() == "sideload"
+    ]
+    _atomic_write_yaml(path, {k: v for k, v in raw.items() if k != "signing"})
+    return sideloads
+
+
+def _comment(text: str) -> str:
+    """`text` as YAML comment lines. Never `#   `-indented, which is how the
+    starter tests find the commented app example, and never split inside a
+    word, so a URL stays whole."""
+    lines = textwrap.wrap(text, 76, break_long_words=False, break_on_hyphens=False)
+    return "".join(f"# {line}\n" for line in lines)
+
+
+def _free_account_header(path: Path) -> str:
+    """The head of a free-Apple-ID starter config at `path`, from the shared
+    text above."""
+    return (
+        _comment(
+            "Free Apple ID: there is no signing: section, so Graft only pushes unsigned "
+            "IPAs into LiveContainer (delivery: livecontainer). LiveContainer itself is "
+            f"installed and refreshed by {FREE_INSTALLERS}. To set it up on the device:"
+        )
+        + "".join(_comment(f"{n}. {step}") for n, step in enumerate(FREE_DEVICE_STEPS, 1))
+        + _comment(
+            "With a paid Apple Developer Program membership, "
+            f"{paid_upgrade(path, config='this file')}. Then apps can be signed and "
+            "sideloaded too."
+        )
+        + "\n"
+    )
 
 #: The tail of the starter config: no apps, and one commented-out entry made of
 #: placeholders. `tests/test_starter_config.py` uncomments it and loads it, so
@@ -589,7 +1032,7 @@ _STARTER_APPS = """\
 #   example:
 #     bundle_id: com.example.app
 #     preferred_version: latest
-#     delivery: sideload          # or livecontainer
+#     delivery: <DELIVERY>
 #     tweaks:
 #       - some-tweak.deb          # a file in tweaks_dir
 #     cyan:
@@ -820,6 +1263,7 @@ def set_app_options(
     preferred_version: str | None = None,
     delivery: str | None = None,
     cyan: dict[str, Any] | None = None,
+    lc_bundle_id: str | None = None,
 ) -> None:
     """Patch an existing app entry's options.
 
@@ -845,7 +1289,7 @@ def set_app_options(
     Note: rewrites config.yaml via yaml.safe_dump — YAML comments are not
     preserved (same documented limitation as add_app / add_repo).
     """
-    if preferred_version is None and delivery is None and not cyan:
+    if preferred_version is None and delivery is None and not cyan and lc_bundle_id is None:
         return
     if preferred_version is not None:
         preferred_version = preferred_version.strip()
@@ -865,6 +1309,12 @@ def set_app_options(
         entry["preferred_version"] = preferred_version
     if delivery is not None:
         entry["delivery"] = delivery
+    if lc_bundle_id is not None:
+        # "" clears the pin, the way an emptied display_name clears that.
+        if lc_bundle_id.strip():
+            entry["lc_bundle_id"] = lc_bundle_id.strip()
+        else:
+            entry.pop("lc_bundle_id", None)
     if cyan:
         existing = entry.get("cyan")
         merged = dict(existing) if isinstance(existing, dict) else {}
@@ -1000,6 +1450,15 @@ def set_settings(path: Path, **values: Any) -> list[str]:
     pointing at a cert they are about to create, or one on a volume that is not
     mounted right now, is not an error to make at write time — `--check` is
     what reports it, and it already does.
+
+    A `signing_*` field on a free-Apple-ID config (no `signing:` section) is
+    refused, not written. Writing one would create a section with one key of
+    four, which `load_config` rejects — every other verb would then fail on a
+    config that worked a moment ago. And completing it with defaults would be
+    worse: it switches the config to paid mode as a side effect of one text
+    field, which turns every app without a `delivery:` key from livecontainer
+    into sideload. Becoming paid is `graft --init`, or a whole `signing:`
+    section added on purpose.
     """
     unknown = sorted(set(values) - set(SETTINGS))
     if unknown:
@@ -1007,6 +1466,16 @@ def set_settings(path: Path, **values: Any) -> list[str]:
             f"unknown setting(s): {', '.join(unknown)}",
             hint=f"known settings: {', '.join(sorted(SETTINGS))}",
         )
+    signing_keys = sorted(
+        key for key, value in values.items()
+        if value is not None and SETTINGS[key].path[0] == "signing"
+    )
+    # `_declares_signing`, not `_signing_section`: a `signing:` that is not a
+    # mapping is a paid config being repaired, and the writer below replaces
+    # it with one, as it always did.
+    if signing_keys and not _declares_signing(_load_raw(path)):
+        flags = ", ".join("--" + key.replace("_", "-") for key in signing_keys)
+        raise paid_account_required(flags, path)
 
     cleaned: dict[str, Any] = {}
     for key, value in values.items():
