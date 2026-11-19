@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Graft: inject tweaks, sign and install IPAs from your Mac</title>
-  <meta name="description" content="Graft is a free, open-source Mac app and CLI that injects tweaks into the iOS apps you own and installs them on your iPhone or iPad: into LiveContainer with a free Apple ID, or signed as a normal app with a paid Apple Developer account.">
+  <title>Graft: inject tweaks into IPAs and sideload them from your Mac</title>
+  <meta name="description" content="Free, open-source Mac app and CLI that injects tweaks into iOS apps you own and installs them, with a free Apple ID through LiveContainer or a paid account.">
   <meta property="og:title" content="Graft">
   <meta property="og:description" content="Inject tweaks into the iOS apps you own and install them from your Mac, with a free Apple ID or a paid developer account. Free and open source.">
   <meta property="og:image" content="https://graftipa.com/screenshot.png">
@@ -17,6 +17,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
+  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "SoftwareApplication", "name": "Graft", "description": "Free, open-source Mac app and CLI that injects tweaks into iOS apps you own and installs them on your iPhone or iPad.", "applicationCategory": "DeveloperApplication", "operatingSystem": "macOS 15 or later, Apple silicon", "softwareVersion": "1.1", "url": "https://graftipa.com/", "downloadUrl": "https://github.com/GreenglassT/Graft/releases/latest/download/Graft.zip", "image": "https://graftipa.com/screenshot.png", "screenshot": "https://graftipa.com/screenshot.png", "license": "https://opensource.org/licenses/MIT", "isAccessibleForFree": true, "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"}, "author": {"@type": "Person", "name": "GreenglassT", "url": "https://github.com/GreenglassT"}, "sameAs": ["https://github.com/GreenglassT/Graft"]}</script>
+  <script type="application/ld+json">{"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": [{"@type": "Question", "name": "Does Graft work with a free Apple ID?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Graft builds the tweaked IPA unsigned and pushes it into LiveContainer, which signs it when you import it. You install LiveContainer with SideStore, AltStore, iloader or Impactor, which also refresh it every 7 days. A paid developer account adds installing apps directly, and lets Graft install LiveContainer for you."}}, {"@type": "Question", "name": "Do I need a jailbreak?", "acceptedAnswer": {"@type": "Answer", "text": "No. Graft installs onto a regular iPhone or iPad. A jailbroken device is only one of the three ways to get a decrypted IPA."}}, {"@type": "Question", "name": "Does Graft come with tweaks or apps?", "acceptedAnswer": {"@type": "Answer", "text": "No. A fresh install starts empty. You bring the app, and the tweaks come from canister.me, an APT repo, or your own .deb and .dylib files."}}, {"@type": "Question", "name": "Does Graft ask for my Apple ID?", "acceptedAnswer": {"@type": "Answer", "text": "No, never for your Apple ID or password. LiveContainer signs with its own certificate, or Graft uses your developer certificate with a paid account. To download from the App Store, you sign in to ipatool yourself in Terminal, and Graft only checks that it's signed in."}}]}</script>
   <script>document.documentElement.classList.add("js")</script>
 </head>
 <body>
@@ -124,6 +126,16 @@
           <li>An iPhone or iPad paired with that Mac, over USB or Wi-Fi</li>
           <li>cyan, which injects the tweaks, and the Xcode Command Line Tools (<code>xcode-select --install</code>), which Graft uses to check that an IPA is decrypted. Sideloading with a paid account also needs zsign and libimobiledevice. The <a href="https://github.com/GreenglassT/Graft#requirements">README</a> has a one-line install for each, and <code>graft --check</code> prints the ones you're missing.</li>
         </ul>
+      </section>
+
+      <section class="faq" id="questions" aria-labelledby="faq-title">
+        <h2 id="faq-title">Questions</h2>
+        <dl>
+          <div><dt>Does Graft work with a free Apple ID?</dt><dd>Yes. Graft builds the tweaked IPA unsigned and pushes it into LiveContainer, which signs it when you import it. You install LiveContainer with SideStore, AltStore, iloader or Impactor, which also refresh it every 7 days. A paid developer account adds installing apps directly, and lets Graft install LiveContainer for you.</dd></div>
+          <div><dt>Do I need a jailbreak?</dt><dd>No. Graft installs onto a regular iPhone or iPad. A jailbroken device is only one of the three ways to get a decrypted IPA.</dd></div>
+          <div><dt>Does Graft come with tweaks or apps?</dt><dd>No. A fresh install starts empty. You bring the app, and the tweaks come from canister.me, an APT repo, or your own <code>.deb</code> and <code>.dylib</code> files.</dd></div>
+          <div><dt>Does Graft ask for my Apple ID?</dt><dd>No, never for your Apple ID or password. LiveContainer signs with its own certificate, or Graft uses your developer certificate with a paid account. To download from the App Store, you sign in to ipatool yourself in Terminal, and Graft only checks that it's signed in.</dd></div>
+        </dl>
       </section>
 
       <section class="own" aria-labelledby="own-title">
