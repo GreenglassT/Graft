@@ -100,7 +100,7 @@ h1 {
 .fineprint { margin: 1.25rem 0 0; font-size: 0.95rem; color: var(--ink-soft); max-width: 30rem; }
 
 /* Sections */
-.build, .more, .install, .own { margin-top: clamp(4.5rem, 9vw, 7.5rem); scroll-margin-top: 1.5rem; }
+.build, .more, .install, .faq, .own { margin-top: clamp(4.5rem, 9vw, 7.5rem); scroll-margin-top: 1.5rem; }
 h2 { margin: 0 0 0.75rem; font-size: clamp(2rem, 4.5vw, 3.2rem); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; }
 .intro { margin: 0 0 1.75rem; font-size: 1.15rem; color: var(--ink-soft); }
 
@@ -165,6 +165,12 @@ pre .c { color: var(--term-soft); }
 .req { margin: 0; padding-left: 1.2rem; max-width: 46rem; }
 .req li { margin: 0.45rem 0; }
 .req li::marker { color: var(--accent); }
+
+/* Questions */
+.faq dl { margin: 1.5rem 0 0; max-width: 48rem; }
+.faq dl div { padding: 1.1rem 0; border-top: 1px solid var(--rule); }
+.faq dt { font-weight: 700; font-size: 1.15rem; }
+.faq dd { margin: 0.25rem 0 0; color: var(--ink-soft); }
 
 /* Your apps */
 .own { max-width: 48rem; border: 2px dashed var(--rule-strong); border-radius: 14px; padding: 1.5rem 1.75rem; }

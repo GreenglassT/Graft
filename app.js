@@ -23,11 +23,11 @@
   };
   var delivery = {
     livecontainer: {
-      build: "cyan injects the tweaks. The IPA stays unsigned and keeps its original bundle id, because LiveContainer signs it when you import it.",
+      build: "cyan injects the tweaks. The IPA stays unsigned and keeps its original bundle id, because LiveContainer signs it when you import it. This works with a free Apple ID.",
       deliver: "Graft pushes it into LiveContainer's Documents over USB or Wi-Fi. Import it in LiveContainer and the tweaks load."
     },
     sideload: {
-      build: "cyan injects the tweaks, and zsign signs the result with your certificate and provisioning profile.",
+      build: "cyan injects the tweaks, and zsign signs the result with your certificate and provisioning profile. This needs a paid developer account.",
       deliver: "Graft installs it on your iPhone or iPad as a normal app, next to everything else on the home screen."
     }
   };
