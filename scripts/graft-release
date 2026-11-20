@@ -37,12 +37,22 @@ if [[ ! -d "$REPO_ROOT/Graft/Graft.xcodeproj" ]]; then
 fi
 
 echo "→ building Release…"
+# Two settings keep this machine's paths out of the public download:
+# - Coverage off, explicitly. The scheme Xcode creates for this project turns
+#   it on even for a plain `build`, and then every function carries a
+#   profiling counter named after its source file's absolute path (zlib-
+#   compressed in __llvm_covmap/__llvm_prf_names, so `strings` misses it).
+# - Debug symbols stripped (`strip -S`, as an archive would): the debug map
+#   names every source and object file by absolute path. The symbol table
+#   stays, so crash logs still name functions.
 xcodebuild \
   -project "$REPO_ROOT/Graft/Graft.xcodeproj" \
   -scheme Graft \
   -configuration Release \
   -destination 'generic/platform=macOS' \
   -derivedDataPath "$DERIVED" \
+  ENABLE_CODE_COVERAGE=NO CLANG_COVERAGE_MAPPING=NO \
+  DEPLOYMENT_POSTPROCESSING=YES STRIP_INSTALLED_PRODUCT=YES STRIP_STYLE=debugging \
   CODE_SIGN_IDENTITY=- \
   build >"$DERIVED/build.log" 2>&1 || {
     tail -40 "$DERIVED/build.log" >&2
