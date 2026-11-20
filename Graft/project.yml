@@ -31,7 +31,7 @@ targets:
       properties:
         CFBundleDisplayName: Graft
         CFBundleShortVersionString: "1.1"
-        CFBundleVersion: "2"
+        CFBundleVersion: "3"
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSPrincipalClass: NSApplication
