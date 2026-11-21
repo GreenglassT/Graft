@@ -143,7 +143,7 @@ Then on the Mac:
 ```bash
 graft --init                        # answer no to the paid-membership question
 graft --check                       # tools, the device, and LiveContainer on it
-graft --add-app https://apps.apple.com/app/id123456789   # delivery: livecontainer
+graft --add-app https://apps.apple.com/us/app/example/id123456789   # delivery: livecontainer
 graft --provide-ipa ~/Downloads/Example.ipa --app example
 graft --attach-tweak some-tweak.deb --app example
 graft example                       # build and push into LiveContainer
@@ -173,7 +173,7 @@ graft --set-p12-password
 graft --check
 
 # 4. Add an app by its App Store URL or numeric id, delivered into LiveContainer.
-graft --add-app https://apps.apple.com/app/id123456789 --delivery livecontainer
+graft --add-app https://apps.apple.com/us/app/example/id123456789 --delivery livecontainer
 graft --list                        # shows the name it was added under, e.g. "example"
 
 # 5. Give it a decrypted IPA (see "Getting an IPA" for the other sources).
