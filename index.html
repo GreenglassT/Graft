@@ -99,7 +99,7 @@
           <div><dt>Rolls back</dt><dd>Archives builds for each app version, so you can put one you shipped before back on the device without rebuilding.</dd></div>
           <div><dt>Knows what's stale</dt><dd>Tells you when a device is behind your config, and why: a rebuilt tweak, or a new version of the app.</dd></div>
           <div><dt>Runs builds on your Mac</dt><dd>Makes a build that also loads under PlayCover on an Apple silicon Mac.</dd></div>
-          <div><dt>Scripts cleanly</dt><dd>Add <code>--json</code> to any command for newline-delimited JSON events. That's how the Mac app talks to it.</dd></div>
+          <div><dt>Scripts cleanly</dt><dd>Add <code>--json</code> to almost any command for newline-delimited JSON events. That's how the Mac app talks to it.</dd></div>
         </dl>
       </section>
 
@@ -113,8 +113,8 @@
           </div>
           <div>
             <h3>The CLI</h3>
-            <p>Install it with pipx, then let it set itself up.</p>
-<pre><code><span class="ln"><span class="p">$</span> pipx install git+https://github.com/GreenglassT/Graft</span><span class="ln"><span class="p">$</span> graft --init</span><span class="ln"><span class="p">$</span> graft --check</span></code></pre>
+            <p>Install it with pipx, open a new terminal after <code>pipx ensurepath</code>, then let it set itself up.</p>
+<pre><code><span class="ln"><span class="p">$</span> pipx install git+https://github.com/GreenglassT/Graft</span><span class="ln"><span class="p">$</span> pipx ensurepath</span><span class="ln"><span class="p">$</span> graft --init</span><span class="ln"><span class="p">$</span> graft --check</span></code></pre>
             <p class="small"><code>--init</code> asks whether you have a paid developer account, copies in your certificate and profile if you do, and finds your device. <code>--check</code> lists any tool that's missing.</p>
           </div>
         </div>
