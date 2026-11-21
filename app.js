@@ -51,7 +51,7 @@
     stepBuild.textContent = delivery[d].build;
     stepDeliver.textContent = delivery[d].deliver;
     var rows = [
-      ["graft --add-app https://apps.apple.com/app/id123456789 --delivery " + d, ""],
+      ["graft --add-app https://apps.apple.com/us/app/example/id123456789 --delivery " + d, ""],
       [s.cmd, s.note],
       ["graft --fetch com.example.sometweak", "from canister.me"],
       ["graft --attach-tweak some-tweak.deb --app example", ""],
