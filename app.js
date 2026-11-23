@@ -6,17 +6,17 @@
 
   var source = {
     have: {
-      text: "Drop a decrypted IPA you already have on the app. Graft checks that its bundle id matches the app, and that every binary in it is decrypted.",
+      text: "Drop an IPA you already have on the app's pane. Graft checks that its bundle id matches the app, and that every binary in it is decrypted. One that's still encrypted is decrypted on the way in, once decryption is set up.",
       cmd: "graft --provide-ipa ~/Downloads/Example.ipa --app example",
       note: ""
     },
     device: {
-      text: "Dump it from the app installed on your own jailbroken iPhone or iPad, with frida-ios-dump or bagbak over SSH. Graft picks whichever can run. Those tools aren't in the app: you install them yourself.",
+      text: "The device's Decrypt card dumps the app off your own jailbroken iPhone or iPad, with frida-ios-dump or bagbak over SSH, and Graft picks whichever can run. Those tools aren't in the app: you install them yourself.",
       cmd: "graft --decrypt com.example.app",
       note: "dumps the installed app"
     },
     store: {
-      text: "Sign in and set up decryption once, in Settings \u203a App Store. Then Get latest from App Store downloads it with your Apple ID through ipatool, and UnfairPlay decrypts it on your Mac. Your Apple ID and licence are stripped from the copy.",
+      text: "Sign in and set up decryption once, in Settings \u203a App Store. Then Get latest from App Store, on the app's pane, downloads it with your Apple ID through ipatool, and UnfairPlay decrypts it on your Mac. A free app your Apple ID hasn't got yet shows Get (free) instead. Your Apple ID and licence are stripped from the copy.",
       cmd: "graft --appstore-get --app example",
       note: "download, decrypt, stage"
     }
