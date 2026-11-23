@@ -1,4 +1,4 @@
-// "How a build goes": the two choices rewrite steps 1, 3 and 4 and the terminal.
+// "How a build goes": the two choices rewrite steps 2, 4 and 5 and the terminal.
 // Every command here is a real Graft flag; see the README's Quick start.
 (function () {
   var form = document.querySelector(".build");
@@ -6,28 +6,28 @@
 
   var source = {
     have: {
-      text: "Bring a decrypted IPA you already have. Graft checks that its bundle id matches the app, and that every binary in it is decrypted.",
+      text: "Drop a decrypted IPA you already have on the app. Graft checks that its bundle id matches the app, and that every binary in it is decrypted.",
       cmd: "graft --provide-ipa ~/Downloads/Example.ipa --app example",
       note: ""
     },
     device: {
-      text: "Dump it from the app installed on your own jailbroken iPhone or iPad, with frida-ios-dump or bagbak over SSH. Graft picks whichever can run.",
+      text: "Dump it from the app installed on your own jailbroken iPhone or iPad, with frida-ios-dump or bagbak over SSH. Graft picks whichever can run. Those tools aren't in the app: you install them yourself.",
       cmd: "graft --decrypt com.example.app",
       note: "dumps the installed app"
     },
     store: {
-      text: "Download it with your own Apple ID through ipatool, and decrypt it on your Mac with UnfairPlay. Your Apple ID and licence are stripped from the copy.",
+      text: "Sign in and set up decryption once, in Settings \u203a App Store. Then Get latest from App Store downloads it with your Apple ID through ipatool, and UnfairPlay decrypts it on your Mac. Your Apple ID and licence are stripped from the copy.",
       cmd: "graft --appstore-get --app example",
       note: "download, decrypt, stage"
     }
   };
   var delivery = {
     livecontainer: {
-      build: "cyan injects the tweaks. The IPA stays unsigned and keeps its original bundle id, because LiveContainer signs it when you import it. This works with a free Apple ID.",
+      build: "Press Build & Install. cyan injects the tweaks. The IPA stays unsigned and keeps its original bundle id, because LiveContainer signs it when you import it. This works with a free Apple ID.",
       deliver: "Graft pushes it into LiveContainer's Documents over USB or Wi-Fi. Import it in LiveContainer and the tweaks load."
     },
     sideload: {
-      build: "cyan injects the tweaks, and zsign signs the result with your certificate and provisioning profile. This needs a paid developer account.",
+      build: "Press Build & Install. cyan injects the tweaks, and zsign signs the result with your certificate and provisioning profile. This needs a paid developer account.",
       deliver: "Graft installs it on your iPhone or iPad as a normal app, next to everything else on the home screen."
     }
   };
