@@ -58,7 +58,6 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/" aria-current="page">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
-<a href="/wiki/upgrading/">Upgrading from 1.x</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -72,7 +71,7 @@
 <li>Graft has no telemetry, analytics, crash reporting or update check. It doesn't update itself.</li>
 <li>The app makes no connections of its own. Everything goes through the CLI and the tools it runs.</li>
 <li>Your Apple ID, your password and the 2FA code, if Apple asks for one, go only to Apple, through the bundled ipatool. You type them into Graft's sign-in sheet (Settings › App Store › Sign In…), or <code>graft --appstore-login</code> asks for them in Terminal. Graft passes them over stdin to ipatool's own prompts and never stores them. ipatool keeps the sign-in, including the password, in your login keychain.</li>
-<li>The first App Store action on a Mac (usually the first sign-in) downloads ipatool's Unicorn emulator from PyPI and about 320 MB of App Store components from Apple, once. The components are skipped if a 1.x ipatool already downloaded them.</li>
+<li>The first App Store action on a Mac (usually the first sign-in) downloads ipatool's Unicorn emulator from PyPI and about 320 MB of App Store components from Apple, once.</li>
 <li>Device UDIDs never leave your Mac.</li>
 </ul>
 <h2 id="grafts-own-requests">Graft's own requests</h2>
@@ -165,7 +164,7 @@
 </tr>
 <tr>
 <td><code>updates.cdn-apple.com</code> (a macOS restore image, read in parts) and <code>wkms-public.apple.com</code> (the key for its encrypted parts)</td>
-<td>The first App Store action on a Mac, while <code>~/Library/Caches/ipatool</code> lacks the Store framework the emulator runs: about 320 MB, kept there afterward (so skipped if a 1.x ipatool already downloaded it). The image's address is fixed in ipatool's source (<code>internal/sap/assets/assets.go</code>), for macOS 27.0.1 (26A434).</td>
+<td>The first App Store action on a Mac, while <code>~/Library/Caches/ipatool</code> lacks the Store framework the emulator runs: about 320 MB, kept there afterward. The image's address is fixed in ipatool's source (<code>internal/sap/assets/assets.go</code>), for macOS 27.0.1 (26A434).</td>
 <td>as named</td>
 <td>The request only</td>
 </tr>
@@ -188,7 +187,7 @@
 <ul>
 <li><code>--appstore-status</code> (Settings › App Store, and Add App › Search once you pick a result it could offer to get; never when the sheet opens, and never while you type) runs <code>ipatool auth info</code>. From ipatool's source, that only reads its keychain item; it doesn't contact Apple.</li>
 <li>Sign Out (<code>--appstore-logout</code>, <code>ipatool auth revoke</code>) only deletes keychain items.</li>
-<li>Graft asks <code>security</code> whether ipatool's keychain items exist, and deletes some of them, since reading another program's is a Keychain dialog. With Graft.app's own ipatool, it deletes the ones Graft's record doesn't show it made: another ipatool's (Graft 1.x's, or one you use in Terminal). With any other ipatool, it deletes only the ones Graft's record shows Graft.app's own made; a sign-in a third ipatool made is saved over instead, and macOS may ask for your login keychain password while it is. Before a sign-in, that is any of its three items. Before every Get and Get (free), whichever ipatool runs, it is the download cache, <code>kbsync-v1</code>, which ipatool fills again. That's local too.</li>
+<li>Graft asks <code>security</code> whether ipatool's keychain items exist, and deletes some of them, since reading another program's is a Keychain dialog. With Graft.app's own ipatool, it deletes the ones Graft's record doesn't show it made: another ipatool's (one you use in Terminal). With any other ipatool, it deletes only the ones Graft's record shows Graft.app's own made; a sign-in a third ipatool made is saved over instead, and macOS may ask for your login keychain password while it is. Before a sign-in, that is any of its three items. Before every Get and Get (free), whichever ipatool runs, it is the download cache, <code>kbsync-v1</code>, which ipatool fills again. That's local too.</li>
 </ul>
 <h2 id="your-iphone-or-ipad">Your iPhone or iPad</h2>
 <p>Over USB or the local network, never the internet.</p>
@@ -251,7 +250,7 @@
 <p>It opens these only when you click them, in your browser or in the app that handles them:</p>
 <ul>
 <li>App Store Connect's API keys page, from Settings › App Store Connect;</li>
-<li>the upgrade guide's &quot;Going back to 1.1&quot; section on GitHub, from How to install Graft 1.1 on the screen an Intel Mac shows;</li>
+<li>a page in Graft's repository on GitHub, from the button on the screen an Intel Mac shows;</li>
 <li>Graft's releases page on GitHub (<code>github.com/GreenglassT/Graft/releases</code>), from the link under the license notice in Graft › About Graft;</li>
 <li>the guides the free-account setup's device steps link, each from its Open button: <code>sidestore.io</code>, iloader on <code>github.com</code>, and LiveContainer's installation guide on <code>livecontainer.github.io</code>;</li>
 <li>an app's <code>apps.apple.com</code> page, from Open in App Store on an app's pane, or the Mac App Store when Graft has no page for the app;</li>

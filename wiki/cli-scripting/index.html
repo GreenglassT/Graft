@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Scripting &amp; Environment | Graft Docs</title>
-<meta name="description" content="Drive graft from a script with --json, and see which environment variables it reads, including the ones for running behind a proxy.">
+<meta name="description" content="A script drives graft with --json, as the Mac app does. The environment variables graft reads include the ones for running behind a proxy.">
 <link rel="canonical" href="https://graftipa.com/wiki/cli-scripting/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="Scripting &amp; Environment | Graft Docs">
-<meta property="og:description" content="Drive graft from a script with --json, and see which environment variables it reads, including the ones for running behind a proxy.">
+<meta property="og:description" content="A script drives graft with --json, as the Mac app does. The environment variables graft reads include the ones for running behind a proxy.">
 <meta property="og:url" content="https://graftipa.com/wiki/cli-scripting/">
 <meta property="og:image" content="https://graftipa.com/screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -58,7 +58,6 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
-<a href="/wiki/upgrading/">Upgrading from 1.x</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -66,8 +65,8 @@
 <main class="wiki-content">
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Terminal</nav>
 <h1>Scripting &amp; Environment</h1>
-<p>Drive <code>graft</code> from a script with <code>--json</code>, and see which environment variables
-it reads, including the ones for running behind a proxy.</p>
+<p>A script drives <code>graft</code> with <code>--json</code>, as the Mac app does. The environment
+variables <code>graft</code> reads include the ones for running behind a proxy.</p>
 <h2 id="scripting">Scripting</h2>
 <p><code>--json</code> turns a command's output into newline-delimited JSON events on
 stdout. Every stdout line is one JSON object, and any command's narration and

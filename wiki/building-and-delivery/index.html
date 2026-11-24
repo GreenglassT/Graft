@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Building &amp; Delivery | Graft Docs</title>
-<meta name="description" content="Build an app with its tweaks, push it into LiveContainer or, with a paid account, install it as a normal app, and keep track of past builds and deliveries.">
+<meta name="description" content="Build &amp; Install builds an app with its tweaks and pushes it into LiveContainer. With a paid account, Sideload delivery installs it as a normal app instead.">
 <link rel="canonical" href="https://graftipa.com/wiki/building-and-delivery/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="Building &amp; Delivery | Graft Docs">
-<meta property="og:description" content="Build an app with its tweaks, push it into LiveContainer or, with a paid account, install it as a normal app, and keep track of past builds and deliveries.">
+<meta property="og:description" content="Build &amp; Install builds an app with its tweaks and pushes it into LiveContainer. With a paid account, Sideload delivery installs it as a normal app instead.">
 <meta property="og:url" content="https://graftipa.com/wiki/building-and-delivery/">
 <meta property="og:image" content="https://graftipa.com/screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -58,7 +58,6 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
-<a href="/wiki/upgrading/">Upgrading from 1.x</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -66,9 +65,8 @@
 <main class="wiki-content">
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
 <h1>Building &amp; Delivery</h1>
-<p>Build an app with its tweaks, push it into LiveContainer or, with a paid
-account, install it as a normal app, and keep track of past builds and
-deliveries.</p>
+<p>Build &amp; Install builds an app with its tweaks and pushes it into LiveContainer.
+With a paid account, Sideload delivery installs it as a normal app instead.</p>
 <p>Press <strong>Build &amp; Install</strong>.</p>
 <ul>
 <li><strong>LiveContainer delivery:</strong> Graft pushes the IPA into LiveContainer's
@@ -112,6 +110,7 @@ refused.</p>
 <h2 id="building">Building</h2>
 <p>Build &amp; Install runs this pipeline. Build options (beside it) picks the
 device and can build without installing.</p>
+<figure class="wiki-shot"><img src="/wiki/img/app-ready.png" alt="An app pane with two tweaks attached and the Build &amp; Install button shown, under a yellow bar saying no device is connected." width="1600" height="1040" loading="lazy"><figcaption>An app with two tweaks attached. The yellow bar says no device is connected.</figcaption></figure>
 <ol>
 <li><strong>Pre-flight.</strong> Tools, signing files, password, device, and that the device
 is in the profile. Only what the delivery mode needs is checked.</li>
@@ -140,8 +139,7 @@ Finder (Reveal in Finder).</p>
 <p>A re-install goes out the way the archive was built: an unsigned LiveContainer
 archive is never installed as a top-level app, and a zsign-signed one is never
 pushed into LiveContainer. If the app's delivery mode has changed since,
-rebuild it. For a build recorded before Graft 1.1 noted the mode, the archive
-itself says (zsign's embedded profile).</p>
+rebuild it.</p>
 <p>After each successful build, all but the newest <code>archive_keep</code> archives <strong>per
 app version</strong> go to the Trash (default 2; <code>0</code> keeps only the build just made).</p>
 <ul>

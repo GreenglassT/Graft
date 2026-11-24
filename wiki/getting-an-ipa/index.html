@@ -58,7 +58,6 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
-<a href="/wiki/upgrading/">Upgrading from 1.x</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -78,12 +77,12 @@ See <a href="#decrypt-on-a-jailbroken-device">Decrypt on a jailbroken device</a>
 </ul>
 <p>These are for <strong>personal use</strong>: your own Apple ID, apps you own or get for
 free, on your own devices. Don't redistribute decrypted or modified IPAs.</p>
-<h2 id="other-ways-to-get-an-ipa">Other ways to get an IPA</h2>
-<p>A build needs a <strong>decrypted</strong> IPA of the app, staged in
-<code>~/.cache/graft/ipas/</code>. Graft checks every Mach-O binary in it before
-injecting and warns if any is still encrypted; the build carries on, but the
-app will most likely not launch. With nothing staged, the build stops and
-lists the ways to get one.</p>
+<figure class="wiki-shot"><img src="/wiki/img/ipa-drop.png" alt="An app pane with no IPA yet, showing a drop area, a Choose IPA button and a Get latest from App Store button." width="1600" height="1040" loading="lazy"><figcaption>An app with no IPA yet: drop one on the pane, choose a file, or get the latest from the App Store.</figcaption></figure>
+<h2 id="details-for-each-way">Details for each way</h2>
+<p>Each way stages the IPA in <code>~/.cache/graft/ipas/</code>, and a build uses it from
+there. Graft checks every Mach-O binary in it before injecting and warns if
+any is still encrypted; the build carries on, but the app will most likely not
+launch. With nothing staged, the build stops and lists the ways to get one.</p>
 <p>The App Store route has its own page,
 <a href="/wiki/app-store/">App Store Downloads</a>.</p>
 <h3 id="bring-your-own">Bring your own</h3>

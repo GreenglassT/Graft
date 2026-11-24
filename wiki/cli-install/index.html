@@ -58,7 +58,6 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
-<a href="/wiki/upgrading/">Upgrading from 1.x</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -162,11 +161,11 @@ instead, and <code>--appstore-status</code> notes the setting it passed over. Re
 the key to stop the note. A pipx <code>graft</code> reports the tool as missing at
 that path.</li>
 <li>An <code>appstore.ipatool</code> of <code>~/.local/bin/ipatool</code>, or an
-<code>appstore.unfairplay</code> of <code>~/.local/share/graft/unfairplay/unfairplay</code>, is
-the 1.x default written out. It counts as not set, so Graft.app's copy
-still comes first. <code>--appstore-status</code> says so for ipatool, and marks the
-UnfairPlay that runs &quot;(bundled)&quot;. To make your own ipatool win, put it
-somewhere else and set the path.</li>
+<code>appstore.unfairplay</code> of <code>~/.local/share/graft/unfairplay/unfairplay</code>,
+counts as not set, so Graft.app's copy still comes first.
+<code>--appstore-status</code> says so for ipatool, and marks the UnfairPlay that
+runs &quot;(bundled)&quot;. To make your own ipatool win, put it somewhere else and
+set the path.</li>
 <li>Without <code>unfairplay_models:</code>, Graft uses UnfairPlay's own default:
 <code>UNFAIRPLAY_MODEL_DIR</code> if set, else
 <code>~/Library/Application Support/unfairplay/models</code>.</li>

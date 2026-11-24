@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>App Store Downloads | Graft Docs</title>
-<meta name="description" content="Sign in and set up decryption once, and Graft downloads, decrypts and stages the apps your Apple ID owns or can get for free.">
+<meta name="description" content="Once you&#x27;ve signed in and set up decryption, Graft downloads and decrypts the apps your Apple ID owns or can get for free.">
 <link rel="canonical" href="https://graftipa.com/wiki/app-store/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="App Store Downloads | Graft Docs">
-<meta property="og:description" content="Sign in and set up decryption once, and Graft downloads, decrypts and stages the apps your Apple ID owns or can get for free.">
+<meta property="og:description" content="Once you&#x27;ve signed in and set up decryption, Graft downloads and decrypts the apps your Apple ID owns or can get for free.">
 <meta property="og:url" content="https://graftipa.com/wiki/app-store/">
 <meta property="og:image" content="https://graftipa.com/screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -58,7 +58,6 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
-<a href="/wiki/upgrading/">Upgrading from 1.x</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -66,8 +65,8 @@
 <main class="wiki-content">
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
 <h1>App Store Downloads</h1>
-<p>Sign in and set up decryption once, and Graft downloads, decrypts and stages
-the apps your Apple ID owns or can get for free.</p>
+<p>Once you've signed in and set up decryption, Graft downloads and decrypts the
+apps your Apple ID owns or can get for free.</p>
 <p>Graft downloads the App Store's IPA with ipatool and decrypts it with
 UnfairPlay, both inside Graft.app. It only downloads apps your Apple ID
 already owns, or free ones it gets for that Apple ID; a paid app is bought in
@@ -92,13 +91,12 @@ a command line, in the environment or in a log.</li>
 <li>ipatool, which comes with Graft, keeps your sign-in, including your
 password, in your login Keychain, as it does when you use it on its own.</li>
 <li>The first App Store action on a Mac (usually the first sign-in) downloads
-ipatool's App Store components (about 320 MB, skipped if a 1.x ipatool
-already downloaded them) and its Unicorn emulator, and can take several
-minutes. Later ones take under a minute. See <a href="/wiki/downloads/">What Graft Downloads</a>.</li>
-<li>If you signed in with your own ipatool under Graft 1, the sheet says so
-first: signing in here removes that sign-in, and your own ipatool will need
-to sign in again if you still use it in Terminal. See
-<a href="/wiki/upgrading/#your-app-store-sign-in">Upgrading from Graft 1.x</a>.</li>
+ipatool's App Store components (about 320 MB) and its Unicorn emulator, and
+can take several minutes. Later ones take under a minute. See
+<a href="/wiki/downloads/">What Graft Downloads</a>.</li>
+<li>If you signed in with your own ipatool, the sheet says so first: signing in
+here removes that sign-in, and your own ipatool will need to sign in again if
+you still use it in Terminal.</li>
 </ul>
 <p>While you're signed in, <strong>Sign In Again…</strong> sits beside <strong>Sign Out</strong>. Use it
 when Apple has ended the session: a get then says so, and names the button.

@@ -58,7 +58,6 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
-<a href="/wiki/upgrading/">Upgrading from 1.x</a>
 <a href="/wiki/troubleshooting/" aria-current="page">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -137,7 +136,7 @@
 </tr>
 <tr>
 <td>Settings › App Store says &quot;signed in by another ipatool (Graft 1's?): sign in again&quot;, or, with your own ipatool set in <code>config.yaml</code>, &quot;a sign-in this ipatool can't read (another ipatool's?): sign in again&quot;</td>
-<td>Your sign-in was made by an ipatool this one can't read: with Graft's own, such as yours under Graft 1; with your own, Graft.app's or another. Press Sign In…; see <a href="/wiki/upgrading/#your-app-store-sign-in">Upgrading from Graft 1.x</a>.</td>
+<td>Your sign-in was made by an ipatool this one can't read: with Graft's own, one from another version of Graft; with your own, Graft.app's or another. Press Sign In….</td>
 </tr>
 <tr>
 <td>A decrypt fails as the wrong model or the wrong Apple ID</td>
@@ -149,7 +148,7 @@
 </tr>
 <tr>
 <td>The first sign-in, or the first App Store action, fails while it downloads ipatool's App Store components, with an error naming the macOS 27.0.1 (26A434) restore image (for example &quot;server returned 404 Not Found&quot;)</td>
-<td>A known issue in 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and if Apple removes that file, a Mac that hasn't downloaded them yet can't get them. A Mac whose ipatool already did (in <code>~/Library/Caches/ipatool</code>, a 1.x ipatool's included) isn't affected. Graft 2.0 has no update check, so look on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a> for a later Graft, whose ipatool will use an image Apple still serves.</td>
+<td>A known issue in 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and if Apple removes that file, a Mac that hasn't downloaded them yet can't get them. A Mac whose ipatool already did (in <code>~/Library/Caches/ipatool</code>) isn't affected. Graft 2.0 has no update check, so look on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a> for a later Graft, whose ipatool will use an image Apple still serves.</td>
 </tr>
 <tr>
 <td>Settings › App Store says &quot;couldn't tell… your login keychain is locked&quot;</td>
@@ -162,7 +161,7 @@
 </tbody>
 </table>
 </div>
-<nav class="pager"><a rel="prev" href="/wiki/upgrading/">← Upgrading from 1.x</a><a rel="next" href="/wiki/removing/">Removing Graft →</a></nav>
+<nav class="pager"><a rel="prev" href="/wiki/updating/">← Updating Graft</a><a rel="next" href="/wiki/removing/">Removing Graft →</a></nav>
 </main>
 </div>
 <footer>

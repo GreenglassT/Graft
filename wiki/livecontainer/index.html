@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LiveContainer | Graft Docs</title>
-<meta name="description" content="Use the LiveContainer already on your device, or install and update one from Graft with a paid account, and see which LiveContainer a build pushes into.">
+<meta name="description" content="Graft pushes builds into the LiveContainer already on your device, and with a paid account it can install and update one itself.">
 <link rel="canonical" href="https://graftipa.com/wiki/livecontainer/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="LiveContainer | Graft Docs">
-<meta property="og:description" content="Use the LiveContainer already on your device, or install and update one from Graft with a paid account, and see which LiveContainer a build pushes into.">
+<meta property="og:description" content="Graft pushes builds into the LiveContainer already on your device, and with a paid account it can install and update one itself.">
 <meta property="og:url" content="https://graftipa.com/wiki/livecontainer/">
 <meta property="og:image" content="https://graftipa.com/screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -58,7 +58,6 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
-<a href="/wiki/upgrading/">Upgrading from 1.x</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -66,8 +65,8 @@
 <main class="wiki-content">
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
 <h1>LiveContainer</h1>
-<p>Use the LiveContainer already on your device, or install and update one from
-Graft with a paid account, and see which LiveContainer a build pushes into.</p>
+<p>Graft pushes builds into the LiveContainer already on your device, and with a
+paid account it can install and update one itself.</p>
 <p>If LiveContainer is already on the device through SideStore, AltStore,
 iloader or Impactor, Graft uses it as it is. With a paid account Graft can
 also install and update LiveContainer itself, signed with your certificate so
@@ -136,9 +135,9 @@ SHA-256 matching one of that app's archived builds.</p>
 <li>Clean up removes only the IPAs Graft's deliveries recorded and a
 certificate it recorded pushing, and retires those records, so a file you
 later put there under the same name is yours.</li>
-<li>An <code>AppleDevelopment.p12</code> with no record (one pushed by Graft 1.0, or your
-own) is reported and left in place. Putting the certificate on the device
-replaces it only when its bytes are your configured <code>.p12</code>.</li>
+<li>An <code>AppleDevelopment.p12</code> with no record (one you put there yourself) is
+reported and left in place. Putting the certificate on the device replaces it
+only when its bytes are your configured <code>.p12</code>.</li>
 <li>A build whose IPA name (<code>&lt;app&gt;.ipa</code>) is already taken by a file that isn't
 Graft's stops instead of overwriting it. Rename or remove that file in the
 Files app, then build again. A re-push of Graft's own earlier delivery
