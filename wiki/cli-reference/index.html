@@ -58,6 +58,7 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/changelog/">Changelog</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -107,7 +108,7 @@ has no effect until the app is delivered by sideload.</p>
 graft --appstore-login                      # asks for the Apple ID, the password, then the code if Apple asks
 graft --appstore-logout
 graft --appstore-check                      # App Store version vs. your staged IPA, per app
-graft --appstore-get --app example          # download, decrypt and stage the latest version
+graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if it's already staged)
 graft --appstore-claim --app example        # Get (free): only for an app the App Store lists at 0
 </code></pre>
 <ul>
@@ -118,6 +119,8 @@ and asks for each in a terminal (the password without echo). None of them is
 ever an argument.</li>
 <li><code>--allow-unverified</code> with <code>--appstore-get</code> or <code>--provide-ipa</code> stages a decrypt
 UnfairPlay couldn't verify, with a warning.</li>
+<li><code>--again</code> with <code>--appstore-get</code> downloads even when that version is already
+staged.</li>
 </ul>
 <p>To set up decryption in Terminal, list the apps that can do it, save the
 script, run it as root, then finish as yourself:</p>
@@ -216,6 +219,7 @@ graft --set-portal --asc-key-id ABCDE12345 \
   --asc-key-file ~/Downloads/AuthKey_ABCDE12345.p8
 graft --setup-portal                # the same key, with questions
 graft --clear-portal                # remove it (the .p8 stays)
+graft --check-update                # is a newer Graft out? (asks GitHub; downloads nothing)
 </code></pre>
 <p><code>--set-settings --signing-*</code> refuses on a free config rather than write part of
 a <code>signing:</code> section, which would leave a config that no longer loads. To
@@ -226,6 +230,7 @@ keeping apps, repos and settings either way.</p>
 </main>
 </div>
 <footer>
+      <p><a href="/wiki/changelog/">Changelog</a></p>
       <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
       <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
     </footer>

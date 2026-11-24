@@ -58,6 +58,7 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/" aria-current="page">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/changelog/">Changelog</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -65,17 +66,18 @@
 <main class="wiki-content">
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
 <h1>What Graft connects to</h1>
-<p>Every host that Graft.app, the <code>graft</code> CLI, or a tool bundled in the app contacts: why, when, and what it sends. It was gathered by reading the code (<code>graft_ipa/</code>, <code>Graft/Graft/</code>, the bundled Python packages), the pinned sources of ipatool 2.8.0 and UnfairPlay 0.4.0, and the bundled binaries' strings. It covers Graft 2.0.</p>
+<p>Every host that Graft.app, the <code>graft</code> CLI, or a tool bundled in the app contacts: why, when, and what it sends. It was gathered by reading the code (<code>graft_ipa/</code>, <code>Graft/Graft/</code>, the bundled Python packages), the pinned sources of ipatool 2.8.0 and UnfairPlay 0.4.0, and the bundled binaries' strings. It covers Graft 2.0.1.</p>
 <p><strong>Short version:</strong></p>
 <ul>
-<li>Graft has no telemetry, analytics, crash reporting or update check. It doesn't update itself.</li>
+<li>Graft has no telemetry, analytics or crash reporting, and it doesn't update itself.</li>
+<li>It does check for updates: once a day while the app is open, the CLI asks GitHub for Graft's latest release, sending nothing that identifies you or your Mac (<code>api.github.com</code>, below). Settings › Updates turns that off.</li>
 <li>The app makes no connections of its own. Everything goes through the CLI and the tools it runs.</li>
 <li>Your Apple ID, your password and the 2FA code, if Apple asks for one, go only to Apple, through the bundled ipatool. You type them into Graft's sign-in sheet (Settings › App Store › Sign In…), or <code>graft --appstore-login</code> asks for them in Terminal. Graft passes them over stdin to ipatool's own prompts and never stores them. ipatool keeps the sign-in, including the password, in your login keychain.</li>
 <li>The first App Store action on a Mac (usually the first sign-in) downloads ipatool's Unicorn emulator from PyPI and about 320 MB of App Store components from Apple, once.</li>
 <li>Device UDIDs never leave your Mac.</li>
 </ul>
 <h2 id="grafts-own-requests">Graft's own requests</h2>
-<p>The CLI sends <code>User-Agent: graft/&lt;version&gt; (+https://github.com/GreenglassT/Graft)</code> with every request it makes through <code>requests</code>. The exception is downloading icon images (<code>--artwork</code>, and the icons of <code>--appstore-search</code> results), which send the library's default User-Agent.</p>
+<p>The CLI sends <code>User-Agent: graft/&lt;version&gt; (+https://github.com/GreenglassT/Graft)</code> with every request it makes through <code>requests</code>. There are two exceptions. Downloading icon images (<code>--artwork</code>, and the icons of <code>--appstore-search</code> results) sends the library's default User-Agent. The update check sends <code>User-Agent: Graft</code>, without the version.</p>
 <p><strong>Bold</strong> marks user data.</p>
 <div class="table-wrap"><table>
 <thead>
@@ -89,8 +91,8 @@
 <tbody>
 <tr>
 <td><code>itunes.apple.com</code> (<code>/lookup</code>)</td>
-<td>CLI: <code>--add-app</code>, <code>--appstore-check</code>, <code>--artwork</code>, and the free-price check before <code>--appstore-claim</code></td>
-<td><code>--add-app</code>: when you add an app. The app also runs the other two <strong>on its own</strong>: <code>--appstore-check</code> when an app's detail pane opens; <code>--artwork</code> at launch, when the app list changes, and after a build or App Store get, but only for apps with no icon cached or in a cached IPA. The price check: when a get is refused for want of a license, and before Get (free).</td>
+<td>CLI: <code>--add-app</code>, <code>--appstore-check</code>, <code>--artwork</code>, the free-price check before <code>--appstore-claim</code>, and the version check before <code>--appstore-get</code></td>
+<td><code>--add-app</code>: when you add an app. The app also runs the other two <strong>on its own</strong>: <code>--appstore-check</code> when an app's detail pane opens; <code>--artwork</code> at launch, when the app list changes, and after a build or App Store get, but only for apps with no icon cached or in a cached IPA. The price check: when a get is refused for want of a license, and before Get (free). The version check: before Get latest from App Store, only when the app has an IPA staged (not with <code>--again</code>, or Get Again).</td>
 <td>The App Store id from the URL you gave, or the app's <strong>bundle id</strong>, and the two-letter store the app came from (the one Search asked, or the one its URL names; else this Mac's region's store, then the US store if that one doesn't sell it). No account.</td>
 </tr>
 <tr>
@@ -124,6 +126,12 @@
 <td>An ES256 <strong>JWT signed with your App Store Connect API key</strong> (.p8), naming its issuer and key id; <strong>bundle ids</strong> (or wildcard patterns) and profile names. Graft reads the team's device list and matches UDIDs on the Mac; it never uploads one.</td>
 </tr>
 <tr>
+<td><code>api.github.com</code> (<code>/repos/GreenglassT/Graft/releases/latest</code>)</td>
+<td>CLI: <code>--check-update</code></td>
+<td><strong>On its own</strong>, at most once a day while the app is open: at launch, and every hour after, the app runs it if the last successful check was more than 24 hours ago or there hasn't been one. A failed check is tried again an hour later. Turn it off in Settings › Updates (Check for a newer Graft once a day). Also when you choose Help › Check for Updates…, whether that's on or off.</td>
+<td>The request only, with <code>User-Agent: Graft</code>: no version, account, cookie or device data, and not a <code>~/.netrc</code> login. It compares the answer with the app's version on your Mac. Graft downloads and installs nothing; the banner links to the release page.</td>
+</tr>
+<tr>
 <td><code>github.com</code>, <code>api.github.com</code>, and <code>release-assets.githubusercontent.com</code>, where GitHub redirects the release files (the LiveContainer project's)</td>
 <td>CLI: <code>--lc-status</code>, <code>--lc-install</code></td>
 <td><code>--lc-status</code> runs <strong>on its own</strong> when a device's pane opens, and in Edit App for a LiveContainer app. <code>--lc-install</code> runs when you install LiveContainer.</td>
@@ -152,7 +160,7 @@
 </tr>
 <tr>
 <td>Get (<code>--appstore-get</code>, which runs <code>ipatool download -b &lt;bundle id&gt;</code>)</td>
-<td>When you press Get latest from App Store, and when you press Add in Add App › Search with &quot;Get it from the App Store after adding&quot; checked (it starts checked for a free app, and is shown only once the App Store is set up)</td>
+<td>When you press Get latest from App Store (unless that version is already staged) or Get Again, and when you press Add in Add App › Search with &quot;Get it from the App Store after adding&quot; checked (it starts checked for a free app, and is shown only once the App Store is set up)</td>
 <td>Apple's App Store hosts, among them <code>init.itunes.apple.com</code>, <code>*-buy.itunes.apple.com</code>, <code>uclient-api.itunes.apple.com</code>, <code>apps.apple.com</code> and <code>downloaddispatch.itunes.apple.com</code>, then the download URL Apple returns</td>
 <td>Your <strong>Apple ID session</strong> (the token ipatool keeps in the keychain), the <strong>bundle id</strong>, and the machine identifier. If Apple has expired the session, ipatool signs in again with the password it keeps.</td>
 </tr>
@@ -252,6 +260,8 @@
 <li>App Store Connect's API keys page, from Settings › App Store Connect;</li>
 <li>a page in Graft's repository on GitHub, from the button on the screen an Intel Mac shows;</li>
 <li>Graft's releases page on GitHub (<code>github.com/GreenglassT/Graft/releases</code>), from the link under the license notice in Graft › About Graft;</li>
+<li>a newer Graft's release page on GitHub, from Release Page on the main window's update banner, or Open Release Page after Help › Check for Updates…;</li>
+<li>a page a link in Help › What's New… points to: Graft's releases, or a page of its documentation, on <code>github.com</code>;</li>
 <li>the guides the free-account setup's device steps link, each from its Open button: <code>sidestore.io</code>, iloader on <code>github.com</code>, and LiveContainer's installation guide on <code>livecontainer.github.io</code>;</li>
 <li>an app's <code>apps.apple.com</code> page, from Open in App Store on an app's pane, or the Mac App Store when Graft has no page for the app;</li>
 <li>the Mac App Store, from Open the Mac App Store in Set Up Decryption.</li>
@@ -311,6 +321,7 @@
 </main>
 </div>
 <footer>
+      <p><a href="/wiki/changelog/">Changelog</a></p>
       <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
       <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
     </footer>

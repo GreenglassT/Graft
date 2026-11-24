@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Changelog | Graft Docs</title>
+<meta name="description" content="What changed in each release of Graft, newest first. Each release&#x27;s download is on GitHub Releases.">
+<link rel="canonical" href="https://graftipa.com/wiki/changelog/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Changelog | Graft Docs">
+<meta property="og:description" content="What changed in each release of Graft, newest first. Each release&#x27;s download is on GitHub Releases.">
+<meta property="og:url" content="https://graftipa.com/wiki/changelog/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/changelog/" aria-current="page">Changelog</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
+<h1>Changelog</h1>
+<p>What changed in each release of Graft, newest first. Each release's download
+is on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>.</p>
+<h2 id="201-2026-11-24">2.0.1 (2026-11-24)</h2>
+<p>Graft now tells you when a new version is out, and has a new icon.</p>
+<ul>
+<li><strong>Update notice.</strong> Once a day while it's open, Graft asks GitHub whether a
+newer version is out, through its own CLI (<code>graft --check-update</code>), and shows
+a banner if there is one. That's one request, sent as <code>User-Agent: Graft</code>,
+with nothing that identifies you or your Mac, and it never downloads or
+installs anything. Help › Check for Updates… asks any time, and Settings ›
+Updates turns the daily check off. <a href="/wiki/network/">What Graft connects to</a>
+lists it.</li>
+<li><strong>What's New.</strong> Help › What's New… shows this changelog inside the app.</li>
+<li><strong>A new icon:</strong> two pieces joined on the diagonal and taped, with a leaf at
+the tip.</li>
+<li><strong>Get Again.</strong> When the version the App Store has is the one already staged,
+Get latest from App Store downloads nothing and says &quot;Already have
+&lt;version&gt;&quot;. Get Again, or <code>--again</code> with <code>--appstore-get</code>, downloads it
+anyway.</li>
+</ul>
+<h3 id="fixes">Fixes</h3>
+<ul>
+<li><strong>Set Up Decryption</strong> suggests opening the app you picked first, with a
+button that does it: macOS sometimes clears the App Store state that step
+reads, even for an app you've already opened, and opening the app writes it
+again. If the state still isn't there, root stops before it copies or
+changes anything (the script exits 69) and the sheet says which app to open.
+The time limit root works under no longer measures an app through a link.</li>
+<li><strong>Quitting, logging out or restarting while Graft is working</strong> (a build or
+install, an App Store download, setting up decryption or your signing
+account, a LiveContainer change, or a decrypt from a device) asks first. Keep
+Working cancels the quit; Quit Anyway stops the work cleanly, then quits.</li>
+<li><strong>Installing LiveContainer</strong> waits up to 15 minutes for you to close
+LiveContainer only when it's updating a copy already on the device. A first
+install keeps the usual minute and the dropped-connection hint.</li>
+</ul>
+<h2 id="20-2026-11-23">2.0 (2026-11-23)</h2>
+<p>Graft no longer needs Terminal.</p>
+<ul>
+<li><strong>Download it, open it, set it up in the app.</strong> Graft.app carries its own
+<code>graft</code> CLI, with its own Python, and every tool it uses: cyan, zsign, ldid,
+ipatool, UnfairPlay and the rest. There's no Homebrew, pipx, Python, Go,
+Xcode or libimobiledevice to install, except libimobiledevice for
+decrypting on a jailbroken device.</li>
+<li><strong>Sign in to the App Store in the app.</strong> Settings › App Store › Sign In…
+takes your Apple ID, your password and, if Apple asks for one, the code it
+sends to your devices. They go only to Apple, through the ipatool inside
+Graft.app, and Graft saves none of them.</li>
+<li><strong>Get (free).</strong> When your Apple ID doesn't have an app yet and it's free, Get
+latest from App Store in the app's Source IPA section becomes Get (free). It
+asks first, then adds the app to your purchases at no cost and downloads it. A paid app shows Open in App Store instead; Graft
+never buys anything.</li>
+<li><strong>Setup, decryption and account changes happen in the app.</strong>
+<ul>
+<li>The first run asks whether you have a paid Apple Developer account. With
+one, you choose your <code>.p12</code> and profile and see the team and devices before
+Graft sets anything up.</li>
+<li>Settings › App Store › Set Up Decryption… enrolls this Mac for App Store
+decryption, behind macOS's administrator prompt. Graft explains the step
+first and never sees the password. Set Up Again… redoes it after you change
+Apple ID.</li>
+<li>Settings switches between a free Apple ID and a paid account, and replaces
+a paid account's certificate and profile when they expire, keeping your
+apps, repos and settings.</li>
+</ul>
+</li>
+<li><strong>App Store search.</strong> Add App opens on Search: type an app's name, pick it,
+and add it. No URL to paste, and no Apple ID needed to search.</li>
+<li><strong>macOS 14 or later.</strong> Graft.app now opens on macOS 14 Sonoma as well as
+later versions. Graft 2.0 needs a Mac with Apple silicon. Graft 1.1 may work
+on an Intel Mac running macOS 15 or later, but it was never tested there.
+Graft 1.1 needs macOS 15;
+<a href="https://github.com/GreenglassT/Graft/blob/main/docs/upgrading.md#going-back-to-11">Going back to 1.1</a> installs its CLI
+with <code>@v1.1</code>.</li>
+</ul>
+<h3 id="also-in-20">Also in 2.0</h3>
+<ul>
+<li>Settings › Command-line tool › Install graft for Terminal links the app's own
+<code>graft</code> into <code>~/.local/bin</code>, so the command updates with the app.</li>
+<li>Each app remembers the App Store it came from, and is checked for updates,
+its icon and its price there. Add App's Search has a Store picker, and Edit
+App can change an app's store.</li>
+<li>The App Store Connect key is set in Settings, and &quot;Create the provisioning
+profile automatically&quot; is in each app's Edit sheet.</li>
+<li>Builds has &quot;Clean up old builds…&quot;, which applies your archive setting now.</li>
+<li>A decrypt UnfairPlay can't verify offers &quot;Use it anyway…&quot;, which says what
+that risks first.</li>
+<li>Builds for this Mac under PlayCover no longer need Xcode: Graft.app carries
+the stand-in framework some tweaks need.</li>
+<li>Before zsign signs an app, Graft warns when its profile can't grant what the
+app asks for (App Groups, iCloud, push and the like), and says which are
+likely to crash it.</li>
+<li>A phone that has never trusted this Mac is told to tap Trust, and Graft
+waits a minute for it, instead of failing.</li>
+<li>Settings shows the version of the app and of the CLI it runs. Help › Licenses
+lists every bundled component, and each release page carries the source
+archive.</li>
+</ul>
+<h3 id="fixes-1">Fixes</h3>
+<ul>
+<li>Re-saving a password no longer asks for your keychain password. In 1.1,
+storing a <code>.p12</code> or SSH password over one already there asked for your login
+keychain password, and replaced it even when you canceled.</li>
+<li>The three known issues in 1.1 are fixed:
+<ul>
+<li>renaming an app's bundle id removes its Apple Watch app, which can't
+follow it, so the install no longer fails;</li>
+<li>builds with a paid account no longer print a &quot;PKCS#12 … BER&quot; warning;</li>
+<li>cyan's color codes no longer show in the build log.</li>
+</ul>
+</li>
+<li>A Stop during a sideload install ends promptly, and removes the IPA it
+staged on the phone.</li>
+<li>A phone that goes silent during an upload or an install is given up on after
+a minute, with a plain message, instead of hanging. A pulled cable gets a
+plain message too. Installing LiveContainer itself (<code>--lc-install</code>) is the
+exception: once Graft has asked you to close LiveContainer on the device, it
+waits up to 15 minutes for that.</li>
+<li>A push into LiveContainer lands whole or not at all. A cut-off push leaves
+nothing under the app's name, and the next push or Clean up removes what it
+left.</li>
+<li>Automatic provisioning puts every enabled iPhone and iPad in the profile,
+not the first three. A cached profile is reused only if it lists your current
+certificate and team, and Graft checks the key's team before it changes
+anything at Apple.</li>
+<li>Setting an App Store Connect key no longer rewrites the rest of the
+<code>app_store_connect:</code> section.</li>
+<li>An archive left by a failed install no longer takes a keep slot from a build
+you can re-install, and a clean-up never moves an archive a build is about to
+deliver.</li>
+<li>A failed paid setup, or a failed certificate replace, puts every file and
+password back as it was.</li>
+<li>A locked or unanswering login keychain gives a plain message after a minute,
+instead of hanging.</li>
+<li>The decryption check reads every binary itself, fat64 ones included, and
+never counts one it can't read as decrypted.</li>
+<li>App Store links with no app name in them, <code>geo.itunes.apple.com</code> links and
+<code>itms-apps://</code> links are accepted, and older <code>itunes.apple.com/gb/...</code> links
+keep their store.</li>
+<li>Warnings from saving an app's options or an App Store Connect key show in the
+app instead of being lost.</li>
+</ul>
+<h3 id="changed">Changed</h3>
+<ul>
+<li>Graft.app always runs the CLI inside it, never a <code>graft</code> installed with pipx.
+The pipx install still works on its own, with the tools you install.</li>
+<li>In config.yaml, an <code>appstore.ipatool</code> or <code>appstore.unfairplay</code> equal to 1.x's
+default counts as not set, so Graft.app's own copy runs, and so does one
+that isn't there any more, with a note in <code>--appstore-status</code>. A relative
+path there, or in <code>appstore.unfairplay_models</code>, is now ignored with a
+warning and read as not set. 1.x resolved it against the folder the CLI
+started in.</li>
+<li>An app with no store is looked up in the store of this Mac's region, then in
+the US store. 1.x asked only the US store.</li>
+<li>Signing in to the App Store in Graft replaces a sign-in your own ipatool made
+under 1.x. Your own ipatool then needs to sign in again if you use it in
+Terminal.</li>
+<li>The CLI no longer installs frida. Decrypting on a jailbroken device uses
+frida-ios-dump's own.</li>
+<li>The Graft.app download is an aggregate of separate programs, each under its
+own license. The CLI inside it is distributed under GPL-3.0-or-later, and
+Graft's own source code stays MIT.</li>
+</ul>
+<p>Coming from 1.x: <a href="https://github.com/GreenglassT/Graft/blob/main/docs/upgrading.md">Upgrading from Graft 1.x</a> covers your
+config, your pipx <code>graft</code>, the Homebrew tools you no longer need, your App
+Store sign-in, and going back to 1.1. Staying on 1.1? Pin its CLI to <code>@v1.1</code>
+before any <code>pipx upgrade</code> or <code>pipx reinstall</code>, or they bring in 2.0's: see
+<a href="https://github.com/GreenglassT/Graft/blob/main/docs/upgrading.md#going-back-to-11">Going back to 1.1</a>.</p>
+<p>The first App Store action on a Mac (usually the first sign-in) downloads
+ipatool's App Store components (about 320 MB, skipped if a 1.x ipatool
+already downloaded them) from Apple and its Unicorn emulator from PyPI, and
+can take several minutes. <a href="/wiki/network/">What Graft connects to</a> lists every host.</p>
+<h2 id="11-2026-11-18">1.1 (2026-11-18)</h2>
+<p>Graft works with a free Apple ID.</p>
+<ul>
+<li>With a free Apple ID, Graft builds the tweaked IPA unsigned and pushes it
+into LiveContainer, which signs it when you import it. You need
+LiveContainer on the device, installed with SideStore, AltStore, iloader or
+Impactor. <code>graft --init</code> asks which kind of account you have, and switching
+to a paid account later keeps your apps, repos and settings.</li>
+<li>The Mac app's setup screen lists every missing tool with its install
+command, and missing tools show as a notice instead of a failed build.</li>
+<li>Finding your iPhone or iPad no longer needs libimobiledevice.</li>
+<li>An app can be pinned to one LiveContainer when the device has several.</li>
+<li><code>graft --lc-clean</code> removes only files Graft pushed, and Graft won't overwrite
+a file in LiveContainer's Documents unless it knows the file is its own.</li>
+<li><code>--dry-run</code> previews only a build and <code>--prune-builds</code>. Any other command
+refuses it instead of running for real.</li>
+<li>A stopped build shows as Stopped, adds nothing to Builds and leaves no
+temporary files behind.</li>
+<li>Your Apple ID data is removed from every IPA Graft builds or installs.</li>
+<li>Your <code>.p12</code> and SSH passwords no longer show in process listings, and
+Graft's folders and files are readable only by your user account.</li>
+<li>The Mac app picks up changes made in Terminal when you come back to its
+window, and says so when <code>config.yaml</code> can't be read.</li>
+<li>A locked phone is asked to unlock, instead of reporting &quot;no LiveContainer
+found&quot;.</li>
+<li>The app works with csh and tcsh, or a shell that forces color, and no longer
+hangs on a slow shell startup file.</li>
+<li>For scripts, <code>--json</code> output is pure JSON for every command, and
+LiveContainer errors have their own exit code, 21.</li>
+</ul>
+<p>Known issues, fixed in 2.0: a renamed bundle id failed on apps with an Apple
+Watch app; paid builds printed a &quot;PKCS#12 … BER&quot; warning; some cyan lines
+showed raw color codes in the app's build log.</p>
+<p>On 2026-11-19 the 1.1 download was rebuilt without the build machine's file
+paths and code-coverage data. Same version, no other changes.</p>
+<h2 id="10-2026-11-17">1.0 (2026-11-17)</h2>
+<p>The first public release: the <code>graft</code> CLI, installed with pipx, and Graft.app,
+which runs it. A paid Apple Developer account was required.</p>
+<ul>
+<li>Injects <code>.deb</code> and <code>.dylib</code> tweaks into a decrypted IPA with cyan, and
+delivers it into LiveContainer, keeping its bundle id, or signs it with
+zsign and installs it as a normal app.</li>
+<li>Gets the source IPA three ways: an IPA you have, a dump from your own
+jailbroken device (frida-ios-dump or bagbak), or the App Store with your
+Apple ID, through ipatool and UnfairPlay.</li>
+<li>Finds tweaks on canister.me and in APT repositories, and checks them for
+updates.</li>
+<li>Keeps a build history, archived builds per app version for rollback, and a
+delivery state that says when a device is behind your config.</li>
+<li>Installs, updates and signs LiveContainer itself, including side-by-side
+instances, and makes per-app profiles through App Store Connect.</li>
+<li>Runs builds on this Mac under PlayCover.</li>
+<li>Needed macOS 15 or later, Python 3.11 or later, and tools from Homebrew and
+the Xcode Command Line Tools.</li>
+</ul>
+<nav class="pager"><a rel="prev" href="/wiki/updating/">← Updating Graft</a><a rel="next" href="/wiki/troubleshooting/">Troubleshooting →</a></nav>
+</main>
+</div>
+<footer>
+      <p><a href="/wiki/changelog/">Changelog</a></p>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

@@ -58,6 +58,7 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/changelog/">Changelog</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -108,7 +109,10 @@ silicon Mac can), signed in there with <strong>the same Apple ID</strong> you us
 Graft, and open it once.</li>
 <li>Press <strong>Set Up Decryption…</strong>. In the sheet, pick that app (the first one
 is already picked) and press <strong>Set Up Decryption…</strong> again. Graft then
-explains what will happen; press <strong>Continue</strong>.</li>
+explains what will happen. Open the app once first (the sheet's
+<strong>Open &lt;app&gt;</strong> button does it): macOS sometimes clears the App Store state
+UnfairPlay reads, and opening the app writes it again. Then press
+<strong>Continue</strong>.</li>
 <li>macOS's dialog usually names Graft and asks you to allow it administrator
 access (&quot;Allow administrator access for “Graft”?&quot;). On a Mac with Touch ID
 it offers Touch ID or <strong>Use Password…</strong>; on one without, it asks for your
@@ -122,6 +126,9 @@ Mac has to type them. The rest is the same: Graft never sees them, and the
 decryption model it sets up is yours.</p>
 <p>What happens:</p>
 <ul>
+<li>Before root copies anything, it checks that this Mac's App Store state
+(<code>SC Info.sidb</code>) is there. If it isn't, the step stops at once, nothing is
+changed, and Graft says which app to open.</li>
 <li>Graft explains the step before macOS's dialog appears, and shows the exact
 command under &quot;The exact command, run as root&quot;.</li>
 <li>Root works only in a folder of its own, on its own copy of the app, and runs
@@ -141,7 +148,9 @@ with an app installed under the new one.</p>
 <h2 id="get-an-app">Get an app</h2>
 <p>On the app's pane, <strong>Get latest from App Store</strong> downloads, decrypts and
 stages the App Store's latest version. <strong>Stop</strong> cancels it and deletes the
-download.</p>
+download. If that version is already staged, nothing is downloaded and the
+pane says &quot;Already have &lt;version&gt;&quot;. The button then reads <strong>Get Again</strong>,
+which asks first, then downloads, decrypts and stages it again.</p>
 <ul>
 <li>If your Apple ID doesn't have the app yet and it's free, the button becomes
 <strong>Get (free)</strong>. Graft asks first, then adds the app to your Apple ID's
@@ -177,6 +186,7 @@ crashes at launch, the decrypt is the likely cause.</p>
 </main>
 </div>
 <footer>
+      <p><a href="/wiki/changelog/">Changelog</a></p>
       <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
       <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
     </footer>

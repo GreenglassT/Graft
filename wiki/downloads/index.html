@@ -58,6 +58,7 @@
 <a href="/wiki/downloads/" aria-current="page">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/changelog/">Changelog</a>
 <a href="/wiki/troubleshooting/">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -66,11 +67,12 @@
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
 <h1>What Graft Downloads</h1>
 <p>When Graft goes online and what it downloads, including the one-time downloads on the first App Store action.</p>
-<p>Graft has no telemetry, analytics, crash reporting or update check, and it
-doesn't update itself. Graft.app makes no
-connections of its own: its CLI does, for something you asked for or a pane
-you opened, and to look up the icon of an app that has none yet, at launch
-and when the app list changes. Device UDIDs never leave your Mac.</p>
+<p>Graft has no telemetry, analytics or crash reporting, and it doesn't update
+itself. Graft.app makes no connections of its own: its CLI does, for something
+you asked for or a pane you opened, to look up the icon of an app that has
+none yet, at launch and when the app list changes, and once a day to ask
+GitHub whether a newer Graft is out (Settings › Updates turns that off).
+Device UDIDs never leave your Mac.</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -94,6 +96,11 @@ and when the app list changes. Device UDIDs never leave your Mac.</p>
 <td>A device's pane opens, Edit App opens for a LiveContainer app, or you install LiveContainer</td>
 <td>GitHub</td>
 <td>LiveContainer's releases</td>
+</tr>
+<tr>
+<td>Once a day while Graft is open, unless Settings › Updates turns it off, and when you choose Help › Check for Updates…</td>
+<td>GitHub (<code>api.github.com</code>), with nothing that identifies you or your Mac</td>
+<td>Whether a newer Graft is out</td>
 </tr>
 <tr>
 <td>A paid account with an App Store Connect key makes a profile</td>
@@ -131,6 +138,7 @@ lists every host, when, and what is sent.</p>
 </main>
 </div>
 <footer>
+      <p><a href="/wiki/changelog/">Changelog</a></p>
       <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
       <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
     </footer>

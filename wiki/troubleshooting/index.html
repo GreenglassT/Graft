@@ -58,6 +58,7 @@
 <a href="/wiki/downloads/">What Graft Downloads</a>
 <a href="/wiki/network/">What Graft Connects To</a>
 <a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/changelog/">Changelog</a>
 <a href="/wiki/troubleshooting/" aria-current="page">Troubleshooting</a>
 <a href="/wiki/removing/">Removing Graft</a>
 <a href="/wiki/building-from-source/">Building from Source</a>
@@ -143,12 +144,12 @@
 <td>Decryption was set up with another Apple ID. Use the same Apple ID in Graft as in the Mac App Store, then press Set Up Again… in Settings › App Store.</td>
 </tr>
 <tr>
-<td>Set Up Decryption… or Set Up Again… stops with &quot;canonical input has no SIDB state&quot;</td>
-<td>This Mac's App Store state, which UnfairPlay reads, isn't there right now: macOS sometimes clears it, even for an app you've already opened. Open the app you picked once, then set up again. The sheet says the same.</td>
+<td>Set Up Decryption… or Set Up Again… says this Mac's App Store state isn't there, or stops with &quot;canonical input has no SIDB state&quot;</td>
+<td>macOS sometimes clears the state UnfairPlay reads, even for an app you've already opened. Open the app you picked once (the sheet's Open &lt;app&gt; button does it), then set up again. In Terminal, the setup script exits 69 for this.</td>
 </tr>
 <tr>
 <td>The first sign-in, or the first App Store action, fails while it downloads ipatool's App Store components, with an error naming the macOS 27.0.1 (26A434) restore image (for example &quot;server returned 404 Not Found&quot;)</td>
-<td>A known issue in 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and if Apple removes that file, a Mac that hasn't downloaded them yet can't get them. A Mac whose ipatool already did (in <code>~/Library/Caches/ipatool</code>) isn't affected. Graft 2.0 has no update check, so look on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a> for a later Graft, whose ipatool will use an image Apple still serves.</td>
+<td>A known issue in 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and if Apple removes that file, a Mac that hasn't downloaded them yet can't get them. A Mac whose ipatool already did (in <code>~/Library/Caches/ipatool</code>) isn't affected. Help › Check for Updates… says whether a later Graft is out (or look on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>); a later Graft's ipatool will use an image Apple still serves.</td>
 </tr>
 <tr>
 <td>Settings › App Store says &quot;couldn't tell… your login keychain is locked&quot;</td>
@@ -161,10 +162,11 @@
 </tbody>
 </table>
 </div>
-<nav class="pager"><a rel="prev" href="/wiki/updating/">← Updating Graft</a><a rel="next" href="/wiki/removing/">Removing Graft →</a></nav>
+<nav class="pager"><a rel="prev" href="/wiki/changelog/">← Changelog</a><a rel="next" href="/wiki/removing/">Removing Graft →</a></nav>
 </main>
 </div>
 <footer>
+      <p><a href="/wiki/changelog/">Changelog</a></p>
       <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
       <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
     </footer>
