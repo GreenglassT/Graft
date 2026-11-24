@@ -118,24 +118,16 @@ legend { padding: 0; margin-bottom: 0.5rem; font-size: 0.95rem; font-weight: 600
 
 .build-grid { display: grid; gap: 2rem; align-items: start; }
 .build-grid > * { min-width: 0; }
-@media (min-width: 60rem) { .build-grid { grid-template-columns: 1fr 1.1fr; gap: 3rem; } }
+.build-grid { max-width: 48rem; }
 .steps { list-style: none; margin: 0; padding: 0; counter-reset: step; }
 .steps li { counter-increment: step; display: grid; grid-template-columns: 2.25rem 1fr; column-gap: 0.75rem; padding: 1rem 0; border-top: 1px solid var(--rule); }
 .steps li::before { content: counter(step); grid-row: span 2; font-size: 1.4rem; font-weight: 800; line-height: 1.25; color: var(--accent); }
 .steps h3 { margin: 0; font-size: 1.15rem; font-weight: 700; }
 .steps p { margin: 0.2rem 0 0; color: var(--ink-soft); }
-.mac-note { margin: 1.25rem 0 0; color: var(--ink-soft); }
-@media (min-width: 60rem) { .term-col { position: sticky; top: 1.5rem; } }
 
-.terminal { background: var(--term); color: var(--term-ink); border-radius: 14px; overflow: hidden; box-shadow: 0 0 0 1px rgba(255,255,255,0.07), 0 30px 60px -30px rgba(5,12,40,0.6); }
-.term-bar { display: flex; justify-content: space-between; align-items: center; padding: 0.55rem 0.75rem 0.55rem 1.1rem; font-size: 0.85rem; color: var(--term-soft); border-bottom: 1px solid rgba(255,255,255,0.08); }
-.copy { font: inherit; font-weight: 600; color: var(--term-ink); background: transparent; border: 1px solid rgba(255,255,255,0.2); border-radius: 6px; padding: 0.3rem 0.65rem; cursor: pointer; }
-.copy:hover { border-color: rgba(255,255,255,0.45); }
-html:not(.js) .copy { display: none; }
 pre { margin: 0; background: var(--term); color: var(--term-ink); border-radius: 12px; padding: 1rem 1.1rem 1.15rem; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.95rem; line-height: 1.6; }
 pre .ln { display: block; padding-left: 2ch; text-indent: -2ch; }
 pre .ln + .ln { margin-top: 0.3rem; }
-.terminal pre { border-radius: 0; padding: 1.1rem 1.1rem 1.3rem; }
 pre .p { color: var(--term-accent); user-select: none; -webkit-user-select: none; }
 pre .c { color: var(--term-soft); }
 
