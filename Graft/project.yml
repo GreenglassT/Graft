@@ -1,7 +1,7 @@
 name: Graft
 options:
   deploymentTarget:
-    macOS: "15.0"
+    macOS: "14.0"
   developmentLanguage: en
   bundleIdPrefix: com.greenglasst
 settings:
@@ -30,8 +30,8 @@ targets:
       path: Graft/Info.plist
       properties:
         CFBundleDisplayName: Graft
-        CFBundleShortVersionString: "1.1"
-        CFBundleVersion: "3"
+        CFBundleShortVersionString: "2.0"
+        CFBundleVersion: "4"
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSPrincipalClass: NSApplication

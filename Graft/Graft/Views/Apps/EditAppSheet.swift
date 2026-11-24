@@ -10,6 +10,9 @@ struct EditAppSheet: View {
     let liveContainer: LiveContainerStore
     /// `ContentView`'s polled store, for which phone is the default.
     let devices: DevicesStore
+    /// `ContentView`'s settings, for whether an App Store Connect key is set:
+    /// "Create the provisioning profile automatically" needs one to turn on.
+    let settings: SettingsStore
     let onClose: () -> Void
 
     /// The whole form, plus the baseline it will be diffed against. One list of
@@ -17,19 +20,28 @@ struct EditAppSheet: View {
     @State private var draft: AppOptionsDraft
     @State private var saving = false
     @State private var error: String?
+    /// What the CLI warned about on a save that worked. The sheet stays open
+    /// to show it, with Done in place of Cancel and Save.
+    @State private var savedWarnings: [String] = []
     /// Held so the sheet can cancel the write if it goes away underneath it.
     @State private var saveTask: Task<Void, Never>?
 
+    /// - Parameter edit: an edit already made, for a test of what Save does
+    ///   with it. A Toggle in a grouped Form has no control a test can click
+    ///   reliably, and the draft-to-flags mapping is tested on its own
+    ///   (`AppOptionsDraftTests`). The app passes nothing.
     init(
         app: AppRecord, store: ConfigStore, liveContainer: LiveContainerStore,
-        devices: DevicesStore, onClose: @escaping () -> Void
+        devices: DevicesStore, settings: SettingsStore, onClose: @escaping () -> Void,
+        edit: AppOptionsDraft? = nil
     ) {
         self.app = app
         self._store = Bindable(wrappedValue: store)
         self.liveContainer = liveContainer
         self.devices = devices
+        self.settings = settings
         self.onClose = onClose
-        _draft = State(initialValue: AppOptionsDraft(app: app))
+        _draft = State(initialValue: edit ?? AppOptionsDraft(app: app))
     }
 
     private var defaultDevice: DeviceRecord? { devices.devices.first(where: \.isDefault) }
@@ -167,9 +179,66 @@ struct EditAppSheet: View {
         return automatic
     }
 
+    /// The line under the auto-provisioning toggle when there is no key to
+    /// make a profile with.
+    static let autoProfileNeedsKey = "Needs an App Store Connect key. Add one in Settings."
+
+    /// The auto-provisioning toggle's reason on a LiveContainer app.
+    static let autoProfileNotUsed = "LiveContainer delivery doesn't use a provisioning profile."
+
+    /// Why "Create the provisioning profile automatically" can't be changed,
+    /// or nil when it can (C-AUTOPROFILE).
+    ///
+    /// Only a sideload is signed, so only a sideload uses a profile: on a
+    /// LiveContainer app the toggle does nothing, and that reason wins over
+    /// the other two, because neither a paid account nor a key would make it
+    /// do anything. Only the control is locked — a saved `auto_profile` stays
+    /// as it is, and takes effect if the app is switched back to sideload.
+    ///
+    /// A free Apple ID has no profile to make. A paid one needs a usable App
+    /// Store Connect key to turn it *on* — `settings`' `app_store_connect`,
+    /// with its .p8 on disk — but can always turn it off, which is the way out
+    /// of an app that no longer builds without one. Nil disables nothing: an
+    /// account not known yet, settings not read yet, or a CLI too old to
+    /// report the key (`AccountMode`'s rule).
+    static func autoProfileLock(
+        delivery: DeliveryMode, account: AccountMode?, settings: SettingsRecord?, current: Bool
+    ) -> String? {
+        if delivery == .livecontainer { return autoProfileNotUsed }
+        if account.isFree { return PaidOnly.autoProfile }
+        guard !current, let settings, settings.reportsAppStoreConnect else { return nil }
+        return settings.appStoreConnect?.isUsable == true ? nil : autoProfileNeedsKey
+    }
+
+    /// The sheet's lock: the delivery the picker now shows, which may not be
+    /// the app's saved one yet, and the `auto_profile` config holds.
+    static func autoProfileLock(
+        draft: AppOptionsDraft, account: AccountMode?, settings: SettingsRecord?
+    ) -> String? {
+        autoProfileLock(
+            delivery: draft.edited.delivery, account: account, settings: settings,
+            current: draft.original.autoProfile
+        )
+    }
+
+    private var autoProfileLock: String? {
+        Self.autoProfileLock(draft: draft, account: store.account, settings: settings.settings)
+    }
+
     /// The default device's LiveContainers, or nil until it has answered.
     private var defaultInstances: [LCInstanceRecord]? {
         Self.instances(from: defaultDevice.flatMap { liveContainer.status[$0.udid] })
+    }
+
+    static let storeLabel = "App Store"
+    static let storeUnset = "Not set (this Mac's region's store, then the US)"
+    static let storeHelp = "The App Store this app's update check and icon ask. "
+        + "Add App's Search sets it to the store it searched."
+
+    /// The store picker's choices: every storefront (`Storefronts`), by name,
+    /// and "not set" first only for an app that has no store yet.
+    static func storeChoices(current: String?) -> [String?] {
+        (current == nil ? [nil] : []) + Storefronts.byName.map { Optional($0) }
     }
 
     var body: some View {
@@ -210,6 +279,19 @@ struct EditAppSheet: View {
                         }
                     }
                 }
+                if app.reportsStoreCountry {
+                    Picker(Self.storeLabel, selection: $draft.edited.storeCountry) {
+                        ForEach(Self.storeChoices(current: app.storeCountry), id: \.self) { code in
+                            Text(code.map(Storefronts.label) ?? Self.storeUnset).tag(code)
+                        }
+                    }
+                    .help(Self.storeHelp)
+                }
+                // Shown on every account, disabled with the reason where it
+                // can't be turned on — the Profile cell on the app pane reads
+                // the same field ("auto" / "manual", "not used" when free).
+                Toggle("Create the provisioning profile automatically", isOn: $draft.edited.autoProfile)
+                    .paidOnly(autoProfileLock)
                 Toggle("Keep bundle id", isOn: $draft.edited.keepBundleId)
                 Toggle("Strip extensions", isOn: $draft.edited.stripExtensions)
                 Toggle("Strip supported devices", isOn: $draft.edited.stripSupportedDevices)
@@ -230,7 +312,14 @@ struct EditAppSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
-            // The reason, whenever the account is free. Warn-coloured while
+            if autoProfileLock == Self.autoProfileNeedsKey {
+                Text(Self.autoProfileNeedsKey)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // The reason, whenever the account is free. Warn-colored while
             // the draft is still Sideload: that is an app no build will accept,
             // and the picker above is how it gets out of that state.
             if store.account.isFree {
@@ -255,20 +344,43 @@ struct EditAppSheet: View {
                 ErrorBanner(message: error)
             }
 
+            if !savedWarnings.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(Self.savedWithWarnings)
+                        .font(AppFont.monoSmall)
+                        .foregroundStyle(Palette.textDim)
+                    // In the app pane's words for a CLI warning.
+                    ForEach(savedWarnings, id: \.self) { warning in
+                        Text("warning: \(warning)")
+                            .font(AppFont.monoSmall)
+                            .foregroundStyle(Palette.warn)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
             HStack {
                 Spacer()
-                // Disabled during the write — this also disables the Escape
-                // binding attached to it. Cancelling used to dismiss the sheet
-                // while `--set-app-options` was mid-flight, so the user was
-                // told nothing happened while config.yaml was being rewritten.
-                // There is no "undo the write" to offer here; the honest
-                // behaviour is to make them wait for the CLI to answer.
-                Button("Cancel") { onClose() }
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(saving)
-                Button("Save") { startSave() }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(saving || !draft.hasChanges)
+                if savedWarnings.isEmpty {
+                    // Disabled during the write — this also disables the Escape
+                    // binding attached to it. Canceling used to dismiss the sheet
+                    // while `--set-app-options` was mid-flight, so the user was
+                    // told nothing happened while config.yaml was being rewritten.
+                    // There is no "undo the write" to offer here; the honest
+                    // behavior is to make them wait for the CLI to answer.
+                    Button("Cancel") { onClose() }
+                        .keyboardShortcut(.cancelAction)
+                        .disabled(saving)
+                    Button("Save") { startSave() }
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(saving || !draft.hasChanges)
+                } else {
+                    // The change is on disk; all that is left is to read why
+                    // it may not do what was asked.
+                    Button(Self.doneLabel) { onClose() }
+                        .keyboardShortcut(.defaultAction)
+                }
             }
         }
         .padding(20)
@@ -292,15 +404,25 @@ struct EditAppSheet: View {
             ), !liveContainer.loading.contains(udid) else { return }
             await liveContainer.load(udid: udid)
         }
-        // A pin only means something for LiveContainer delivery. Switching
-        // the app to Sideload hides the picker, and a pin edited before that
-        // must not ride along on the save unseen.
+        // Whether a key is set comes from Settings' read, which may not have
+        // run yet this session; once is enough, since Settings re-reads it.
+        .task {
+            if settings.settings == nil { _ = try? await settings.loadSettings() }
+        }
+        // A delivery switch hides or locks controls: Sideload hides the
+        // LiveContainer picker, and LiveContainer locks "Create the
+        // provisioning profile automatically". An edit made to either before
+        // the switch must not ride along on the save unseen.
         .onChange(of: draft.edited.delivery) { _, delivery in
-            if !Self.offersLCPin(app: app, delivery: delivery) {
-                draft.edited.lcPin = draft.original.lcPin
-            }
+            draft.revertEditsHiddenByDelivery(
+                lcPinShown: Self.offersLCPin(app: app, delivery: delivery)
+            )
         }
     }
+
+    /// Above the CLI's warnings after a save that worked.
+    static let savedWithWarnings = "Saved. graft said:"
+    static let doneLabel = "Done"
 
     /// Whether the delivery picker is disabled: on a free Apple ID, for an app
     /// that is already LiveContainer, since Sideload is the only other choice
@@ -323,8 +445,8 @@ struct EditAppSheet: View {
     /// Send only what changed — the CLI patches exactly the fields it receives.
     /// Which fields those are is `AppOptionsDraft`'s business, and tested there.
     ///
-    /// Cancelling `saveTask` *does* kill the subprocess — `CLIRunner.runOnce`
-    /// SIGTERMs it — so a cancelled save may or may not have landed, and the
+    /// Canceling `saveTask` *does* kill the subprocess — `CLIRunner.runOnce`
+    /// SIGTERMs it — so a canceled save may or may not have landed, and the
     /// call can come back either with a result or with a `CancellationError`.
     /// Either way the sheet is gone by then, so the outcome goes to
     /// `store.lastError` — which outlives this view and is already surfaced by
@@ -332,8 +454,14 @@ struct EditAppSheet: View {
     private func save() async {
         defer { saving = false }
         do {
-            _ = try await store.updateAppOptions(appName: app.name, draft: draft)
-            if !Task.isCancelled { onClose() }
+            let updated = try await store.updateAppOptions(appName: app.name, draft: draft)
+            guard !Task.isCancelled else { return }
+            // A save the CLI warned about stays open to say so: turning on
+            // "Create the provisioning profile automatically" for an app
+            // with its own `profile:` saves, and changes nothing until that
+            // line goes, which only the warning says (fix-check #6/#26).
+            let warnings = updated?.warnings ?? []
+            if warnings.isEmpty { onClose() } else { savedWarnings = warnings }
         } catch {
             if Task.isCancelled {
                 store.lastError =

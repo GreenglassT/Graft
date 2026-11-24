@@ -92,7 +92,7 @@ enum BuildNotifier {
     ///   nothing else, because there is no `NSApp` to ask from a test.
     /// Set once macOS has said yes, and never unset.
     ///
-    /// Not an optimisation — it is the fix for banners arriving at
+    /// Not an optimization — it is the fix for banners arriving at
     /// unpredictable times. Every notification used to wait on a
     /// `requestAuthorization` completion, which is an XPC round-trip to
     /// `usernoted` with no latency guarantee, to re-ask a question that was
@@ -165,7 +165,7 @@ enum BuildNotifier {
             }
     }
 
-    /// Hand the banner to the notification centre, from whatever thread we are
+    /// Hand the banner to the notification center, from whatever thread we are
     /// already on.
     ///
     /// Deliberately *not* wrapped in `Task { @MainActor in … }`, which is how

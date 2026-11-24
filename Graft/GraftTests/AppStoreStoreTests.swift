@@ -38,7 +38,7 @@ final class AppStoreStoreTests: XCTestCase {
     @MainActor
     func test_status_asks_for_json_and_the_verb() async throws {
         let (runner, log) = try scriptRunner("printf '%s\\n' '\(Self.statusLine)'")
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         await store.loadStatus()
 
@@ -54,7 +54,7 @@ final class AppStoreStoreTests: XCTestCase {
     @MainActor
     func test_a_failed_status_load_is_loaded_with_an_error() async throws {
         let (runner, _) = try scriptRunner("echo 'error: No such option: --appstore-status' >&2; exit 2")
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
         XCTAssertFalse(store.hasLoadedStatus)
 
         await store.loadStatus()
@@ -75,7 +75,7 @@ final class AppStoreStoreTests: XCTestCase {
         if [ -e '\(flag.path)' ]; then exit 1; fi
         printf '%s\\n' '\(Self.statusLine)'
         """)
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
         await store.loadStatus()
         XCTAssertNotNil(store.status)
 
@@ -92,7 +92,7 @@ final class AppStoreStoreTests: XCTestCase {
     func test_check_asks_about_one_app_and_keys_the_answer_by_it() async throws {
         let line = #"{"type":"appstore-version","app":"example","bundle_id":"com.example.app","store_version":"21.46.3","cached_version":"21.40.0","update_available":true,"error":null}"#
         let (runner, log) = try scriptRunner("printf '%s\\n' '\(line)'")
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         await store.checkVersion(app: "example")
 
@@ -105,7 +105,7 @@ final class AppStoreStoreTests: XCTestCase {
         // An older CLI without the verb, or no network: the row says it could
         // not tell, rather than showing nothing (which reads as "not asked").
         let (runner, _) = try scriptRunner("echo 'error: offline' >&2; exit 13")
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         await store.checkVersion(app: "example")
 
@@ -137,7 +137,7 @@ final class AppStoreStoreTests: XCTestCase {
     @MainActor
     func test_get_publishes_each_stage_as_it_arrives_then_clears_it() async throws {
         let (runner, log) = try scriptRunner(Self.getScript)
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         XCTAssertTrue(store.startGet(app: "example"))
         await waitUntil { store.stages["example"] == .download }
@@ -160,7 +160,7 @@ final class AppStoreStoreTests: XCTestCase {
         echo "  hint: tap Get for this app on an iPhone or iPad" >&2
         exit 20
         """)
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         XCTAssertTrue(store.startGet(app: "example"))
         await waitUntil { !store.isBusy("example") }
@@ -177,7 +177,7 @@ final class AppStoreStoreTests: XCTestCase {
     /// get has finished.
     @MainActor
     func test_a_stage_for_a_get_that_is_not_running_is_ignored() {
-        let store = AppStoreStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true")))
+        let store = AppStoreStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true")), shell: NoAdminShell())
 
         store.note(.appStoreStage(AppStoreStageRecord(app: "example", stage: .download)), forGetOf: "example")
 
@@ -188,7 +188,7 @@ final class AppStoreStoreTests: XCTestCase {
 
     @MainActor
     func test_a_drop_reports_decrypting_when_the_cli_says_so() async throws {
-        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")), notify: { _ in })
         let script = """
         printf '%s\\n' '{"type":"appstore-stage","app":"example","stage":"decrypt"}'
         sleep 1
@@ -204,5 +204,221 @@ final class AppStoreStoreTests: XCTestCase {
         XCTAssertEqual(record?.record.filename, "b_1.ipa")
         XCTAssertEqual(record?.decrypted, false, "a decrypt stage alone is not the CLI saying it decrypted")
         XCTAssertEqual(seen, [.decrypt])
+    }
+
+    // MARK: "Use it anyway…" (C-UNVERIFIED)
+
+    /// A fake CLI that refuses an unverified decrypt the way the real one does
+    /// — the `appstore-refused` event, then `_fatal`'s Terminal hint, exit 20 —
+    /// unless it was given `--allow-unverified`, when it warns and stages.
+    private static let unverifiedScript = """
+    case " $* " in
+      *" --appstore-check "*)
+        printf '%s\\n' '{"type":"appstore-version","app":"example","bundle_id":"com.example.app","store_version":"1.0","cached_version":"1.0","update_available":false,"error":null}'
+        exit 0 ;;
+      *" --allow-unverified "*)
+        printf '%s\\n' '{"type":"appstore-stage","app":"example","stage":"decrypt"}'
+        printf '%s\\n' '{"type":"log","source":"warning","line":"example: staging a decrypt UnfairPlay could not verify against Apple'"'"'s page hashes (--allow-unverified)"}'
+        printf '%s\\n' '{"type":"appstore-decrypted","app":"example","encrypted_images":1,"decrypted_pages":4,"plaintext_verified":false}'
+        printf '%s\\n' '{"type":"ipa-provided","app":"example","bundle_id":"com.example.app","version":"1.0","filename":"com.example.app_1.0.ipa","path":"/c/com.example.app_1.0.ipa","size_bytes":1}'
+        exit 0 ;;
+    esac
+    printf '%s\\n' '{"type":"appstore-stage","app":"example","stage":"decrypt"}'
+    printf '%s\\n' '{"type":"appstore-refused","app":"example","reason":"unverified"}'
+    echo "error: UnfairPlay decrypted encrypted.ipa but couldn't verify it against Apple's own page hashes (PlaintextVerified: false) — refusing to stage it" >&2
+    echo "  hint: older apps without those hashes legitimately report this. To accept it anyway, run in Terminal: graft --appstore-get --app example --allow-unverified" >&2
+    exit 20
+    """
+
+    @MainActor
+    func test_an_unverified_get_offers_use_it_anyway_in_the_apps_own_words() async throws {
+        let (runner, _) = try scriptRunner(Self.unverifiedScript)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        XCTAssertTrue(store.startGet(app: "example"))
+        await waitUntil { !store.isBusy("example") }
+
+        let message = try XCTUnwrap(store.errors["example"])
+        XCTAssertEqual(message, UnverifiedDecrypt.message)
+        XCTAssertFalse(message.contains("Terminal"), "the CLI's hint is for a Terminal user")
+        XCTAssertEqual(store.unverifiedRetry["example"], .get)
+    }
+
+    @MainActor
+    func test_use_it_anyway_reruns_the_get_with_allow_unverified_and_keeps_the_warning() async throws {
+        let (runner, log) = try scriptRunner(Self.unverifiedScript)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        let config = ConfigStore(runner: runner, notify: { _ in })
+        store.startGet(app: "example")
+        await waitUntil { !store.isBusy("example") }
+
+        XCTAssertTrue(store.useUnverified(app: "example", config: config))
+        await waitUntil { store.completions["example"] != nil }
+
+        XCTAssertEqual(
+            Array(try argv(log).prefix(2)),
+            ["--json --appstore-get --app example",
+             "--json --appstore-get --app example --allow-unverified"]
+        )
+        XCTAssertNil(store.errors["example"])
+        XCTAssertNil(store.unverifiedRetry["example"], "an offer is used once")
+        let staged = try XCTUnwrap(store.staged["example"])
+        XCTAssertEqual(staged.warnings.count, 1)
+        XCTAssertTrue(staged.warnings[0].contains("could not verify"), "\(staged.warnings)")
+    }
+
+    @MainActor
+    func test_use_it_anyway_reruns_the_same_drop() async throws {
+        let (runner, log) = try scriptRunner(Self.unverifiedScript)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        let config = ConfigStore(runner: runner, notify: { _ in })
+        let file = URL(fileURLWithPath: "/tmp/Example.ipa")
+        store.startProvide(app: "example", fileURL: file, config: config)
+        await waitUntil { !store.isBusy("example") }
+        XCTAssertEqual(store.errors["example"], UnverifiedDecrypt.message)
+        XCTAssertEqual(store.unverifiedRetry["example"], .drop(file))
+
+        XCTAssertTrue(store.useUnverified(app: "example", config: config))
+        await waitUntil { store.completions["example"] != nil }
+
+        XCTAssertEqual(
+            Array(try argv(log).prefix(2)),
+            ["--json --provide-ipa /tmp/Example.ipa --app example",
+             "--json --provide-ipa /tmp/Example.ipa --app example --allow-unverified"]
+        )
+        XCTAssertEqual(store.staged["example"]?.warnings.count, 1)
+    }
+
+    /// Only the unverified refusal has a button behind it. Every other failure
+    /// keeps the CLI's own message and offers nothing.
+    @MainActor
+    func test_other_failures_offer_no_retry() async throws {
+        let (runner, _) = try scriptRunner("""
+        echo "error: this Apple ID doesn't own com.example.app yet" >&2
+        exit 20
+        """)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        let config = ConfigStore(runner: runner, notify: { _ in })
+
+        store.startGet(app: "example")
+        await waitUntil { !store.isBusy("example") }
+
+        XCTAssertNotNil(store.errors["example"])
+        XCTAssertNil(store.unverifiedRetry["example"])
+        XCTAssertFalse(store.useUnverified(app: "example", config: config))
+    }
+
+    @MainActor
+    func test_dismissing_the_error_withdraws_the_offer() async throws {
+        let (runner, _) = try scriptRunner(Self.unverifiedScript)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        store.startGet(app: "example")
+        await waitUntil { !store.isBusy("example") }
+
+        store.dismissError(app: "example")
+
+        XCTAssertNil(store.unverifiedRetry["example"])
+    }
+
+    // MARK: Add App's IPA (`AddAppSheet.add`)
+
+    /// `unverifiedScript` behind a CLI that also answers Add App: the
+    /// `app-added` event, and an empty `--list` for the reload after it.
+    private static let addThenUnverifiedScript = """
+    case " $* " in
+      *" --add-app-manual "*)
+        printf '%s\\n' '{"type":"app-added","name":"example","bundle_id":"com.example.app","display_name":"Example","delivery":"sideload"}'
+        exit 0 ;;
+      *" --list "*) exit 0 ;;
+    esac
+    """ + "\n" + unverifiedScript
+
+    private static let manualAdd = AddAppSheet.Request.manual(
+        name: "example", bundleId: "com.example.app", displayName: nil,
+        delivery: .sideload, ipa: URL(fileURLWithPath: "/tmp/Example.ipa")
+    )
+
+    /// Add App stages its IPA the way a drop on the app pane does. It used to
+    /// run its own copy of the refusal → "Use it anyway…" → retry, which threw
+    /// the CLI's warning away: the IPA was staged unverified and nothing said
+    /// so. Now the refusal is the app pane's offer, and the warning lands on
+    /// the app's record under its staged line, as a drop's does.
+    @MainActor
+    func test_a_sheet_add_used_anyway_keeps_the_warning_on_the_apps_record() async throws {
+        let (runner, log) = try scriptRunner(Self.addThenUnverifiedScript)
+        let config = ConfigStore(runner: runner, notify: { _ in })
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        let file = URL(fileURLWithPath: "/tmp/Example.ipa")
+
+        let added = try await AddAppSheet.add(Self.manualAdd, store: config, appStore: store)
+
+        XCTAssertEqual(added, "example")
+        await waitUntil { store.unverifiedRetry["example"] != nil }
+        XCTAssertEqual(store.errors["example"], UnverifiedDecrypt.message, "the app pane's banner")
+        XCTAssertEqual(store.unverifiedRetry["example"], .drop(file), "and its Use it anyway…")
+
+        XCTAssertTrue(store.useUnverified(app: "example", config: config))
+        await waitUntil { store.completions["example"] != nil }
+
+        XCTAssertEqual(try argv(log).filter { $0.contains("--provide-ipa") }, [
+            "--json --provide-ipa /tmp/Example.ipa --app example",
+            "--json --provide-ipa /tmp/Example.ipa --app example --allow-unverified",
+        ])
+        let staged = try XCTUnwrap(store.staged["example"])
+        XCTAssertEqual(staged.source, .drop(filename: "Example.ipa"))
+        XCTAssertEqual(staged.warnings.count, 1, "\(staged.warnings)")
+        XCTAssertTrue(staged.warnings.first?.contains("could not verify") ?? false, "\(staged.warnings)")
+    }
+
+    /// Any other failure is the app pane's plain banner, with nothing to
+    /// retry — and the app stays added, as it always did.
+    @MainActor
+    func test_a_sheet_add_whose_ipa_fails_otherwise_offers_nothing() async throws {
+        let (runner, _) = try scriptRunner("""
+        case " $* " in
+          *" --add-app-manual "*)
+            printf '%s\\n' '{"type":"app-added","name":"example","bundle_id":"com.example.app","display_name":"Example","delivery":"sideload"}'
+            exit 0 ;;
+          *" --list "*) exit 0 ;;
+        esac
+        echo 'error: not an IPA' >&2; exit 2
+        """)
+        let config = ConfigStore(runner: runner, notify: { _ in })
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        let added = try await AddAppSheet.add(Self.manualAdd, store: config, appStore: store)
+
+        XCTAssertEqual(added, "example")
+        await waitUntil { store.errors["example"] != nil }
+        XCTAssertTrue(store.errors["example"]?.contains("not an IPA") ?? false, "\(String(describing: store.errors))")
+        XCTAssertNil(store.unverifiedRetry["example"])
+        XCTAssertNil(store.staged["example"])
+    }
+
+    /// No IPA chosen, nothing staged: the add is the whole of it.
+    @MainActor
+    func test_a_sheet_add_without_an_ipa_stages_nothing() async throws {
+        let (runner, log) = try scriptRunner(Self.addThenUnverifiedScript)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        let added = try await AddAppSheet.add(
+            .manual(name: "example", bundleId: "com.example.app", displayName: nil,
+                    delivery: .sideload, ipa: nil),
+            store: ConfigStore(runner: runner, notify: { _ in }), appStore: store
+        )
+
+        XCTAssertEqual(added, "example")
+        XCTAssertFalse(store.isBusy("example"))
+        XCTAssertEqual(try argv(log).filter { $0.contains("--provide-ipa") }, [])
+    }
+
+    /// A first try never sends the flag, whatever happened before.
+    @MainActor
+    func test_a_plain_get_never_allows_unverified() {
+        XCTAssertFalse(AppStoreStore.getArgs(app: "example").contains(CLIContract.Flag.allowUnverified))
+        XCTAssertEqual(
+            AppStoreStore.getArgs(app: "example", allowUnverified: true).last,
+            CLIContract.Flag.allowUnverified
+        )
     }
 }

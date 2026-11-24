@@ -76,7 +76,7 @@ def test_a_free_build_of_the_leftover_entry_gets_the_free_hint(tmp_path: Path) -
 def test_a_failed_push_names_a_command_graft_has(monkeypatch, tmp_path: Path) -> None:
     import pymobiledevice3.lockdown as lockdown_mod
 
-    async def unreachable(*, serial):
+    async def unreachable(*, serial, autopair):
         raise ConnectionError("no route")
 
     monkeypatch.setattr(lockdown_mod, "create_using_usbmux", unreachable)
@@ -112,6 +112,35 @@ def test_a_sandbox_that_will_not_open_is_not_called_missing(monkeypatch, tmp_pat
     assert "is installed" in exc.value.hint
     assert "set LiveContainer up" not in exc.value.hint
     assert "unlock" in exc.value.hint
+
+
+def test_a_cable_pulled_as_the_sandbox_opens_is_called_a_dropped_connection(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Device session on try5: unplugging during a push's HouseArrest vend
+    raised ConnectionTerminatedError there, and the hint said "iOS would not
+    open its Documents: … open LiveContainer once", which sends the user to
+    the wrong fix. A connection that dropped gets the dropped-connection hint
+    every other step gives."""
+    import pymobiledevice3.services.house_arrest as house_arrest_mod
+    from pymobiledevice3.exceptions import ConnectionTerminatedError
+
+    from .test_lc_discovery import fake_device
+
+    fake_device(monkeypatch, ["com.kdt.livecontainer.ABCDE12345"])
+
+    async def dropped(*, lockdown, bundle_id):
+        raise ConnectionTerminatedError("Connection was terminated abruptly")
+
+    monkeypatch.setattr(house_arrest_mod.HouseArrestService, "create", dropped)
+    ipa = tmp_path / "a.ipa"
+    ipa.write_bytes(b"x")
+
+    with pytest.raises(lc_runner.LiveContainerError) as exc:
+        lc_runner.push_ipa_to_livecontainer(ipa, "UDID1", free_account=True)
+
+    assert "connection to the phone dropped" in exc.value.hint
+    assert "open LiveContainer once" not in exc.value.hint
 
 
 def test_skip_install_help_does_not_promise_signing() -> None:

@@ -63,7 +63,7 @@ def _fakes(tmp_path: Path):
         out.write_bytes(b"tweaked")
         return CyanResult(output_ipa=out, stdout="cyan says hello", stderr="")
 
-    def zsign(cfg, src, out, *, app=None, dry_run=False):
+    def zsign(cfg, src, out, *, app=None, dry_run=False, **_):
         out.write_bytes(b"signed")
         return SignResult(output_ipa=out, team_id="ABCDE12345", cert_subject="dev",
                           expiry="2027", stdout="zsign says hello", stderr="")
@@ -249,7 +249,7 @@ def test_the_json_verbs_are_most_of_them() -> None:
     answered False for everything would pass it vacuously."""
     flags = {v.flag for v in _json_verbs()}
     assert {"--install-to-mac", "--list", "--check", "--reinstall-build"} <= flags
-    assert not flags & {"--version", "--init", "--setup-portal", "--build-log"}
+    assert not flags & {"--version", "--setup-portal", "--build-log"}
 
 
 @pytest.mark.parametrize("verb", _json_verbs(), ids=lambda v: v.flag)

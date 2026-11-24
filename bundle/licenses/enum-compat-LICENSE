@@ -1,0 +1,28 @@
+# enum-compat 0.0.3. Its wheel ships no licence file; its metadata says MIT. Its repository has no
+# licence text either: at tag 0.0.3 (commit ae41cfa712e837596f7d26a5283be40ec5b84084), setup.py names the
+# licence (license='MIT', author Jakub Stasiak) and nothing more:
+# https://github.com/jstasiak/enum-compat/blob/0.0.3/setup.py
+# Below is the standard MIT License text (https://spdx.org/licenses/MIT.html). The package installs no
+# code on Python 3.4 or later, only its metadata: it exists to pull in enum34 on older Pythons.
+
+MIT License
+
+Copyright (c) Jakub Stasiak
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

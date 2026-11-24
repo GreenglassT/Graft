@@ -107,7 +107,7 @@ def test_a_mixed_result_emits_only_for_the_hit(temp_config_env: Path) -> None:
     _add_bravo(temp_config_env)
     cfg = load_config(temp_config_env)
 
-    def _resolve(bundle_id: str, *, ipa, refresh=False):
+    def _resolve(bundle_id: str, *, ipa, refresh=False, store_country=None):
         if bundle_id == "com.bravo.app":
             return _artwork(bundle_id, source="ipa", cached=True)
         return None
@@ -368,7 +368,7 @@ def test_one_app_failing_to_cache_does_not_abandon_the_rest(temp_config_env: Pat
 
     calls: list[str] = []
 
-    def flaky(bundle_id, *, ipa, udid=None, refresh=False):
+    def flaky(bundle_id, *, ipa, udid=None, refresh=False, store_country=None):
         calls.append(bundle_id)
         if len(calls) == 1:
             raise OSError(28, "No space left on device")

@@ -663,7 +663,7 @@ final class BuildEventTests: XCTestCase {
         XCTAssertFalse(record.cached)
     }
 
-    /// `source` must stay a `String`: an unrecognised value still has to
+    /// `source` must stay a `String`: an unrecognized value still has to
     /// decode, because the CLI is free to add a fifth source without an older
     /// GUI build refusing the whole line for it. This is what would break if
     /// `source` were ever turned into an enum.
@@ -860,6 +860,30 @@ final class BuildEventTests: XCTestCase {
             return XCTFail("expected .stagedIPAsEnd")
         }
         XCTAssertEqual(count, 10)
+    }
+
+    func test_the_setup_events_decode() throws {
+        let step = try BuildEvent.decode(line: #"{"type":"init-step","step":"config","detail":"wrote /tmp/x/config.yaml"}"#)
+        guard case let .initStep(record) = step else { return XCTFail("\(step)") }
+        XCTAssertEqual(record.detail, "wrote /tmp/x/config.yaml")
+
+        let line = #"{"type":"init-result","account":"paid","config":"/tmp/x/config.yaml","change":"created","dry_run":true,"summary":"Everything checks out.","team_id":"ABCDE12345","profile_name":"Test Wildcard","certificate":"Apple Development: Test Person (XYZ9876543)","device_count":2,"devices":["00008130-001A2B3C0123456D","00008110-000E1C2A3B4C5D6E"],"expires":"2027-06-01T12:00:00Z","pinned":[],"sideloads":[],"steps":[]}"#
+        guard case let .initResult(result) = try BuildEvent.decode(line: line) else { return XCTFail(line) }
+        XCTAssertEqual(result.account, .paid)
+        XCTAssertTrue(result.dryRun)
+        XCTAssertEqual(result.teamId, "ABCDE12345")
+        XCTAssertEqual(result.devices.count, 2)
+        XCTAssertNotNil(result.expiryDate)
+    }
+
+    func test_a_free_step_names_each_page_it_sends_you_to() {
+        let step = "Install SideStore (https://sidestore.io), or use iloader "
+            + "(https://github.com/nab138/iloader), with your free Apple ID."
+        XCTAssertEqual(FreeSetupStep.links(in: step).map(\.absoluteString),
+                       ["https://sidestore.io", "https://github.com/nab138/iloader"])
+        XCTAssertEqual(FreeSetupStep.links(in: "Install LiveContainer: https://example.com/guide.").map(\.absoluteString),
+                       ["https://example.com/guide"])
+        XCTAssertEqual(FreeSetupStep.links(in: "In LiveContainer, open Settings."), [])
     }
 }
 

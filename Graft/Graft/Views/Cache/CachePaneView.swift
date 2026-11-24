@@ -481,7 +481,7 @@ struct CachePaneView: View {
         // do it because SwiftUI reuses one view instance across a switch between
         // two apps or two phones. Nothing switches this pane between two caches.
         //
-        // It still re-runs on every entry, which is the behaviour that matters
+        // It still re-runs on every entry, which is the behavior that matters
         // here: `ContentView`'s detail `switch` builds this view only while
         // `.section(.cache)` is selected, so leaving the pane tears it down and
         // coming back makes a new one. A dump from the device pane, a file
@@ -695,7 +695,7 @@ struct CacheRow: View {
     /// The side of one control's square, and the gap between two of them.
     ///
     /// Public constants rather than literals in the `HStack` because
-    /// `CachePaneTests` aims at their centres: a row that changed its control
+    /// `CachePaneTests` aims at their centers: a row that changed its control
     /// size stays targetable instead of quietly moving out from under three
     /// hardcoded coordinates. The constants say where to click; what the tests
     /// prove is which callback answers there, which is not a constant.

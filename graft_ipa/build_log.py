@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
     reconcile_ok INTEGER,
     -- When `--lc-clean` removed what this row pushed. A cleaned row no longer
     -- vouches for a file of that name (`pushed_by_instance`): one the user puts
-    -- there afterwards is theirs. NULL: not cleaned, or from before the column.
+    -- there afterward is theirs. NULL: not cleaned, or from before the column.
     cleaned_at TEXT
 );
 
@@ -137,7 +137,7 @@ def _target_of(row: sqlite3.Row) -> str:
     A closed set of two, not whatever the column happens to hold. A row
     predating the column reads NULL, and NULL here means a build made before
     Mac builds existed — which is a device build. So does anything else
-    unrecognised: `'Mac'`, `'macos'`, a typo. Only the exact string a writer
+    unrecognized: `'Mac'`, `'macos'`, a typo. Only the exact string a writer
     means by "this artifact was prepared for this Mac" reads as `mac`.
 
     That asymmetry is deliberate, because the two errors are not equal. A Mac
@@ -148,7 +148,7 @@ def _target_of(row: sqlite3.Row) -> str:
     everything except one spelling means no future writer can reach the other
     one by accident.
 
-    Normalised here rather than in each consumer, so that "unrecognised means
+    Normalized here rather than in each consumer, so that "unrecognized means
     phone" is written down once: `--builds` and the GUI reading its JSON are
     both about to branch on this, and each would get it wrong differently.
 
@@ -272,12 +272,35 @@ class BuildLog:
                 )
         return ids
 
+    def restore_ipa_path(self, build_ids: list[int], ipa_path: Path) -> None:
+        """Point `build_ids` back at `ipa_path`: undoes `clear_ipa_path` for a
+        prune whose move to the Trash then failed, so the archive still on
+        disk keeps its Re-install button."""
+        if not build_ids:
+            return
+        with self._connect() as conn:
+            conn.executemany(
+                "UPDATE builds SET ipa_path = ? WHERE id = ? AND ipa_path IS NULL",
+                [(str(ipa_path), i) for i in build_ids],
+            )
+
+    def reinstallable_paths(self) -> list[Path]:
+        """Every archive a successful row still points at: what has a
+        Re-install button. Retention gives keep slots to these alone
+        (`retention.plan_prune`)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT ipa_path FROM builds"
+                " WHERE success = 1 AND ipa_path IS NOT NULL"
+            ).fetchall()
+        return [Path(r[0]) for r in rows]
+
     def recent(self, app: str | None = None, limit: int = 10) -> list[dict]:
         """Recent build rows, as dicts whose `target` is always populated.
 
         Dicts rather than `sqlite3.Row` because `ALTER TABLE ADD COLUMN` cannot
         supply a default for rows that already exist, so `target` has to be
-        normalised on read — and a Row is immutable. Every caller indexes by
+        normalized on read — and a Row is immutable. Every caller indexes by
         name, so the swap is invisible to them. What would not survive it is
         positional access (`r[0]`), and subscripting or comparing the key view
         as a list (`r.keys()[0]`, `r.keys() == [...]`) — `dict.keys()` itself

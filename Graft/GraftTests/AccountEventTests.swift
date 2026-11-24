@@ -27,7 +27,7 @@ func accountEventLine(_ account: String) -> String {
 @MainActor
 func accountTestStore(_ lines: [String]) async throws -> ConfigStore {
     let body = lines.map { "printf '%s\\n' '\($0)'" }.joined(separator: "; ")
-    let store = ConfigStore(runner: accountTestShell, cliArgs: ["-c", body.isEmpty ? "true" : body])
+    let store = ConfigStore(runner: accountTestShell, cliArgs: ["-c", body.isEmpty ? "true" : body], notify: { _ in })
     _ = try await store.loadApps()
     return store
 }

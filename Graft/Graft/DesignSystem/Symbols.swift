@@ -54,11 +54,11 @@ struct Symbol {
     /// most, and then applied uniformly on purpose.**
     ///
     /// `.hierarchical` is the obvious reach for an icon carrying state in its
-    /// own colour, and the argument against it is about *seven* of the symbols
+    /// own color, and the argument against it is about *seven* of the symbols
     /// below rather than all of them. Those seven have an interior mark cut out
     /// of a filled body as a genuine hole — `ok`, `blocked`, `advisory`,
     /// `detach`, `updateAvailable`, `failure` and `checkboxOn`. In monochrome
-    /// the hole is the surface colour and the body is the state colour, which
+    /// the hole is the surface color and the body is the state color, which
     /// is what makes a tick and a cross tell each other apart at 11pt across
     /// the width of a card.
     ///
@@ -110,7 +110,7 @@ struct Symbol {
     ///   "disc" was never the right word for the shape the argument is about.
     ///
     /// So for `attention` and `noDefaultDevice` — the two of the nine that
-    /// carry state in their own colour, `Palette.warn` and `BuildTargetBar`'s
+    /// carry state in their own color, `Palette.warn` and `BuildTargetBar`'s
     /// tint — a mixed policy is available and is deliberately not taken.
     /// Halving the enclosure would make the glyph quieter than the amber
     /// sentence it sits beside, and more to the point: **a rendering mode that
@@ -463,7 +463,7 @@ enum Symbols {
 
     /// This app on the phone is FairPlay-encrypted — a decrypt candidate.
     /// `.medium` because it is drawn at 10pt in `Palette.textDim`, which is the
-    /// app's smallest size at its quietest colour.
+    /// app's smallest size at its quietest color.
     static let encrypted = Symbol(name: "lock.fill", weight: .medium)
 
     /// A newer build of this tweak exists.

@@ -345,7 +345,7 @@ def test_a_phone_that_drops_off_at_teardown_keeps_the_answer_it_gave() -> None:
 # `_detect_livecontainer_async` had a discovery of its own: a case-sensitive
 # `startswith("com.kdt.livecontainer")` over User apps, first match wins. So a
 # phone with only `com.kdt.LiveContainer2.<TEAM>` (an extra instance), only a
-# capitalised primary, or a TrollStore install (a System app) showed "no LC" in
+# capitalized primary, or a TrollStore install (a System app) showed "no LC" in
 # the sidebar while the push found it fine; and with two installed, the sidebar
 # named whichever the phone listed first, not the one the push goes into.
 

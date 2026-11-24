@@ -81,7 +81,7 @@ def test_no_prints_the_free_account_setup_in_order(
         "https://sidestore.io",
         "https://github.com/nab138/iloader",
         "https://livecontainer.github.io/docs/installation/lc_sidestore",
-        "import the certificate from SideStore",
+        "Import Certificate from SideStore",
         "graft --add-app",
     ]
     positions = [text.find(s) for s in steps]

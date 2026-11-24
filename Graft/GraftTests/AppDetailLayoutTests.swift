@@ -27,8 +27,7 @@ final class AppDetailLayoutTests: XCTestCase {
     private func store(events: String) async -> ConfigStore {
         let s = ConfigStore(
             runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")),
-            cliArgs: ["-c", "printf '\(events)'"]
-        )
+            cliArgs: ["-c", "printf '\(events)'"], notify: { _ in })
         _ = try? await s.loadApps()
         return s
     }
@@ -180,6 +179,7 @@ final class AppDetailLayoutTests: XCTestCase {
                     staged: staged,
                     appStore: appStore,
                     liveContainer: LiveContainerStore(runner: store.runner),
+                    settings: SettingsStore(runner: store.runner),
                     // The bar's Change control. Nothing here observes it; the
                     // pane only needs it to be constructible.
                     showSettings: {}
@@ -296,7 +296,7 @@ final class AppDetailLayoutTests: XCTestCase {
                 app: app, store: s, artwork: ArtworkStore(runner: s.runner),
                 devices: deviceStore, tweaks: library,
                 staged: StagedIPAStore(runner: s.runner),
-                appStore: AppStoreStore(runner: s.runner)
+                appStore: AppStoreStore(runner: s.runner, shell: NoAdminShell())
             ),
             label, width: width, height: height, file: file, line: line
         )
@@ -1111,7 +1111,7 @@ final class AppDetailLayoutTests: XCTestCase {
         )
     }
 
-    /// A path the fixture appends one line to per run, cleaned up afterwards.
+    /// A path the fixture appends one line to per run, cleaned up afterward.
     private func spawnCounter() -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("tweaks-spawns-\(UUID().uuidString)")
@@ -1168,7 +1168,7 @@ final class AppDetailLayoutTests: XCTestCase {
         let artwork = ArtworkStore(runner: s.runner)
         let devices = await devicesStore()
         let staged = StagedIPAStore(runner: s.runner)
-        let appStore = AppStoreStore(runner: s.runner)
+        let appStore = AppStoreStore(runner: s.runner, shell: NoAdminShell())
         func harness(_ app: AppRecord) -> Harness {
             Harness(app: app, store: s, artwork: artwork, devices: devices, tweaks: library,
                     staged: staged, appStore: appStore)
@@ -1238,7 +1238,7 @@ final class AppDetailLayoutTests: XCTestCase {
             Harness(app: app, store: s, artwork: ArtworkStore(runner: s.runner),
                     devices: await devicesStore(), tweaks: library,
                     staged: StagedIPAStore(runner: s.runner),
-                    appStore: AppStoreStore(runner: s.runner)),
+                    appStore: AppStoreStore(runner: s.runner, shell: NoAdminShell())),
             width: 1200, height: 700
         )
         _ = window

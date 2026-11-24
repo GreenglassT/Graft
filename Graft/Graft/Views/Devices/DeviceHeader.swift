@@ -99,7 +99,7 @@ struct DeviceHeader: View {
     /// findable across a bench of several panes that otherwise look alike.
     ///
     /// Not `labelCaps()`, which is otherwise exactly this typography:
-    /// that modifier also fixes the colour at `Palette.textMuted`, and muted on
+    /// that modifier also fixes the color at `Palette.textMuted`, and muted on
     /// `accentSelect` is 2.5:1. `onAccentMuted` exists for precisely this — see
     /// its doc comment — and carries 5.10:1 on this fill.
     private var defaultTargetChip: some View {

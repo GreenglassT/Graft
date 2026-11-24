@@ -14,6 +14,19 @@ struct SettingsView: View {
     /// `ConfigStore.account`, the one answer every pane gates on. Nil until
     /// the app list has loaded, and nil disables nothing (`AccountMode`).
     let account: AccountMode?
+    /// Settings › Account's flows. Nil hides the account buttons, which only
+    /// tests of other sections do.
+    var accountSetup: AccountSetupStore? = nil
+    /// What to re-read once a run that may have changed the account has
+    /// finished (`ContentView.afterAccountChange`). Handed to the store
+    /// (`onAccountRunFinished`), which outlives this pane, so a run that ends
+    /// after the user has left Settings still re-reads.
+    var onAccountChanged: () async -> Void = {}
+    /// A build is running (`ConfigStore.buildingApp`): it signs with the
+    /// account, so the account isn't changed under it.
+    var isBuilding: Bool = false
+    @State private var showAccountSheet = false
+    @State private var confirmingSwitchToFree = false
 
     var body: some View {
         ScrollView {
@@ -27,8 +40,13 @@ struct SettingsView: View {
                 }
                 preflightSection
                 settingsSection
+                AppStoreConnectSection(store: store, account: account)
                 AppStoreSettingsSection(store: appStore)
+                if CommandLineToolSection.isOffered {
+                    CommandLineToolSection(context: .thisApp)
+                }
                 pathsSection
+                versionSection
             }
             .padding(Metrics.paneGutter)
         }
@@ -52,6 +70,7 @@ struct SettingsView: View {
         // discard what they were halfway through typing.
         .onChange(of: store.settings) { _, _ in store.reseedDraftIfIdle() }
         .task {
+            accountSetup?.onAccountRunFinished = onAccountChanged
             store.reseedDraftIfIdle()
             // Populates the device picker's names; it renders the saved UDID
             // regardless, so a failed scan costs a label, not the setting.
@@ -166,11 +185,27 @@ struct SettingsView: View {
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.textDim)
                     .fixedSize(horizontal: false, vertical: true)
+                // Nothing here resets or rewrites it: the fix is the user's,
+                // in a text editor, and this is the way to the file.
+                if let file = Self.configFile(store.paths) {
+                    Button(Self.showConfigLabel) {
+                        NSWorkspace.shared.activateFileViewerSelecting([file])
+                    }
+                    .controlSize(.small)
+                }
             }
             Spacer(minLength: 0)
         }
         .padding(Metrics.cardPadding)
         .cardStyle()
+    }
+
+    static let showConfigLabel = "Show config.yaml in Finder"
+
+    /// config.yaml, in the config folder `--settings` reported (the app's
+    /// config is always the default one).
+    static func configFile(_ paths: SettingsPaths?) -> URL? {
+        paths.map { URL(fileURLWithPath: $0.configDir).appendingPathComponent("config.yaml") }
     }
 
     /// The caption beside the retention stepper.
@@ -200,7 +235,7 @@ struct SettingsView: View {
                 summaryPill
                 Button {
                     Task {
-                        do { try await store.runChecks() }
+                        do { try await store.runChecks(askingShellAgain: true) }
                         catch { store.lastError = error.localizedDescription }
                     }
                 } label: {
@@ -326,7 +361,7 @@ struct SettingsView: View {
                     }
                 }
                 // Frozen for the round trip. `save()` reseeds the draft from
-                // what the CLI reports afterwards, so anything typed during
+                // what the CLI reports afterward, so anything typed during
                 // those three subprocesses would be silently thrown away —
                 // and only Save and Revert were disabled before. And frozen
                 // while config.yaml does not parse: an edit there has nowhere
@@ -340,7 +375,7 @@ struct SettingsView: View {
 
     /// One settings row: the label column, then whatever edits the value.
     ///
-    /// The label stack was written out three times with the same font, colour
+    /// The label stack was written out three times with the same font, color
     /// and 150pt column — so the column width lived in three places and the
     /// next row would have made it four.
     private func settingRow<Content: View>(
@@ -355,9 +390,9 @@ struct SettingsView: View {
         }
     }
 
-    /// Which account config.yaml is for, and what that means. Information,
-    /// not a setting: the CLI has no verb that changes it, because becoming
-    /// paid is `graft --init` (or a whole `signing:` section) on purpose.
+    /// Which account config.yaml is for, what that means, and the way to the
+    /// other one. Both ways run `graft --init --account …` (`AccountSetupStore`),
+    /// which keeps every app, repo and setting.
     private func accountRow(_ account: AccountMode) -> some View {
         settingRow("Account") {
             VStack(alignment: .leading, spacing: 2) {
@@ -370,7 +405,86 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
+            if let accountSetup {
+                if isBuilding {
+                    Text(AccountMode.waitForBuild)
+                        .font(AppFont.monoSmall)
+                        .foregroundStyle(Palette.textDim)
+                }
+                Button(account.changeLabel) {
+                    switch account {
+                    case .free:
+                        accountSetup.startUpgrade()
+                        showAccountSheet = true
+                    case .paid:
+                        confirmingSwitchToFree = true
+                    }
+                }
+                .controlSize(.small)
+                .disabled(accountSetup.isRunning || isBuilding)
+                .help(isBuilding ? AccountMode.waitForBuild : "")
+                if account == .paid {
+                    // A development certificate and profile expire every year:
+                    // the new pair goes in here, with `--replace`.
+                    Button(AccountMode.replaceLabel) {
+                        accountSetup.startReplace()
+                        showAccountSheet = true
+                    }
+                    .controlSize(.small)
+                    .disabled(accountSetup.isRunning || isBuilding)
+                    .help(isBuilding ? AccountMode.waitForBuild : "")
+                }
+            }
         }
+        // A switch to a free Apple ID that finished while the user was in
+        // another pane: its result, and the free device steps, are shown on
+        // the way back rather than lost with the pane that started it.
+        .onAppear {
+            if let accountSetup, case .done = accountSetup.step { showAccountSheet = true }
+        }
+        .confirmationDialog(AccountMode.switchToFreeTitle, isPresented: $confirmingSwitchToFree) {
+            Button("Switch to a free Apple ID") {
+                Task { await switchToFree() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(AccountMode.switchToFreeMessage)
+        }
+        .sheet(isPresented: $showAccountSheet, onDismiss: accountSheetClosed) {
+            if let accountSetup {
+                AccountSetupView(
+                    store: accountSetup,
+                    onFinished: { showAccountSheet = false },
+                    onCancel: { showAccountSheet = false }
+                )
+                .padding(Metrics.paneGutter)
+                .frame(width: 560)
+                .background(Palette.bg)
+                // Escape and a click outside can't close it while it writes.
+                .interactiveDismissDisabled(accountSetup.isWriting)
+            }
+        }
+    }
+
+    /// The switch runs from the confirmation, then shows its result, and for a
+    /// free Apple ID the steps on the device, in the sheet. A refusal goes to
+    /// the pane's alert.
+    private func switchToFree() async {
+        guard let accountSetup, !isBuilding else { return }
+        await accountSetup.switchToFree()
+        if case .done = accountSetup.step {
+            showAccountSheet = true
+        } else if let error = accountSetup.error {
+            store.lastError = error
+            accountSetup.cancel()
+        }
+    }
+
+    /// However the sheet closed: reset the flow for next time. What the run
+    /// changed has already been re-read, when it finished, success or not
+    /// (`AccountSetupStore.onAccountRunFinished`).
+    private func accountSheetClosed() {
+        accountSetup?.finish()
     }
 
     /// The persistent counterpart to the per-build device picker. "Ask each
@@ -433,6 +547,46 @@ struct SettingsView: View {
             TextField("", text: value)
                 .textFieldStyle(.roundedBorder)
                 .font(mono ? AppFont.monoSmall : AppFont.body)
+        }
+    }
+
+    // MARK: Version
+
+    /// This app's version and the CLI's, on one line: "Graft 1.2 · graft
+    /// 1.1.0". They ship separately, so a bug report wants both.
+    ///
+    /// The CLI's comes off `--settings` (`graft_version`), which this pane
+    /// already reads, rather than a `--version` of its own.
+    static func versionLine(app: String?, cli: String?, hasSettings: Bool) -> String {
+        let cliPart: String
+        if let cli {
+            cliPart = "graft \(cli)"
+        } else if hasSettings {
+            cliPart = "graft: this version doesn't say which it is"
+        } else {
+            cliPart = "graft: shown once graft has read your config"
+        }
+        guard let app else { return cliPart }
+        return "Graft \(app) · \(cliPart)"
+    }
+
+    private static var appVersion: String? {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+    }
+
+    private var versionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionTitle(text: "Version")
+            Text(Self.versionLine(
+                app: Self.appVersion, cli: store.settings?.cliVersion,
+                hasSettings: store.settings != nil
+            ))
+            .font(AppFont.mono)
+            .foregroundStyle(Palette.textMuted)
+            .textSelection(.enabled)
+            .padding(.horizontal, Metrics.cardPadding).padding(.vertical, Metrics.innerPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle()
         }
     }
 

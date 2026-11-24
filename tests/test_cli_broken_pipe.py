@@ -127,7 +127,7 @@ def _spawn_with_dead_stderr(home: Path, stdout_path: Path) -> int:
     """The mirror image: stderr's reader is gone, stdout is a real file.
 
     stdout being a *file* is the point — a file cannot break, so this isolates
-    the second stream, and the file's size afterwards shows the boundary did
+    the second stream, and the file's size afterward shows the boundary did
     not go silencing descriptors that were working.
     """
     read_fd, write_fd = os.pipe()

@@ -47,7 +47,7 @@ enum LegacyDefaults {
     static func migrate(
         into domain: String,
         from legacy: String = legacyDomain,
-        store: PersistentDomainStore = UserDefaults.standard
+        store: PersistentDomainStore
     ) -> Bool {
         guard domain != legacy else { return false }
         var current = store.persistentDomain(forName: domain) ?? [:]
@@ -71,7 +71,7 @@ enum LegacyDefaults {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         domain: String? = Bundle.main.bundleIdentifier,
         legacy: String = legacyDomain,
-        store: PersistentDomainStore = UserDefaults.standard
+        store: PersistentDomainStore
     ) -> Bool {
         guard environment["XCTestConfigurationFilePath"] == nil, let domain else { return false }
         return migrate(into: domain, from: legacy, store: store)

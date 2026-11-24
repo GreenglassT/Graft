@@ -107,7 +107,7 @@ final class ConfigStore: CLIStore {
     /// The Task running the build, so it can be stopped from somewhere other
     /// than the pane that started it.
     ///
-    /// Cancelling it is what reaches the subprocess: `CLIRunner.launch` wraps
+    /// Canceling it is what reaches the subprocess: `CLIRunner.launch` wraps
     /// the continuation in a `withTaskCancellationHandler` whose `onCancel`
     /// terminates the adopted process — SIGTERM, then SIGKILL `cliStopGrace`
     /// later for the stretches cyan and zsign spend in native loops.
@@ -119,7 +119,7 @@ final class ConfigStore: CLIStore {
     /// The app whose build the user asked to stop, until the next build claims
     /// the slot.
     ///
-    /// This exists because a cancelled build is indistinguishable from a
+    /// This exists because a canceled build is indistinguishable from a
     /// broken one at the point it lands: the CLI is killed, so it exits
     /// non-zero with whatever it had written to stderr, and the pane's normal
     /// reading of that is "the build failed" — a red Retry and a failure card
@@ -153,7 +153,7 @@ final class ConfigStore: CLIStore {
     /// A stopped build writes no history row, so anything `lastBuild` holds is
     /// necessarily from an *earlier* run — and that run's failure is real news
     /// the user still needs. What must not happen is attributing it to the
-    /// build they just stopped, which is a question of labelling, not of hiding.
+    /// build they just stopped, which is a question of labeling, not of hiding.
     func stopSupersedes(_ appName: String, buildTimestamp: Date?) -> Bool {
         guard let stopped = stoppedAt[appName] else { return false }
         guard let buildTimestamp else { return true }
@@ -169,6 +169,11 @@ final class ConfigStore: CLIStore {
     /// letting a second `--reconcile` race the first on `log.sqlite`.
     private(set) var checkingApp: String?
 
+    /// What the phone is waiting on while the check runs — the CLI's
+    /// `device` line, "Unlock the phone and tap Trust…". Shown live under
+    /// Checking…, gone when the check ends, and never part of its result.
+    private(set) var deviceCheckStatus: String?
+
     /// What the running build will actually do to the phone, captured from the
     /// build options at launch. See `EffectiveDelivery`.
     @ObservationIgnored private(set) var effectiveDelivery: EffectiveDelivery = .unknown
@@ -183,7 +188,7 @@ final class ConfigStore: CLIStore {
     /// failed" for the same run.
     private var notifiedThisBuild: Set<String> = []
 
-    /// How a finished build reaches the user's notification centre.
+    /// How a finished build reaches the user's notification center.
     ///
     /// A seam, because there is no other way to keep a test out of
     /// `UNUserNotificationCenter`: `note(_:forBuildOf:)` is driven directly by
@@ -192,14 +197,26 @@ final class ConfigStore: CLIStore {
     /// permission prompt for `com.greenglasst.graft` in the middle of
     /// `xcodebuild test`. It also lets the store's *decisions* be asserted,
     /// which is where the interesting logic now lives.
-    @ObservationIgnored var postNote: (BuildNotifier.Note?) -> Void = { BuildNotifier.post($0) }
+    ///
+    /// No default: `BuildNotifier.post` is named only in `GraftApp`, and a
+    /// test passes its own (`NoRealDefaultsTests`).
+    @ObservationIgnored var postNote: @MainActor (BuildNotifier.Note?) -> Void
 
     let runner: CLIRunner
     private let cliArgs: [String]
+    /// Holds sudden and automatic termination off while a build runs
+    /// (whole-diff review, app-3).
+    private let hold: TerminationHold
 
-    init(runner: CLIRunner, cliArgs: [String] = [Flag.json, Flag.list]) {
+    init(
+        runner: CLIRunner, cliArgs: [String] = [Flag.json, Flag.list],
+        notify: @escaping @MainActor (BuildNotifier.Note?) -> Void,
+        hold: TerminationHold = .shared
+    ) {
         self.runner = runner
         self.cliArgs = cliArgs
+        self.postNote = notify
+        self.hold = hold
     }
 
     /// Claim the build slot for `appName`.
@@ -228,7 +245,7 @@ final class ConfigStore: CLIStore {
         buildFailures[appName] = nil
         // None of these describe the build that is starting. A stale
         // `cancellingApp` in particular would make this build report itself as
-        // cancelled the moment it ended, however it ended.
+        // canceled the moment it ended, however it ended.
         cancellingApp = nil
         stoppedAt[appName] = nil
         buildStage = nil
@@ -283,13 +300,20 @@ final class ConfigStore: CLIStore {
         // Set before `beginBuild`, which derives the run's device exposure from it.
         effectiveDelivery = delivery
         beginBuild(appName: appName)
-        buildTask = Task { @MainActor in await work() }
+        // macOS mustn't kill the app under a build: the CLI would be left
+        // signing or installing with nobody reading it (`TerminationHold`).
+        let hold = self.hold
+        buildTask = Task { @MainActor in
+            hold.begin(TerminationHold.building)
+            defer { hold.end(TerminationHold.building) }
+            await work()
+        }
         return true
     }
 
     /// Stop the running build.
     ///
-    /// Cancelling the Task is what reaches the subprocess — see `buildTask`.
+    /// Canceling the Task is what reaches the subprocess — see `buildTask`.
     /// The flag is set *before* the cancel so the completion path, which can
     /// run immediately, already knows why the CLI died.
     ///
@@ -443,10 +467,10 @@ final class ConfigStore: CLIStore {
             // the signal — Stop here, or a `kill` from Terminal — so it is
             // read exactly as one: no failure card (`buildFailures` is left as
             // `beginBuild` cleared it), no "failed" banner, and the build is
-            // marked cancelled so the pane's guard drops whatever the stream
+            // marked canceled so the pane's guard drops whatever the stream
             // still has queued behind this line. Only while this build holds
             // the slot: a late event from a finished build must not mark the
-            // next one cancelled.
+            // next one canceled.
             if buildingApp == appName { cancellingApp = appName }
             notify(appName, .cancelled)
         case .start, .log, .pruned, .liveContainerChoice:
@@ -519,6 +543,7 @@ final class ConfigStore: CLIStore {
     func beginDeviceCheck(appName: String) -> Bool {
         guard busy == nil else { return false }
         checkingApp = appName
+        deviceCheckStatus = nil
         return true
     }
 
@@ -558,7 +583,9 @@ final class ConfigStore: CLIStore {
 
     /// Only the check that claimed the slot may release it.
     func endDeviceCheck(appName: String) {
-        if checkingApp == appName { checkingApp = nil }
+        guard checkingApp == appName else { return }
+        checkingApp = nil
+        deviceCheckStatus = nil
     }
 
     /// Read the app list, and the delivery state that rides along with it.
@@ -651,7 +678,7 @@ final class ConfigStore: CLIStore {
     ///
     /// Returns the apps when the load succeeded, nil when it did not — the
     /// caller's "did it work", without a second copy of the state to agree with
-    /// this one. A cancelled load leaves both channels alone: nobody is waiting
+    /// this one. A canceled load leaves both channels alone: nobody is waiting
     /// on it, and a SIGTERM'd `--list` is not evidence of anything.
     ///
     /// - Parameters:
@@ -832,9 +859,18 @@ final class ConfigStore: CLIStore {
         var args = [Flag.json, Flag.reconcile]
         if let appName { args += [Flag.app, appName] }
         if let deviceUDID, !deviceUDID.isEmpty { args += [Flag.device, deviceUDID] }
-        let events = try await runner.runEvents(
+        // Streamed, so the phone's own prompt shows while the check waits on
+        // it — up to 60 s for "tap Trust" — rather than after it is over.
+        let events = try await runner.streamEvents(
             argsOverride ?? args, failing: "Check the device"
-        )
+        ) { [weak self] event in
+            // Only while a check holds the slot: a line that lands after it
+            // ended must not stand under the verdict.
+            guard let self, self.checkingApp != nil,
+                  case let .log(source, line) = event, source == CLIContract.deviceLogSource
+            else { return }
+            self.deviceCheckStatus = line
+        }
 
         let states = events.compactMap { event -> DeliveryStateRecord? in
             if case let .deliveryState(record) = event { return record }
@@ -853,13 +889,17 @@ final class ConfigStore: CLIStore {
         // reports events, not their fields), and the failure it buys is the
         // silent one: a check that quietly did nothing.
         //
-        // The one source that is excluded is the one the CLI has a contract
-        // for (C-NOTICE): `startup` lines are written before the verb runs —
+        // The sources that are excluded are the ones the CLI has a contract
+        // for. `startup` lines (C-NOTICE) are written before the verb runs —
         // a renamed environment variable, a moved data directory — and are
         // about the machine, not the check. Counted here, "TB_SSH_PASS is set
-        // but no longer read" became every device check's result.
+        // but no longer read" became every device check's result. `device`
+        // lines are the phone's prompt while the check waits on it, shown
+        // live above; counted, a check that succeeded once the user tapped
+        // Trust read as one that hadn't (fix-check #19, #21).
+        let notResults: Set<String> = [CLIContract.startupLogSource, CLIContract.deviceLogSource]
         let warnings = events.compactMap { event -> String? in
-            if case let .log(source, line) = event, source != CLIContract.startupLogSource {
+            if case let .log(source, line) = event, !notResults.contains(source) {
                 return line
             }
             return nil
@@ -901,6 +941,7 @@ final class ConfigStore: CLIStore {
         bundleId: String,
         displayName: String?,
         delivery: DeliveryMode,
+        storeCountry: String? = nil,
         addArgsOverride: [String]? = nil
     ) async throws -> String? {
         var args = [
@@ -911,6 +952,9 @@ final class ConfigStore: CLIStore {
         ]
         if let displayName, !displayName.isEmpty {
             args += [Flag.displayName, displayName]
+        }
+        if let storeCountry {
+            args += [Flag.storeCountry, storeCountry]
         }
         return try await addAndReload(addArgsOverride ?? args)
     }
@@ -933,6 +977,11 @@ final class ConfigStore: CLIStore {
         /// the returned events, not the `onStage` callbacks, which are MainActor
         /// hops that can land after this returns.
         let decrypted: Bool
+        /// The CLI's warnings on the way in (`log` events sourced
+        /// `CLIContract.warningLogSource`) — after "Use it anyway…", the line
+        /// saying it staged a decrypt UnfairPlay could not verify. The pane
+        /// keeps it on screen under the confirmation.
+        var warnings: [String] = []
     }
 
     /// Validate `fileURL` and stage it in cache_dir for the given app.
@@ -948,20 +997,32 @@ final class ConfigStore: CLIStore {
     /// seconds where a plain copy takes none. The argv is the same either way —
     /// the CLI decides by the IPA's cryptid, not this app — and a decrypted
     /// drop reports no stage at all.
+    ///
+    /// `allowUnverified` is "Use it anyway…": the same drop again, after the
+    /// CLI refused an unverified decrypt and the user confirmed. That refusal
+    /// throws `UnverifiedDecrypt` rather than the CLI's own error.
     @discardableResult
     func provideIPA(
         appName: String,
         fileURL: URL,
+        allowUnverified: Bool = false,
         argsOverride: [String]? = nil,
         onStage: (@MainActor (AppStoreStage) -> Void)? = nil
     ) async throws -> ProvidedIPA? {
-        let args = argsOverride ?? [
-            Flag.json, Flag.provideIPA, fileURL.path, Flag.app, appName,
-        ]
-        let events = try await runner.streamEvents(args, failing: "Provide IPA") { event in
+        let args = argsOverride ?? Self.provideArgs(
+            appName: appName, fileURL: fileURL, allowUnverified: allowUnverified
+        )
+        let events = try await runner.streamEvents(
+            args, failing: "Provide IPA", refusal: .unverifiedDecrypt
+        ) { event in
             if case let .appStoreStage(record) = event { onStage?(record.stage) }
         }
         return Self.provided(in: events)
+    }
+
+    static func provideArgs(appName: String, fileURL: URL, allowUnverified: Bool = false) -> [String] {
+        [Flag.json, Flag.provideIPA, fileURL.path, Flag.app, appName]
+            + (allowUnverified ? [Flag.allowUnverified] : [])
     }
 
     /// The `ipa-provided` record in a stream, with whether the same stream
@@ -977,7 +1038,7 @@ final class ConfigStore: CLIStore {
             if case .appStoreDecrypted = event { return true }
             return false
         }
-        return ProvidedIPA(record: record, decrypted: decrypted)
+        return ProvidedIPA(record: record, decrypted: decrypted, warnings: events.warningLines)
     }
 
     /// Look up what IPA the build pipeline would use for the given app.
@@ -1063,6 +1124,8 @@ final class ConfigStore: CLIStore {
         stripSupportedDevices: Bool? = nil,
         compressionLevel: Int? = nil,
         lcPin: AppOptionsDraft.LCPin? = nil,
+        autoProfile: Bool? = nil,
+        storeCountry: String? = nil,
         argsOverride: [String]? = nil
     ) async throws -> AppUpdatedRecord? {
         var args = [Flag.json, Flag.setAppOptions, Flag.app, appName]
@@ -1115,13 +1178,26 @@ final class ConfigStore: CLIStore {
         case nil:
             break
         }
+        if let autoProfile {
+            args.append(autoProfile ? Flag.autoProfile : Flag.noAutoProfile)
+            request(.autoProfile)
+        }
+        if let storeCountry {
+            args += [Flag.storeCountry, storeCountry]
+            request(.storeCountry)
+        }
 
-        let record = try await mutate(
+        let events = try await mutateEvents(
             argsOverride ?? args, failing: "Update app", succeeded: "App updated"
-        ) { event in
+        )
+        var record = events.lazy.compactMap { event -> AppUpdatedRecord? in
             if case let .appUpdated(rec) = event { return rec }
             return nil
-        }
+        }.first
+        // Kept for the Edit sheet, which shows them before it closes: the
+        // CLI saves an `auto_profile` an app's own `profile:` outranks, and
+        // says so only here (fix-check #6/#26).
+        record?.warnings = events.warningLines
 
         try requireApplied(requestedFields, reportedIn: record?.changed ?? [])
         return record
@@ -1149,7 +1225,11 @@ final class ConfigStore: CLIStore {
             stripExtensions: draft.changed(\.stripExtensions),
             stripSupportedDevices: draft.changed(\.stripSupportedDevices),
             compressionLevel: draft.changed(\.compressionLevel),
-            lcPin: draft.changed(\.lcPin)
+            lcPin: draft.changed(\.lcPin),
+            autoProfile: draft.changed(\.autoProfile),
+            // `String??`: nil is unchanged. A change to nil can't be drawn
+            // (`EditAppSheet.storeChoices`), so it flattens to unchanged too.
+            storeCountry: draft.changed(\.storeCountry) ?? nil
         )
     }
 }

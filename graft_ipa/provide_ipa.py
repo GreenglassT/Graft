@@ -84,7 +84,7 @@ def stage(source: Path, final: Path, *, keep: Collection[str] = ()) -> list[str]
     App Store get, a `--decrypt` dump — and the reason all three can be said
     to stage nothing that names the buyer. An App Store IPA carries
     `iTunesMetadata.plist` (the Apple ID's email and account ids) and an
-    `SC_Info/` licence in the app and in every extension
+    `SC_Info/` license in the app and in every extension
     (`ipa_inspect.account_data_in`); a copy without them is written, or a plain
     copy when there were none. The result is then *checked*, not assumed: no
     tool's word — UnfairPlay's `--strip-account-data` included — decides what
@@ -188,7 +188,7 @@ def provide(
     pipeline expects. Returns (destination path, validated IPA info).
 
     Through `stage`: owner-only, atomic, and without the buyer's metadata and
-    licences. Replaces any existing file with the same version.
+    licenses. Replaces any existing file with the same version.
     """
     info = validate_ipa(source_path, expected_bundle_id)
     cache_dir.mkdir(parents=True, exist_ok=True)

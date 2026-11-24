@@ -9,10 +9,10 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .child_env import child_env
-from .config import AppConfig, Config
+from . import tools
+from .child_env import BUNDLED_OPENSSL_CONF, child_env
+from .config import AppConfig, Config, CyanOptions
 from .errors import CyanError
-
 
 # Pinned to the release Graft is tested with (cyan 1.4.4), by the commit its tag
 # points at rather than by the tag: a tag can be moved, and a tag archive moves
@@ -25,6 +25,16 @@ CYAN_INSTALL_COMMAND = (
 )
 
 
+#: Set in cyan's environment on top of `child_env`. cctools-port's
+#: install_name_tool, which a cyan whose helpers were built from source runs,
+#: re-signs each ARM file it changes with `system("codesign -s - -f <path>")`,
+#: the path unquoted, so a tweak or app file name holding `;cmd` ran `cmd`.
+#: Graft.app's copy is built with that hook compiled out
+#: (bundle/patches/cctools-port-no-fake-sign.patch); NO_CODESIGN is the hook's
+#: own off switch, kept as a second layer.
+CYAN_ENV = {"NO_CODESIGN": "1"}
+
+
 @dataclass
 class CyanResult:
     output_ipa: Path
@@ -33,7 +43,31 @@ class CyanResult:
 
 
 _MISSING_LIB_RE = re.compile(r'Library not loaded:\s+([^\s"\']+)')
+
 _BAD_DEB_RE = re.compile(r"couldn'?t extract\s+([^\s]+)", re.IGNORECASE)
+
+#: cyan's flag that removes Watch apps (`Watch`, `WatchKit`,
+#: `com.apple.WatchPlaceholder`), short and long.
+_WATCH_FLAGS = ("-w", "--no-watch")
+
+#: Terminal escape sequences: CSI (color, `ESC[96m`; erase, `ESC[K`), OSC
+#: (`ESC]…BEL` or `ESC]…ESC\\`, window titles and links), character-set
+#: designations (`ESC(B`), and the two-byte forms. cyan colors its counts for
+#: a terminal whether or not it has one.
+_ANSI_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[ -/]+[0-~]|[@-Z\\-_])"
+)
+
+
+def strip_ansi(text: str) -> str:
+    """`text` without terminal escape sequences.
+
+    cyan's output is printed to a human, emitted as `log` events for the app's
+    build log, and quoted in an error's hint. Its color codes rode through
+    all three, so the app showed `changed [96m41[0m localized names`. Stripped
+    once, where the output enters graft.
+    """
+    return _ANSI_RE.sub("", text)
 
 
 def build_command(
@@ -56,12 +90,15 @@ def build_command(
             hint=f"download them and place under {cfg.tweaks_dir}",
         )
 
-    cmd: list[str] = ["cyan", "-i", str(input_ipa), "-o", str(output_ipa)]
+    # The resolved binary (`tools.resolve`); a bare "cyan" only when there is
+    # none, which a dry run still renders and `run_cyan` refuses.
+    cyan = str(tools.resolve("cyan").path or "cyan")
+    cmd: list[str] = [cyan, "-i", str(input_ipa), "-o", str(output_ipa)]
     if tweak_paths:
         cmd += ["-f", *tweak_paths]
     opts = app.cyan
     if opts.display_name:
-        cmd += ["-n", opts.display_name]
+        cmd.append(f"-n={opts.display_name}")  # one token: a name starting "-" is not an option
     if opts.strip_supported_devices:
         cmd.append("-u")
     if opts.strip_extensions:
@@ -69,10 +106,25 @@ def build_command(
     if not opts.keep_bundle_id:
         new_id = opts.new_bundle_id or f"{app.bundle_id}.plus"
         cmd += ["-b", new_id]
+        # A Watch app names its companion's bundle id
+        # (WKCompanionAppBundleIdentifier), which -b leaves alone, so iOS
+        # refuses the renamed IPA with InvalidCompanionAppBundleIdentifier. A
+        # Watch app cannot install under a renamed companion, so it goes.
+        # (-e removes PlugIns/Extensions only; the Watch app needs -w.)
+        if not any(a in _WATCH_FLAGS for a in opts.extra_args):
+            cmd.append("-w")
     if opts.compression_level is not None:
         cmd += ["-c", str(opts.compression_level)]
     cmd.extend(opts.extra_args)
     return cmd
+
+
+def removes_watch(opts: CyanOptions) -> bool:
+    """Whether cyan is told to remove the Watch app (`-w`): for a renamed
+    bundle id (`keep_bundle_id: false`, `build_command`), or by the user in
+    `extra_args`. Its extensions are then not on the device, and nothing
+    should be said about what they ask for (`capabilities.missing_for`)."""
+    return not opts.keep_bundle_id or any(a in _WATCH_FLAGS for a in opts.extra_args)
 
 
 def run_cyan(
@@ -87,6 +139,13 @@ def run_cyan(
     cmd = build_command(cfg, app, input_ipa, output_ipa)
     if dry_run:
         return CyanResult(output_ipa=output_ipa, stdout=" ".join(cmd), stderr="")
+    resolved = tools.resolve("cyan")
+    if not resolved.found:
+        raise CyanError("cyan not found in PATH", hint=CYAN_INSTALL_COMMAND)
+    # Graft.app's cyan runs Graft.app's ldid, which links the bundled
+    # libcrypto: no OpenSSL configuration file for it (review 2.0, bundle #7).
+    # A cyan from PATH runs its own tools, with the user's environment.
+    openssl = BUNDLED_OPENSSL_CONF if resolved.source == tools.SOURCE_BUNDLED else {}
 
     output_ipa.parent.mkdir(parents=True, exist_ok=True)
     # cyan unpacks the IPA into a `tempfile.TemporaryDirectory()`, which is
@@ -99,9 +158,9 @@ def run_cyan(
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True,
-            env=child_env({"TMPDIR": f"{scratch}/"}),
+            env=child_env({"TMPDIR": f"{scratch}/", **CYAN_ENV, **openssl}),
         )
-    except FileNotFoundError as e:
+    except FileNotFoundError as e:  # gone since it was resolved
         raise CyanError(
             "cyan not found in PATH",
             hint=CYAN_INSTALL_COMMAND,
@@ -109,11 +168,12 @@ def run_cyan(
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
-    combined = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    stdout, stderr = strip_ansi(proc.stdout or ""), strip_ansi(proc.stderr or "")
+    combined = stdout + "\n" + stderr
     if proc.returncode != 0 or not output_ipa.exists():
         _raise_translated(combined, proc.returncode)
 
-    return CyanResult(output_ipa=output_ipa, stdout=proc.stdout, stderr=proc.stderr)
+    return CyanResult(output_ipa=output_ipa, stdout=stdout, stderr=stderr)
 
 
 def _raise_translated(output: str, returncode: int) -> None:

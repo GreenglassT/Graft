@@ -22,7 +22,7 @@ from typing import Any, Literal, TypeVar
 
 import yaml
 
-from . import child_env, data_dirs
+from . import child_env, data_dirs, mobileprovision, storefronts
 from .errors import ConfigError, PaidAccountRequiredError
 
 T = TypeVar("T")
@@ -321,8 +321,13 @@ FREE_SETUP_STEPS = (
     "your free Apple ID. It installs LiveContainer and refreshes it every 7 days.",
     f"Install LiveContainer: {LIVECONTAINER_SETUP_URL} (the LiveContainer+SideStore "
     "build uses one app slot for both).",
-    "In LiveContainer, import the certificate from SideStore (LiveContainer's "
-    "Settings), so it can sign the apps you import.",
+    # iOS 26 made this the step nothing works without, and iloader skips it
+    # although its README says otherwise: every app LiveContainer opens fails
+    # its first launch until it is done.
+    "In LiveContainer, open Settings and tap Import Certificate from SideStore, so "
+    "it can sign the apps you import. iloader doesn't do this for you, and on iOS 26 "
+    "every app fails its first launch with \"JITLess mode is required since iOS 26\" "
+    "until it's done.",
     "Add an app: `graft --add-app <App Store URL>`, then run `graft --check`.",
 )
 #: The steps that happen on the device, without the last one (Graft's own).
@@ -333,7 +338,7 @@ FREE_DEVICE_STEPS = FREE_SETUP_STEPS[:-1]
 #: yes (`init_flow._upgrade_to_paid`, `add_signing_section`). A template:
 #: `paid_upgrade` fills in the command and the file.
 PAID_UPGRADE = (
-    "run `{init}` and answer yes: it asks for your .p12 and profile and adds a "
+    "run `{init}` and answer yes{app}: it asks for your .p12 and profile and adds a "
     "signing: section to {config}, keeping its apps, repos and settings. Apps "
     "with no delivery: key are given delivery: livecontainer, so they stay in "
     "LiveContainer"
@@ -343,10 +348,14 @@ PAID_UPGRADE = (
 #: characters and cuts the rest from the middle; the long form, with a config
 #: path named twice, ran past it on its own.
 PAID_UPGRADE_SHORT = (
-    "run `{init}` and answer yes: it adds a signing: section and keeps your apps"
+    "run `{init}` and answer yes{app}: it adds a signing: section and keeps your apps"
 )
 #: How a free Apple ID builds instead.
 FREE_ALTERNATIVE = "With a free Apple ID, use delivery: livecontainer"
+#: Where the Mac app sets up and changes the account, for every hint that
+#: sends someone to `graft --init`: the app has no Terminal to run it in.
+#: (`\u203a` is the right-pointing angle quote the app's own panes use.)
+APP_ACCOUNT_SETTINGS = "Settings \u203a Account in Graft.app"
 
 
 def paid_upgrade(
@@ -357,15 +366,20 @@ def paid_upgrade(
     `--init` edits the default config unless given `--config`, so a config
     anywhere else is named in the command too; `config` replaces how the file
     is referred to (the starter's own header says "this file").
+
+    The default config is also the Mac app's, which has no Terminal to run
+    `--init` in, so the way there names the app's Account settings too
+    (`APP_ACCOUNT_SETTINGS`). A config anywhere else is one the app never
+    opens, and its way stays the command alone.
     """
     if path is None or os.path.realpath(path) == os.path.realpath(default_config_path()):
-        init = "graft --init"
+        init, app = "graft --init", f", or use {APP_ACCOUNT_SETTINGS}"
     else:
-        init = f"graft --config {shlex.quote(str(path))} --init"
+        init, app = f"graft --config {shlex.quote(str(path))} --init", ""
     if short:
-        return PAID_UPGRADE_SHORT.format(init=init)
+        return PAID_UPGRADE_SHORT.format(init=init, app=app)
     where = config or (str(path) if path is not None else "your config.yaml")
-    return PAID_UPGRADE.format(init=init, config=where)
+    return PAID_UPGRADE.format(init=init, app=app, config=where)
 
 
 #: The keys of a `signing:` section, all required.
@@ -450,7 +464,7 @@ def account_of(path: Path) -> str:
 def paid_account_required(what: str, path: Path | None = None) -> PaidAccountRequiredError:
     """The one refusal every paid-only path raises in free mode.
 
-    `what` names the thing that was asked for, as the user would recognise it
+    `what` names the thing that was asked for, as the user would recognize it
     (`--lc-install`, `delivery: sideload (app 'example')`). The hint gives both
     ways forward, because which one applies depends on whether the user has
     the membership: add it, or stay on LiveContainer delivery. Adding it is
@@ -503,6 +517,9 @@ class AppStoreConnectConfig:
     key_file: Path
     device_udids: list[str]
     profile_cache_dir: Path
+    #: `device_udids_pinned: true`: the list is curated by hand, and
+    #: `--set-portal` / `--setup-portal` leave it alone (`set_app_store_connect`).
+    device_udids_pinned: bool = False
 
     @classmethod
     def from_dict(
@@ -521,7 +538,18 @@ class AppStoreConnectConfig:
             key_file=_expand(data["key_file"]),
             device_udids=[str(u) for u in (data.get("device_udids") or [])],
             profile_cache_dir=_expand(data.get("profile_cache_dir") or default_cache_dir),
+            device_udids_pinned=_udids_pinned(data),
         )
+
+
+def _udids_pinned(section: dict[str, Any]) -> bool:
+    """Whether an `app_store_connect:` section pins its `device_udids`.
+
+    Only a real YAML `true` pins: the loader and the writer that honours it
+    read it through this one rule, so they cannot disagree about a quoted
+    `"false"`.
+    """
+    return section.get("device_udids_pinned") is True
 
 
 def _default_unfairplay_models() -> Path:
@@ -543,15 +571,24 @@ def _default_unfairplay_models() -> Path:
 class AppStoreToolsConfig:
     """Optional `appstore:` section: where the user's own ipatool and UnfairPlay live.
 
-    Both are installed by hand, outside this project, and only ever *run* by
-    it — the Apple ID login and the FairPlay enrollment stay Terminal commands
-    the user types (see `appstore.py`). The defaults are the paths they were
-    installed at on 2026-11-17, so a missing section means "where they are".
+    Both are installed by hand, outside this project, or come bundled in
+    Graft.app, and are only ever *run* by it; the app signs in and enrolls
+    through them since 2.0 (see `appstore.py`). The defaults are the paths
+    they were installed at on 2026-11-17, so a missing section means "where
+    they are".
 
-    Every field is a path, `~`-expanded, and nothing else is accepted: a typo'd
-    `ipatool: 2.8.0` (the version where the path should be) would otherwise
-    become `Path("2.8.0")`, resolved against whatever directory the CLI happened
-    to start in.
+    Every field is a full path, `~`-expanded. A value that isn't text is
+    refused, as 1.1 did; one that stays relative once expanded (a typo'd
+    `ipatool: 2.8.0`, `bin/ipatool`, a `$VAR` that isn't set) is ignored with
+    a notice (`Config.notices`), as a `store_country` that isn't a store is:
+    it would resolve against whatever directory the CLI started in (`/` for
+    the app), and failing the whole config over it failed every verb on a
+    config 1.1 loaded (the whole-diff review's upgrade-2).
+
+    `explicit` names the tools the user pointed somewhere on purpose; the
+    resolver (`tools.resolve`) lets only those beat a bundled copy. A 1.x
+    config that spells out the old defaults is not a choice, so the app's
+    bundled tools take over.
     """
 
     ipatool: Path = field(default_factory=lambda: Path.home() / ".local" / "bin" / "ipatool")
@@ -559,9 +596,14 @@ class AppStoreToolsConfig:
         default_factory=lambda: data_dirs.data_dir() / "unfairplay" / "unfairplay"
     )
     unfairplay_models: Path = field(default_factory=_default_unfairplay_models)
+    explicit: frozenset[str] = field(default_factory=frozenset)
+    #: Tools set in config.yaml to exactly the old default, and so not in
+    #: `explicit`: read as no choice, which `appstore.ipatool_setting_note`
+    #: says out loud when it is what let a bundled copy win.
+    spelled_default: frozenset[str] = field(default_factory=frozenset)
 
     @classmethod
-    def from_dict(cls, data: Any) -> AppStoreToolsConfig:
+    def from_dict(cls, data: Any, *, notices: list[str] | None = None) -> AppStoreToolsConfig:
         if data is None:
             return cls()
         if not isinstance(data, dict):
@@ -576,8 +618,33 @@ class AppStoreToolsConfig:
                     f"appstore.{key} must be a path, got {value!r}",
                     hint="remove the key to use the default location",
                 )
-            paths[key] = _expand(value)
-        return cls(**paths)
+            path = _expand(value)
+            # The guard the docstring promises. Kept, a relative value
+            # (`ipatool`, `2.8.0`, `bin/ipatool`) would count as explicit, so
+            # it would beat the bundled copy and never fall back, and resolve
+            # against the CLI's cwd, which is `/` for the app: "ipatool not
+            # found at ipatool". So it isn't kept, and the notice says so.
+            if not path.is_absolute():
+                if notices is not None:
+                    notices.append(
+                        f"appstore.{key} {value!r} in config.yaml isn't a full path; ignoring it "
+                        "(start it with / or ~/, or remove it to use the default)"
+                    )
+                continue
+            paths[key] = path
+        old_defaults = {
+            "ipatool": Path.home() / ".local" / "bin" / "ipatool",
+            "unfairplay": data_dirs.data_dir() / "unfairplay" / "unfairplay",
+        }
+        explicit = frozenset(
+            key for key in ("ipatool", "unfairplay")
+            if key in paths and paths[key] != old_defaults[key]
+        )
+        spelled_default = frozenset(
+            key for key in ("ipatool", "unfairplay")
+            if key in paths and paths[key] == old_defaults[key]
+        )
+        return cls(**paths, explicit=explicit, spelled_default=spelled_default)
 
 
 def _text(value: Any) -> str | None:
@@ -646,13 +713,25 @@ class AppConfig:
     profile_override: Path | None = None  # explicit per-app profile path
     delivery: str = "sideload"  # "sideload" or "livecontainer"
     lc_bundle_id: str | None = None  # pin which LiveContainer to push into (livecontainer delivery)
+    #: The App Store this app was found in, as a two-letter code (`DE`): the
+    #: store Add App's Search asked, or the one its App Store URL named.
+    #: `--appstore-check` and `--artwork` look it up there. None asks this
+    #: Mac's region's store, then the US (`host.look_up`).
+    store_country: str | None = None
 
     @classmethod
     def from_dict(
-        cls, name: str, data: dict[str, Any], *, default_delivery: str = "sideload"
+        cls, name: str, data: dict[str, Any], *, default_delivery: str = "sideload",
+        notices: list[str] | None = None,
     ) -> AppConfig:
         """`default_delivery` is what an entry with no `delivery:` key means,
-        which depends on the account: `Config.default_delivery`."""
+        which depends on the account: `Config.default_delivery`.
+
+        `notices` collects what the entry got wrong but was loaded anyway
+        (`Config.notices`): a `store_country` that isn't an App Store."""
+        store_country, notice = _store_country(data.get("store_country"), app=name)
+        if notice is not None and notices is not None:
+            notices.append(notice)
         if "bundle_id" not in data:
             raise ConfigError(f"app '{name}': missing bundle_id")
         profile_override = data.get("profile")
@@ -672,7 +751,36 @@ class AppConfig:
             profile_override=_expand(profile_override) if profile_override else None,
             delivery=delivery,
             lc_bundle_id=(str(data["lc_bundle_id"]) if data.get("lc_bundle_id") else None),
+            store_country=store_country,
         )
+
+
+def _store_country(value: Any, *, app: str) -> tuple[str | None, str | None]:
+    """An app's `store_country` as the storefront it names, and a notice when
+    the value had to be read differently from how it was written.
+
+    Mapped like every other country (`storefronts.store_for`). A territory or
+    `UK` reads as the store it shops in, with a notice. A value that names no
+    store (`ZZ`, `GBR`, a number) reads as unset, with a notice, rather than
+    stopping the whole config from loading: it is a hand edit, and every
+    command (the one that would fix it included) loads this file first.
+    `--store-country`, typed on a command line, still refuses one.
+
+    `False` is Norway. YAML 1.1 reads an unquoted `NO` as a boolean, and no
+    other country code collides, so that is the only thing it can mean.
+    Graft's own writer always quotes the value (`_quote_store_countries`).
+    """
+    if value is None:
+        return None, None
+    if value is False:
+        return "NO", None
+    text = value.strip() if isinstance(value, str) else ""
+    store = storefronts.store_for(text) if len(text) == 2 and text.isascii() and text.isalpha() else None
+    if store is None:
+        return None, f"store_country {value!r} for {app} isn't an App Store; ignoring it"
+    if store != text.upper():
+        return store, f"store_country {value!r} for {app} is the {store} App Store; using {store}"
+    return store, None
 
 
 @dataclass
@@ -712,6 +820,11 @@ class Config:
     app_store_connect: AppStoreConnectConfig | None = None
     archive_keep: int = DEFAULT_ARCHIVE_KEEP
     appstore: AppStoreToolsConfig = field(default_factory=AppStoreToolsConfig)
+    #: What the file got wrong but was loaded anyway, one sentence each, for
+    #: the CLI to warn of once per command (`cli._warn`, `startup`). Today:
+    #: a hand-written `store_country` that isn't an App Store, or is an alias,
+    #: and an `appstore:` path that isn't a full one.
+    notices: list[str] = field(default_factory=list)
 
     @property
     def free_account(self) -> bool:
@@ -847,8 +960,9 @@ def load_config(path: Path | None = None) -> Config:
                 hint=f"edit {cfg_path}: delete the `{name}:` entry under `apps:`, or make "
                 "it a mapping with a `bundle_id:` key",
             )
+    notices: list[str] = []
     apps = {
-        name: AppConfig.from_dict(name, data, default_delivery=default_delivery)
+        name: AppConfig.from_dict(name, data, default_delivery=default_delivery, notices=notices)
         for name, data in apps_raw.items()
     }
 
@@ -874,17 +988,30 @@ def load_config(path: Path | None = None) -> Config:
         default_device_udid=_text(raw.get("default_device_udid")),
         app_store_connect=asc,
         archive_keep=_archive_keep(raw.get("archive_keep")),
-        appstore=AppStoreToolsConfig.from_dict(raw.get("appstore")),
+        appstore=AppStoreToolsConfig.from_dict(raw.get("appstore"), notices=notices),
+        notices=notices,
     )
 
 
 @_locked
-def write_default_config(path: Path, *, free_account: bool = False, **overrides: Any) -> None:
+def write_default_config(
+    path: Path, *, free_account: bool = False, only_if_missing: bool = False, **overrides: Any
+) -> None:
     """Write a starter config file. Used by --init.
 
     `free_account` writes the free-Apple-ID starter: no `signing:` section,
     which is what makes it one, and a header saying so and how to change it.
+
+    `only_if_missing` (the setup the app runs, which never overwrites a
+    config) looks again once the lock is held, and refuses if a config has
+    appeared since the caller last looked: another window's setup, or a
+    Terminal `--init`, may have made one meanwhile.
     """
+    if only_if_missing and path.exists():
+        raise ConfigError(
+            f"{path} appeared while the setup ran, so it wasn't overwritten",
+            hint="nothing was changed; run the setup again to see what that config is",
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     template: dict[str, Any] = {}
     if not free_account:
@@ -920,7 +1047,7 @@ def _signing_template(cfg_dir: Path, **overrides: Any) -> dict[str, Any]:
 
 
 @_locked
-def add_signing_section(path: Path, **overrides: Any) -> list[str]:
+def add_signing_section(path: Path, *, write: bool = True, **overrides: Any) -> list[str]:
     """Make the free config at `path` a paid one, keeping everything else in it.
 
     What `--init` does when a free config exists and the answer to "paid
@@ -933,6 +1060,9 @@ def add_signing_section(path: Path, **overrides: Any) -> list[str]:
     key is a LiveContainer app in free mode and a sideload app in paid mode.
     Each such entry is given an explicit `delivery: livecontainer`, so the
     upgrade moves no app; their names are returned, for `--init` to say so.
+
+    `write=False` answers which apps the upgrade would pin (`--init
+    --dry-run`) and writes nothing.
 
     Note: rewrites config.yaml via yaml.safe_dump — YAML comments are not
     preserved, the free starter's header included (it describes a free
@@ -953,14 +1083,39 @@ def add_signing_section(path: Path, **overrides: Any) -> list[str]:
         if isinstance(entry, dict) and "delivery" not in entry:
             entry["delivery"] = "livecontainer"
             pinned.append(name)
-    upgraded: dict[str, Any] = {"signing": _signing_template(path.parent, **overrides)}
-    upgraded.update((key, value) for key, value in raw.items() if key != "signing")
-    _atomic_write_yaml(path, upgraded)
+    if write:
+        upgraded: dict[str, Any] = {"signing": _signing_template(path.parent, **overrides)}
+        upgraded.update((key, value) for key, value in raw.items() if key != "signing")
+        _atomic_write_yaml(path, upgraded)
     return pinned
 
 
 @_locked
-def remove_signing_section(path: Path) -> list[str]:
+def replace_signing(path: Path, *, cert: Path, profile: Path, team_id: str) -> list[str]:
+    """Point the paid config's `signing:` section at a new certificate,
+    profile and team (`--init --account paid --replace`), keeping the rest of
+    it and of the config.
+
+    A section missing `cert_password_env` (a 1.x config that relied on the
+    Keychain alone) is completed with the default the setup uses, since
+    `load_config` refuses a section without it and the replace is the one
+    repair the app offers. Returns the keys it had to add.
+    """
+    raw = _load_raw(path)
+    section = _signing_section(raw)
+    if section is None:
+        raise ConfigError(f"{path} has no signing: section to replace")
+    added = [key for key in ("cert_password_env",) if not section.get(key)]
+    template = _signing_template(path.parent, cert=cert, profile=profile, team_id=team_id)
+    section.update(cert=template["cert"], profile=template["profile"], team_id=team_id)
+    for key in added:
+        section[key] = template[key]
+    _atomic_write_yaml(path, raw)
+    return added
+
+
+@_locked
+def remove_signing_section(path: Path, *, write: bool = True) -> list[str]:
     """Make the paid config at `path` a free one, keeping everything else in it.
 
     What `--init` does when a paid config exists, the answer to "paid
@@ -977,6 +1132,9 @@ def remove_signing_section(path: Path) -> list[str]:
     paid-only sentence, rather than this quietly rewriting what the user
     chose. Their names are returned, for `--init` to say so.
 
+    `write=False` answers what the switch would do (`--init --dry-run`) and
+    writes nothing.
+
     Note: rewrites config.yaml via yaml.safe_dump — YAML comments are not
     preserved.
     """
@@ -990,7 +1148,8 @@ def remove_signing_section(path: Path) -> list[str]:
         name for name, entry in (apps or {}).items()
         if isinstance(entry, dict) and str(entry.get("delivery", "")).lower() == "sideload"
     ]
-    _atomic_write_yaml(path, {k: v for k, v in raw.items() if k != "signing"})
+    if write:
+        _atomic_write_yaml(path, {k: v for k, v in raw.items() if k != "signing"})
     return sideloads
 
 
@@ -1045,16 +1204,32 @@ apps: {}
 """
 
 
+def _missing_config_hint(path: Path) -> str:
+    """How to make the config at `path`: the default one is also the app's,
+    whose first run sets it up; any other is made by `--config <it> --init`,
+    which the app never opens (`paid_upgrade`'s rule)."""
+    if os.path.realpath(path) == os.path.realpath(default_config_path()):
+        return "run `graft --init` to create one, or open Graft.app, whose first run sets up your account"
+    return f"run `graft --config {shlex.quote(str(path))} --init` to create it"
+
+
 def _load_raw(path: Path) -> dict[str, Any]:
     if not path.exists():
-        raise ConfigError(
-            f"config file not found at {path}",
-            hint="run `graft --init` to create one",
-        )
+        raise ConfigError(f"config file not found at {path}", hint=_missing_config_hint(path))
     try:
-        raw = yaml.safe_load(path.read_text()) or {}
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as e:
         raise ConfigError(f"failed to parse {path}: {e}") from e
+    except UnicodeDecodeError:
+        raise ConfigError(
+            f"{path} isn't UTF-8 text, so it can't be read",
+            hint="open it in a text editor and save it as UTF-8, or move it aside",
+        ) from None
+    except OSError as e:
+        raise ConfigError(
+            f"can't read {path}: {e.strerror or e}",
+            hint="check that it is a file you can read, or move it aside",
+        ) from None
     if not isinstance(raw, dict):
         raise ConfigError(f"{path} must contain a YAML mapping at the top level")
     return raw
@@ -1102,13 +1277,77 @@ def remove_repo(path: Path, url: str) -> None:
 
 @_locked
 def set_app_store_connect(path: Path, section: dict[str, Any]) -> None:
-    """Replace config.yaml's `app_store_connect:` section (`--setup-portal`).
+    """Write a new key into config.yaml's `app_store_connect:` section
+    (`--set-portal`, `--setup-portal`), keeping what was set by hand.
+
+    Merged, not replaced: `section`'s keys win, and everything else already
+    there stays — `profile_cache_dir` in particular, which neither writer
+    asks about. `device_udids` comes from `section` too, refreshed from App
+    Store Connect on every run: the list is the one these writers made, so
+    keeping it meant a re-run never saw a newly registered phone and a key
+    from another team inherited the old team's devices. The exception is a
+    section with `device_udids_pinned: true`, the user's word that the list
+    is curated: then the list stays exactly as it is.
+    Under the config lock, so the read the merge starts from is the file it
+    replaces.
 
     Note: rewrites config.yaml via yaml.safe_dump — YAML comments are not preserved.
     """
     raw = _load_raw(path)
-    raw["app_store_connect"] = section
+    existing = raw.get("app_store_connect")
+    existing = existing if isinstance(existing, dict) else {}
+    merged = {**existing, **section}
+    if _udids_pinned(existing):
+        if "device_udids" in existing:
+            merged["device_udids"] = existing["device_udids"]
+        else:
+            merged.pop("device_udids", None)
+    raw["app_store_connect"] = merged
     _atomic_write_yaml(path, raw)
+
+
+@_locked
+def clear_app_store_connect(path: Path) -> dict[str, Any] | None:
+    """Remove config.yaml's `app_store_connect:` section (`--clear-portal`).
+
+    Returns the section that was there, or None when there was none — in which
+    case the file is not rewritten. The .p8 it named is left where it is: it
+    is the user's key, and the setting is all this removes.
+    """
+    raw = _load_raw(path)
+    if "app_store_connect" not in raw:
+        return None
+    section = raw.pop("app_store_connect")
+    _atomic_write_yaml(path, raw)
+    return section if isinstance(section, dict) else {}
+
+
+def read_app_store_connect(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """What `--settings` reports about the App Store Connect key, from raw YAML.
+
+    Who the key is (`key_id`, `issuer_id`), where its .p8 is, and whether that
+    file is there — never what is in it. None when there is no section, or one
+    that is not a mapping (which `load_config` would refuse; this answers for
+    the configs it refuses, like the rest of `--settings`).
+    """
+    section = raw.get("app_store_connect")
+    if not isinstance(section, dict) or not section:
+        return None
+    key_file = section.get("key_file")
+    path = _expand(key_file) if key_file else None
+    try:
+        exists = bool(path and path.is_file())
+    except OSError:
+        # Python 3.11-3.13's `is_file()` raises PermissionError for a path in
+        # a directory the user cannot search. A key graft cannot reach is as
+        # good as missing, and `--settings` must answer whatever the path is.
+        exists = False
+    return {
+        "key_id": None if section.get("key_id") is None else str(section["key_id"]),
+        "issuer_id": None if section.get("issuer_id") is None else str(section["issuer_id"]),
+        "key_file": str(path) if path else None,
+        "key_file_exists": exists,
+    }
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -1123,6 +1362,19 @@ def slugify_name(text: str) -> str:
     lowered = (text or "").lower()
     slug = _SLUG_RE.sub("_", lowered).strip("_")
     return slug or "app"
+
+
+def app_key(name: str, bundle_id: str) -> str:
+    """The YAML key an add derives for an app called `name`.
+
+    `slugify_name(name)`, unless the name has no ASCII letter or digit to slug
+    (微信, カカオトーク, Яндекс Карты): then the slug of the bundle id's last
+    component (`com.example.xin` → `xin`), and only past that `"app"`. Three
+    such apps used to be keyed `app`, `app_2` and `app_3`. `add_app` still
+    de-duplicates whatever this returns.
+    """
+    slug = _SLUG_RE.sub("_", (name or "").lower()).strip("_")
+    return slug or slugify_name((bundle_id or "").rsplit(".", 1)[-1])
 
 
 # --- apps: mutator envelope ------------------------------------------------
@@ -1151,6 +1403,33 @@ def _load_apps(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     return raw, apps
 
 
+class _Quoted(str):
+    """A string `yaml.safe_dump` writes in single quotes (`_quote_store_countries`)."""
+
+
+yaml.SafeDumper.add_representer(
+    _Quoted, lambda dumper, data: dumper.represent_scalar("tag:yaml.org,2002:str", str(data), style="'")
+)
+
+
+def _quote_store_countries(apps: dict[str, Any]) -> None:
+    """Make every app's `store_country` a quoted string before it is written.
+
+    Quoted always, not only when YAML needs it: a person copying the line
+    for another app then copies the quotes, and `NO` (Norway) never becomes
+    a boolean. A `False` that YAML read from an unquoted `NO` goes back as
+    `'NO'`, which is what `_store_country` reads it as.
+    """
+    for entry in apps.values():
+        if not isinstance(entry, dict) or "store_country" not in entry:
+            continue
+        value = entry["store_country"]
+        if value is False:
+            entry["store_country"] = _Quoted("NO")
+        elif isinstance(value, str):
+            entry["store_country"] = _Quoted(value)
+
+
 def _commit_apps(path: Path, raw: dict[str, Any], apps: dict[str, Any]) -> None:
     """Reattach ``apps`` to ``raw`` and write config.yaml atomically.
 
@@ -1158,6 +1437,7 @@ def _commit_apps(path: Path, raw: dict[str, Any], apps: dict[str, Any]) -> None:
     the ``apps:`` key is absent or null, so mutating that dict alone would
     write a config with no apps in it.
     """
+    _quote_store_countries(apps)
     raw["apps"] = apps
     _atomic_write_yaml(path, raw)
 
@@ -1264,6 +1544,8 @@ def set_app_options(
     delivery: str | None = None,
     cyan: dict[str, Any] | None = None,
     lc_bundle_id: str | None = None,
+    auto_profile: bool | None = None,
+    store_country: str | None = None,
 ) -> None:
     """Patch an existing app entry's options.
 
@@ -1289,7 +1571,8 @@ def set_app_options(
     Note: rewrites config.yaml via yaml.safe_dump — YAML comments are not
     preserved (same documented limitation as add_app / add_repo).
     """
-    if preferred_version is None and delivery is None and not cyan and lc_bundle_id is None:
+    if (preferred_version is None and delivery is None and not cyan
+            and lc_bundle_id is None and auto_profile is None and store_country is None):
         return
     if preferred_version is not None:
         preferred_version = preferred_version.strip()
@@ -1309,12 +1592,22 @@ def set_app_options(
         entry["preferred_version"] = preferred_version
     if delivery is not None:
         entry["delivery"] = delivery
+    if store_country is not None:
+        # Already checked and mapped by the caller (`storefronts.given`);
+        # `_commit_apps` quotes it.
+        entry["store_country"] = store_country
     if lc_bundle_id is not None:
         # "" clears the pin, the way an emptied display_name clears that.
         if lc_bundle_id.strip():
             entry["lc_bundle_id"] = lc_bundle_id.strip()
         else:
             entry.pop("lc_bundle_id", None)
+    if auto_profile is not None:
+        # Off is the default, so it is the key's absence rather than `false`.
+        if auto_profile:
+            entry["auto_profile"] = True
+        else:
+            entry.pop("auto_profile", None)
     if cyan:
         existing = entry.get("cyan")
         merged = dict(existing) if isinstance(existing, dict) else {}
@@ -1504,6 +1797,16 @@ def set_settings(path: Path, **values: Any) -> list[str]:
             raise ConfigError(
                 f"{key} can't be empty",
                 hint="a build can't sign without it; run --check to see what's missing",
+            )
+        if key == "signing_team_id" and not mobileprovision.is_team_id(text):
+            # The same check as a team read off a profile: the team becomes
+            # the Keychain account `--set-p12-password` writes through
+            # `security -i`, so a crafted one is refused here, not quoted later.
+            raise ConfigError(
+                f"{text!r} isn't an Apple team ID" if len(text) <= 40
+                else "that isn't an Apple team ID",
+                hint="an Apple team ID is 10 capital letters and digits, as "
+                "developer.apple.com shows under Membership",
             )
         cleaned[key] = str(_expand(text)) if setting.kind == "path" else text
 

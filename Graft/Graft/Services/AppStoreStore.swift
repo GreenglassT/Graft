@@ -5,7 +5,8 @@ private typealias Flag = CLIContract.Flag
 
 /// Getting an app from the App Store and decrypting it on this Mac — and,
 /// since both write the same cache file, every other way an app's source IPA
-/// gets staged from the app pane.
+/// gets staged from the app pane, and the IPA Add App is given with a new app
+/// (`AddAppSheet.add`).
 ///
 /// The CLI does the work — ipatool downloads the App Store's encrypted IPA,
 /// UnfairPlay decrypts it offline, and the result is staged like any drop (see
@@ -24,10 +25,10 @@ private typealias Flag = CLIContract.Flag
 /// comparison left to get wrong; and the Task handle survives the pane, which
 /// is what lets Stop reach it.
 ///
-/// **Credentials never pass through here.** Signing in to ipatool takes a
-/// password and a 2FA code, and enrolling UnfairPlay takes root; both are
-/// Terminal commands the CLI names in `status.setupCommands` and the Settings
-/// pane offers for copying. Nothing in this app sends either.
+/// **The account lives next door.** Signing in, signing out and enrolling are
+/// `account`'s (`AppStoreAccountStore`): the Apple ID, the password and the
+/// 2FA code go to the CLI's stdin and are wiped once sent, and enrollment runs
+/// as root only behind macOS's administrator prompt.
 ///
 /// One instance, owned by `ContentView` and injected into the app pane and
 /// Settings, for the reason `DevicesStore` is: a view that builds its own
@@ -36,6 +37,13 @@ private typealias Flag = CLIContract.Flag
 @Observable
 final class AppStoreStore {
     let runner: CLIRunner
+    /// Add App's Search (`AppStoreSearchStore`). It lives here so the sheet,
+    /// which is rebuilt each time it opens, needs no store of its own. The
+    /// sheet resets it when it opens and when it closes.
+    let search: AppStoreSearchStore
+    /// Signing in and out, and enrolling (`AppStoreAccountStore`). Reads
+    /// status again through `loadStatus` after each.
+    let account: AppStoreAccountStore
 
     /// The last `--appstore-status` answer, or nil before one arrives or after
     /// one fails. A failed reload clears it: a "signed in" left over from
@@ -46,9 +54,14 @@ final class AppStoreStore {
     /// Not `status != nil`: that cannot tell "never asked" from "asked and it
     /// failed", and the Settings rows need to say "Checking…" for one and the
     /// error for the other. See memory `empty-collection-is-not-a-load-state`.
-    /// A *cancelled* load does not set it — see `loadStatus`.
+    /// A *canceled* load does not set it — see `loadStatus`.
     private(set) var hasLoadedStatus = false
     private(set) var isLoadingStatus = false
+    /// Status reads started, and running now; and which one's answer is the
+    /// one in `status` (see `loadStatus`).
+    private var statusReadsStarted = 0
+    private var statusReadsRunning = 0
+    private var statusReadRecorded = 0
     private(set) var statusError: String?
 
     /// The App Store's version against the cached one, by config app name.
@@ -74,6 +87,8 @@ final class AppStoreStore {
     enum Activity: Equatable {
         case getting
         case providing
+        /// Get (free): the $0 purchase before the get.
+        case claiming
     }
 
     /// What is writing each app's source IPA right now. At most one per app:
@@ -83,6 +98,18 @@ final class AppStoreStore {
     private(set) var stages: [String: AppStoreStage] = [:]
     /// The last get or drop failure per app, until dismissed or retried.
     private(set) var errors: [String: String] = [:]
+
+    /// What "Use it anyway…" would re-run, per app: set only when the CLI
+    /// refused the last get or drop because UnfairPlay couldn't verify the
+    /// decrypt (C-UNVERIFIED), and cleared with that app's error. Kept beside
+    /// the error rather than inside it, so every other failure stays the plain
+    /// sentence it was.
+    enum Retry: Equatable {
+        case get
+        case drop(URL)
+    }
+
+    private(set) var unverifiedRetry: [String: Retry] = [:]
     /// How many gets or drops have staged an IPA for each app. The pane watches
     /// its own app's count to re-read the cached-IPA card.
     private(set) var completions: [String: Int] = [:]
@@ -119,6 +146,10 @@ final class AppStoreStore {
         /// The CLI decrypted it on the way in. Always so for a get; for a drop,
         /// only when the IPA came straight from the App Store encrypted.
         let decrypted: Bool
+        /// What the CLI warned about on the way in — after "Use it anyway…",
+        /// that the decrypt was never verified. Shown under the line, so the
+        /// warning outlives the confirmation that caused it.
+        var warnings: [String] = []
         /// When it landed, against `ConfigStore.buildStartedAt`: a build that
         /// started after this is the next action, and the line is old news.
         var at: ContinuousClock.Instant = .now
@@ -140,28 +171,74 @@ final class AppStoreStore {
     private var tasks: [String: Task<Void, Never>] = [:]
 
     private let now: () -> Date
+    /// Holds sudden and automatic termination off while a get, drop or
+    /// claim runs (whole-diff review, app-3).
+    private let hold: TerminationHold
 
     /// `now` exists for the freshness window's test; production passes nothing.
-    init(runner: CLIRunner, now: @escaping () -> Date = Date.init) {
+    /// `shell` is the account store's administrator shell, and has no default:
+    /// `GraftApp` passes the real one, and every test a fake, so a forgotten
+    /// one is a compile error (`NoRealDefaultsTests`; the real shells also
+    /// refuse in a test host, `AdminShell.insideTests`). Last, so a call that
+    /// passes `now` reads `runner, now, shell`.
+    /// `hold` is the account store's too, for enrollment.
+    init(
+        runner: CLIRunner, now: @escaping () -> Date = Date.init, shell: PrivilegedShell,
+        hold: TerminationHold = .shared
+    ) {
         self.runner = runner
         self.now = now
+        self.hold = hold
+        self.search = AppStoreSearchStore(runner: runner)
+        self.account = AppStoreAccountStore(runner: runner, shell: shell, hold: hold)
+        account.onChange = { [weak self] in await self?.loadStatus() }
+        account.onAccountChange = { [weak self] in self?.forgetLicences() }
+        account.blockedBy = { [weak self] in self?.accountBlockedReason }
     }
 
+    // MARK: Account actions against gets (the review's critic)
+
+    static let getRunningReason = "Wait for the App Store get to finish, or stop it, first."
+    static let accountBusyReason = "Wait for the App Store sign-in, sign-out or setup in Settings to finish."
+
+    /// Why Sign In, Sign Out and Set Up Decryption must wait: a get or Get
+    /// (free) is running, and ipatool is reading the sign-in under it.
+    var accountBlockedReason: String? {
+        activity.values.contains { $0 == .getting || $0 == .claiming } ? Self.getRunningReason : nil
+    }
+
+    /// Why Get latest and Get (free) must wait: a sign-in, sign-out or
+    /// enrollment is changing what they would use.
+    var getBlockedReason: String? { account.isBusy ? Self.accountBusyReason : nil }
+
     static func statusArgs() -> [String] { [Flag.json, Flag.appstoreStatus] }
+    static func claimArgs(app: String) -> [String] { [Flag.json, Flag.appstoreClaim, Flag.app, app] }
     static func checkArgs(app: String) -> [String] { [Flag.json, Flag.appstoreCheck, Flag.app, app] }
-    static func getArgs(app: String) -> [String] { [Flag.json, Flag.appstoreGet, Flag.app, app] }
+    static func getArgs(app: String, allowUnverified: Bool = false) -> [String] {
+        [Flag.json, Flag.appstoreGet, Flag.app, app]
+            + (allowUnverified ? [Flag.allowUnverified] : [])
+    }
 
     // MARK: Status
 
     /// Read `--appstore-status`.
     ///
-    /// **A cancelled load changes nothing but `isLoadingStatus`.** Settings
+    /// **A canceled load changes nothing but `isLoadingStatus`.** Settings
     /// starts this from a `.task`, which SwiftUI cancels when the pane goes
     /// away; the runner then kills the CLI, and that arrives here as an
     /// ordinary non-zero exit (`runOnce` never checks cancellation). Recording
     /// it would latch a failure nobody had — `hasLoadedStatus` true with an
     /// error — and the `.task` gate would never load again.
+    ///
+    /// **Reads can overlap** (Settings' Refresh, the sign-in sheet's own
+    /// read, a reload after a sign-in), and one that started earlier can
+    /// finish later. Its older answer is dropped rather than put over a newer
+    /// one: a second of a stale "signed in" before the legacy state was the
+    /// owner's try12 report. `isLoadingStatus` holds while any read runs.
     func loadStatus() async {
+        statusReadsStarted += 1
+        let started = statusReadsStarted
+        statusReadsRunning += 1
         isLoadingStatus = true
         let record: AppStoreStatusRecord?
         let failure: String?
@@ -175,11 +252,109 @@ final class AppStoreStore {
             record = nil
             failure = error.localizedDescription
         }
-        isLoadingStatus = false
-        guard !Task.isCancelled else { return }
+        statusReadsRunning -= 1
+        isLoadingStatus = statusReadsRunning > 0
+        guard !Task.isCancelled, started > statusReadRecorded else { return }
+        statusReadRecorded = started
         status = record
         statusError = failure
         hasLoadedStatus = true
+        if let record {
+            let now = Self.account(of: record)
+            if let lastAccount, Self.isSwitch(from: lastAccount, to: now) { forgetLicences() }
+            lastAccount = Self.remembered(lastAccount, now)
+        }
+    }
+
+    // MARK: Sign In… (fix-check #10)
+
+    /// Whether status has been read since Sign In… last opened. Until it
+    /// has, the sheet can't say which ipatool gets the password.
+    private(set) var hasCheckedForSignIn = false
+
+    /// Sign In…'s first step, as the sheet opens: read status again, so the
+    /// "goes to another ipatool" note describes the ipatool `--appstore-login`
+    /// will run now, not the one a status read earlier in the session named
+    /// (config.yaml can change under the app). A canceled read (the sheet
+    /// closed) leaves the sheet unchecked.
+    func checkBeforeSignIn() async {
+        hasCheckedForSignIn = false
+        await loadStatus()
+        guard !Task.isCancelled else { return }
+        hasCheckedForSignIn = true
+    }
+
+    /// The ipatool the sign-in sheet describes, and the only one its Sign In
+    /// sends the password to: from a status read since the sheet opened, or
+    /// a newer one (a sign-in reads status again after any outcome). nil
+    /// before that read, and when it failed.
+    var signInIpatool: AppStoreStatusRecord.IPATool? {
+        hasCheckedForSignIn ? status?.ipatool : nil
+    }
+
+    /// The sheet's Sign In: `account.startSignIn` with `--expect-ipatool` set
+    /// to `signInIpatool`'s path, so the CLI refuses ("ipatool-changed")
+    /// rather than type the password into an ipatool the sheet didn't name.
+    /// False, with the password wiped, before the sheet's status read.
+    @discardableResult
+    func startSignIn(email: String, password: inout [UInt8]) -> Bool {
+        guard let ipatool = signInIpatool else {
+            Secret.wipe(&password)
+            return false
+        }
+        return account.startSignIn(email: email, password: &password, expectedIpatool: ipatool.path)
+    }
+
+    /// Who status says is signed in, as far as a license answer depends on it.
+    struct SignedInAccount: Equatable {
+        let signedIn: Bool?
+        let email: String?
+        let legacy: Bool?
+    }
+
+    static func account(of status: AppStoreStatusRecord) -> SignedInAccount {
+        SignedInAccount(
+            signedIn: status.ipatool.signedIn, email: status.ipatool.email, legacy: status.ipatool.legacySignin
+        )
+    }
+
+    /// Whether status now names another Apple ID than before: signed in,
+    /// then signed out; one email, then another; or Graft 1.x's sign-in,
+    /// then Graft's own. Not a change to or from an answer status couldn't
+    /// give: a login keychain that doesn't answer reads as signed in "nil"
+    /// with no email, and a flap of that would otherwise clear every claim's
+    /// banner and offer (the fix-check's critic).
+    nonisolated static func isSwitch(from old: SignedInAccount, to new: SignedInAccount) -> Bool {
+        if old.signedIn == true, new.signedIn == false { return true }
+        if let was = old.email, let now = new.email, was != now { return true }
+        return old.legacy == true && new.legacy == false && new.signedIn == true
+    }
+
+    /// What the next status is compared with: this one's answers, and the
+    /// last answer for whatever this one couldn't say, so Apple ID A, then no
+    /// answer, then B is still a switch. Signed out has no email.
+    nonisolated static func remembered(_ old: SignedInAccount?, _ new: SignedInAccount) -> SignedInAccount {
+        SignedInAccount(
+            signedIn: new.signedIn ?? old?.signedIn,
+            email: new.signedIn == false ? nil : new.email ?? old?.email,
+            legacy: new.legacy ?? old?.legacy
+        )
+    }
+
+    /// The last successful statuses' account (`remembered`), kept across a
+    /// failed reload so a switch seen after one is still a switch.
+    private var lastAccount: SignedInAccount?
+
+    /// The Apple ID changed: a sign-in, a sign-out, or status naming another
+    /// account. Every license answer and Get (free) offer was about the one
+    /// before, and so is the banner that came with each (review part 4, #8).
+    /// A claim can't be running: account actions wait for gets and claims.
+    func forgetLicences() {
+        for app in licenseNeeded.keys where activity[app] == nil {
+            errors[app] = nil
+            licenseNeeded[app] = nil
+            claimConfirmations[app] = nil
+        }
     }
 
     // MARK: Version check
@@ -192,7 +367,7 @@ final class AppStoreStore {
     /// time. A get or drop that stages a file forces a fresh one, and so does
     /// the row's refresh button.
     ///
-    /// Cancelled — an app switch cancels the pane's `.task` — it records
+    /// Canceled — an app switch cancels the pane's `.task` — it records
     /// nothing, for `loadStatus`'s reason: a killed CLI is not "couldn't check".
     func checkVersion(app: String, context: VersionContext? = nil, force: Bool = false) async {
         if !force, let last = checkedAt[app], last.context == context,
@@ -226,29 +401,307 @@ final class AppStoreStore {
     func isBusy(_ app: String) -> Bool { activity[app] != nil }
     func isGetting(_ app: String) -> Bool { activity[app] == .getting }
 
-    func dismissError(app: String) { errors[app] = nil }
+    func dismissError(app: String) {
+        errors[app] = nil
+        unverifiedRetry[app] = nil
+        licenseNeeded[app] = nil
+        claimConfirmations[app] = nil
+    }
+
+    // MARK: A license the Apple ID doesn't have
+
+    /// What a get refused for want of a license said, per app: the button the
+    /// row shows instead of Get latest. Cleared by the next get, by a get or
+    /// drop that stages, and with the app's error.
+    struct LicenseNeed: Equatable {
+        let price: Double?
+        let formattedPrice: String?
+        let trackId: Int?
+        /// Whether Get (free) is still the answer. After a claim was tried and
+        /// didn't get the app, it isn't: the row offers Open in App Store.
+        var claim: Claim = .offer
+
+        enum Claim: Equatable {
+            /// Not tried yet.
+            case offer
+            /// The CLI refused the claim as paid (`ClaimRefusedPaid`).
+            case refusedPaid
+            /// The claim failed some other way. That includes ipatool's own
+            /// "paid apps" refusal (the Apple ID's storefront prices it),
+            /// which reaches the app only as stderr, with no event: this side
+            /// can't tell it from a dropped connection without matching
+            /// words, so no failed claim is offered again from here.
+            /// Dismissing the banner starts over from Get latest.
+            case failed
+            /// The claim said the Apple ID already owns it, and the get still
+            /// wanted a license (`NeedsLicense.ownedButRefusedMessage`).
+            case alreadyOwned
+            /// The claim said it worked, not already owned, and the get still
+            /// wanted a license: Apple took the request and hasn't added the
+            /// app, as with Ask to Buy waiting for a parent
+            /// (`NeedsLicense.requestedButRefusedMessage`).
+            case requested
+        }
+
+        var isFree: Bool { price == 0 }
+        /// Get (free): free, and no claim has been tried and failed.
+        var offersClaim: Bool { isFree && claim == .offer }
+        var storeURL: URL? { trackId.flatMap { URL(string: "https://apps.apple.com/app/id\($0)") } }
+    }
+
+    private(set) var licenseNeeded: [String: LicenseNeed] = [:]
+
+    func isClaiming(_ app: String) -> Bool { activity[app] == .claiming }
+
+    nonisolated static let signedOutReason = "Sign in to the App Store in Settings › App Store first."
+
+    /// Why Get (free) can't run now, or nil. A claim adds the app to the
+    /// signed-in Apple ID's purchases, so not while status says nobody is
+    /// signed in, or only Graft 1.x's ipatool is. Status not read yet is no
+    /// reason: the CLI checks again.
+    var claimBlockedReason: String? {
+        if let getBlockedReason { return getBlockedReason }
+        guard let ipa = status?.ipatool else { return nil }
+        return ipa.signedIn == false || ipa.legacySignin == true ? Self.signedOutReason : nil
+    }
+
+    /// The confirmation Get (free) asks first: one click is a permanent
+    /// entry in an Apple ID's purchase history.
+    nonisolated static func claimConfirmation(app: String, email: String?) -> (title: String, message: String) {
+        let whose = email.map { "the Apple ID \($0)" } ?? "this Apple ID"
+        return (
+            "Get \(app) for free?",
+            "Graft adds \(app) to \(whose)'s purchases, at no cost, as Get in the App Store would. "
+                + "That's permanent: it stays in the purchase history. Then Graft downloads it."
+        )
+    }
+
+    // MARK: Who Get (free) buys for (whole-diff review, get-4)
+
+    /// What an app's Get (free) confirmation names: the Apple ID a status read
+    /// made as the button was pressed said is signed in. ipatool claims for
+    /// whoever is signed in when it runs, so the email shown is that read's,
+    /// never one cached from earlier in the session: an Apple ID changed in
+    /// Terminal since would otherwise get a purchase the dialog put another
+    /// name on.
+    struct ClaimConfirmation: Equatable {
+        /// nil when status says signed in but `auth info` gave no email:
+        /// the dialog then says "this Apple ID".
+        let email: String?
+    }
+
+    /// Apps whose Get (free) is reading status before it asks.
+    private(set) var checkingClaim: Set<String> = []
+    /// Each app's confirmation, from that read, until it is answered.
+    private(set) var claimConfirmations: [String: ClaimConfirmation] = [:]
+
+    static let checkingClaimLine = "Checking which Apple ID is signed in…"
+
+    /// Why Get (free) doesn't claim, said in the app's banner instead.
+    enum ClaimRefusal: Equatable {
+        /// The status read failed: nobody can say who would get the app.
+        case couldNotCheck(String)
+        /// Nobody is signed in, or only Graft 1.x's ipatool is.
+        case signedOut
+        /// Status couldn't tell (a locked keychain, `auth info` silent), with
+        /// the CLI's sentence for why when it sent one.
+        case couldNotTell(String?)
+        /// Another Apple ID than the one the license answer or the
+        /// confirmation was about, with its email when status has one. Its
+        /// license answer is dropped, as `forgetLicences` drops them.
+        case switched(to: String?)
+
+        var message: String {
+            switch self {
+            case let .couldNotCheck(why):
+                return "Not claimed: Graft couldn't check which Apple ID is signed in to the App Store (\(why)). "
+                    + "Press Get (free) to try again."
+            case .signedOut:
+                return "Not claimed: no Apple ID is signed in to the App Store. " + AppStoreStore.signedOutReason
+            case let .couldNotTell(why):
+                return "Not claimed: Graft couldn't tell which Apple ID is signed in to the App Store, "
+                    + "so it can't say whose purchases the app would go to."
+                    + (why.map { " " + $0 } ?? " Press Get (free) to try again.")
+            case let .switched(email):
+                return "Not claimed: the Apple ID signed in to the App Store changed"
+                    + (email.map { " (it's now \($0))" } ?? "")
+                    + ". Press Get latest to check this app for it."
+            }
+        }
+    }
+
+    /// Whether status lets Get (free) claim, and if not, why. `switched` is
+    /// whether it names another Apple ID than the claim is meant for.
+    nonisolated static func claimRefusal(
+        status: AppStoreStatusRecord?, statusError: String?, switched: Bool
+    ) -> ClaimRefusal? {
+        guard let ipa = status?.ipatool else { return .couldNotCheck(statusError ?? "no App Store status") }
+        if ipa.signedIn == false || ipa.legacySignin == true { return .signedOut }
+        guard ipa.signedIn == true else {
+            return .couldNotTell(ipa.unknownMessage.flatMap { $0.isEmpty ? nil : $0 })
+        }
+        return switched ? .switched(to: ipa.email) : nil
+    }
+
+    /// Say `refusal` in `app`'s banner; a switch also drops the license
+    /// answer, which was about the other Apple ID.
+    private func refuseClaim(app: String, _ refusal: ClaimRefusal) {
+        errors[app] = refusal.message
+        if case .switched = refusal { licenseNeeded[app] = nil }
+    }
+
+    /// Get (free)'s first step, as the button is pressed: read status again,
+    /// then ask, naming the Apple ID that read found
+    /// (`claimConfirmations[app]`). A read that failed, nobody signed in, an
+    /// Apple ID status can't name, or one other than the last status named
+    /// (changed in Terminal since) is refused in words, and nothing is asked.
+    func checkBeforeClaim(app: String) async {
+        guard activity[app] == nil, licenseNeeded[app]?.offersClaim == true, claimBlockedReason == nil,
+              !checkingClaim.contains(app) else { return }
+        checkingClaim.insert(app)
+        claimConfirmations[app] = nil
+        let before = lastAccount
+        await loadStatus()
+        checkingClaim.remove(app)
+        // A drop started meanwhile, or the banner was closed: nothing to ask.
+        guard activity[app] == nil else { return }
+        let switched = before.flatMap { old in status.map { Self.isSwitch(from: old, to: Self.account(of: $0)) } }
+        if let refusal = Self.claimRefusal(status: status, statusError: statusError, switched: switched ?? false) {
+            refuseClaim(app: app, refusal)
+            return
+        }
+        guard licenseNeeded[app]?.offersClaim == true else { return }
+        claimConfirmations[app] = ClaimConfirmation(email: status?.ipatool.email)
+    }
+
+    /// The confirmation's Cancel, or the dialog closing.
+    func cancelClaim(app: String) {
+        claimConfirmations[app] = nil
+    }
+
+    /// Get (free), confirmed: the $0 purchase, then, once it worked, the get
+    /// itself. The CLI refuses anything but a free app; this asks only for
+    /// one the get's refusal said was free, and that no claim has failed for
+    /// since, and only while status still names the Apple ID `confirmed`
+    /// named: one changed since is refused in words.
+    @discardableResult
+    func startClaim(app: String, confirmed: ClaimConfirmation) -> Bool {
+        claimConfirmations[app] = nil
+        guard activity[app] == nil else { return false }
+        if let refusal = Self.claimRefusal(
+            status: status, statusError: statusError, switched: status?.ipatool.email != confirmed.email
+        ) {
+            refuseClaim(app: app, refusal)
+            return false
+        }
+        guard licenseNeeded[app]?.offersClaim == true, claimBlockedReason == nil else { return false }
+        activity[app] = .claiming
+        errors[app] = nil
+        tasks[app] = Task { [weak self] in await self?.runClaim(app: app) }
+        return true
+    }
+
+    private func runClaim(app: String) async {
+        var failure: Error?
+        var alreadyOwned = false
+        hold.begin(TerminationHold.claiming)
+        do {
+            let events = try await runner.streamEvents(
+                Self.claimArgs(app: app), failing: "Get (free)", refusal: .appStoreClaim
+            )
+            alreadyOwned = events.contains { event in
+                if case let .appStoreClaimed(record) = event { return record.alreadyOwned }
+                return false
+            }
+        } catch {
+            failure = error
+        }
+        hold.end(TerminationHold.claiming)
+        let cancelled = Task.isCancelled
+        activity[app] = nil
+        tasks[app] = nil
+        guard !cancelled else { return }
+        if let failure {
+            errors[app] = failure.localizedDescription
+            let earlier = licenseNeeded[app]
+            if let paid = failure as? ClaimRefusedPaid {
+                licenseNeeded[app] = LicenseNeed(
+                    price: paid.price, formattedPrice: paid.formattedPrice,
+                    trackId: paid.trackId ?? earlier?.trackId, claim: .refusedPaid
+                )
+            } else {
+                licenseNeeded[app] = LicenseNeed(
+                    price: earlier?.price, formattedPrice: earlier?.formattedPrice,
+                    trackId: earlier?.trackId, claim: .failed
+                )
+            }
+            return
+        }
+        licenseNeeded[app] = nil
+        beginGet(app: app, allowUnverified: false, afterClaim: alreadyOwned ? .alreadyOwned : .claimed)
+    }
+
+    /// What the claim before a get said, which decides what a needs-license
+    /// refusal of that get means.
+    enum AfterClaim: Equatable {
+        case claimed
+        case alreadyOwned
+    }
 
     /// Start a get for `app`, owned by this store. False when something is
     /// already writing that app's source IPA.
+    ///
+    /// `allowUnverified` only ever comes from `useUnverified`: a first try
+    /// never stages a decrypt nobody could verify.
     @discardableResult
-    func startGet(app: String) -> Bool {
+    func startGet(app: String, allowUnverified: Bool = false) -> Bool {
+        beginGet(app: app, allowUnverified: allowUnverified, afterClaim: nil)
+    }
+
+    @discardableResult
+    private func beginGet(app: String, allowUnverified: Bool, afterClaim: AfterClaim?) -> Bool {
         guard activity[app] == nil else { return false }
+        if let getBlockedReason {
+            // Not silent: Add App's "Get it after adding" lands here too.
+            errors[app] = getBlockedReason
+            return false
+        }
         activity[app] = .getting
         errors[app] = nil
+        unverifiedRetry[app] = nil
+        licenseNeeded[app] = nil
         stages[app] = nil
         staged[app] = nil
         tasks[app] = Task { [weak self] in
-            await self?.run(app: app, source: .appStore) { try await $0.streamGet(app: app) }
+            await self?.run(app: app, source: .appStore, retry: .get, afterClaim: afterClaim) {
+                try await $0.streamGet(app: app, allowUnverified: allowUnverified)
+            }
         }
         return true
     }
 
-    /// Stop `app`'s running get. Cancelling the Task makes the runner SIGTERM
-    /// the CLI, whose scoped handler deletes the encrypted download on the way
-    /// out (`appstore._stop_cleans_up`). Not reported as an error: the user
-    /// asked for it.
+    /// "Use it anyway…", confirmed: re-run the get or drop the CLI just
+    /// refused as unverified, with `--allow-unverified`. False when there is
+    /// no such refusal to answer, or something is already writing the app's
+    /// source IPA. The CLI's warning comes back on `staged[app].warnings`.
+    @discardableResult
+    func useUnverified(app: String, config: ConfigStore) -> Bool {
+        guard activity[app] == nil, let retry = unverifiedRetry[app] else { return false }
+        switch retry {
+        case .get:
+            return startGet(app: app, allowUnverified: true)
+        case let .drop(fileURL):
+            return startProvide(app: app, fileURL: fileURL, config: config, allowUnverified: true)
+        }
+    }
+
+    /// Stop `app`'s running get, or its Get (free). Canceling the Task makes
+    /// the runner SIGTERM the CLI, whose scoped handler deletes the encrypted
+    /// download on the way out (`appstore._stop_cleans_up`). Not reported as
+    /// an error: the user asked for it. A stopped claim leaves Get (free) on
+    /// offer, as it was.
     func stopGet(app: String) {
-        guard activity[app] == .getting else { return }
+        guard activity[app] == .getting || activity[app] == .claiming else { return }
         tasks[app]?.cancel()
     }
 
@@ -259,20 +712,25 @@ final class AppStoreStore {
     /// A refusal is not silent: the drop zone accepted the file, so the user
     /// is told why nothing happened, in the same banner a failure uses.
     @discardableResult
-    func startProvide(app: String, fileURL: URL, config: ConfigStore) -> Bool {
+    func startProvide(
+        app: String, fileURL: URL, config: ConfigStore, allowUnverified: Bool = false
+    ) -> Bool {
         if let busy = activity[app] {
-            errors[app] = busy == .getting
-                ? "Not staged: an App Store get is running for this app. "
-                    + "Wait for it, or press Stop, then drop the IPA again."
-                : "Not staged: another IPA is still being staged for this app."
+            errors[app] = Self.busyRefusal(busy)
             return false
         }
         activity[app] = .providing
         errors[app] = nil
+        unverifiedRetry[app] = nil
         staged[app] = nil
         tasks[app] = Task { [weak self] in
-            await self?.run(app: app, source: .drop(filename: fileURL.lastPathComponent)) { store in
-                try await config.provideIPA(appName: app, fileURL: fileURL) { [weak store] stage in
+            await self?.run(
+                app: app, source: .drop(filename: fileURL.lastPathComponent),
+                retry: .drop(fileURL)
+            ) { store in
+                try await config.provideIPA(
+                    appName: app, fileURL: fileURL, allowUnverified: allowUnverified
+                ) { [weak store] stage in
                     store?.noteStage(stage, for: app)
                 }
             }
@@ -280,34 +738,85 @@ final class AppStoreStore {
         return true
     }
 
+    /// Why a drop was refused, in words true of what is running (review part
+    /// 4, #11: a claim stages nothing, so "another IPA" was false).
+    static func busyRefusal(_ busy: Activity) -> String {
+        switch busy {
+        case .getting:
+            return "Not staged: an App Store get is running for this app. "
+                + "Wait for it, or press Stop, then drop the IPA again."
+        case .claiming:
+            return "Not staged: Graft is getting this app for your Apple ID (Get (free)). "
+                + "Wait for it, or press Stop, then drop the IPA again."
+        case .providing:
+            return "Not staged: another IPA is still being staged for this app."
+        }
+    }
+
     /// The tail every get and drop shares. The slot is released *before* the
     /// follow-up version check, so a second operation can start the moment the
     /// first has staged — and nothing after that point writes `activity`, so a
     /// new operation's claim cannot be clobbered by this one finishing.
+    ///
+    /// `retry` is what "Use it anyway…" re-runs, recorded only when the
+    /// failure is the CLI's unverified refusal (`UnverifiedDecrypt`).
     private func run(
-        app: String, source: Staged.Source,
+        app: String, source: Staged.Source, retry: Retry, afterClaim: AfterClaim? = nil,
         _ work: (AppStoreStore) async throws -> ConfigStore.ProvidedIPA?
     ) async {
         var failure: Error?
         var provided: ConfigStore.ProvidedIPA?
+        // Not under the version check at the end: by then it has staged.
+        let reason = source == .appStore ? TerminationHold.gettingFromAppStore : TerminationHold.staging
+        hold.begin(reason)
         do {
             provided = try await work(self)
         } catch {
             failure = error
         }
+        hold.end(reason)
         let cancelled = Task.isCancelled
         activity[app] = nil
         stages[app] = nil
         tasks[app] = nil
         if let failure {
-            if !cancelled { errors[app] = failure.localizedDescription }
+            guard !cancelled else { return }
+            errors[app] = failure.localizedDescription
+            if failure is UnverifiedDecrypt { unverifiedRetry[app] = retry }
+            if let need = failure as? NeedsLicense {
+                // After a claim, "It's free: Get (free)" again would be a loop:
+                // owned, by Apple's own account, and still no license (review
+                // part 4, #9); or a claim Apple accepted that hasn't added the
+                // app, as when Ask to Buy waits for a parent, where each
+                // confirm could send another request (fix-check #14).
+                let claim: LicenseNeed.Claim
+                switch afterClaim {
+                case .alreadyOwned?:
+                    claim = .alreadyOwned
+                    errors[app] = NeedsLicense.ownedButRefusedMessage
+                case .claimed?:
+                    claim = .requested
+                    errors[app] = NeedsLicense.requestedButRefusedMessage
+                case nil:
+                    claim = .offer
+                }
+                licenseNeeded[app] = LicenseNeed(
+                    price: need.price, formattedPrice: need.formattedPrice, trackId: need.trackId, claim: claim
+                )
+            }
             return
         }
         guard !cancelled else { return }
+        // Staged: whatever a license refusal said, the cache now has a copy,
+        // so the row goes back to Get latest. A drop is the one way here with
+        // a refusal still standing (whole-diff review, get-1): a get clears
+        // it as it starts, but a drop doesn't, and the row stayed on Get
+        // (free) or Open in App Store, with no banner left to dismiss.
+        licenseNeeded[app] = nil
         if let provided {
             staged[app] = Staged(
                 source: source, version: provided.record.version,
-                decrypted: provided.decrypted
+                decrypted: provided.decrypted, warnings: provided.warnings
             )
         }
         serial += 1
@@ -320,9 +829,13 @@ final class AppStoreStore {
     /// work `startGet` runs in its slot, never called outside one. Throws the
     /// CLI's own message and hint, which is where "tap Get on a device first"
     /// and the login command come from.
-    private func streamGet(app: String) async throws -> ConfigStore.ProvidedIPA? {
+    ///
+    /// An unverified decrypt throws `UnverifiedDecrypt` instead, whose words are
+    /// the app's: the CLI's hint for it is a Terminal command.
+    private func streamGet(app: String, allowUnverified: Bool) async throws -> ConfigStore.ProvidedIPA? {
         let events = try await runner.streamEvents(
-            Self.getArgs(app: app), failing: "Get from App Store"
+            Self.getArgs(app: app, allowUnverified: allowUnverified), failing: "Get from App Store",
+            refusal: .appStoreGet
         ) { [weak self] event in
             self?.note(event, forGetOf: app)
         }

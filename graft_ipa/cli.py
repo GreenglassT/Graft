@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import fcntl
 import functools
 import inspect
 import json
@@ -35,22 +36,27 @@ from rich.table import Table
 from . import (
     __version__,
     appstore,
+    appstore_search,
     artwork,
     canister,
+    capabilities,
     deb,
     decrypt_runner,
     device_apps,
+    device_session,
     host,
     itunes,
     lc_runner,
     playcover,
     repo,
+    storefronts,
     updates,
 )
 from . import ipa_inspect as ipa_inspect_module
 from . import provide_ipa as provide_ipa_module
 from .build_log import BuildLog, _target_of, sha256_of
 from .config import (
+    ACCOUNT_FREE,
     DEFAULT_ARCHIVE_KEEP,
     SETTINGS,
     AppConfig,
@@ -58,6 +64,7 @@ from .config import (
     _expand,
     _load_raw,
     add_app,
+    app_key,
     add_repo,
     default_built_dir,
     default_cache_dir,
@@ -65,13 +72,14 @@ from .config import (
     default_state_dir,
     default_tweaks_dir,
     load_config,
+    paid_account_required,
+    read_app_store_connect,
     read_settings,
     remove_app,
     remove_repo,
     set_app_options,
     set_app_tweaks,
     set_settings,
-    slugify_name,
 )
 from .child_env import child_env
 from .cyan_runner import run_cyan
@@ -195,7 +203,7 @@ class _PipeAwareConsole(Console):
 console = _PipeAwareConsole()
 # Errors go to stderr so subprocess consumers (the GUI) can surface them via
 # `result.stderr` without parsing the JSON-events stdout. Rich auto-disables
-# colour when stderr isn't a TTY (i.e. when piped).
+# color when stderr isn't a TTY (i.e. when piped).
 err_console = _PipeAwareConsole(stderr=True)
 
 
@@ -270,7 +278,7 @@ def _warn(
     MarkupError and `[foo]` is deleted silently. Raised from `_record_history`
     that aborted `__exit__` before `build-end` — a warning about bookkeeping
     taking out the one event `_BuildReport` exists to guarantee. Escaping only
-    the interpolated half is what keeps the `warning:` prefix coloured; the
+    the interpolated half is what keeps the `warning:` prefix colored; the
     `log` event carries the original text because JSON has no markup.
 
     `startup` marks a notice given before any verb runs — a directory moved
@@ -283,7 +291,7 @@ def _warn(
     `startup` for results; stderr gets it as any other warning.
     """
     if carried_by is not None and carried_by not in GUI_EVENTS:
-        # Checked before the suppression it authorises, and raised rather than
+        # Checked before the suppression it authorizes, and raised rather than
         # ignored for the same reason `_line` raises: the alternative is a
         # warning that reaches nobody, which is indistinguishable from no
         # warning at all. `carried_by` is a literal at every call site
@@ -302,6 +310,26 @@ def _warn(
         else:
             emitter.emit("log", source="warning", line=message)
     err_console.print(f"[yellow]warning:[/yellow] {escape(message)}")
+
+
+def _warn_ungranted_capabilities(
+    emitter: JsonEmitter | None, app_cfg: AppConfig, ipa: Path, profile: Path,
+) -> None:
+    """Stage 4's warning, before zsign runs: what `ipa`'s own binaries ask
+    for that `profile` doesn't grant (`capabilities`). zsign signs the
+    profile's entitlements, so those are gone on the device; an app that
+    asks for an app group and gets none traps at launch. Warned, not
+    refused: the build is the user's call. Extensions are left out when
+    cyan removes them (`strip_extensions`): they won't be on the device. So
+    is the Watch app's when cyan removes the Watch app (`-w`,
+    `cyan_runner.removes_watch`)."""
+    from .cyan_runner import removes_watch
+
+    gaps = capabilities.missing_for(ipa, profile, extensions=not app_cfg.cyan.strip_extensions,
+                                    watch=not removes_watch(app_cfg.cyan))
+    label = app_cfg.cyan.display_name or app_cfg.name
+    for line in capabilities.warnings(label, app_cfg.name, gaps):
+        _warn(emitter, line)
 
 
 def _print_checks(results) -> None:
@@ -343,6 +371,8 @@ def _do_check(cfg: Config, emitter: JsonEmitter | None = None) -> bool:
                 payload["action_key"] = r.action_key
             if r.info:
                 payload["info"] = True
+            if r.source:
+                payload["source"] = r.source
             emitter.emit("preflight-check", **payload)
         ok_count = sum(1 for r in results if r.ok)
         emitter.emit(
@@ -613,6 +643,7 @@ class _BuildReport:
         self._started = 0.0
         self._entered = False
         self._tee: TextIO | None = None
+        self._trust_to_tee: contextlib.AbstractContextManager[None] | None = None
         # Stays `None` for a re-install: it re-ships an archive that already has
         # a row, and a second row would claim a build that never ran. It also
         # stays None for a build whose log.sqlite wouldn't open — that failure
@@ -624,6 +655,10 @@ class _BuildReport:
         self.signing_team: str | None = None
         self.udid: str | None = None
         self.log_path: Path | None = None
+        # This run's share of `retention.lock` (`hold_archives`), and the
+        # sweep to run once it is released (`sweep_when_done`).
+        self._archive_hold: _RetentionLock | None = None
+        self._sweep: tuple[Config, Path | None] | None = None
 
     @property
     def elapsed(self) -> float:
@@ -673,6 +708,77 @@ class _BuildReport:
             # file would otherwise be missing. A saved log the GUI replays from
             # `build-start` onwards must not begin mid-build.
             self._emitter.emit_to_tee("build-start", **self._start_fields)
+            # The trust prompt's live event comes from the dispatch's own
+            # emitter (`_trust_prompts_as_events`), which has no tee, so a
+            # build replayed from Builds had no trace of it (re-check #22).
+            # Written here to this file alone: stdout already has it.
+            emitter = self._emitter
+            self._trust_to_tee = device_session.trust_prompt_listener(
+                lambda line: emitter.emit_to_tee("log", source="device", line=line)
+            )
+            self._trust_to_tee.__enter__()
+
+    def hold_archives(self, cfg: Config) -> None:
+        """Share `retention.lock` from now until the history row is written.
+
+        A build calls this just before it archives its IPA, `--reinstall-build`
+        before it opens the archive it re-ships; `_finish` lets go once the row
+        is written (a re-install writes none, so: once it has delivered). In
+        between, no sweep in any process can move this run's archive to the
+        Trash — not mid-push, and not before the row naming it exists, which
+        would leave a Re-install button pointing at the Trash.
+
+        Waits out a sweep that is running, which is a handful of renames; one
+        that holds the lock past `_RETENTION_LOCK_TIMEOUT` is stuck, and the
+        run fails with this build's `build-end` rather than ship unguarded.
+        """
+        if self._archive_hold is not None:
+            return
+        hold = _RetentionLock(cfg)
+        if not hold.acquire(exclusive=False, wait=_RETENTION_LOCK_TIMEOUT):
+            raise GraftError(
+                "a clean-up of old builds is holding the archive folder",
+                hint="try again in a moment; if no graft is running, "
+                f"the process holding {hold.path} is stopped or stuck",
+            )
+        self._archive_hold = hold
+
+    def sweep_when_done(self, cfg: Config, *, trash_dir: Path | None) -> None:
+        """Run this build's retention sweep once its row is written and its
+        share of the lock released. Called at the end of a build that worked;
+        `_finish` runs it only if the build ended that way."""
+        self._sweep = (cfg, trash_dir)
+
+    def _release_archives(self) -> None:
+        hold, self._archive_hold = self._archive_hold, None
+        if hold is not None:
+            hold.release()
+
+    def _run_sweep(self) -> None:
+        """The build's own sweep. Warns rather than raises, always.
+
+        After `_release_archives`, because a share and an exclusive hold of
+        the same lock in one process conflict like any other two. Takes the
+        lock once, without waiting: another build or a re-install sharing it
+        is delivering, maybe for minutes, and this build has already shipped —
+        so it skips, says so in a line, and the next build's sweep catches up.
+        Its own archive is excluded, so it is never a candidate, even at
+        `archive_keep: 0`. Ahead of build-end, so the prune is part of the
+        build stream a consumer sees rather than a trailer after "done".
+        """
+        if self._sweep is None or self.ipa_path is None:
+            return
+        cfg, trash_dir = self._sweep
+        try:
+            _prune_archives(
+                cfg, keep=cfg.archive_keep, dry_run=False, exclude=[self.ipa_path],
+                wait=0, emitter=self._emitter, trash_dir=trash_dir,
+            )
+        except _RetentionBusy:
+            _warn(self._emitter, "another build is delivering; old archives are cleaned up next time")
+        except Exception as prune_error:
+            # Housekeeping must never turn a shipped build into a failed one.
+            _warn(self._emitter, f"archive retention failed: {prune_error}")
 
     def _record_history(self, error: str | None) -> None:
         """Write the build's history row. Warns rather than raises, always.
@@ -720,8 +826,8 @@ class _BuildReport:
         elapsed = self.elapsed
         # A stop is not a failure (C-STOP): the GUI's Stop arrives as
         # `Stopped`, Ctrl-C as `KeyboardInterrupt`. Neither writes a history
-        # row — the user cancelled a build, nothing failed — and `build-end`
-        # says `stopped`, which the app reads as cancelled rather than as
+        # row — the user canceled a build, nothing failed — and `build-end`
+        # says `stopped`, which the app reads as canceled rather than as
         # "Last build failed / 143".
         stopped = isinstance(exc, (Stopped, KeyboardInterrupt))
         error = None if exc is None or stopped else (str(exc) or exc.__class__.__name__)
@@ -750,9 +856,19 @@ class _BuildReport:
         #   at the finished build's file: in a multi-app `--json` run the next
         #   app appended its `build-start` there, and replaying app 1's saved
         #   log showed a transcript that changed apps halfway through.
+        #
+        # Between the row and `build-end`: this run lets go of its share of
+        # `retention.lock` whatever happened, and only then, on success, runs
+        # its own sweep — under the signal mask with the rest of these, which
+        # costs a Stop the few renames a sweep is.
         try:
-            if not stopped:
-                self._record_history(error)
+            try:
+                if not stopped:
+                    self._record_history(error)
+            finally:
+                self._release_archives()
+            if error is None and not stopped:
+                self._run_sweep()
         finally:
             try:
                 self._emit_end(error, elapsed, stopped=stopped)
@@ -795,6 +911,9 @@ class _BuildReport:
         `build-end`, i.e. buying a diagnostic nobody needs by breaking the
         "terminal event last" rule this class is here to keep.
         """
+        listener, self._trust_to_tee = self._trust_to_tee, None
+        if listener is not None:
+            listener.__exit__(None, None, None)
         handle, self._tee = self._tee, None
         if handle is None:
             return
@@ -937,7 +1056,7 @@ def _do_reinstall_build(cfg: Config, build_id: int, emitter: JsonEmitter | None 
         app_name=app_name,
         bundle_id=row["bundle_id"],
         delivery=app_cfg.delivery if app_cfg else None,
-    ):
+    ) as report:
         # Every pre-push guard runs here rather than above, so a re-install that
         # can't start still ends: these all raise, and outside the envelope they
         # produced no build-start and no build-end at all — the Re-install sheet
@@ -960,6 +1079,10 @@ def _do_reinstall_build(cfg: Config, build_id: int, emitter: JsonEmitter | None 
                 f"build {build_id} did not produce a signed IPA — nothing to re-install",
                 hint="pick a row with a green status",
             )
+        # From before the archive is looked at until it is delivered: no sweep
+        # in another process can move it to the Trash mid-push, which at
+        # `archive_keep: 0` is exactly the archive one would take.
+        report.hold_archives(cfg)
         ipa_path = row["ipa_path"]
         if not ipa_path or not Path(ipa_path).exists():
             raise GraftError(
@@ -999,7 +1122,7 @@ def _do_reinstall_build(cfg: Config, build_id: int, emitter: JsonEmitter | None 
             )
         # Through the door the archive was built for, or not at all: the app's
         # mode may have changed since. A LiveContainer archive is unsigned and
-        # ideviceinstaller cannot install it; a sideload archive is signed by
+        # the device won't install it; a sideload archive is signed by
         # zsign with the paid profile, which LiveContainer then runs as such.
         _refuse_other_mode_archive(row, build_id, app_cfg, Path(ipa_path))
 
@@ -1061,7 +1184,7 @@ def _reship(
         # how it was built — the same rule the build path's push follows.
         remote_name = Path(lc_result.documents_path).name
     else:
-        console.print(f"→ re-installing [cyan]{app_name}[/cyan] {row['version']} via ideviceinstaller")
+        console.print(f"→ re-installing [cyan]{app_name}[/cyan] {row['version']} on the device")
         if emitter:
             emitter.emit("stage", name="install", status="start")
         ir = install(ipa, udid=udid, transport=transport, dry_run=False)
@@ -1156,7 +1279,7 @@ def _without_account_data(
     `workdir`, or when the copy fails too, it is an error: nothing ships with
     the data in it.
 
-    `keep_sealed` is for a zsign-signed archive: the licences its signature
+    `keep_sealed` is for a zsign-signed archive: the licenses its signature
     seals stay (`ipa_inspect.sealed_account_data`), since removing them breaks
     the install and re-signing is a rebuild.
     """
@@ -1199,13 +1322,13 @@ def _without_account_data(
     if healed:
         _warn(
             emitter,
-            f"removed the Apple ID metadata and licence files ({len(healed)} entries) "
+            f"removed the Apple ID metadata and license files ({len(healed)} entries) "
             f"from {path.name}, which was made before Graft took them out on staging",
         )
     if keep:
         _warn(
             emitter,
-            f"{path.name} keeps {len(keep)} licence file(s) its signature seals; "
+            f"{path.name} keeps {len(keep)} license file(s) its signature seals; "
             "rebuild it to ship it without them",
         )
     return path
@@ -1311,12 +1434,84 @@ def _human_bytes(n: int) -> str:
     return f"{mb / 1000:.1f} GB" if mb >= 1000 else f"{mb:.1f} MB"
 
 
+#: How long `--prune-builds` waits for builds to finish with their archives,
+#: and how long a build or re-install waits for a sweep to finish. A sweep is a
+#: handful of renames into the Trash; a build delivers for as long as a push
+#: takes, so `--prune-builds` gives up rather than wait that out.
+_RETENTION_LOCK_TIMEOUT = 30.0
+
+
+class _RetentionBusy(GraftError):
+    """A sweep found the retention lock taken for the whole of its wait."""
+
+
+class _RetentionLock:
+    """`retention.lock`: what keeps a sweep off an archive still in flight.
+
+    Two kinds of holder, across processes. A build shares it (`LOCK_SH`) from
+    the moment it archives its IPA until its history row is written, and
+    `--reinstall-build` from before it opens the archive until it has
+    delivered it; any number of those at once (`_BuildReport.hold_archives`).
+    A sweep — `--prune-builds`, or the one a build runs once it has let go of
+    its own share — holds it alone (`LOCK_EX`, `_prune_archives`). So no sweep
+    moves to the Trash an archive a build or re-install is still pushing, or
+    one whose history row is not written yet, and two sweeps take turns rather
+    than plan the same removals (the second then failed on every file the first
+    had moved, exiting 1). This replaced a guess: `--prune-builds` left alone
+    anything written in the last ten minutes, which a build's own sweep did not
+    do and a re-install of an old archive was not covered by.
+
+    `flock`, beside the device dump lock in the cache's `.locks`, so it dies
+    with its holder. Proceeds unlocked where locking is impossible (a lock file
+    it cannot create, a filesystem without `flock`), as the config lock does: a
+    sweep or a build that refuses to run is worse than one that might race.
+    """
+
+    def __init__(self, cfg: Config) -> None:
+        self.path = cfg.cache_dir / ".locks" / "retention.lock"
+        self._fd: int | None = None
+
+    def acquire(self, *, exclusive: bool, wait: float) -> bool:
+        """Take it, trying for up to `wait` seconds (0: once).
+
+        Polled with `LOCK_NB` rather than blocked on, so the wait has an end
+        and a Stop is never stuck behind it. False when another holder kept it
+        the whole time; True when held, or when it cannot be locked at all.
+        """
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError:
+            return True
+        mode = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, mode)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    os.close(fd)
+                    return False
+                time.sleep(0.05)
+            except OSError:
+                break
+        self._fd = fd
+        return True
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            os.close(fd)  # releases the flock
+
+
 def _prune_archives(
     cfg: Config,
     *,
     keep: int,
     dry_run: bool,
     exclude: Iterable[Path] = (),
+    wait: float | None = None,
     emitter: JsonEmitter | None = None,
     trash_dir: Path | None = None,
 ) -> tuple[list[Archive], list[tuple[Archive, str]]]:
@@ -1328,7 +1523,7 @@ def _prune_archives(
     `exclude`.
 
     Archives go to the Trash, not `unlink()`. They are the user's rollback
-    artefacts — the thing `--reinstall-build` re-ships — so a wrong retention
+    artifacts — the thing `--reinstall-build` re-ships — so a wrong retention
     setting should cost a trip to the Trash, not the build. The corollary is
     that pruning frees no disk space until the Trash is emptied, which the
     output says out loud.
@@ -1338,19 +1533,64 @@ def _prune_archives(
     exception would be recorded as a build failure. `trash_dir` is injectable
     for the same reason as `_do_delete_tweak`'s — so tests never touch the real
     `~/.Trash`.
-    """
-    import sqlite3 as _sqlite3
 
+    Planned and carried out holding `retention.lock` alone (`_RetentionLock`),
+    so no archive a build or re-install still shares it for is touched. `wait`
+    is how long to try for it — `_RETENTION_LOCK_TIMEOUT` when None, 0 for a
+    build's own sweep, which skips rather than wait on another build's
+    delivery — and `_RetentionBusy` says it stayed taken.
+    """
+    lock = _RetentionLock(cfg)
+    if not lock.acquire(exclusive=True, wait=_RETENTION_LOCK_TIMEOUT if wait is None else wait):
+        raise _RetentionBusy(
+            "a build is delivering an archived IPA, or another clean-up of old builds is running",
+            hint="try again when it has finished; if no graft is running, "
+            f"the process holding {lock.path} is stopped or stuck",
+        )
     try:
-        plan = plan_prune(cfg.built_dir, keep=keep, exclude=exclude)
-    except ValueError as exc:
-        raise ConfigError(str(exc)) from exc
+        return _prune_archives_locked(
+            cfg, keep=keep, dry_run=dry_run, exclude=exclude,
+            emitter=emitter, trash_dir=trash_dir,
+        )
+    finally:
+        lock.release()
+
+
+def _prune_archives_locked(
+    cfg: Config,
+    *,
+    keep: int,
+    dry_run: bool,
+    exclude: Iterable[Path],
+    emitter: JsonEmitter | None,
+    trash_dir: Path | None,
+) -> tuple[list[Archive], list[tuple[Archive, str]]]:
+    import sqlite3 as _sqlite3
 
     # Deliberately not `BuildLog(db_path)` unconditionally: its constructor
     # creates the file, and pruning before the first build shouldn't leave an
-    # empty history database behind. No log means no ipa_path to clear.
+    # empty history database behind. No log means no ipa_path to clear, and no
+    # way to tell a re-installable archive from one a failed delivery left.
     db_path = cfg.state_dir / "log.sqlite"
     log = BuildLog(db_path) if db_path.exists() else None
+    reinstallable = None
+    if log is not None:
+        try:
+            reinstallable = log.reinstallable_paths()
+        except _sqlite3.Error as exc:
+            # Planning blind is the bug this list exists to prevent: archives
+            # from failed deliveries outranking the last re-installable one.
+            raise GraftError(
+                f"couldn't read the build history to plan a clean-up: {exc}",
+                hint=f"nothing was moved; check {db_path}",
+            ) from exc
+
+    try:
+        plan = plan_prune(
+            cfg.built_dir, keep=keep, exclude=exclude, reinstallable=reinstallable,
+        )
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
     if not emitter and plan.remove:
         console.print(
@@ -1381,6 +1621,11 @@ def _prune_archives(
                 trash_path = move_to_trash(archive.path, trash_dir=trash_dir)
             except OSError as exc:
                 failures.append((archive, str(exc)))
+                # The file stayed, so its rows get their pointer back: a move
+                # that failed must not cost the Re-install button as well.
+                if log is not None:
+                    with contextlib.suppress(_sqlite3.Error):
+                        log.restore_ipa_path(build_ids, archive.path)
                 continue
         removed.append(archive)
         if emitter:
@@ -1478,8 +1723,12 @@ def _do_prune_builds(
             f"--keep must be a non-negative integer, got {effective}",
             hint="use --keep 0 to remove every archive",
         )
+    # Waits up to `_RETENTION_LOCK_TIMEOUT` for builds in other processes —
+    # the app's, a Terminal's — to finish delivering, then refuses
+    # (`_RetentionBusy`, exit 1) with nothing moved. A dry run waits too, so
+    # it lists what the real run would move rather than an archive in flight.
     _removed, failures = _prune_archives(
-        cfg, keep=effective, dry_run=dry_run, emitter=emitter, trash_dir=trash_dir
+        cfg, keep=effective, dry_run=dry_run, emitter=emitter, trash_dir=trash_dir,
     )
     if failures:
         # The work that succeeded stands; this only makes the shell exit code
@@ -1638,7 +1887,7 @@ def _do_artwork(
 
     A hit is reported two ways, and a miss only one. Under `--json` a hit
     emits `artwork`; a miss emits nothing at all, because the GUI already has
-    the right behaviour for "no icon" — the letter tile it draws today — and
+    the right behavior for "no icon" — the letter tile it draws today — and
     an event here would just be machinery with nothing to consume it.
     Without `--json`, though, a miss has to say something: `resolve` swallows
     every exception on every rung (deliberately — see its module docstring),
@@ -1691,7 +1940,10 @@ def _do_artwork(
         # cache could not be *written*, which is a real fault on the machine
         # and the user should hear about it once.
         try:
-            found = artwork.resolve(app_cfg.bundle_id, ipa=ipa, refresh=refresh)
+            found = artwork.resolve(
+                app_cfg.bundle_id, ipa=ipa, refresh=refresh,
+                store_country=app_cfg.store_country,
+            )
         except Exception as e:
             _warn(emitter, f"{name}: couldn't cache artwork ({e})")
             continue
@@ -2087,6 +2339,7 @@ def _print_apps(cfg: Config, states: dict[str, dict[str, Any]]) -> None:
     table.add_column("version pin")
     table.add_column("tweaks")
     table.add_column("delivery")
+    table.add_column("store")
     for name, a in sorted(cfg.apps.items()):
         kind = states.get(name, {}).get("kind", "unknown")
         table.add_row(
@@ -2095,6 +2348,7 @@ def _print_apps(cfg: Config, states: dict[str, dict[str, Any]]) -> None:
             a.preferred_version,
             ", ".join(a.tweaks) or "[dim]none[/dim]",
             f"{_DELIVERY_MARKS.get(kind, '?')} {kind}",
+            a.store_country or "[dim]—[/dim]",
         )
     console.print(table)
 
@@ -2137,6 +2391,83 @@ def _do_search(query: str, emitter: JsonEmitter | None = None) -> None:
     )
 
 
+def _store_note(emitter: JsonEmitter | None, note: str | None) -> None:
+    """Say how a store was chosen (`storefronts.Store.note`): a territory, an
+    alias, or a region with no store. Through `_warn`, so it reaches stderr
+    and, under --json, the event stream."""
+    if note:
+        _warn(emitter, note)
+
+
+def _do_appstore_search(
+    cfg: Config, term: str, *, country: str | None, limit: int | None,
+    emitter: JsonEmitter | None = None,
+) -> None:
+    """Search the App Store: one event per result and the sentinel, or a table.
+
+    A failed search emits `appstore-search-failed` with its reason just before
+    the error goes on to `_fatal`, so the exit status (13, or 2 for a term
+    that isn't text) and stderr are what they always are and the app can tell
+    offline and rate-limited from the rest. Both the sentinel and the failure
+    carry `note`: how the store was chosen, when there is something to say.
+    """
+    store = appstore_search.resolve_country(country)
+    if emitter is None:
+        # Under --json the note is the events' own `note` field instead.
+        _store_note(None, store.note)
+    try:
+        found = appstore_search.search(
+            cfg, term, country=store, limit=limit, with_icons=emitter is not None
+        )
+    except (itunes.ITunesRequestError, appstore_search.InvalidTerm) as e:
+        if emitter:
+            # A lone surrogate can't be written as text, and the app needs none.
+            shown = term.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
+            emitter.emit("appstore-search-failed", term=shown, reason=e.reason, note=store.note)
+        raise
+    if emitter:
+        for hit in found.hits:
+            emitter.emit("appstore-search-result", **appstore_search.event_fields(hit))
+        emitter.emit(
+            "appstore-search-end", term=found.term, country=found.country,
+            count=len(found.hits), note=found.note,
+        )
+        return
+    # Every cell is a listing's own text, so every cell has its control
+    # characters and escape sequences stripped (`printable`), then its markup
+    # escaped (see the note above `_do_add_repo` on markup in values this CLI
+    # did not write).
+    if not found.hits:
+        console.print(
+            f"[yellow]no iPhone apps on the {found.country} App Store match[/yellow] "
+            f"{escape(repr(found.term))}"
+        )
+        return
+    table = Table(
+        title=f"App Store ({found.country}): {len(found.hits)} match(es) for {escape(repr(found.term))}"
+    )
+    # Name and developer keep a minimum width, and the bundle id folds rather
+    # than being cut with "…": it is the value the footer says to copy.
+    table.add_column("name", style="bold", overflow="fold", min_width=8, max_width=28)
+    table.add_column("developer", overflow="fold", min_width=6, max_width=20)
+    table.add_column("price", no_wrap=True)
+    table.add_column("bundle id", style="cyan", overflow="fold")
+    table.add_column("added as", no_wrap=True)
+    for hit in found.hits:
+        r = hit.result
+        table.add_row(*(
+            escape(appstore_search.printable(cell)) for cell in (
+                r.name, r.developer, appstore_search.price_label(r), r.bundle_id,
+                hit.configured_as or "",
+            )
+        ))
+    console.print(table)
+    console.print(
+        "[dim]→ graft --add-app-manual --name NAME --bundle-id BUNDLE_ID "
+        f"--store-country {found.country} adds one, as the Mac app's Add App does[/dim]"
+    )
+
+
 def _do_fetch(
     cfg: Config,
     target: str,
@@ -2175,7 +2506,7 @@ def _do_fetch(
 # The rule the five success lines below follow, and why it is those five.
 #
 # `console.print` parses `[...]` as markup: on rich 15 a closing-tag-shaped
-# token raises MarkupError and an unrecognised opening tag is deleted in
+# token raises MarkupError and an unrecognized opening tag is deleted in
 # silence. Most of this module's interpolations are values it produced itself.
 # These are not — a repo's `Origin:` field, an App Store listing's name, a .deb
 # filename chosen by whoever built it, a URL from argv — and, crucially, each is
@@ -2243,16 +2574,24 @@ def _do_add_app_url(
     emitter: JsonEmitter | None = None,
 ) -> None:
     cfg.require_delivery(delivery)
-    track_id = itunes.parse_id_from_url(url_or_id)
-    info = itunes.lookup(track_id)
-    desired = slugify_name(info.name)
-    app_cfg = {
+    # One parse for both: the store the URL names (`apps.apple.com/gb/app/...`,
+    # or the legacy `itunes.apple.com/gb/app/...`) is asked, and kept as
+    # `store_country` so later lookups ask it too. A URL that names none asks
+    # the chain every lookup shares (`host.look_up`: this Mac's region's
+    # store, then the US), and keeps nothing.
+    link = itunes.parse_app_link(url_or_id)
+    country = link.country
+    info, asked = host.look_up(country, lambda store: itunes.lookup(link.track_id, country=store))
+    desired = app_key(info.name, info.bundle_id)
+    app_cfg: dict[str, Any] = {
         "bundle_id": info.bundle_id,
         "preferred_version": "latest",
         "delivery": delivery,
         "tweaks": [],
         "cyan": _default_cyan_block(info.name),
     }
+    if country:
+        app_cfg["store_country"] = country
     # dedup atomically inside add_app — re-reads disk so concurrent --add-app
     # calls can't race past each other onto the same slug.
     name = add_app(cfg.path, desired, app_cfg, dedup=True)
@@ -2269,6 +2608,12 @@ def _do_add_app_url(
         f"[green]✓[/green] added [bold]{escape(info.name)}[/bold]  "
         f"({escape(info.bundle_id)})  → {escape(str(cfg.path))} apps.{escape(name)}"
     )
+    if not country:
+        console.print(
+            f"[dim]  the URL names no country, so it was looked up in this Mac's region's "
+            f"App Store, then the US one, and found in the {asked} App Store; its checks "
+            "will look the same way[/dim]"
+        )
 
 
 def _do_add_app_manual(
@@ -2278,10 +2623,11 @@ def _do_add_app_manual(
     bundle_id: str,
     display_name: str | None,
     delivery: str,
+    store_country: str | None = None,
     emitter: JsonEmitter | None = None,
 ) -> None:
     cfg.require_delivery(delivery)
-    desired = slugify_name(name)
+    desired = app_key(name, bundle_id)
     # Resolve the post-dedup label preview now; if a collision pushes us to
     # `name_2`, the display name still tracks what the user typed (or the
     # original slug as a fallback) — not the suffixed slug.
@@ -2293,6 +2639,8 @@ def _do_add_app_manual(
         "tweaks": [],
         "cyan": _default_cyan_block(label),
     }
+    if store_country:
+        app_cfg["store_country"] = store_country
     final_name = add_app(cfg.path, desired, app_cfg, dedup=True)
     if emitter:
         emitter.emit(
@@ -2800,9 +3148,17 @@ PLAYCOVER_BUNDLE_ID = "io.playcover.PlayCover"
 #:
 #: Hence: never fatal. Every failure here leaves the handoff successful,
 #: because the handoff *was*.
-PLAYCOVER_SETTINGS_DIR = (
-    Path.home() / "Library/Containers/io.playcover.PlayCover/App Settings"
-)
+#:
+#: None means "under this user's home, read when it's needed"; tests set it to
+#: a scratch folder. It used to be computed at import, which pinned it to the
+#: real home even for a test that had moved HOME somewhere safe.
+PLAYCOVER_SETTINGS_DIR: Path | None = None
+
+
+def _playcover_settings_dir() -> Path:
+    return PLAYCOVER_SETTINGS_DIR or (
+        Path.home() / "Library/Containers/io.playcover.PlayCover/App Settings"
+    )
 
 #: `playChain` crashes the app in PlayTools' keychain shim the first time it
 #: writes a credential; `keymapping` translates the mouse into mapped touch, so
@@ -2831,10 +3187,11 @@ def _tame_playcover_settings(bundle_id: str, *, timeout: float = 25.0) -> str | 
     # otherwise every caller without PlayCover — every test among them — pays
     # the full timeout to learn the same thing: the suite went from 17s to 42s
     # before this guard existed.
-    if not PLAYCOVER_SETTINGS_DIR.is_dir():
+    settings_dir = _playcover_settings_dir()
+    if not settings_dir.is_dir():
         return None
 
-    path = PLAYCOVER_SETTINGS_DIR / f"{bundle_id}.plist"
+    path = settings_dir / f"{bundle_id}.plist"
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.is_file():
@@ -2876,6 +3233,69 @@ def _prepare_for_playcover(tweaked: Path, emitter: JsonEmitter | None) -> list[s
             f"couldn't prepare {tweaked.name} for PlayCover: {exc.message}",
             hint=exc.hint,
         ) from exc
+
+
+#: How long a copy handed to PlayCover is left for it to read. `open` returns
+#: before PlayCover opens the file and nothing says when it has, so the copy
+#: is never removed by the handoff that made it, only by a later one.
+_HANDOFF_COPY_MAX_AGE = 24 * 3600
+
+
+def _handoff_root() -> Path:
+    """Where copies handed to PlayCover go: the per-user temp directory, which
+    on macOS is owner-only. A function so tests can point it elsewhere."""
+    return Path(tempfile.gettempdir())
+
+
+def _handoff_copy(cfg: Config, archive: Path) -> Path:
+    """A private copy of the archive `archive` in built_dir, for PlayCover.
+
+    `open` returns before PlayCover reads the file, so no lock held here could
+    cover the read: a sweep (a phone build of the same version finishing, or
+    "Clean up old builds...") could move the archive to the Trash before
+    PlayCover opened it. So the copy is made under a share of the retention
+    lock — no sweep moves the archive mid-copy — and PlayCover gets the copy,
+    which no sweep looks at. The archive itself is left exactly as it was
+    built, rather than rewritten in place by `_without_account_data`.
+
+    Earlier copies older than `_HANDOFF_COPY_MAX_AGE` are removed first.
+    """
+    root = _handoff_root()
+    now = time.time()
+    for old in root.glob("graft-playcover-*"):
+        try:
+            if now - old.stat().st_mtime > _HANDOFF_COPY_MAX_AGE:
+                shutil.rmtree(old, ignore_errors=True)
+        except OSError:
+            continue
+
+    hold = _RetentionLock(cfg)
+    if not hold.acquire(exclusive=False, wait=_RETENTION_LOCK_TIMEOUT):
+        raise GraftError(
+            "a clean-up of old builds is holding the archive folder",
+            hint="try again in a moment; if no graft is running, "
+            f"the process holding {hold.path} is stopped or stuck",
+        )
+    try:
+        # Asked again under the lock: a sweep may have moved it since.
+        if not archive.is_file():
+            raise ConfigError(
+                f"{archive.name} was moved to the Trash by a clean-up of old builds",
+                hint="build it again with --for-playcover --skip-install",
+            )
+        private = Path(tempfile.mkdtemp(prefix="graft-playcover-", dir=root))
+        try:
+            copy = private / archive.name
+            shutil.copyfile(archive, copy)
+        except OSError as exc:
+            shutil.rmtree(private, ignore_errors=True)
+            raise GraftError(
+                f"couldn't copy {archive.name} to hand it to PlayCover: {exc}",
+                hint=f"check the free space in {root}",
+            ) from exc
+    finally:
+        hold.release()
+    return copy
 
 
 def _do_install_to_mac(
@@ -2922,10 +3342,15 @@ def _do_install_to_mac(
             f"no IPA named {filename!r} in {cfg.cache_dir} or {cfg.built_dir}",
             hint="run --staged-ipas to see what's in the cache",
         )
+    if target.parent == cfg.built_dir:
+        # Retention can move a built archive at any moment after the lock is
+        # let go, PlayCover's read included (`_handoff_copy`).
+        target = _handoff_copy(cfg, target)
 
     # PlayCover re-signs it, so all of the buyer's data can go, and in place:
     # `open` returns before PlayCover reads the file, so a temporary copy
-    # would be gone by then (K8).
+    # removed here would be gone by then (K8). A built archive's private copy
+    # is the one rewritten; the copy itself stays until a later handoff.
     target = _without_account_data(target, emitter=emitter, workdir=None)
     info = read_info_plist(target)
     result = subprocess.run(
@@ -3185,17 +3610,41 @@ def _do_set_app_options(
     delivery: str | None = None,
     lc_bundle_id: str | None = None,
     clear_lc_bundle_id: bool = False,
+    auto_profile: bool | None = None,
+    store_country: str | None = None,
     emitter: JsonEmitter | None = None,
 ) -> None:
     """Patch an app's options. Only the fields actually passed are written.
+
+    `store_country` is checked and mapped like every country
+    (`storefronts.given`): the Edit sheet's store picker, or a hand-run fix
+    for a store Search guessed wrong.
 
     `lc_bundle_id` pins the app to one LiveContainer and `clear_lc_bundle_id`
     removes the pin; either reports `lc_bundle_id` changed. A pin must be an
     id a LiveContainer can have (`lc_discovery.is_livecontainer_id`, any
     case): one naming another app would push the IPA into a Documents folder
     LiveContainer never reads, and the push refuses it anyway.
+
+    `auto_profile` (C-AUTOPROFILE) turns the app's App Store Connect
+    provisioning on or off. On is refused on a free config, like everything
+    else that signs; off never is. On without an `app_store_connect` key still
+    saves — the key can come next — with a warning that builds need it first.
+    On for an app delivered by LiveContainer (after this call's own
+    `delivery`, if it passes one) also saves, with a warning that it does
+    nothing there: a LiveContainer build is never signed, so no profile is
+    made or read. That one replaces the no-key warning, whose "its builds
+    fail" is not true of a build that does not sign.
     """
-    cfg.get_app(app_name)  # raises ConfigError if unknown
+    current = cfg.get_app(app_name)  # raises ConfigError if unknown
+
+    if store_country is not None:
+        store = storefronts.given(store_country, flag="--store-country")
+        _store_note(emitter, store.note)
+        store_country = store.code
+
+    if auto_profile and cfg.account == ACCOUNT_FREE:
+        raise paid_account_required("--auto-profile", cfg.path)
 
     if clear_lc_bundle_id and lc_bundle_id is not None:
         raise ConfigError("--lc-bundle-id and --no-lc-bundle-id contradict each other",
@@ -3228,6 +3677,8 @@ def _do_set_app_options(
         # "" is the clear: `set_app_options` deletes the key for it, and it is
         # not None, so `changed` still names the field.
         "lc_bundle_id": "" if clear_lc_bundle_id else lc_bundle_id,
+        "auto_profile": auto_profile,
+        "store_country": store_country,
     }
     if set(supplied) != APP_OPTION_FIELDS:
         raise ValueError(
@@ -3271,6 +3722,30 @@ def _do_set_app_options(
         cyan=cyan_updates or None,
         **top_level_updates,
     )
+    if auto_profile and (delivery or current.delivery) == "livecontainer":
+        _warn(
+            emitter,
+            f"{app_name} is delivered by LiveContainer, which uses no provisioning "
+            "profile: auto_profile has no effect until its delivery is sideload",
+        )
+    elif auto_profile and current.profile_override is not None:
+        # The override wins (`signer._plan_profile`), so without this the
+        # save said "changed: auto_profile" and every build went on signing
+        # with the hand-set file, until it expired and pre-flight failed.
+        _warn(
+            emitter,
+            f"{app_name} has its own `profile:` in config.yaml "
+            f"({current.profile_override}), which signs every build whatever "
+            "auto_profile says: remove that line for the profile to be made "
+            "automatically",
+        )
+    elif auto_profile and cfg.app_store_connect is None:
+        _warn(
+            emitter,
+            f"{app_name} will make its own provisioning profile once an App Store "
+            "Connect key is set (Settings, or `graft --set-portal`); until then its "
+            "builds fail",
+        )
     if emitter:
         emitter.emit("app-updated", name=app_name, changed=sorted(changed))
         return
@@ -3612,6 +4087,11 @@ def _do_set_ssh_password(cfg: Config, *, device: str | None) -> None:
         password = sys.stdin.readline().rstrip("\n")
     if not password:
         raise _fatal(GraftError("no password provided"))
+    if not keychain.secret_fits(password):
+        raise _fatal(GraftError(
+            f"a root SSH password longer than {keychain.MAX_SECRET_BYTES} bytes isn't supported "
+            "(in UTF-8, so a character outside ASCII counts 2 to 4, and a \\ or \" counts 2)"
+        ))
 
     try:
         keychain.write_ssh_password(udid, password)
@@ -3648,8 +4128,20 @@ def _do_set_p12_password(cfg: Config) -> None:
         # Stdin pipe — read one line, strip the trailing newline only.
         password = sys.stdin.readline().rstrip("\n")
 
-    if not password:
-        raise _fatal(GraftError("no password provided"))
+    # Keychain Access can export a .p12 with a blank password, which setup
+    # stores as "" and builds read back (combined fix check #17). Empty is
+    # taken only when the configured .p12 really opens with it, so a stray
+    # Enter still stores nothing.
+    if not password and not _opens_with_a_blank_password(cfg.signing.cert):
+        raise _fatal(GraftError(
+            "no password provided",
+            hint="a .p12 exported with a blank password is accepted empty, and this one "
+            "doesn't open with an empty password",
+        ))
+    # Before the write, as the setup does: `security -i` takes one line of
+    # 4095 bytes, and what spills past it runs as another command.
+    if not keychain.secret_fits(password):
+        raise _fatal(GraftError(keychain.P12_PASSWORD_TOO_LONG))
 
     try:
         keychain.write_p12_password(team, password)
@@ -3657,6 +4149,100 @@ def _do_set_p12_password(cfg: Config) -> None:
         detail = e.stderr.decode(errors="replace").strip() if isinstance(e, subprocess.CalledProcessError) and e.stderr else str(e)
         raise _fatal(GraftError(f"failed to store password in Keychain: {detail}")) from e
     console.print(f"[green]✓[/green] stored .p12 password in Keychain (service={keychain.SERVICE}, account=p12-{team})")
+
+
+def _opens_with_a_blank_password(p12_path: Path) -> bool:
+    """Whether the .p12 at `p12_path` opens with an empty password, asked of
+    `p12.probe`'s child as the setup asks it. No for anything unreadable."""
+    from . import p12 as p12_mod
+    from .account_setup import read_chosen_file
+
+    try:
+        return p12_mod.probe(read_chosen_file(p12_path, ".p12"), b"") == "ok"
+    except (GraftError, ValueError, OSError):  # SlowP12Error and P12ProbeError are ValueErrors
+        return False
+
+
+def _read_secret_line(prompt: str) -> str:
+    """One secret: typed at a prompt that doesn't echo, or one line of a piped stdin.
+
+    Never a flag or an environment variable. argv is readable by every user
+    on the Mac (`ps -axww`), and a variable is inherited by every tool. A
+    pipe is how the app sends it (`AccountSetupStore`), and only the trailing
+    newline is stripped.
+    """
+    if sys.stdin.isatty():
+        import getpass
+
+        return getpass.getpass(prompt)
+    return sys.stdin.readline().rstrip("\n")
+
+
+def _do_init_account(
+    config_path: Path,
+    *,
+    account: str,
+    p12: str | None,
+    profile: str | None,
+    dry_run: bool,
+    emitter: JsonEmitter | None,
+    replace: bool = False,
+) -> None:
+    """`--init --account free|paid` (`account_setup.setup_account`).
+
+    Under --json: one `init-step` per thing done, then one `init-result`.
+    Otherwise the same as lines, then the free Apple ID's steps on the device.
+    """
+    from .account_setup import printable, setup_account
+
+    # Text mode prints to a terminal, and a step names files and a
+    # certificate whoever made them chose: no control characters reach it.
+    def on_step(step: str, detail: str) -> None:
+        if emitter:
+            emitter.emit("init-step", step=step, detail=detail)
+        else:
+            console.print(f"[green]✓[/green] {escape(printable(detail))}")
+
+    try:
+        result = setup_account(
+            config_path,
+            account=account,
+            p12_path=Path(p12).expanduser() if p12 else None,
+            profile_path=Path(profile).expanduser() if profile else None,
+            password=lambda: _read_secret_line("Password for the .p12: "),
+            dry_run=dry_run,
+            replace=replace,
+            on_step=on_step,
+        )
+    except (Stopped, KeyboardInterrupt) as stop:
+        # A Stop that came while the setup's undo ran still stops the run,
+        # but what the undo couldn't put back is said first: the stop alone
+        # says nothing (the whole-diff review's cli-4).
+        report = getattr(stop, "undo_incomplete", None)
+        if report is not None:
+            _warn(emitter, f"{report.message}: {report.hint}" if report.hint else report.message)
+        raise
+    if emitter:
+        emitter.emit("init-result", **result.fields())
+        return
+    console.print(f"[bold]{escape(printable(result.summary))}[/bold]")
+    for warning in result.warnings:
+        console.print(f"  [yellow]![/yellow] {escape(printable(warning))}")
+    if result.pinned:
+        console.print(
+            f"  delivery: livecontainer written into {escape(', '.join(result.pinned))}, so "
+            "they stay in LiveContainer"
+        )
+    if result.sideloads:
+        console.print(
+            f"  [yellow]![/yellow] still delivery: sideload, which a free Apple ID cannot "
+            f"build: {escape(', '.join(result.sideloads))}. Switch each with `graft "
+            "--set-app-options --app <name> --delivery livecontainer`."
+        )
+    if result.steps:
+        console.print("To finish setting up, on the device:")
+        for n, step in enumerate(result.steps, 1):
+            console.print(f"  {n}. {escape(step)}")
 
 
 def _do_describe(ctx: typer.Context) -> None:
@@ -3697,7 +4283,7 @@ def _do_describe(ctx: typer.Context) -> None:
         # binary rather than a source file it was built beside.
         cli_only_events=sorted(CLI_ONLY_EVENTS),
         # The `stage` event's `name` field, which is a vocabulary of its own
-        # inside an already-checked one. `events` proves the GUI recognises a
+        # inside an already-checked one. `events` proves the GUI recognizes a
         # `stage` line; only this proves the *name* it reads for meaning —
         # `CLIContract.Stage.decryptionCheck` — is still one the CLI puts on
         # the wire. The Python suite pins this set to exactly the names emitted
@@ -3716,7 +4302,7 @@ def _fatal(e: GraftError) -> typer.Exit:
     the traceback that `_reported` exists to prevent — and `GraftError`
     messages routinely carry subprocess stderr and file paths. `markup=False`
     would work too but would print the literal `[red]` tags; escaping the
-    interpolated span keeps the colour and makes only the untrusted part inert.
+    interpolated span keeps the color and makes only the untrusted part inert.
     """
     err_console.print(f"[red]error:[/red] {escape(e.message)}")
     if e.hint:
@@ -3725,7 +4311,7 @@ def _fatal(e: GraftError) -> typer.Exit:
 
 
 #: pymobiledevice3's "usbmuxd did not answer", by class name: the boundary
-#: must not import pymobiledevice3 to recognise it (tests/test_lazy_imports.py).
+#: must not import pymobiledevice3 to recognize it (tests/test_lazy_imports.py).
 _USBMUXD_DOWN = "ConnectionFailedToUsbmuxdError"
 
 
@@ -3916,10 +4502,64 @@ def _verb_version(**_: Any) -> None:
     console.print(f"graft {__version__}")
 
 
-def _verb_init(*, config_path: Path | None = None, **_: Any) -> None:
-    # `--config` too: an upgrade from free to paid edits the config the
-    # refusal named, and `config.paid_upgrade` names it that way.
-    run_init(console, cfg_path=config_path)
+def _verb_init(
+    *,
+    config_path: Path,
+    json_mode: bool,
+    dry_run: bool,
+    init_account: str | None,
+    init_p12: str | None,
+    init_profile: str | None,
+    init_replace: bool,
+    **rest: Any,
+) -> None:
+    """`--init`. With `--account`, the setup the Mac app runs: no questions,
+    the .p12 password on stdin (`_do_init_account`). Without it, the
+    interactive setup in Terminal (`init_flow.run_init`). That one can neither
+    preview nor answer in events, so `--json`, `--dry-run`, `--p12`,
+    `--profile` and `--replace` are refused there rather than dropped.
+
+    `--config` too: an upgrade from free to paid edits the config the refusal
+    named, and `config.paid_upgrade` names it that way.
+    """
+    if init_account is None:
+        given = [flag for flag, value in (
+            ("--json", json_mode), ("--dry-run", dry_run),
+            ("--p12", init_p12), ("--profile", init_profile), ("--replace", init_replace),
+        ) if value]
+        if given:
+            raise ConfigError(
+                f"{', '.join(given)} with --init needs --account free or --account paid",
+                hint="without --account, --init asks its questions in Terminal",
+            )
+        run_init(console, cfg_path=config_path)
+        return
+    # `--init` sits above `_StrayFlagGate`, so the scripted setup refuses a
+    # verb-only flag itself: dropped, `--default-device X` or `--force` would
+    # read as done (F9). The interactive `--init` keeps ignoring them, as it
+    # always has.
+    stray = sorted(
+        _flag_as_typed(flag, rest[param]) for flag, param in _VERB_ONLY_FLAGS.items()
+        if rest.get(param) is not None
+    )
+    if stray:
+        raise ConfigError(
+            f"{', '.join(stray)} {'is' if len(stray) == 1 else 'are'} not valid with "
+            "--init --account",
+            hint="the setup takes --account, --p12, --profile, --replace, --dry-run and "
+            "--json; change the rest afterward, with --set-settings or in Graft.app",
+        )
+    # A Stop, the app quitting (SIGTERM) or a hang-up is a `Stopped`, which
+    # the setup's undo catches like any failure: the default disposition
+    # would kill the process between two writes. A reader that hung up is a
+    # BrokenPipeError at the next event (SIGPIPE is ignored), caught the same.
+    from . import lc_manage
+
+    with lc_manage.exit_on_termination():
+        _do_init_account(
+            config_path, account=init_account, p12=init_p12, profile=init_profile,
+            dry_run=dry_run, replace=init_replace, emitter=JsonEmitter() if json_mode else None,
+        )
 
 
 def _verb_setup_portal(*, config_path: Path | None = None, **_: Any) -> None:
@@ -3967,6 +4607,9 @@ def _verb_list_apps(*, cfg: Config, json_mode: bool, **_: Any) -> None:
                 display_name=a.cyan.display_name,
                 delivery=a.delivery,
                 auto_profile=a.auto_profile,
+                # The per-app `profile:` path, null without one. It outranks
+                # auto_profile, so the app shows it rather than "auto".
+                profile_override=str(a.profile_override) if a.profile_override else None,
                 keep_bundle_id=a.cyan.keep_bundle_id,
                 strip_extensions=a.cyan.strip_extensions,
                 strip_supported_devices=a.cyan.strip_supported_devices,
@@ -3974,6 +4617,10 @@ def _verb_list_apps(*, cfg: Config, json_mode: bool, **_: Any) -> None:
                 # The LiveContainer pin, null when unpinned. Always present:
                 # the app shows its LiveContainer picker only when the key is.
                 lc_bundle_id=a.lc_bundle_id,
+                # The App Store it was found in (`store_country`), which its
+                # lookups ask; null when unset (the US store). The Edit sheet's
+                # store picker starts here.
+                store_country=a.store_country,
                 # `free` or `paid`: the same on every app, and the same as
                 # the `account` event above. Kept so a GUI built before that
                 # event still learns the mode from a config with apps.
@@ -4287,6 +4934,7 @@ def _verb_add_app_manual(
     add_app_bundle_id: str | None,
     add_app_display_name: str | None,
     add_app_delivery: str | None,
+    add_app_store_country: str | None,
     json_mode: bool,
     **_: Any,
 ) -> None:
@@ -4296,12 +4944,23 @@ def _verb_add_app_manual(
     trimmed_bundle = (add_app_bundle_id or "").strip()
     if not trimmed_name or not trimmed_bundle:
         raise _fatal(ConfigError("--add-app-manual requires --name and --bundle-id"))
+    store_country = None
+    if add_app_store_country is not None:
+        # Checked and mapped like every country (`storefronts.given`): a code
+        # with no store would only make every later lookup of the app a 400.
+        try:
+            store = storefronts.given(add_app_store_country, flag="--store-country")
+        except ConfigError as e:
+            raise _fatal(e) from e
+        _store_note(JsonEmitter() if json_mode else None, store.note)
+        store_country = store.code
     _do_add_app_manual(
         cfg,
         name=trimmed_name,
         bundle_id=trimmed_bundle,
         display_name=add_app_display_name,
         delivery=add_app_delivery or cfg.default_delivery,
+        store_country=store_country,
         emitter=JsonEmitter() if json_mode else None,
     )
 
@@ -4358,6 +5017,166 @@ def _verb_appstore_get(
         say=_say_plain, warn=lambda message: _warn(emitter, message),
     ) as decrypted:
         _stage_ipa(cfg, app_name=provide_ipa_app, source_path=decrypted, emitter=emitter)
+
+
+def _verb_appstore_claim(
+    *, cfg: Config, provide_ipa_app: str | None, json_mode: bool, **_: Any
+) -> None:
+    if not provide_ipa_app:
+        raise ConfigError("--appstore-claim requires --app <name>")
+    appstore.claim(
+        cfg, provide_ipa_app, emitter=JsonEmitter() if json_mode else None, say=_say_plain
+    )
+
+
+def _stdin_fd() -> int:
+    """This process's stdin as a descriptor, for the secret readers, which
+    read bytes into wipeable buffers rather than through Python's text layer."""
+    try:
+        return sys.stdin.fileno()
+    except (AttributeError, OSError, ValueError) as e:
+        raise ConfigError("--appstore-login reads the Apple ID and password on stdin, and there is none") from e
+
+
+def _verb_appstore_login(*, cfg: Config, json_mode: bool, expect_ipatool: str | None, **_: Any) -> None:
+    from . import appstore_login, lc_manage
+    from .secret_input import prompt_line
+
+    fd = _stdin_fd()
+    # A Stop raises `Stopped` here instead of killing the process where it
+    # stands, so ipatool is stopped and the secrets wiped on the way out.
+    with lc_manage.exit_on_termination():
+        appstore_login.run(
+            cfg,
+            emitter=JsonEmitter() if json_mode else None,
+            say=_say_plain,
+            read_line=lambda prompt, timeout, echo=False: prompt_line(
+                fd, prompt, timeout=timeout, echo=echo
+            ),
+            expect_ipatool=Path(expect_ipatool) if expect_ipatool is not None else None,
+        )
+
+
+def _verb_appstore_logout(*, cfg: Config, json_mode: bool, **_: Any) -> None:
+    from . import appstore_login
+
+    appstore_login.sign_out(cfg, emitter=JsonEmitter() if json_mode else None, say=_say_plain)
+
+
+def _verb_appstore_enroll_candidates(*, cfg: Config, json_mode: bool, **_: Any) -> None:
+    from . import enrollment
+
+    found = enrollment.candidates()
+    emitter = JsonEmitter() if json_mode else None
+    if emitter:
+        for c in found:
+            emitter.emit(
+                "appstore-enroll-candidate",
+                path=str(c.path), name=c.name, bundle_id=c.bundle_id, opened=c.opened,
+            )
+        emitter.emit("appstore-enroll-candidates-end", count=len(found))
+        return
+    if not found:
+        _say_plain(enrollment.NO_CANDIDATES)
+    for c in found:
+        _say_plain(f"{c.name}  {c.path}" + ("" if c.opened else "  (open it once first)"))
+
+
+def _verb_appstore_enroll_command(
+    *,
+    cfg: Config,
+    provide_ipa_app: str | None,
+    allow_unverified_helper: bool | None,
+    json_mode: bool,
+    **_: Any,
+) -> None:
+    from . import enrollment
+    from .errors import AppStoreError
+
+    if not provide_ipa_app:
+        raise ConfigError("--appstore-enroll-command requires --app <path to the installed app>")
+    # Graft.app's own UnfairPlay, checked against its team, when this CLI is
+    # Graft.app's; otherwise one nothing can check (`root_helper`).
+    helper = enrollment.root_helper(cfg.appstore)
+    command = enrollment.enroll_command(helper, Path(provide_ipa_app), cfg.appstore.unfairplay_models)
+    emitter = JsonEmitter() if json_mode else None
+    if not command.verified and not allow_unverified_helper:
+        # Root would run an UnfairPlay nothing checks: only with consent
+        # (review #1). The app answers this event with a confirmation that
+        # says why, then runs again with the flag.
+        if emitter:
+            emitter.emit(
+                "appstore-refused",
+                app=str(command.app), reason=enrollment.REFUSED_UNVERIFIED_HELPER,
+                kind=command.unverified_kind, helper=str(command.helper),
+                message=command.unverified_reason,
+            )
+        raise AppStoreError(
+            f"Graft won't print this enrollment script on its own: {command.unverified_reason}",
+            hint=(
+                f"root would copy and run {command.helper}; to accept that, run again with "
+                f"{enrollment.ALLOW_FLAG}"
+            ),
+        )
+    if emitter:
+        emitter.emit(
+            "appstore-enroll-command",
+            app=str(command.app), model_dir=str(command.model_dir),
+            script=command.script, verified=command.verified,
+            helper=str(command.helper), unverified_kind=command.unverified_kind,
+            unverified_reason=command.unverified_reason,
+            cancel_file=str(command.cancel_file), time_limit_seconds=command.time_limit_seconds,
+        )
+        return
+    # The script, byte for byte, is all that goes to stdout, so `> file`
+    # saves exactly what was built: rich would wrap it at the terminal's
+    # width (splitting a command in two) and turn `:name:` into an emoji.
+    # Everything said about it goes to stderr.
+    if not command.verified:
+        _warn(None, command.unverified_reason)
+    err_console.print(
+        "Save the script on stdout to a file (`graft --appstore-enroll-command --app ... > enroll.sh`), "
+        "run it as an administrator with `sudo /bin/sh enroll.sh`, then run "
+        "`graft --appstore-enroll-finish <the folder it prints>`. It stops by itself after "
+        f"{command.time_limit_seconds} seconds.",
+        markup=False, highlight=False, emoji=False,
+    )
+    sys.stdout.write(command.script)
+    sys.stdout.flush()
+
+
+def _verb_appstore_enroll_finish(
+    *, cfg: Config, appstore_enroll_finish: str | None, json_mode: bool, **_: Any
+) -> None:
+    from . import enrollment
+
+    model_dir = cfg.appstore.unfairplay_models
+    names = enrollment.finish(Path(appstore_enroll_finish or ""), model_dir)
+    if json_mode:
+        JsonEmitter().emit("appstore-enrolled", model_dir=str(model_dir), count=len(names))
+    else:
+        _say_plain(f"this Mac is enrolled for decryption: {len(names)} file(s) in {model_dir}")
+
+
+def _verb_appstore_search(
+    *,
+    cfg: Config,
+    appstore_search_term: str | None,
+    search_country: str | None,
+    search_limit: int | None,
+    json_mode: bool,
+    **_: Any,
+) -> None:
+    term = (appstore_search_term or "").strip()
+    if not term:
+        raise _fatal(ConfigError(
+            "--appstore-search needs something to search for",
+            hint='name the app, e.g. graft --appstore-search "photo editor"',
+        ))
+    _do_appstore_search(
+        cfg, term, country=search_country, limit=search_limit,
+        emitter=JsonEmitter() if json_mode else None,
+    )
 
 
 def _verb_cached_ipa(*, cfg: Config, cached_ipa_app: str | None, json_mode: bool, **_: Any) -> None:
@@ -4461,11 +5280,17 @@ def _do_settings(config_path: Path, *, emitter: JsonEmitter | None = None) -> No
     go out as a `log` warning, which the pane's store drops: the pane showed
     default paths as the config's and promised "saving replaces it" for a
     file `--set-settings` refuses to write. stderr still gets the warning.
+
+    `app_store_connect` is left out of a parse error's event, not null: the
+    app reads a present null as "no key set", which a config it cannot read
+    does not say, and an absent key as "this CLI doesn't report it", which
+    hides the section while the parse-error banner explains.
     """
     parse_error: str | None = None
     try:
         payload = read_settings(config_path)
         paths = _resolved_dirs(config_path)
+        asc = {"app_store_connect": read_app_store_connect(_load_raw(config_path))}
     except ConfigError as e:
         if emitter is None or not config_path.is_file():
             raise
@@ -4474,9 +5299,11 @@ def _do_settings(config_path: Path, *, emitter: JsonEmitter | None = None) -> No
               carried_by="settings")
         payload = dict.fromkeys(SETTINGS)
         paths = _resolved_dirs(config_path, raw={})
+        asc = {}
     if emitter:
         emitter.emit("settings", **payload, paths=paths, parse_error=parse_error,
-                     paths_are_defaults=parse_error is not None)
+                     paths_are_defaults=parse_error is not None, **asc,
+                     graft_version=__version__)
     else:
         table = Table(title="settings")
         table.add_column("setting", style="bold")
@@ -4519,18 +5346,137 @@ def _do_set_settings(
         # `CLIStore.mutate`'s rule, one process further down. A caller that
         # gets no `settings` event falls back to running `--settings` itself,
         # which is what it did before this event existed.
-        try:
-            # `--settings`' shape less `paths`: the write above only lands in
-            # a config that parsed, so there is no parse error to carry.
-            emitter.emit("settings", **read_settings(config_path), parse_error=None,
-                         paths_are_defaults=False)
-        except (ConfigError, OSError):
-            pass
+        _emit_settings_echo(config_path, emitter)
     else:
         if not changed:
             console.print("[dim]nothing to change[/dim]")
         for key in changed:
             console.print(f"✓ {key}")
+
+
+def _emit_settings_echo(config_path: Path, emitter: JsonEmitter) -> None:
+    """The `settings` a writer emits after its write, so the GUI need not ask.
+
+    `--settings`' shape less `paths`: a write only lands in a config that
+    parsed, so there is no parse error to carry. Best-effort, and swallowing
+    the error is the point — the write already landed on disk, and a failed
+    *read* exiting non-zero would report a save that succeeded as failed. A
+    caller that gets no `settings` event runs `--settings` itself.
+
+    `app_store_connect` rides on it for the same reason it is on `--settings`:
+    the pane replaces its record with this one, and an echo without the key
+    would show "not set up" after every save. `graft_version` too, which the
+    pane shows as "graft <version>".
+    """
+    try:
+        emitter.emit(
+            "settings", **read_settings(config_path), parse_error=None,
+            paths_are_defaults=False,
+            app_store_connect=read_app_store_connect(_load_raw(config_path)),
+            graft_version=__version__,
+        )
+    except (ConfigError, OSError):
+        pass
+
+
+def _do_set_portal(
+    config_path: Path,
+    *,
+    key_id: str | None,
+    issuer_id: str | None,
+    key_file: str | None,
+    emitter: JsonEmitter | None = None,
+) -> None:
+    """`--set-portal`: the `--setup-portal` wizard's work, without its prompts.
+
+    See `setup_portal.set_portal`. Under --json: `portal-set`, then the
+    resulting `settings`. A key App Store Connect turns away is its
+    `PortalError` (exit 10) with nothing written.
+    """
+    from .setup_portal import other_key_copies, set_portal
+
+    result = set_portal(config_path, key_id=key_id, issuer_id=issuer_id, key_file=key_file)
+    _warn_about_key_copies(other_key_copies(config_path, keep=Path(result["key_file"])), emitter)
+    if emitter:
+        emitter.emit("portal-set", **result)
+        _emit_settings_echo(config_path, emitter)
+    else:
+        console.print(
+            f"[green]✓[/green] App Store Connect key {escape(result['key_id'])} works — "
+            f"it sees {result['devices']} iOS device(s)"
+        )
+        console.print(f"[dim]  key copied to {escape(result['key_file'])}[/dim]")
+
+
+def _warn_about_key_copies(copies: list[Path], emitter: JsonEmitter | None) -> None:
+    """Name the private keys still in the config folder that nothing points
+    at (`setup_portal.other_key_copies`), so none sits there unmentioned."""
+    from .setup_portal import key_copies_warning
+
+    said = key_copies_warning(copies)
+    if said:
+        _warn(emitter, said)
+
+
+def _do_clear_portal(config_path: Path, *, emitter: JsonEmitter | None = None) -> None:
+    """`--clear-portal`: remove the App Store Connect setting, keep the .p8.
+
+    Not refused on a free config, unlike setting one: removing a key is never
+    harmful. Clearing a config with no key is a no-op that says so, not an
+    error. Sideload apps still set to `auto_profile` are named in a warning,
+    because their next build fails without a key; a LiveContainer app never
+    signs, so it is not (`setup_portal.clear_portal`).
+    """
+    from .setup_portal import clear_portal, other_key_copies
+
+    removed, auto, unreadable = clear_portal(config_path)
+    key_file = None
+    if removed and removed.get("key_file"):
+        key_file = str(_expand(removed["key_file"]))
+    # The removed key's own file is reported below, as before.
+    _warn_about_key_copies(
+        other_key_copies(config_path, keep=Path(key_file) if key_file else None), emitter
+    )
+    if unreadable:
+        _warn(
+            emitter,
+            "couldn't tell which apps still create their provisioning profile "
+            f"automatically: {unreadable}",
+        )
+    if auto:
+        _warn(
+            emitter,
+            f"{', '.join(auto)} still create their provisioning profile automatically "
+            "(auto_profile); their builds fail until a key is set again or that is turned off",
+        )
+    if emitter:
+        emitter.emit("portal-cleared", removed=removed is not None, key_file=key_file)
+        _emit_settings_echo(config_path, emitter)
+    elif removed is None:
+        console.print("[dim]no App Store Connect key was set[/dim]")
+    else:
+        console.print("[green]✓[/green] removed the App Store Connect key from config.yaml")
+        if key_file:
+            console.print(f"[dim]  {escape(key_file)} is still there; delete it yourself if you want it gone[/dim]")
+
+
+def _verb_set_portal(
+    *,
+    config_path: Path,
+    asc_key_id: str | None,
+    asc_issuer_id: str | None,
+    asc_key_file: str | None,
+    json_mode: bool,
+    **_: Any,
+) -> None:
+    _do_set_portal(
+        config_path, key_id=asc_key_id, issuer_id=asc_issuer_id, key_file=asc_key_file,
+        emitter=JsonEmitter() if json_mode else None,
+    )
+
+
+def _verb_clear_portal(*, config_path: Path, json_mode: bool, **_: Any) -> None:
+    _do_clear_portal(config_path, emitter=JsonEmitter() if json_mode else None)
 
 
 def _verb_set_app_options(
@@ -4546,6 +5492,8 @@ def _verb_set_app_options(
     add_app_delivery: str | None,
     opt_lc_bundle_id: str | None,
     opt_no_lc_bundle_id: bool | None,
+    opt_auto_profile: bool | None,
+    add_app_store_country: str | None,
     json_mode: bool,
     **_: Any,
 ) -> None:
@@ -4563,6 +5511,8 @@ def _verb_set_app_options(
         delivery=add_app_delivery,
         lc_bundle_id=opt_lc_bundle_id,
         clear_lc_bundle_id=bool(opt_no_lc_bundle_id),
+        auto_profile=opt_auto_profile,
+        store_country=add_app_store_country,
         emitter=JsonEmitter() if json_mode else None,
     )
 
@@ -4694,7 +5644,7 @@ def _verb_prune_builds(
 
 
 def _do_decrypt(
-    cfg: Config, bundle_id: str, *, device: str | None, mode: str, backend: str,
+    cfg: Config, bundle_id: str, *, device: str | None, backend: str,
     strip_encrypted_extensions: bool = False, strip_extensions_forced: bool = False,
     verbose: bool = False, emitter: JsonEmitter | None = None,
 ) -> None:
@@ -4709,34 +5659,14 @@ def _do_decrypt(
     if emitter:
         emitter.emit("decrypt-start", bundle_id=bundle_id)
 
-    # Said before the dump starts, not after: `--decrypt-mode main` on a bagbak
-    # with no mode option dumps the entire bundle instead — minutes and hundreds
-    # of megabytes the user did not ask for — and announcing "(main)" while
-    # doing it was the CLI reporting a choice it had already discarded.
-    if (
-        backend == decrypt_runner.BAGBAK
-        and mode != "all"
-        and not decrypt_runner.mode_is_supported()
-    ):
-        _warn(
-            emitter,
-            f"--decrypt-mode {mode} is ignored: the installed bagbak has no mode "
-            f"option and always dumps the whole bundle",
-        )
-
+    # No mode to take: the whole app is the only dump that can be staged, so
+    # `--decrypt-mode` refuses anything else before this runs
+    # (`_require_whole_app_mode`) and `decrypt_runner` fixes `all` itself.
     udid = device or cfg.default_device_udid
     with tempfile.TemporaryDirectory(prefix="graft-decrypt-") as tmp:
         dump_dir = Path(tmp) / "dump"
         if not emitter:
-            # Only name the mode when the installed bagbak actually has one.
-            # 4.x does not, so announcing "(main)" and then dumping the whole
-            # bundle was the CLI reporting a choice it had already discarded.
-            supports_mode = (
-                backend == decrypt_runner.BAGBAK and decrypt_runner.mode_is_supported()
-            )
-            label = f"bagbak ({mode})" if supports_mode else backend
-
-            console.print(f"→ dumping [cyan]{escape(bundle_id)}[/cyan] with {label}…")
+            console.print(f"→ dumping [cyan]{escape(bundle_id)}[/cyan] with {backend}…")
         # Verbose puts the backend's own narration in front of the user as it
         # arrives. Worth having because these tools are the opaque part: a dump
         # that has pulled 200 files and a dump that is wedged look identical
@@ -4751,8 +5681,7 @@ def _do_decrypt(
                 console.print(f"[dim]{escape(line)}[/dim]")
 
         result = decrypt_runner.decrypt_app(
-            bundle_id, dump_dir, udid=udid, backend=backend, mode=mode,
-            on_line=on_line,
+            bundle_id, dump_dir, udid=udid, backend=backend, on_line=on_line,
         )
 
         # Its own Info.plist, so the staged name matches the version dumped and
@@ -4893,7 +5822,7 @@ def _do_decrypt(
         cfg.cache_dir.mkdir(parents=True, exist_ok=True)
         final = cfg.cache_dir / f"{info.bundle_id}_{info.version}.ipa"
         # Staged like a drop or a get, not moved: a dump copies the bundle off
-        # the device with its `SC_Info/` licences in it, and `stage` is what
+        # the device with its `SC_Info/` licenses in it, and `stage` is what
         # leaves those (and any iTunesMetadata.plist) behind, owner-only.
         provide_ipa_module.stage(result.ipa_path, final)
         # A stripped dump lands under the same canonical name a complete one
@@ -4984,7 +5913,7 @@ def _decrypt_backend_for(bundle_id: str, udid: str | None) -> str:
 
     This function used to rank the *installed* ones instead, which was a third
     copy of a rule that already existed twice. The copies then disagreed exactly
-    where it hurt: with SSH down the pane labelled every row "will be launched
+    where it hurt: with SSH down the pane labeled every row "will be launched
     and dumped with bagbak" and the dump ran frida-ios-dump anyway, spending
     twenty seconds to fail with advice about installing an OpenSSH the phone
     already had. Asking costs about two seconds against a dump measured in tens.
@@ -5071,7 +6000,7 @@ def _lock_key(udid: str | None) -> str:
 
 
 def _decrypt_escalating(
-    cfg: Config, bundle_id: str, *, device: str | None, mode: str,
+    cfg: Config, bundle_id: str, *, device: str | None,
     backend: str | None, strip: bool | None,
     verbose: bool, emitter: JsonEmitter | None,
 ) -> None:
@@ -5101,13 +6030,13 @@ def _decrypt_escalating(
         cfg.cache_dir / ".locks" / f"{_lock_key(udid)}.lock", udid
     ):
         _decrypt_climbing(
-            cfg, bundle_id, udid=udid, mode=mode, backend=backend, strip=strip,
+            cfg, bundle_id, udid=udid, backend=backend, strip=strip,
             verbose=verbose, emitter=emitter,
         )
 
 
 def _decrypt_climbing(
-    cfg: Config, bundle_id: str, *, udid: str | None, mode: str,
+    cfg: Config, bundle_id: str, *, udid: str | None,
     backend: str | None, strip: bool | None, verbose: bool,
     emitter: JsonEmitter | None,
 ) -> None:
@@ -5128,7 +6057,7 @@ def _decrypt_climbing(
         tried.add(current)
         try:
             _do_decrypt(
-                cfg, bundle_id, device=udid, mode=mode, backend=current,
+                cfg, bundle_id, device=udid, backend=current,
                 strip_encrypted_extensions=strip_now,
                 # `True` is a user who typed the flag; the default is not one,
                 # and the difference is exactly who gets to decide that an app
@@ -5155,8 +6084,8 @@ def _say_escalating(emitter: JsonEmitter | None, why: str) -> None:
 
     Emitted unconditionally rather than under --verbose: this is the CLI
     deciding something on the user's behalf, and a minute of silence followed by
-    a different tool's output is exactly how automatic behaviour becomes
-    inexplicable behaviour.
+    a different tool's output is exactly how automatic behavior becomes
+    inexplicable behavior.
     """
     if emitter:
         emitter.emit("log", source="graft", line=why)
@@ -5164,8 +6093,31 @@ def _say_escalating(emitter: JsonEmitter | None, why: str) -> None:
         console.print(f"[yellow]→[/yellow] {escape(why)}")
 
 
+def _require_whole_app_mode(decrypt_mode: str | None) -> None:
+    """Refuse every `--decrypt-mode` but `all`, the only dump a decrypt verb can stage.
+
+    Both verbs verify a dump and stage it for a build, and only bagbak's `all`
+    dumps an app. `main` writes bare binaries with no `Payload`, so the dump
+    failed at reading its Info.plist, naming a temp directory already gone;
+    under Automatic a failed bagbak falls back to frida-ios-dump, which has no
+    mode and dumps the whole app regardless; and `ext` was never shown to make
+    anything a build can use. Asked before the device is, so a refusal costs
+    nothing.
+
+    The flag stays, accepting `all`, so scripts that pass it keep working. Its
+    value goes no further: with one mode left, `decrypt_runner` fixes `all`
+    where the bagbak argv is built, and nothing in between carries a mode.
+    """
+    if decrypt_mode is None or decrypt_mode == "all":
+        return
+    raise ConfigError(
+        f"--decrypt-mode {decrypt_mode} is not supported: a decrypt is staged for "
+        "a build, and only all dumps a whole app"
+    )
+
+
 def _dispatch_decrypt(
-    cfg: Config, bundle_id: str, *, device: str | None, decrypt_mode: str | None,
+    cfg: Config, bundle_id: str, *, device: str | None,
     decrypt_backend: str | None, strip_encrypted_extensions: bool | None,
     verbose: bool, json_mode: bool,
 ) -> None:
@@ -5174,11 +6126,10 @@ def _dispatch_decrypt(
     `--decrypt` (bundle typed) and `--decrypt-frontmost` (bundle read off the
     foreground app) end identically — default the backend and hand to
     `_do_decrypt`, which verifies cryptid 0 and stages the result. One place, so
-    a new `_do_decrypt` argument or a changed mode default can't land on one
-    verb and not the other.
+    a new `_do_decrypt` argument can't land on one verb and not the other.
     """
     _decrypt_escalating(
-        cfg, bundle_id, device=device, mode=decrypt_mode or "all",
+        cfg, bundle_id, device=device,
         backend=decrypt_backend, strip=strip_encrypted_extensions,
         verbose=verbose,
         emitter=JsonEmitter() if json_mode else None,
@@ -5192,8 +6143,9 @@ def _verb_decrypt(
 ) -> None:
     if not decrypt:
         raise _fatal(ConfigError("--decrypt requires a bundle id"))
+    _require_whole_app_mode(decrypt_mode)
     _dispatch_decrypt(
-        cfg, decrypt, device=device, decrypt_mode=decrypt_mode,
+        cfg, decrypt, device=device,
         decrypt_backend=decrypt_backend,
         strip_encrypted_extensions=strip_encrypted_extensions, verbose=verbose,
         json_mode=json_mode,
@@ -5214,6 +6166,7 @@ def _verb_decrypt_frontmost(
     fail the attach. From here it is the ordinary decrypt — same verify, same
     staging — on the id the device reported.
     """
+    _require_whole_app_mode(decrypt_mode)
     udid = device or cfg.default_device_udid
     bundle = decrypt_runner.frontmost_app(udid)
     if not bundle:
@@ -5227,7 +6180,7 @@ def _verb_decrypt_frontmost(
     # than two independent resolutions of `device or default` a future rule
     # change could split.
     _dispatch_decrypt(
-        cfg, bundle, device=udid, decrypt_mode=decrypt_mode,
+        cfg, bundle, device=udid,
         decrypt_backend=decrypt_backend,
         strip_encrypted_extensions=strip_encrypted_extensions, verbose=verbose,
         json_mode=json_mode,
@@ -5606,11 +6559,13 @@ _VERB_ONLY_FLAGS: dict[str, str] = {
     "--bundle-id": "add_app_bundle_id",
     "--display-name": "add_app_display_name",
     "--delivery": "add_app_delivery",
+    "--store-country": "add_app_store_country",
     "--app": "provide_ipa_app",
     "--preferred-version": "opt_preferred_version",
     "--compression-level": "opt_compression_level",
     "--lc-bundle-id": "opt_lc_bundle_id",
     "--no-lc-bundle-id": "opt_no_lc_bundle_id",
+    "--auto-profile": "opt_auto_profile",
     "--keep-bundle-id": "opt_keep_bundle_id",
     "--strip-extensions": "opt_strip_extensions",
     "--strip-supported-devices": "opt_strip_supported_devices",
@@ -5627,9 +6582,16 @@ _VERB_ONLY_FLAGS: dict[str, str] = {
     "--with-icons": "with_icons",
     "--force": "force",
     "--allow-unverified": "allow_unverified",
+    "--allow-unverified-helper": "allow_unverified_helper",
+    "--expect-ipatool": "expect_ipatool",
+    "--country": "search_country",
+    "--limit": "search_limit",
     "--instances": "lc_instances",
     "--channel": "lc_channel",
     "--cert-only": "lc_cert_only",
+    "--asc-key-id": "asc_key_id",
+    "--asc-issuer-id": "asc_issuer_id",
+    "--asc-key-file": "asc_key_file",
 }
 
 
@@ -5710,14 +6672,15 @@ class _Verb:
         return "dry_run" in inspect.signature(self.run).parameters
 
 
-def _speaks_json(verb: _Verb | _StrayFlagGate | _DryRunGate) -> bool:
+def _speaks_json(verb: _Verb | _StrayFlagGate | _DryRunGate | _ModifierGate) -> bool:
     """Whether `verb` answers --json with events: whether its handler reads
     `json_mode`.
 
     Read off the handler rather than declared beside it, so a verb that grows
     a JSON mode is covered by `main`'s stderr switch the moment it can be
     asked for one. The handlers that do not read it are the interactive ones
-    (`--init`, `--setup-portal`, the password prompts), the two whose stdout
+    (`--setup-portal`, the password prompts; `--init` reads `json_mode` to
+    refuse it without `--account`), the two whose stdout
     is itself the answer (`--version`; `--build-log`, a saved JSON-Lines log
     written straight to `sys.stdout`), `--describe`, which is JSON whatever is
     asked, `--reveal-build`, which prints nothing, and the stray-flag gate,
@@ -5757,7 +6720,22 @@ def _active_verb_only_flags(opts: dict[str, Any]) -> tuple[str | None, list[str]
 #: dict keys accused the user of passing a flag they never typed — and `sorted`
 #: put the one they *didn't* type first. The value says which it was: only the
 #: negative form can leave it False.
-_NEGATED_FLAGS = {"--strip-encrypted-extensions": "--keep-encrypted-extensions"}
+#:
+#: Filled from `main`'s own declarations (below it), not written out: the
+#: hand-kept table had one pair of five, so `--builds --no-auto-profile` was
+#: refused as "--auto-profile requires ...".
+_NEGATED_FLAGS: dict[str, str] = {}
+
+
+def _negated_flags(command: Callable[..., Any]) -> dict[str, str]:
+    """Every `--x/--no-x` pair `command`'s options declare, positive form first."""
+    pairs: dict[str, str] = {}
+    for param in inspect.signature(command).parameters.values():
+        for decl in getattr(param.default, "param_decls", ()) or ():
+            if "/" in decl:
+                positive, negative = decl.split("/", 1)
+                pairs[positive] = negative
+    return pairs
 
 
 def _flag_as_typed(flag: str, value: Any) -> str:
@@ -5768,7 +6746,7 @@ def _flag_as_typed(flag: str, value: Any) -> str:
 class _StrayFlagGate:
     """Not a verb: the position in the order where verb-only flags are checked.
 
-    It occupies a slot in `_VERBS` because *where* it runs is behaviour. Above
+    It occupies a slot in `_VERBS` because *where* it runs is behavior. Above
     it are the verbs that consume none of these flags and have never rejected
     one — `graft --list --app example` lists every app and ignores the
     `--app`, and moving this check any higher would turn that into an error.
@@ -5793,8 +6771,8 @@ class _StrayFlagGate:
             f"is not valid with {verb}" if verb
             else (
                 "requires --add-app, --add-app-manual, --provide-ipa, "
-                "--appstore-check, --appstore-get, --attach-tweak, --detach-tweak, --set-app-options, "
-                "--delivery-state, --reconcile, --set-settings, --artwork, "
+                "--appstore-check, --appstore-get, --appstore-claim, --appstore-login, --appstore-enroll-command, --appstore-search, --attach-tweak, --detach-tweak, --set-app-options, "
+                "--delivery-state, --reconcile, --set-settings, --set-portal, --artwork, "
                 "--prune-builds, --devices, --device-apps, --decrypt, "
                 "--decrypt-frontmost, --delete-staged, --lc-status, --lc-install, or --lc-clean"
             )
@@ -5847,20 +6825,103 @@ class _DryRunGate:
         ))
 
 
+#: The global modifiers a verb either reads or must refuse, in the order a
+#: refusal names them. Each changes what is done to a device, to the user's
+#: files, or how far a download is trusted — so dropping one without a word
+#: does something the user did not ask for: `graft example --prune-builds`
+#: trashed every app's archives, `--reinstall-build 5 --device B` installed on
+#: the phone the build was recorded for, and `--update-tweak X --fetch-sha H`
+#: never checked H. Display-only qualifiers (`--refresh`, `--builds-app`,
+#: `--verbose`) only change what is printed, and stay inert.
+_MODIFIERS: dict[str, str] = {
+    "apps": "app names",
+    "device": "--device",
+    "skip_install": "--skip-install",
+    "for_playcover": "--for-playcover",
+    "skip_decrypt_check": "--skip-decrypt-check",
+    "fetch_sha": "--fetch-sha",
+    # `--init`'s, beside anything else: a setup flag a verb drops would read
+    # as a setup that ran.
+    "init_account": "--account",
+    "init_p12": "--p12",
+    "init_profile": "--profile",
+    "init_replace": "--replace",
+}
+
+#: Why a verb ignores a modifier, where there is more to say than "it does".
+_MODIFIER_HINTS: dict[tuple[str, str], str] = {
+    ("--reinstall-build", "device"): (
+        "a re-install ships to the device its build was recorded for"
+    ),
+    ("--prune-builds", "apps"): (
+        "it cleans up every app's archives; there is no per-app clean-up"
+    ),
+}
+
+
+class _ModifierGate:
+    """Not a verb: the refusal of a global modifier by a verb that ignores it.
+
+    `_DryRunGate`'s rule for the other modifiers in `_MODIFIERS`. Typer
+    accepts each beside any verb, and only the handlers that take the
+    parameter read it, so everywhere else it was dropped. Which verb reads
+    which is read off the handler, as `_Verb.honours_dry_run` is, so the two
+    cannot drift; with no verb selected, the build is what runs.
+
+    Second in `_VERBS`, for `_DryRunGate`'s reason: the question is about the
+    verb that will run, and the refusal must land before a config load or a
+    migration touches anything.
+    """
+
+    flag = "(modifiers)"
+    needs = _Needs.NOTHING
+    migrates = False
+
+    @staticmethod
+    def _refused(opts: dict[str, Any]) -> tuple[str, list[str]] | None:
+        """The verb that will run and the modifiers it would ignore, or None."""
+        verb = next((v for v in _VERBS if isinstance(v, _Verb) and v.selected(opts)), None)
+        reads = inspect.signature(verb.run if verb else _verb_build_apps).parameters
+        ignored = [p for p in _MODIFIERS if p not in reads and _asked_for(opts[p] or None)]
+        if not ignored:
+            return None
+        return (verb.flag if verb else "a build"), ignored
+
+    def selected(self, opts: dict[str, Any]) -> bool:
+        return self._refused(opts) is not None
+
+    def run(self, **opts: Any) -> NoReturn:
+        refused = self._refused(opts)
+        assert refused is not None
+        verb, ignored = refused
+        named = [
+            f"{_MODIFIERS[p]} ({', '.join(opts[p])})" if p == "apps" else _MODIFIERS[p]
+            for p in ignored
+        ]
+        why = [_MODIFIER_HINTS[(verb, p)] for p in ignored if (verb, p) in _MODIFIER_HINTS]
+        raise _fatal(ConfigError(
+            f"{', '.join(named)} {'is' if len(named) == 1 else 'are'} not valid with "
+            f"{verb}: it would ignore {'it' if len(named) == 1 else 'them'}",
+            hint="; ".join([*why, "nothing was run"]),
+        ))
+
+
 # The whole of `main`'s control flow, in source order, which is the order it
-# runs in. First match wins — given two verb flags today's behaviour is that the
+# runs in. First match wins — given two verb flags today's behavior is that the
 # earlier one here takes it, and that is preserved rather than made an error,
 # because the GUI builds argv programmatically and an error would be a new way
 # for it to fail.
 #
 # `_DryRunGate` comes first because it judges whichever verb is about to run,
-# and refuses before that verb, a config load or a migration touches anything.
+# and refuses before that verb, a config load or a migration touches anything;
+# `_ModifierGate`, beside it, does the same for the other global modifiers.
 #
 # `_Needs.NOTHING` marks the four verbs that must work on a machine that has
 # never run `--init`: the GUI's contract test introspects `--describe` before
 # there is a config.yaml to load, and `--init` is what creates one.
-_VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate, ...] = (
+_VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
     _DryRunGate(),
+    _ModifierGate(),
     _Verb("--describe", "describe", _verb_describe, needs=_Needs.NOTHING, migrates=False),
     _Verb("--version", "version", _verb_version, needs=_Needs.NOTHING, migrates=False),
     _Verb("--init", "init", _verb_init, needs=_Needs.NOTHING),
@@ -5882,7 +6943,7 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate, ...] = (
     _Verb(
         "--add-app-manual", "add_app_manual", _verb_add_app_manual,
         accepts=frozenset({
-            "--name", "--bundle-id", "--display-name", "--delivery",
+            "--name", "--bundle-id", "--display-name", "--delivery", "--store-country",
         }),
     ),
     _Verb(
@@ -5902,6 +6963,19 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate, ...] = (
         "--appstore-get", "appstore_get", _verb_appstore_get,
         accepts=frozenset({"--app", "--allow-unverified"}),
     ),
+    _Verb("--appstore-claim", "appstore_claim", _verb_appstore_claim, accepts=frozenset({"--app"})),
+    _Verb("--appstore-login", "appstore_login", _verb_appstore_login, accepts=frozenset({"--expect-ipatool"})),
+    _Verb("--appstore-logout", "appstore_logout", _verb_appstore_logout),
+    _Verb("--appstore-enroll-candidates", "appstore_enroll_candidates", _verb_appstore_enroll_candidates),
+    _Verb(
+        "--appstore-enroll-command", "appstore_enroll_command", _verb_appstore_enroll_command,
+        accepts=frozenset({"--app", "--allow-unverified-helper"}),
+    ),
+    _Verb("--appstore-enroll-finish", "appstore_enroll_finish", _verb_appstore_enroll_finish),
+    _Verb(
+        "--appstore-search", "appstore_search_term", _verb_appstore_search,
+        accepts=frozenset({"--country", "--limit"}),
+    ),
     _Verb("--staged-ipas", "staged_ipas", _verb_staged_ipas),
     _Verb("--delete-staged", "delete_staged", _verb_delete_staged,
           accepts=frozenset({"--force"})),
@@ -5915,9 +6989,10 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate, ...] = (
         # has no way to rename an app or change its identity, so accepting them
         # would report success for a change that never happened.
         accepts=frozenset({
-            "--app", "--display-name", "--delivery", "--preferred-version",
+            "--app", "--display-name", "--delivery", "--preferred-version", "--store-country",
             "--compression-level", "--keep-bundle-id", "--strip-extensions",
             "--strip-supported-devices", "--lc-bundle-id", "--no-lc-bundle-id",
+            "--auto-profile",
         }),
     ),
     # Ahead of --delivery-state, for the flag check as much as for the dispatch:
@@ -5946,6 +7021,21 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate, ...] = (
             "--signing-cert", "--signing-profile", "--signing-team-id",
         }),
     ),
+    # The App Store Connect key, set and removed without the wizard's prompts
+    # (the Settings pane's "App Store Connect" section). `_Needs.PATH` for the
+    # settings verbs' reason, and one more of its own: `load_config` refuses
+    # an `app_store_connect:` section missing a key, and that is a section
+    # these two exist to replace or remove. Both still need the file to exist.
+    #
+    # Ahead of `--settings`, for `--set-settings`' reason: both writers echo
+    # the settings after they write, so given a writer and the reader, the
+    # writer is strictly more. Below it, `--settings --set-portal ...` reported
+    # and exited 0 having checked and written nothing.
+    _Verb(
+        "--set-portal", "set_portal_flag", _verb_set_portal, needs=_Needs.PATH,
+        accepts=frozenset({"--asc-key-id", "--asc-issuer-id", "--asc-key-file"}),
+    ),
+    _Verb("--clear-portal", "clear_portal_flag", _verb_clear_portal, needs=_Needs.PATH),
     _Verb("--settings", "list_settings", _verb_settings, needs=_Needs.PATH),
     _Verb("--reconcile", "reconcile_flag", _verb_reconcile, accepts=frozenset({"--app"})),
     _Verb(
@@ -5994,7 +7084,7 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate, ...] = (
 def main(
     ctx: typer.Context,
     apps: list[str] = typer.Argument(None, help="App name(s) from config to build & install."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With a build or --prune-builds: show what would happen without doing it. Every other verb refuses it."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With a build, --prune-builds or --init --account: show what would happen without doing it. Every other verb refuses it."),
     skip_install: bool = typer.Option(False, "--skip-install", help="Build only (and sign, for a sideload app): don't install or push it to the device."),
     for_playcover: bool = typer.Option(False, "--for-playcover", help="Also make the build loadable on this Mac under PlayCover."),
     skip_decrypt_check: bool = typer.Option(
@@ -6008,8 +7098,19 @@ def main(
     tweak_updates: bool = typer.Option(False, "--tweak-updates", help="Check the tweaks library for newer published versions."),
     update_tweak: str | None = typer.Option(None, "--update-tweak", help="Download the newest build of a tweak (.deb filename in tweaks_dir) and re-point the apps using it."),
     check: bool = typer.Option(False, "--check", help="Run pre-flight checks and exit."),
-    init: bool = typer.Option(False, "--init", help="Interactive first-run setup."),
+    init: bool = typer.Option(False, "--init", help="First-run setup. Asks its questions in Terminal, or none with --account."),
+    init_account: str | None = typer.Option(None, "--account", help="With --init: 'free' or 'paid', and no questions. Paid needs --p12 and --profile, and reads the .p12 password from stdin (one line). --dry-run checks everything and writes nothing."),
+    init_p12: str | None = typer.Option(None, "--p12", help="With --init --account paid: the .p12 exported from Keychain Access. It is copied into the config folder."),
+    init_profile: str | None = typer.Option(None, "--profile", help="With --init --account paid: the development .mobileprovision. It is copied into the config folder."),
+    init_replace: bool = typer.Option(False, "--replace", help="With --init --account paid on a paid config: swap in the new .p12 and profile, its Keychain password and the signing: section, keeping apps, repos and settings. A development certificate and profile expire every year."),
     setup_portal: bool = typer.Option(False, "--setup-portal", help="Configure App Store Connect API key for auto-provisioning."),
+    set_portal_flag: bool = typer.Option(False, "--set-portal", help="Set the App Store Connect API key without prompts: --asc-key-id, --asc-issuer-id and --asc-key-file. Checks it by listing devices first, and writes nothing if that fails."),
+    clear_portal_flag: bool = typer.Option(False, "--clear-portal", help="Remove the App Store Connect API key from config.yaml. The .p8 file is kept."),
+    # `str | None` defaulting to None: verb-only flags, detected as passed by
+    # `is not None` — see `force` below.
+    asc_key_id: str | None = typer.Option(None, "--asc-key-id", help="With --set-portal: the key's Key ID (10 characters)."),
+    asc_issuer_id: str | None = typer.Option(None, "--asc-issuer-id", help="With --set-portal: the Issuer ID shown above the keys list."),
+    asc_key_file: str | None = typer.Option(None, "--asc-key-file", help="With --set-portal: the AuthKey_<key id>.p8 downloaded from App Store Connect. It is copied beside config.yaml."),
     search: str | None = typer.Option(None, "--search", help="Search canister.me for tweaks matching QUERY."),
     fetch: str | None = typer.Option(None, "--fetch", help="Download a .deb into tweaks_dir (package id or direct URL)."),
     fetch_sha: str | None = typer.Option(None, "--fetch-sha", help="Expected SHA-256 for a --fetch URL download (verified after download)."),
@@ -6021,24 +7122,40 @@ def main(
     add_app_bundle_id: str | None = typer.Option(None, "--bundle-id", help="With --add-app-manual: the iOS bundle identifier (e.g. com.example.app)."),
     add_app_display_name: str | None = typer.Option(None, "--display-name", help="With --add-app-manual: display name shown in the launcher."),
     add_app_delivery: str | None = typer.Option(None, "--delivery", help="With --add-app or --add-app-manual: 'sideload' or 'livecontainer' (defaults to sideload with a paid account, livecontainer with a free Apple ID; sideload needs a paid account). With --set-app-options: change the app's delivery mode."),
+    add_app_store_country: str | None = typer.Option(None, "--store-country", help="With --add-app-manual or --set-app-options: the App Store the app was found in, as a two-letter code such as GB. --appstore-check and --artwork then look it up there (default: the store of this Mac's region, else the US)."),
     provide_ipa_path: Path | None = typer.Option(None, "--provide-ipa", help="Validate a .ipa and stage it in cache_dir under the canonical filename. Requires --app."),
-    provide_ipa_app: str | None = typer.Option(None, "--app", help="With --provide-ipa / --attach-tweak / --detach-tweak: the configured app name (YAML key)."),
+    provide_ipa_app: str | None = typer.Option(None, "--app", help="With --provide-ipa / --attach-tweak / --detach-tweak / --appstore-get / --appstore-claim: the configured app name (YAML key). With --appstore-enroll-command: the installed app's path."),
     cached_ipa_app: str | None = typer.Option(None, "--cached-ipa", help="Report which IPA the build pipeline would use for the given app (YAML key)."),
     # --- App Store acquisition (`appstore.py`) ---
     appstore_status: bool = typer.Option(False, "--appstore-status", help="Report whether ipatool is installed and signed in and UnfairPlay is enrolled, with the Terminal commands for whatever is missing."),
     appstore_check: bool = typer.Option(False, "--appstore-check", help="Compare each app's App Store version with its cached IPA. Narrow it with --app."),
     appstore_get: bool = typer.Option(False, "--appstore-get", help="Download the App Store's latest version of --app with ipatool, decrypt it with UnfairPlay, and stage it."),
+    appstore_claim: bool = typer.Option(False, "--appstore-claim", help="Get --app's free App Store license for the signed-in Apple ID (ipatool purchase). Refuses unless the App Store lists it at 0."),
     # `bool | None` defaulting to None, like `--force`: a verb-only flag, and
     # the stray-flag gate reads "was it passed" as `opts[param] is not None`.
     allow_unverified: bool | None = typer.Option(None, "--allow-unverified", help="With --appstore-get or --provide-ipa: stage a decrypt UnfairPlay could not verify against Apple's page hashes (older apps), with a warning."),
+    appstore_login: bool = typer.Option(False, "--appstore-login", help="Sign ipatool in to the App Store. stdin gives the Apple ID, then the password, then the 2FA code if Apple asks (asked for in a terminal, the password without echo). None of them is ever an argument, and Graft saves none of them."),
+    # `str | None` defaulting to None: a verb-only flag, passed when not None.
+    expect_ipatool: str | None = typer.Option(None, "--expect-ipatool", help="With --appstore-login: sign in only if the ipatool found is PATH (compared as real paths). Any other is refused before stdin is read or ipatool starts: appstore-login {state: failed, reason: ipatool-changed}. Graft.app passes the one its sign-in sheet named."),
+    appstore_logout: bool = typer.Option(False, "--appstore-logout", help="Sign ipatool out of the App Store (ipatool auth revoke)."),
+    appstore_enroll_candidates: bool = typer.Option(False, "--appstore-enroll-candidates", help="List the installed iPhone and iPad apps that can enroll this Mac for App Store decryption."),
+    appstore_enroll_command: bool = typer.Option(False, "--appstore-enroll-command", help="Print the script that enrolls this Mac with --app PATH (one of --appstore-enroll-candidates). It runs as root, in a folder of its own: Graft.app runs it behind the macOS administrator prompt; in Terminal, run it with sudo /bin/sh, then --appstore-enroll-finish with the folder it prints."),
+    # `bool | None` defaulting to None, like `--allow-unverified`: a verb-only flag.
+    allow_unverified_helper: bool | None = typer.Option(None, "--allow-unverified-helper", help="With --appstore-enroll-command: print the script even though root can't check the UnfairPlay it runs, because this copy of Graft has no developer-team signature, or this graft isn't Graft.app's own. Graft.app asks first."),
+    appstore_enroll_finish: str | None = typer.Option(None, "--appstore-enroll-finish", help="After the --appstore-enroll-command script: move the model from the folder it printed into this user's model folder, as this user."),
+    appstore_search_term: str | None = typer.Option(None, "--appstore-search", help="Search the App Store for iPhone apps matching TERM (no Apple ID needed). Narrow it with --country and --limit."),
+    # `str | None` / `int | None` defaulting to None: verb-only flags, detected
+    # as passed by `is not None`, like `--force` below.
+    search_country: str | None = typer.Option(None, "--country", help="With --appstore-search: which country's App Store, as a two-letter code such as US or GB (default: this Mac's region, else US)."),
+    search_limit: int | None = typer.Option(None, "--limit", help="With --appstore-search: how many results, at most 50 (default 25)."),
     staged_ipas: bool = typer.Option(False, "--staged-ipas", help="Report every IPA staged in the cache, with what any strip removed."),
     delete_staged: str | None = typer.Option(None, "--delete-staged", help="Delete one staged IPA from the cache, by filename."),
     # `bool | None` defaulting to None, like `--brief` and `--with-icons`
     # below: this is a verb-only flag, and the stray-flag gate detects "was it
     # passed" as `opts[param] is not None`. A default of `False` would read as
     # passed on every invocation.
-    force: bool | None = typer.Option(None, "--force", help="With --delete-staged: delete even if it is the only staged IPA an app can build from. With --lc-install: replace LiveContainers AltStore manages."),
-    install_to_mac: str | None = typer.Option(None, "--install-to-mac", help="Hand one staged IPA to PlayCover to install on this Mac, by filename."),
+    force: bool | None = typer.Option(None, "--force", help="With --delete-staged: delete even if it is the only staged IPA an app can build from. With --lc-install: replace LiveContainers AltStore or SideStore manages."),
+    install_to_mac: str | None = typer.Option(None, "--install-to-mac", help="Hand one staged IPA or archived build to PlayCover to install on this Mac, by filename."),
     delivery_state_flag: bool = typer.Option(False, "--delivery-state", help="Report whether each app's last delivery still matches its config. Narrow it with --app."),
     list_settings: bool = typer.Option(False, "--settings", help="Show the global settings --set-settings can write."),
     set_settings_flag: bool = typer.Option(False, "--set-settings", help="Write global settings (see the --default-device / --archive-keep / --signing-* options)."),
@@ -6063,6 +7180,7 @@ def main(
     # the stray-flag gate, like `--force`.
     opt_lc_bundle_id: str | None = typer.Option(None, "--lc-bundle-id", help="With --set-app-options: pin the app to one LiveContainer, by bundle id (any case; `graft --lc-status` lists them)."),
     opt_no_lc_bundle_id: bool | None = typer.Option(None, "--no-lc-bundle-id", help="With --set-app-options: clear the app's LiveContainer pin."),
+    opt_auto_profile: bool | None = typer.Option(None, "--auto-profile/--no-auto-profile", help="With --set-app-options: make the app's provisioning profile through App Store Connect on its first build (needs a paid account and an App Store Connect key)."),
     list_repos: bool = typer.Option(False, "--repos", help="List configured APT repos."),
     repo_packages: str | None = typer.Option(None, "--repo-packages", help="List packages in an APT repo (by URL)."),
     refresh: bool = typer.Option(False, "--refresh", help="With --repo-packages: re-fetch the index before listing."),
@@ -6129,7 +7247,7 @@ def main(
     # `opts[param] is not None`, so a non-None default would make --decrypt-mode
     # look supplied on every command and trip the stray-flag gate. The verb
     # substitutes "all" itself.
-    decrypt_mode: str | None = typer.Option(None, "--decrypt-mode", help="bagbak dump mode: all (default, full app bundle), main (binaries only), or ext."),
+    decrypt_mode: str | None = typer.Option(None, "--decrypt-mode", help="bagbak dump mode. Only all (the default: the whole app bundle) is accepted, since --decrypt and --decrypt-frontmost stage the dump for a build and no other mode dumps an app."),
     decrypt_backend: str | None = typer.Option(None, "--decrypt-backend", help="Decrypt backend: frida-ios-dump (reliable, needs the app running + device SSH) or bagbak (spawns the app; bagbak 4.x also pulls over device SSH, so it needs the same SSH password)."),
     decrypt_frontmost: bool = typer.Option(False, "--decrypt-frontmost", help="Dump a decrypted IPA of whatever app is currently on screen on the device — auto-detects the foreground app, no bundle id needed. Open the app and keep it foreground first."),
     strip_encrypted_extensions: bool | None = typer.Option(None, "--strip-encrypted-extensions/--keep-encrypted-extensions", help="A dump drops app extensions it cannot decrypt (no tool can read one built for a newer iOS than the phone runs) and stages the rest — the app keeps working, minus its widgets and share sheet, and what went is always reported. `--keep-encrypted-extensions` refuses that trade and fails instead. The app's own binaries are never removed either way."),
@@ -6234,6 +7352,10 @@ def main(
     cfg: Config | None = None
     if selected is None or selected.needs is _Needs.LOADED:
         cfg = load_config(config_path)
+        # Once per command, ahead of the verb, like the notices above: what
+        # config.yaml got wrong but loaded anyway (`Config.notices`).
+        for notice in cfg.notices:
+            _warn(JsonEmitter() if json_mode else None, notice, startup=True)
         # Hidden partials a killed run left behind (R3): two listings.
         sweep_stale_partials(cfg.cache_dir, cfg.built_dir)
     if selected is not None:
@@ -6241,13 +7363,40 @@ def main(
         # events (`_narration_on_stderr`): here, once, rather than in each
         # handler, so a helper's `console.print` cannot reach the stream
         # through a verb that forgot to ask.
-        with _narration_on_stderr(json_mode and _speaks_json(selected)):
+        with _trust_prompts_as_events(json_mode), \
+                _narration_on_stderr(json_mode and _speaks_json(selected)):
             code = selected.run(cfg=cfg, **opts)
         raise typer.Exit(code=0 if code is None else code)
 
     # No verb flag. `cfg` is loaded — the walk above passed every verb that
     # needs one — and a build is what this CLI does by default.
-    raise typer.Exit(code=_verb_build_apps(cfg=cfg, **opts))
+    with _trust_prompts_as_events(json_mode):
+        code = _verb_build_apps(cfg=cfg, **opts)
+    raise typer.Exit(code=code)
+
+
+@contextlib.contextmanager
+def _trust_prompts_as_events(json_mode: bool):
+    """Under --json, the 'tap Trust' prompt is also a live `log` event.
+
+    `device_session.say_trust_prompt` writes it to stderr, which the app reads
+    only after a non-zero exit: a phone that never trusted this Mac sat behind
+    a silent 60 s wait, its instruction appearing once the wait had failed.
+    Source "device", which the build log and the LiveContainer pane both show.
+    The emitter is made here, outside `_narration_on_stderr`, so it writes to
+    the real stdout.
+    """
+    if not json_mode:
+        yield
+        return
+    emitter = JsonEmitter()
+    with device_session.trust_prompt_listener(
+        lambda line: emitter.emit("log", source="device", line=line)
+    ):
+        yield
+
+
+_NEGATED_FLAGS.update(_negated_flags(main))
 
 
 def _report_app_failure(app_name: str, exc: Exception, *, emitter: JsonEmitter | None) -> None:
@@ -6392,11 +7541,11 @@ def _build_one(
 
         # Tee every JSON event to a per-build .jsonl so the GUI can replay it
         # later. Only meaningful when --json is in use; non-JSON runs leave no
-        # machine-readable artefact.
+        # machine-readable artifact.
         if emitter is not None and not dry_run:
             report.open_tee(cfg.state_dir / "build-logs")
 
-        # `tmp_root` is read by the finally block, so it is initialised BEFORE
+        # `tmp_root` is read by the finally block, so it is initialized BEFORE
         # the try: a failure ahead of stage 2.5 must not trip an
         # UnboundLocalError on the way out. What a *failed* build reports is no
         # longer read off these — the envelope has it — so nothing here has to
@@ -6431,7 +7580,7 @@ def _build_one(
             # rather than "unknown".
             report.version = cached.version
             console.print(f"   using [cyan]{cached.path}[/cyan] (v{cached.version})")
-            # Staging has removed the buyer's metadata and licences from every
+            # Staging has removed the buyer's metadata and licenses from every
             # IPA since 1.1 (`provide_ipa.stage`); one staged before that still
             # has them, and would carry them into the build and onto the
             # device. Healed once, in place — or, when the cache won't take
@@ -6593,6 +7742,8 @@ def _build_one(
                 if emitter:
                     emitter.emit("stage", name="archive", status="start")
                 if not dry_run:
+                    # Shared until the history row is written (`hold_archives`).
+                    report.hold_archives(cfg)
                     cfg.built_dir.mkdir(parents=True, exist_ok=True)
                     ts = time.strftime("%Y%m%dT%H%M%S")
                     report.ipa_path = cfg.built_dir / f"{app_name}_{cached.version}_{ts}.ipa"
@@ -6665,12 +7816,19 @@ def _build_one(
                         udid=report.udid, dry_run=dry_run, emitter=emitter,
                     )
             else:
-                # Classic sideload: zsign + ideviceinstaller.
+                # Classic sideload: zsign + install over usbmux.
                 console.print("→ stage 4: signing with zsign")
                 if emitter:
                     emitter.emit("stage", name="sign", status="start")
                 signed = tmp_root / f"{app_name}-signed.ipa"
-                sg = run_zsign(cfg, tweaked, signed, app=app_cfg, dry_run=dry_run)
+                sg = run_zsign(
+                    cfg, tweaked, signed, app=app_cfg, dry_run=dry_run,
+                    # Read from `source`, the app as it came: a dry run's
+                    # cyan made no `tweaked`, and cyan adds no entitlements.
+                    before_signing=lambda profile: _warn_ungranted_capabilities(
+                        emitter, app_cfg, source, profile
+                    ),
+                )
                 for note in sg.profile_notes:
                     # An expired or device-stale auto-provisioning cache is
                     # refreshed silently by `ensure_profile_for_bundle` — which
@@ -6683,11 +7841,13 @@ def _build_one(
                     # line.
                     _warn(emitter, note)
                 if dry_run:
-                    console.print(f"   [dim]{sg.stdout}[/dim]")
+                    console.print(f"   [dim]{escape(sg.stdout)}[/dim]")
                 else:
+                    # Each escaped: the subject and the team (the certificate's
+                    # OU) are whatever made the .p12 says (combined fix check #27).
                     console.print(
-                        f"   [green]✓[/green] team={sg.team_id or '?'} "
-                        f"subject={sg.cert_subject or '?'} expiry={sg.expiry or '?'}"
+                        f"   [green]✓[/green] team={escape(sg.team_id or '?')} "
+                        f"subject={escape(sg.cert_subject or '?')} expiry={escape(sg.expiry or '?')}"
                     )
                     report.signing_team = sg.team_id
                 if emitter:
@@ -6696,6 +7856,8 @@ def _build_one(
                 _emit_log_lines(emitter, "zsign", sg.stderr)
 
                 if not dry_run:
+                    # Shared until the history row is written (`hold_archives`).
+                    report.hold_archives(cfg)
                     cfg.built_dir.mkdir(parents=True, exist_ok=True)
                     ts = time.strftime("%Y%m%dT%H%M%S")
                     report.ipa_path = cfg.built_dir / f"{app_name}_{cached.version}_{ts}.ipa"
@@ -6703,7 +7865,7 @@ def _build_one(
                     console.print(f"   archived to [cyan]{report.ipa_path}[/cyan]")
 
                 if not skip_install:
-                    console.print("→ stage 5: installing via ideviceinstaller")
+                    console.print("→ stage 5: installing on the device")
                     if emitter:
                         emitter.emit("stage", name="install", status="start")
                     report.udid, transport = select_device(device or cfg.default_device_udid)
@@ -6731,31 +7893,17 @@ def _build_one(
                 f"[bold green]✓ {app_cfg.cyan.display_name or app_name}[/bold green] "
                 f"({app_cfg.bundle_id}) {cached.version} in {report.elapsed:.1f}s"
             )
-            # Retention, on the success path only: a failed build archives nothing,
-            # and sweeping after one would delete the history a user is mid-way
-            # through debugging. This build's own archive is excluded so it is
-            # never a candidate, even at `archive_keep: 0`.
-            #
-            # Ahead of build-end so the prune is part of the build stream a
-            # consumer sees, rather than a trailer after the event that means
-            # "done"; and ahead of the history row because the only rows it
-            # clears belong to older archives, which are already on disk.
+            # Retention, on the success path only: sweeping after a failure
+            # would delete the history a user is mid-way through debugging. A
+            # build that fails *after* archiving (the push or install) leaves
+            # its archive with no row naming it; the sweep gives such archives
+            # no keep slot (`plan_prune`'s `reinstallable`), so they never
+            # outrank a build that can be re-installed. Run by the envelope
+            # once the history row is written and this build's share of the
+            # retention lock released (`_BuildReport.sweep_when_done`), still
+            # ahead of build-end.
             if not dry_run and report.ipa_path is not None:
-                try:
-                    _prune_archives(
-                        cfg,
-                        keep=cfg.archive_keep,
-                        dry_run=False,
-                        exclude=[report.ipa_path],
-                        emitter=emitter,
-                        trash_dir=trash_dir,
-                    )
-                except Exception as prune_error:
-                    # Housekeeping must never turn a shipped build into a failed
-                    # one: this block sits inside the envelope, which would
-                    # report a shipped build as a failure and tell the GUI the
-                    # install never happened.
-                    _warn(emitter, f"archive retention failed: {prune_error}")
+                report.sweep_when_done(cfg, trash_dir=trash_dir)
             # No build-end and no log.record here: both belong to the envelope,
             # which emits the terminal event last and exactly once. Emitting it
             # here — ahead of the history write — is what let a locked database

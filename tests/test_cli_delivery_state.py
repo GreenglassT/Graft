@@ -138,7 +138,7 @@ def _run_build(
         else patch.object(cli_mod, "run_cyan")
     )
     install_patch = (
-        patch.object(cli_mod, "install", side_effect=InstallError("ideviceinstaller failed"))
+        patch.object(cli_mod, "install", side_effect=InstallError("installing on the device failed"))
         if install_error
         else patch.object(cli_mod, "install", return_value=install_result)
     )
@@ -388,7 +388,7 @@ def test_a_sideload_install_records_a_delivery(tmp_path: Path) -> None:
 def test_a_sideload_install_that_throws_records_no_delivery(tmp_path: Path) -> None:
     """The mirror of the livecontainer case, on the branch that has its own push.
 
-    `ideviceinstaller` reports failure by raising, so a recording call placed
+    `install` reports failure by raising, so a recording call placed
     ahead of it would still be reached — and the tool would report `current`
     for a phone the IPA never landed on.
     """
@@ -708,7 +708,7 @@ def test_the_verb_scoped_by_device_reports_the_state_for_that_phone(
 
 
 def test_the_verb_without_device_is_unchanged_from_today(temp_config_env: Path) -> None:
-    """Omitting `--device` must still answer "anywhere" — today's behaviour —
+    """Omitting `--device` must still answer "anywhere" — today's behavior —
     even though the only delivery on record went to a specific phone."""
     from typer.testing import CliRunner
 

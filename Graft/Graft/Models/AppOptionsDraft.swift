@@ -26,6 +26,13 @@ struct AppOptionsDraft: Equatable {
         var compressionLevel: Int
         /// Which LiveContainer a push goes into. See `LCPin`.
         var lcPin: LCPin
+        /// Make the provisioning profile through App Store Connect
+        /// (`auto_profile`, C-AUTOPROFILE).
+        var autoProfile: Bool
+        /// The App Store the app's lookups ask (`store_country`); nil while
+        /// unset. The picker offers nil only to an app that has none, so an
+        /// edit can set or change it but never send a clear.
+        var storeCountry: String? = nil
     }
 
     /// The app's LiveContainer pin, as the Edit sheet's picker holds it.
@@ -61,7 +68,9 @@ struct AppOptionsDraft: Equatable {
             stripExtensions: app.stripExtensions,
             stripSupportedDevices: app.stripSupportedDevices,
             compressionLevel: app.compressionLevel,
-            lcPin: LCPin(app.lcBundleId)
+            lcPin: LCPin(app.lcBundleId),
+            autoProfile: app.autoProfile,
+            storeCountry: app.storeCountry
         )
         edited = original
     }
@@ -69,6 +78,24 @@ struct AppOptionsDraft: Equatable {
     /// Whether anything at all differs — Save's enablement, and the guard on
     /// starting a write at all.
     var hasChanges: Bool { edited != original }
+
+    /// Take back the edits the delivery now in the picker hides or locks, so
+    /// none of them goes out on Save unseen. The Edit sheet calls this on
+    /// every delivery switch.
+    ///
+    /// - The LiveContainer pin, whenever its picker is off the sheet
+    ///   (`lcPinShown` false, `EditAppSheet.offersLCPin`): a switch to
+    ///   Sideload hides it.
+    /// - `auto_profile`, on a switch to LiveContainer, which locks its toggle
+    ///   (`EditAppSheet.autoProfileLock`). One turned on under Sideload stayed
+    ///   on, grayed, and Save sent `--auto-profile`.
+    ///
+    /// Each goes back to `original`, what config holds, so only an unsaved
+    /// edit is dropped. A saved value is never changed by the switch.
+    mutating func revertEditsHiddenByDelivery(lcPinShown: Bool) {
+        if !lcPinShown { edited.lcPin = original.lcPin }
+        if edited.delivery == .livecontainer { edited.autoProfile = original.autoProfile }
+    }
 
     /// The edited value of `field`, or nil when it still matches the original.
     ///

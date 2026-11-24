@@ -35,6 +35,8 @@ struct SidebarView: View {
     /// snapshot of launch. Nothing here loads or refreshes it; `ContentView`
     /// owns that, so a sidebar rendered in a test spawns no subprocesses.
     let devices: DevicesStore
+    /// Handed to Add App, which stages a chosen IPA through it.
+    let appStore: AppStoreStore
 
     @State private var showingAddSheet = false
     @State private var pendingRemove: AppRecord?
@@ -127,7 +129,7 @@ struct SidebarView: View {
             }
         }
         .sheet(isPresented: $showingAddSheet) {
-            AddAppSheet(store: store) { newName in
+            AddAppSheet(store: store, appStore: appStore) { newName in
                 // Tagged straight from the name, with no lookup in `store.apps`
                 // first. `AppRecord.id` *is* `name` (Models/BuildEvent.swift),
                 // so this already matches a row.

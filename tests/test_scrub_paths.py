@@ -70,7 +70,7 @@ def test_a_read_only_cache_builds_from_a_scrubbed_copy(
 ) -> None:
     cfg = free_config
     staged = next(cfg.cache_dir.glob("*.ipa"))
-    account_ipa(staged, version="1.0", cryptid=None)
+    account_ipa(staged, version="1.0", cryptid=0)
     before = staged.read_bytes()
     written = fake_device(monkeypatch, ["com.kdt.livecontainer.FGHIJ67890"])
     read_only(cfg.cache_dir)
@@ -116,7 +116,7 @@ def test_the_heal_says_what_it_is_doing_before_it_does_it(
 ) -> None:
     cfg = free_config
     staged = next(cfg.cache_dir.glob("*.ipa"))
-    account_ipa(staged, version="1.0", cryptid=None)
+    account_ipa(staged, version="1.0", cryptid=0)
     fake_device(monkeypatch, ["com.kdt.livecontainer.FGHIJ67890"])
 
     events = _build(cfg, tmp_path)

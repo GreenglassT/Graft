@@ -1,8 +1,10 @@
 """`graft_ipa.playcover` — making a tweaked IPA loadable on macOS.
 
-These build real Mach-O dylibs with `clang` rather than using fixtures: the
-whole subject is load commands, and a fixture that only *looked* like a dylib
-would prove nothing about `otool` or `install_name_tool`.
+Most of these build real Mach-O dylibs with `clang` rather than using
+fixtures: the whole subject is load commands, and a fixture that only *looked*
+like a dylib would prove nothing about the reader or `install_name_tool`. The
+few at the end use synthetic load commands, so the reading half is still
+covered on a Mac with no clang or iOS SDK.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from graft_ipa import macho, playcover
 from graft_ipa.playcover import (
     linked_private_frameworks,
     prepare_frameworks_dir,
@@ -21,30 +24,19 @@ from graft_ipa.playcover import (
     retarget_to_bundled_framework,
 )
 
+from . import macho_builder as mb
 
-def _has_ios_sdk() -> bool:
-    """Whether `xcrun -sdk iphoneos` can find an SDK.
-
-    Half these cases reach `build_stub`, which shells out to
-    `xcrun -sdk iphoneos clang`. Guarding on `which("clang")` alone passes on a
-    Command Line Tools install — which has clang and otool but no iOS SDK — and
-    the cases then fail with `PlayCoverPrepError: couldn't build the
-    Preferences stub` instead of skipping.
-    """
-    try:
-        return subprocess.run(
-            ["xcrun", "--sdk", "iphoneos", "--show-sdk-path"],
-            capture_output=True, timeout=30,
-        ).returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    shutil.which("clang") is None
-    or shutil.which("otool") is None
-    or not _has_ios_sdk(),
-    reason="needs clang, otool and the iOS SDK to build and read a real dylib",
+#: Only on the tests that build a real dylib. The synthetic load-command tests
+#: below need none of this, and must not be skipped on a Mac without it.
+#:
+#: Asked of the developer directory, as the product asks it
+#: (`playcover.developer_dir`), never of `xcrun` or `which("clang")`: both are
+#: shims on every Mac, which pop the install dialog where there are no tools.
+#: A Command Line Tools install has clang but no iOS SDK, and these cases
+#: reach `build_stub`, so the SDK is what decides.
+needs_clang_and_sdk = pytest.mark.skipif(
+    not playcover.has_ios_sdk(playcover.developer_dir()),
+    reason="needs Xcode with the iOS SDK to build a real dylib",
 )
 
 
@@ -86,14 +78,17 @@ def needy(tmp_path: Path) -> Path:
     return _dylib(tmp_path, "needy", link_against=fake_prefs)
 
 
+@needs_clang_and_sdk
 def test_a_dylib_linking_a_stubbable_private_framework_is_found(needy: Path) -> None:
     assert linked_private_frameworks(needy) == ["Preferences"]
 
 
+@needs_clang_and_sdk
 def test_a_dylib_linking_nothing_private_is_left_alone(tmp_path: Path) -> None:
     assert linked_private_frameworks(_dylib(tmp_path, "plain")) == []
 
 
+@needs_clang_and_sdk
 def test_the_dylibs_own_id_is_never_mistaken_for_a_dependency(tmp_path: Path) -> None:
     """The trap this function exists to avoid, and which really happened.
 
@@ -114,12 +109,11 @@ def test_the_dylibs_own_id_is_never_mistaken_for_a_dependency(tmp_path: Path) ->
     assert linked_private_frameworks(lib) == [], "its own id is not a dependency"
 
 
+@needs_clang_and_sdk
 def test_retargeting_points_the_load_command_at_the_bundle(needy: Path) -> None:
     lib = needy
     retarget_to_bundled_framework(lib, "Preferences")
-    deps = subprocess.run(
-        ["otool", "-L", str(lib)], capture_output=True, text=True, check=True
-    ).stdout
+    deps = macho.dylib_names(lib)
     assert "@rpath/Preferences.framework/Preferences" in deps
     assert PREFS not in deps, "the /System path must be gone, not merely joined"
     # And it is no longer reported as needing a stub, which is what makes this
@@ -127,8 +121,9 @@ def test_retargeting_points_the_load_command_at_the_bundle(needy: Path) -> None:
     assert linked_private_frameworks(lib) == []
 
 
+@needs_clang_and_sdk
 def test_retargeting_leaves_the_dylib_signed(needy: Path) -> None:
-    """The dylib is loadable afterwards, however that gets achieved.
+    """The dylib is loadable afterward, however that gets achieved.
 
     Deliberately *not* a test that the explicit `codesign` call matters:
     measured on this toolchain, `install_name_tool` re-signs ad-hoc on its own,
@@ -141,6 +136,7 @@ def test_retargeting_leaves_the_dylib_signed(needy: Path) -> None:
     assert r.returncode == 0, r.stderr
 
 
+@needs_clang_and_sdk
 class TestPreparingAFrameworksDir:
     """The directory-level step: find, stub, retarget, report."""
 
@@ -189,6 +185,7 @@ class TestPreparingAFrameworksDir:
         assert prepare_frameworks_dir(tmp_path / "nope") == []
 
 
+@needs_clang_and_sdk
 class TestPreparingAnIPA:
     """The archive-level entry point."""
 
@@ -298,3 +295,175 @@ class TestPreparingAnIPA:
             after = zf.getinfo(name).external_attr >> 16
         assert after & 0o111, f"lost +x: {oct(before)} -> {oct(after)}"
         assert after == before, f"mode changed: {oct(before)} -> {oct(after)}"
+
+
+# ---- synthetic load commands: no clang, SDK or otool needed ----
+
+@pytest.fixture
+def no_subprocess(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError(f"unexpected subprocess: {a[0] if a else k}")
+    monkeypatch.setattr(playcover.subprocess, "run", boom)
+
+
+def test_linked_private_frameworks_reads_load_commands(tmp_path, no_subprocess):
+    lib = tmp_path / "libexample.dylib"
+    lib.write_bytes(mb.thin([
+        mb.dylib_cmd("/Library/MobileSubstrate/DynamicLibraries/libexample.dylib", cmd=mb.LC_ID_DYLIB),
+        mb.dylib_cmd("/System/Library/PrivateFrameworks/Preferences.framework/Preferences"),
+    ], filetype=mb.MH_DYLIB))
+    assert playcover.linked_private_frameworks(lib) == ["Preferences"]
+
+
+def test_an_unreadable_dylib_is_an_error_never_nothing_to_stub(tmp_path, no_subprocess):
+    lib = tmp_path / "libexample.dylib"
+    lib.write_bytes(b"not a mach-o")
+    with pytest.raises(playcover.PlayCoverPrepError, match=r"couldn't read libexample\.dylib's linked libraries"):
+        playcover.linked_private_frameworks(lib)
+
+
+def test_rpaths_reads_load_commands(tmp_path, no_subprocess):
+    lib = tmp_path / "libexample.dylib"
+    lib.write_bytes(mb.thin([mb.rpath_cmd("@loader_path")], filetype=mb.MH_DYLIB))
+    assert playcover._rpaths(lib) == ["@loader_path"]
+
+
+# ---- review #41: Xcode is found or named, never shimmed into ----
+
+def _needy_synthetic(frameworks: Path) -> Path:
+    frameworks.mkdir(parents=True, exist_ok=True)
+    lib = frameworks / "libexample.dylib"
+    lib.write_bytes(mb.thin([
+        mb.dylib_cmd("/Library/MobileSubstrate/DynamicLibraries/libexample.dylib", cmd=macho.LC_ID_DYLIB),
+        mb.dylib_cmd(PREFS),
+    ], filetype=mb.MH_DYLIB))
+    return lib
+
+
+def _fake_tool(directory: Path, name: str) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    tool = directory / name
+    tool.write_text("#!/bin/sh\nexit 0\n")
+    tool.chmod(0o755)
+    return tool
+
+
+def test_without_xcode_the_stub_build_says_so_and_runs_nothing(tmp_path, monkeypatch):
+    """On a Mac with no Xcode, `xcrun -sdk iphoneos clang` is a shim that pops
+    the install dialog and fails; --check had nothing to say about it."""
+    _needy_synthetic(tmp_path / "Frameworks")
+    monkeypatch.setattr(playcover, "developer_dir", lambda: None)
+
+    def boom(argv, *a, **k):
+        raise AssertionError(f"ran {argv}")
+
+    monkeypatch.setattr(playcover.subprocess, "run", boom)
+
+    with pytest.raises(playcover.PlayCoverPrepError, match="needs Xcode with its iOS SDK") as e:
+        prepare_frameworks_dir(tmp_path / "Frameworks")
+    assert "xcode-select -s" in (e.value.hint or "")
+
+
+def test_the_command_line_tools_alone_are_not_enough(tmp_path, monkeypatch):
+    clt = tmp_path / "CommandLineTools"
+    _fake_tool(clt / "usr" / "bin", "install_name_tool")
+    monkeypatch.setattr(playcover, "developer_dir", lambda: clt)
+
+    assert not playcover.has_ios_sdk(clt)
+
+
+def test_a_bundled_install_name_tool_is_run_by_its_path(tmp_path, monkeypatch):
+    """Graft.app's is cyan's, built from cctools-port with its fake-sign
+    hook compiled out: never the xcrun shim, never Xcode's (decision 9)."""
+    contents = tmp_path / "Graft.app" / "Contents"
+    helpers = contents / "Helpers" / "bin"
+    helpers.mkdir(parents=True)
+    bundled = _fake_tool((contents / playcover.BUNDLED_INSTALL_NAME_TOOL).parent, "install_name_tool")
+    monkeypatch.setattr(playcover.tools, "bundled_tools_dir", lambda: helpers)
+    monkeypatch.setattr(playcover, "developer_dir", lambda: None)
+    ran: list[list[str]] = []
+    monkeypatch.setattr(playcover.subprocess, "run", lambda argv, **k: ran.append(argv))
+
+    retarget_to_bundled_framework(_needy_synthetic(tmp_path / "F"), "Preferences")
+
+    tools_run = [argv[0] for argv in ran if argv[0] != "codesign"]
+    assert tools_run and set(tools_run) == {str(bundled)}
+
+
+def test_without_a_bundled_copy_the_developer_dir_s_is_used_not_the_shim(tmp_path, monkeypatch):
+    dev = tmp_path / "Xcode.app" / "Contents" / "Developer"
+    own = _fake_tool(dev / "Toolchains" / "XcodeDefault.xctoolchain" / "usr" / "bin", "install_name_tool")
+    monkeypatch.setattr(playcover.tools, "bundled_tools_dir", lambda: None)
+    monkeypatch.setattr(playcover, "developer_dir", lambda: dev)
+
+    assert playcover.install_name_tool() == own
+
+
+def test_with_neither_install_name_tool_is_named_with_the_fix(monkeypatch):
+    monkeypatch.setattr(playcover.tools, "bundled_tools_dir", lambda: None)
+    monkeypatch.setattr(playcover, "developer_dir", lambda: None)
+
+    with pytest.raises(playcover.PlayCoverPrepError, match="install_name_tool isn't installed") as e:
+        playcover.install_name_tool()
+    assert e.value.hint == playcover.XCODE_HINT
+
+
+def test_the_developer_dir_is_asked_of_xcode_select_not_xcrun(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEVELOPER_DIR", raising=False)
+    asked: list[list[str]] = []
+
+    def answer(argv, **k):
+        asked.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=f"{tmp_path}\n", stderr="")
+
+    monkeypatch.setattr(playcover.subprocess, "run", answer)
+
+    assert playcover.developer_dir() == tmp_path
+    assert asked == [["/usr/bin/xcode-select", "-p"]]
+
+
+def test_developer_dir_honours_the_environment(tmp_path, monkeypatch, no_subprocess):
+    monkeypatch.setenv("DEVELOPER_DIR", str(tmp_path))
+    assert playcover.developer_dir() == tmp_path
+    monkeypatch.setenv("DEVELOPER_DIR", str(tmp_path / "nonexistent-dev"))
+    assert playcover.developer_dir() is None
+
+
+def test_developer_dir_may_name_xcode_app_itself_as_xcrun_accepts(tmp_path, monkeypatch, no_subprocess):
+    """Fix-check #20: `DEVELOPER_DIR=/Applications/Xcode.app` works for xcrun,
+    and so for the tools found under it."""
+    xcode = tmp_path / "Xcode.app"
+    (xcode / "Contents" / "Developer").mkdir(parents=True)
+    monkeypatch.setenv("DEVELOPER_DIR", str(xcode))
+    assert playcover.developer_dir() == xcode / "Contents" / "Developer"
+
+
+def test_graft_apps_prebuilt_stub_is_used_and_nothing_is_built(tmp_path, monkeypatch, no_subprocess):
+    """Decision 9: Graft.app carries the stub, built at release, so a Mac
+    with no Xcode can still make a PlayCover build."""
+    prebuilt = tmp_path / "stubs" / "Preferences.framework"
+    prebuilt.mkdir(parents=True)
+    (prebuilt / "Preferences").write_bytes(b"stub")
+    (prebuilt / "Info.plist").write_text("<plist/>")
+    monkeypatch.setattr(playcover, "STUB_TOOLS_DIR", prebuilt.parent)
+    monkeypatch.setattr(playcover, "developer_dir", lambda: pytest.fail("asked for Xcode"))
+    out = playcover.build_stub("Preferences", tmp_path / "Frameworks")
+    assert out == tmp_path / "Frameworks" / "Preferences.framework"
+    assert (out / "Preferences").read_bytes() == b"stub" and (out / "Info.plist").is_file()
+
+
+def test_a_build_with_nothing_to_stub_never_looks_for_xcode(tmp_path, monkeypatch, no_subprocess):
+    """Only a tweak linking a private framework needs the tools, so a Mac
+    without Xcode still builds every other app for PlayCover."""
+    frameworks = tmp_path / "Frameworks"
+    frameworks.mkdir()
+    (frameworks / "libplain.dylib").write_bytes(mb.thin([
+        mb.dylib_cmd("/System/Library/Frameworks/UIKit.framework/UIKit"),
+    ], filetype=mb.MH_DYLIB))
+
+    def unasked():
+        raise AssertionError("looked for Xcode with nothing to stub")
+
+    monkeypatch.setattr(playcover, "developer_dir", unasked)
+
+    assert prepare_frameworks_dir(frameworks) == []

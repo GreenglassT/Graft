@@ -15,14 +15,16 @@ Auth: JWT (ES256) in Authorization: Bearer <token>, expires 20 min, regenerated 
 from __future__ import annotations
 
 import base64
+import os
 import re
+import stat
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import USER_AGENT, mobileprovision
-from .errors import EXIT_PORTAL, GraftError
+from .errors import EXIT_PORTAL, NOT_LET_READ, GraftError, not_let_read_hint
 
 # `requests` is imported inside `ASCClient.__init__` and `ASCClient._request`,
 # and `jwt` inside `make_jwt` — not here; see those comments for the measured
@@ -81,6 +83,10 @@ class Device:
     name: str
     platform: str
     status: str  # "ENABLED" / "DISABLED"
+    # IPHONE / IPAD / IPOD / APPLE_WATCH / APPLE_TV / MAC. `filter[platform]=IOS`
+    # lists Watches and Apple TVs too; this is what tells them apart. Empty
+    # when App Store Connect didn't say.
+    device_class: str = ""
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,11 @@ class Certificate:
     display_name: str
     serial_number: str | None
     expiration: str | None
+    # The certificate itself, base64 DER (`certificateContent`). Its subject's
+    # OU is the team that issued it, which is the one way to learn the API
+    # key's team before anything is written to the account; see
+    # `certificate_team`. None when App Store Connect sent none.
+    content_b64: str | None = None
 
 
 @dataclass(frozen=True)
@@ -104,20 +115,75 @@ class Profile:
 
 # ---------- JWT auth ----------
 
+#: The most of a key file that is ever read. An App Store Connect key is a
+#: PEM-wrapped P-256 private key, a few hundred bytes; anything past 64 KiB is
+#: not one, and is not read into memory to find that out.
+MAX_KEY_BYTES = 64 * 1024
+
+_KEY_HINT = "choose the AuthKey_….p8 you downloaded from App Store Connect"
+
+
+def read_key_file(path: Path) -> bytes:
+    """The .p8 at `path`: a regular file, at most `MAX_KEY_BYTES`, read once.
+
+    Opened non-blocking and checked with `fstat` on the descriptor it is then
+    read from. `exists()` is true for a FIFO, and reading one with no writer
+    blocks forever, which is what the setup wizard did; and a check on the
+    path followed by a read of the path can be raced, while a check on the
+    open descriptor cannot. `O_NONBLOCK` changes nothing for a regular file.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except FileNotFoundError:
+        raise PortalError(
+            f"ASC API key not found at {path}",
+            hint="download the .p8 from App Store Connect -> Users and Access -> Integrations -> Keys",
+        ) from None
+    except OSError as e:
+        raise PortalError(
+            f"couldn't open the App Store Connect key at {path}: {e.strerror}",
+            hint=not_let_read_hint(str(path)) if e.errno in NOT_LET_READ else _KEY_HINT,
+        ) from None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PortalError(
+                f"{path} is not a file, so it isn't an App Store Connect key", hint=_KEY_HINT
+            )
+        chunks: list[bytes] = []
+        size = 0
+        while size <= MAX_KEY_BYTES:
+            chunk = os.read(fd, MAX_KEY_BYTES + 1 - size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+    finally:
+        os.close(fd)
+    if size > MAX_KEY_BYTES:
+        raise PortalError(
+            f"{path} is larger than 64 KiB, so it isn't an App Store Connect key",
+            hint=_KEY_HINT,
+        )
+    return b"".join(chunks)
+
 
 @dataclass
 class PortalCredentials:
     key_id: str
     issuer_id: str
     key_path: Path
+    #: The key itself, when the caller has already read it (`read_key_file`).
+    #: Then what signs is exactly what was read, and the path is not read
+    #: again: `--set-portal` checks these bytes and installs these bytes.
+    #: Out of the repr: it is the private key, and a dataclass repr — in a
+    #: traceback's locals, a log line, an f-string — showed it whole. The only
+    #: field here that holds key material; the rest name the key.
+    key_bytes: bytes | None = field(default=None, repr=False)
 
     def load_key(self) -> bytes:
-        if not self.key_path.exists():
-            raise PortalError(
-                f"ASC API key not found at {self.key_path}",
-                hint="download the .p8 from App Store Connect -> Users and Access -> Integrations -> Keys",
-            )
-        return self.key_path.read_bytes()
+        if self.key_bytes is not None:
+            return self.key_bytes
+        return read_key_file(self.key_path)
 
 
 def make_jwt(creds: PortalCredentials) -> str:
@@ -369,6 +435,7 @@ def _device_from_resource(r: dict[str, Any]) -> Device:
         name=a.get("name", ""),
         platform=a.get("platform", ""),
         status=a.get("status", ""),
+        device_class=a.get("deviceClass", "") or "",
     )
 
 
@@ -380,6 +447,7 @@ def _cert_from_resource(r: dict[str, Any]) -> Certificate:
         display_name=a.get("displayName", ""),
         serial_number=a.get("serialNumber"),
         expiration=a.get("expirationDate"),
+        content_b64=a.get("certificateContent"),
     )
 
 
@@ -459,6 +527,69 @@ class ProvisionResult:
     unregistered_devices: tuple[str, ...] = ()
 
 
+def certificate_team(cert: Certificate) -> str | None:
+    """The team `cert` was issued to (its subject's OU), or None when App Store
+    Connect sent no readable certificate.
+
+    A certificate this key lists is the key's team's, so this is the key's
+    team, known from a read alone.
+    """
+    if not cert.content_b64:
+        return None
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    try:
+        parsed = x509.load_der_x509_certificate(base64.b64decode(cert.content_b64))
+    except (TypeError, ValueError):
+        return None
+    units = parsed.subject.get_attributes_for_oid(NameOID.ORGANIZATIONAL_UNIT_NAME)
+    return str(units[0].value) if units else None
+
+
+def _profile_team(profile: Profile) -> str | None:
+    """The team a profile App Store Connect sent belongs to, read in memory,
+    or None when it can't be read or names none."""
+    if not profile.profile_content_b64:
+        return None
+    try:
+        plist = mobileprovision.decode_bytes(
+            base64.b64decode(profile.profile_content_b64), source=f"profile {profile.id}"
+        )
+    except (GraftError, TypeError, ValueError):
+        return None
+    teams = plist.get("TeamIdentifier") or []
+    return str(teams[0]) if teams else None
+
+
+def _refuse_another_team(
+    team_id: str | None,
+    key_team: str | None,
+    *,
+    done: str = "Nothing was created or deleted at Apple.",
+) -> None:
+    """Stop when signing.team_id names a team other than the API key's.
+
+    A key can only make profiles for its own team, and `cache_problem`'s team
+    rule refuses every one of them for another `team_id`. Left to run, each
+    build created a profile, refused it, and left it in the account: one more
+    per build, and nothing ever built. Asked as soon as the key's team is
+    known, so the refusal comes before any write.
+    """
+    if team_id is None or key_team is None or team_id.upper() == key_team.upper():
+        return
+    raise PortalError(
+        f"signing.team_id {team_id} doesn't match the App Store Connect key's team {key_team}",
+        hint=(
+            f"the key and the .p12's certificate are team {key_team}'s, and every "
+            f"profile it makes is {key_team}'s, which a build for {team_id} refuses. "
+            f"If you moved to team {key_team}, set Team ID to {key_team} in Settings "
+            f"(or `graft --set-settings --signing-team-id {key_team}`); if not, set "
+            f"up team {team_id}'s App Store Connect key and .p12. {done}"
+        ),
+    )
+
+
 def _cache_filename(pattern: str) -> str:
     # Make a filesystem-safe filename from a bundle id pattern.
     return pattern.replace("*", "x").replace(".", "_") + ".mobileprovision"
@@ -476,7 +607,13 @@ def profile_cache_path(cache_dir: Path, pattern: str) -> Path:
 
 
 def _cache_if_usable(
-    profile: Profile, cached: Path, device_udids: list[str], pattern: str
+    profile: Profile,
+    cached: Path,
+    device_udids: list[str],
+    pattern: str,
+    *,
+    cert_serial: str | None = None,
+    team_id: str | None = None,
 ) -> str | None:
     """Write `profile` to `cached` if it is usable, or say why it is not.
 
@@ -500,7 +637,8 @@ def _cache_if_usable(
     staged.write_bytes(base64.b64decode(profile.profile_content_b64))
     staged.chmod(0o600)
     problem = mobileprovision.cache_problem(
-        staged, device_udids=device_udids, application_identifier=pattern
+        staged, device_udids=device_udids, application_identifier=pattern,
+        cert_serial=cert_serial, team_id=team_id,
     )
     if problem is not None:
         staged.unlink(missing_ok=True)
@@ -519,6 +657,7 @@ def ensure_profile_for_bundle(
     force_refresh: bool = False,
     exact: bool = False,
     register_missing: bool = True,
+    team_id: str | None = None,
 ) -> ProvisionResult:
     """Return a path to a .mobileprovision that covers `bundle_id`.
 
@@ -527,11 +666,15 @@ def ensure_profile_for_bundle(
          if `exact=True` (needed for hosts like LiveContainer whose runtime
          features require the application-identifier entitlement to be exact
          rather than a wildcard).
-      2. Find the Bundle ID resource whose identifier *equals* that pattern,
+      2. Resolve the cert, and refuse a `team_id` that is not its team (the
+         key's) before anything is written to the account.
+      3. Find the Bundle ID resource whose identifier *equals* that pattern,
          or create it — unless `register_missing=False`, which raises
          `AppIdNotRegistered` instead (see that class for why).
-      3. Resolve the cert and the devices, refusing a UDID ASC does not know.
-      4. Reuse or create a profile, and cache it only once it passes the rule.
+      4. Resolve the devices, refusing a UDID ASC does not know.
+      5. Reuse or create a profile, and cache it only once it passes the rule.
+         A name-matched remote profile is read and judged before it is
+         replaced, never deleted unread.
 
     The cache heals itself. `force_refresh` is the caller's override, not the
     only way to get a fresh profile: an expired cached file, or one that does
@@ -568,6 +711,12 @@ def ensure_profile_for_bundle(
     and if the narrower answer is "no problem" the cached file is returned
     untouched. So the retired-phone case costs read-only calls and a warning
     rather than two writes to the user's developer account.
+
+    Every one of those judgements, cached file and remote alike, also asks
+    whether the profile lists the certificate `cert_serial` names and belongs
+    to `team_id` (when given). A certificate revoked or replaced, or a move to
+    another team, otherwise left a profile zsign can't use in the cache, and
+    deleting the file only fetched the same remote profile back.
     """
     if exact:
         pattern = bundle_id
@@ -586,7 +735,8 @@ def ensure_profile_for_bundle(
 
     if cached.exists() and not force_refresh:
         problem = mobileprovision.cache_problem(
-            cached, device_udids=device_udids, application_identifier=pattern
+            cached, device_udids=device_udids, application_identifier=pattern,
+            cert_serial=cert_serial, team_id=team_id,
         )
         if problem is None:
             return ProvisionResult(
@@ -595,13 +745,33 @@ def ensure_profile_for_bundle(
                 bundle_id_pattern=pattern,
                 refreshed=False,
             )
-        # Re-download is not enough: the remote profile of the same name is the
-        # one this stale file came from, so reusing it would fetch the same
-        # expired bytes back. Refreshing for real deletes and recreates it.
-        force_refresh = True
+        # Not the caller's override: the remote profile of the same name is
+        # read and judged below before anything replaces it. For an expired
+        # file it is usually the one the file came from, and is refused the
+        # same way; for a file from another team, or one lacking this Mac's
+        # certificate, it says nothing about the remote one, which another Mac
+        # may have made and be using.
         refresh_reason = problem
 
-    # Step 1: locate or create the Bundle ID resource.
+    # Step 2: resolve our certificate id by serial number, before anything is
+    # written. The certificate is the key's team's, so this is also where a
+    # signing.team_id no profile from this key can satisfy is refused.
+    # Apple's ASC API uses 'DEVELOPMENT' for newer accounts, 'IOS_DEVELOPMENT' for older.
+    # Search both so we don't miss the cert.
+    certs = client.list_certificates(certificate_type=["DEVELOPMENT", "IOS_DEVELOPMENT"])
+    cert = _find_cert_by_serial(certs, cert_serial)
+    if cert is None:
+        raise PortalError(
+            f"no IOS_DEVELOPMENT cert in ASC matching serial {cert_serial}",
+            hint=(
+                "verify the cert is registered: developer.apple.com -> Certificates. "
+                "If it was created locally and never uploaded, regenerate it from Xcode "
+                "while signed into the same Apple ID."
+            ),
+        )
+    _refuse_another_team(team_id, certificate_team(cert))
+
+    # Step 3: locate or create the Bundle ID resource.
     #
     # The identifier that *equals* the pattern, never the first one returned.
     # ASC's `filter[identifier]` is a prefix match: asked for
@@ -630,22 +800,7 @@ def ensure_profile_for_bundle(
         safe_name = "graft " + re.sub(r"[^a-zA-Z0-9]+", " ", pattern).strip()
         bid = client.create_bundle_id(pattern, name=safe_name)
 
-    # Step 2: resolve our certificate id by serial number.
-    # Apple's ASC API uses 'DEVELOPMENT' for newer accounts, 'IOS_DEVELOPMENT' for older.
-    # Search both so we don't miss the cert.
-    certs = client.list_certificates(certificate_type=["DEVELOPMENT", "IOS_DEVELOPMENT"])
-    cert = _find_cert_by_serial(certs, cert_serial)
-    if cert is None:
-        raise PortalError(
-            f"no IOS_DEVELOPMENT cert in ASC matching serial {cert_serial}",
-            hint=(
-                "verify the cert is registered: developer.apple.com -> Certificates. "
-                "If it was created locally and never uploaded, regenerate it from Xcode "
-                "while signed into the same Apple ID."
-            ),
-        )
-
-    # Step 3: resolve device IDs, and narrow the question to the devices a
+    # Step 4: resolve device IDs, and narrow the question to the devices a
     # profile could actually cover.
     all_devices = client.list_devices(platform="IOS")
     udid_to_id = {d.udid.lower(): d.id for d in all_devices if d.status == "ENABLED"}
@@ -675,7 +830,8 @@ def ensure_profile_for_bundle(
         # its UDID in config.yaml, and a build that stops working for a device
         # the user no longer owns is a bad trade for a warning they can act on.
         problem = mobileprovision.cache_problem(
-            cached, device_udids=provisionable, application_identifier=pattern
+            cached, device_udids=provisionable, application_identifier=pattern,
+            cert_serial=cert_serial, team_id=team_id,
         )
         if problem is None:
             return ProvisionResult(
@@ -689,11 +845,11 @@ def ensure_profile_for_bundle(
         # device this refresh was never going to add.
         refresh_reason = problem
 
-    # Step 4: find a usable existing profile, otherwise create a new one.
+    # Step 5: find a usable existing profile, otherwise create a new one.
     # Apple rejects duplicate names so we either reuse or generate a unique name.
     #
     # Profiles made before the rename to Graft are called `tweak-build <id>
-    # dev`. They are still ours, and recognising only the new name would have
+    # dev`. They are still ours, and recognizing only the new name would have
     # every existing install create a second profile per app on its first
     # build after upgrading, leaving the old one orphaned in the account. New
     # profiles get the new name; the old one is only ever matched.
@@ -711,7 +867,10 @@ def ensure_profile_for_bundle(
         ),
         None,
     )
-    if candidate is not None and not force_refresh:
+    # Whether the candidate was read and refused: the only grounds, short of
+    # the caller's override, for deleting it.
+    candidate_refused = False
+    if candidate is not None and not caller_forced:
         # The remote profile is a cache too, and it was the one place the
         # validity rule was never applied. This is the *only* path on a fresh
         # machine — or right after the user deletes the local file, which is
@@ -719,8 +878,19 @@ def ensure_profile_for_bundle(
         # created before this phone existed came down here, passed every green
         # pre-flight row, and was refused by the phone. Only the next build,
         # judging the file it had written, healed it.
+        #
+        # Asked on a refresh too. It was skipped whenever the local file had a
+        # problem, and then deleted unread once the replacement existed: a
+        # valid profile in the new team after a team switch, or the one
+        # another Mac had just refreshed, went with it.
         downloaded = client.get_profile(candidate.id, with_content=True)
-        problem = _cache_if_usable(downloaded, cached, provisionable, pattern)
+        # A profile this key lists is the key's team's: the same refusal as
+        # step 2's, for when App Store Connect sent the certificate bare.
+        _refuse_another_team(team_id, _profile_team(downloaded))
+        problem = _cache_if_usable(
+            downloaded, cached, provisionable, pattern,
+            cert_serial=cert_serial, team_id=team_id,
+        )
         if problem is None:
             return ProvisionResult(
                 profile_path=cached,
@@ -730,7 +900,9 @@ def ensure_profile_for_bundle(
                 refresh_reason=refresh_reason,
                 unregistered_devices=unregistered,
             )
-        force_refresh, refresh_reason = True, problem
+        # The reason the refresh began, when the local file gave one: that is
+        # the question the user has, and the remote one usually shares it.
+        candidate_refused, refresh_reason = True, refresh_reason or problem
 
     unique_name = (
         profile_name_prefix
@@ -745,8 +917,23 @@ def ensure_profile_for_bundle(
     )
     if not profile.profile_content_b64:
         profile = client.get_profile(profile.id, with_content=True)
-    problem = _cache_if_usable(profile, cached, provisionable, pattern)
+    problem = _cache_if_usable(
+        profile, cached, provisionable, pattern,
+        cert_serial=cert_serial, team_id=team_id,
+    )
     if problem is not None:
+        # Removed again first: it is ours, minutes old, and refused, so all it
+        # could do in the account is accumulate, one per build.
+        try:
+            client.delete_profile(profile.id)
+        except PortalError:
+            pass
+        # The last place the key's team can show itself, when neither the
+        # certificate nor a listed profile said.
+        _refuse_another_team(
+            team_id, _profile_team(profile),
+            done="The profile it just made was deleted again.",
+        )
         # The new profile does not resolve what the old one was replaced for.
         # Refreshing on the strength of `cache_problem` without ever asking it
         # about the result is what let an unresolvable condition re-provision
@@ -767,8 +954,9 @@ def ensure_profile_for_bundle(
     # Deleted only now. Recreating meant deleting first, so a network failure
     # landing between the two calls left the account with no profile at all;
     # this way the worst case is a stale extra, which the check above rejects
-    # and the next refresh clears.
-    if candidate is not None and force_refresh:
+    # and the next refresh clears. And only one that was read and refused, or
+    # that the caller asked to replace.
+    if candidate is not None and (caller_forced or candidate_refused):
         try:
             client.delete_profile(candidate.id)
         except PortalError:
@@ -785,19 +973,21 @@ def ensure_profile_for_bundle(
 
 
 def _find_cert_by_serial(certs: list[Certificate], serial: str) -> Certificate | None:
-    target = _normalize_serial(serial)
+    """The certificate whose serial is `serial`, compared as numbers.
+
+    ASC may print a serial as '00:11:22' or '001122', and `read_p12_cert_serial`
+    as '1122': `format(n, 'X')` drops leading zero nibbles, which a byte-padded
+    rendering keeps. Compared as strings those never matched, which would fail
+    about one serial in sixteen; `mobileprovision.serial_value` makes every
+    spelling of one number equal.
+    """
+    target = mobileprovision.serial_value(serial)
+    if target is None:
+        return None
     for c in certs:
-        if not c.serial_number:
-            continue
-        if _normalize_serial(c.serial_number) == target:
+        if c.serial_number and mobileprovision.serial_value(c.serial_number) == target:
             return c
     return None
-
-
-def _normalize_serial(s: str) -> str:
-    """ASC returns serials like '00:11:22' or '001122'. p12 reports them as
-    hex without separators. Compare case-insensitively after stripping ':'."""
-    return s.replace(":", "").replace(" ", "").lower()
 
 
 # ---------- helper: read the .p12's serial number so the user doesn't have to ----------
@@ -810,11 +1000,11 @@ def read_p12_cert_serial(p12_path: Path, password: str) -> str:
     formatted as a hex string. This function reads the .p12, extracts the cert,
     and returns the serial in the same hex form (no separators, uppercase).
     """
-    from cryptography.hazmat.primitives.serialization import pkcs12
+    from .p12 import load_key_and_certificates
 
     data = p12_path.read_bytes()
     try:
-        _, cert, _ = pkcs12.load_key_and_certificates(data, password.encode("utf-8"))
+        _, cert, _ = load_key_and_certificates(data, password.encode("utf-8"))
     except ValueError as e:
         raise PortalError(
             f"could not read {p12_path}: {e}",

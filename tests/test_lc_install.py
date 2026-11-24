@@ -1,22 +1,23 @@
 """`--lc-install`, `--lc-push-cert` and `--lc-clean`, against fakes.
 
 Nothing here reaches a phone, App Store Connect or a keychain. The device is a
-`FakeDevice`; profiles come from `FakeProfiles`; `codesign`, `security` and
-`ideviceinstaller` go to a `FakeRunner` that records argv. The signing code
-under them is the real `lc_sign` / `lc_instance`, on a synthetic IPA.
+`FakeDevice`, and installs go to its `install_ipa`; profiles come from
+`FakeProfiles`; `codesign` and `security` go to a `FakeRunner` that records
+argv. The signing code under them is the real `lc_sign` / `lc_instance`, on a
+synthetic IPA.
 """
 
 from __future__ import annotations
 
 import io
 import json
-import subprocess
+import threading
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from graft_ipa import lc_manage
+from graft_ipa import device_install, lc_instance, lc_manage
 from graft_ipa.apple_portal import AppIdNotRegistered
 from graft_ipa.build_log import BuildLog
 from graft_ipa.errors import InstallError
@@ -58,30 +59,15 @@ class Recorder:
         return [f for t, f in self.all() if t == event_type]
 
 
-class FakeProc:
-    """`ideviceinstaller` as `Popen` would hand it back."""
-
-    def __init__(self, output: str = "Install: Complete\n", returncode: int = 0,
-                 timeouts: int = 0) -> None:
-        self.output, self.returncode, self.timeouts = output, returncode, timeouts
-
-    def communicate(self, timeout: float | None = None):
-        if self.timeouts and timeout is not None:
-            self.timeouts -= 1
-            raise subprocess.TimeoutExpired("ideviceinstaller", timeout)
-        return self.output, None
-
-
 class InstallRunner(FakeRunner):
-    def __init__(self, procs: list[FakeProc] | None = None, **kw) -> None:
-        super().__init__(**kw)
-        self.procs = procs or []
-        self.spawned: list[list[str]] = []
+    """`FakeRunner`, minus the real `spawn` it inherits from `lc_sign.Runner`.
+
+    Installs go to `FakeDevice.install_ipa` now, so nothing should spawn; a
+    spawn that got through would start a real process, so it fails instead."""
 
     def spawn(self, cmd):
         self.calls.append(list(cmd))
-        self.spawned.append(list(cmd))
-        return self.procs.pop(0) if self.procs else FakeProc()
+        raise AssertionError(f"lc_manage spawned a process: {cmd}")
 
 
 class FakeDevice:
@@ -94,9 +80,24 @@ class FakeDevice:
         #: The bytes of a file in `docs`, by (bundle id, name); others read
         #: as somebody else's.
         self.contents: dict[tuple[str, str], bytes] = {}
+        self.installs: list[tuple[str, str]] = []
+        self.install_marks: list[int] = []      # len(calls_source) at each install
+        self.calls_source: list = []            # Harness points this at runner.calls
+        self.install_gate = None                # a threading.Event to block on
+        self.waiting_on_user: list = []         # the switch each install was handed
+        self.install_error: Exception | None = None
 
     def installed_apps(self, udid: str) -> dict[str, dict]:
         return self.apps
+
+    def install_ipa(self, udid: str, ipa: Path, on_progress=None, waiting_on_user=None) -> None:
+        self.install_marks.append(len(self.calls_source))
+        self.waiting_on_user.append(waiting_on_user)
+        if self.install_gate is not None:
+            self.install_gate.wait(5)
+        if self.install_error is not None:
+            raise self.install_error
+        self.installs.append((udid, ipa.name))
 
     def read_document(self, udid: str, bundle_id: str, name: str) -> bytes:
         return self.contents.get((bundle_id, name), b"somebody else's file")
@@ -150,34 +151,34 @@ def ipa(tmp_path: Path) -> Path:
 
 class Harness:
     def __init__(self, tmp_path: Path, ipa: Path, *, device: FakeDevice | None = None,
-                 runner: InstallRunner | None = None, profiles: FakeProfiles | None = None,
-                 transport: str = "Network") -> None:
+                 runner: InstallRunner | None = None,
+                 profiles: FakeProfiles | None = None) -> None:
         (tmp_path / "profiles").mkdir(exist_ok=True)
         self.p12, _ = _make_p12(tmp_path)
         # A phone with one ordinary app: an empty listing is a locked phone,
         # which `install` refuses (see the test for that).
         self.device = device or FakeDevice({"com.example.app": {}})
         self.runner = runner or InstallRunner()
+        self.device.calls_source = self.runner.calls
         self.profiles = profiles or FakeProfiles(tmp_path / "profiles")
         self.log = BuildLog(tmp_path / "log.sqlite")
         self.recorder = Recorder()
         self.fetched = 0
         self.ipa = ipa
-        self.transport = transport
         self.tmp_path = tmp_path
 
     def fetch(self, channel: str):
         self.fetched += 1
         return RELEASE, self.ipa
 
-    def install(self, *, instances=(1, 2, 3), force=False):
+    def install(self, *, instances=(1, 2, 3), force=False, wait_notice_seconds: float = 1.0):
         return lc_manage.install(
             udid="u1", team=TEAM, instances=instances, channel="nightly", force=force,
             p12=self.p12, p12_password=REAL_PASSWORD, profiles=self.profiles,
             device_ops=self.device, runner=self.runner,
-            transport=lambda udid: self.transport, log=self.log, events=self.recorder.events,
+            log=self.log, events=self.recorder.events,
             fetch_ipa=self.fetch, load_profile=self.profiles.decoded.__getitem__,
-            workdir=self.tmp_path / "work",
+            workdir=self.tmp_path / "work", wait_notice_seconds=wait_notice_seconds,
         )
 
     def of(self, event_type: str) -> list[dict]:
@@ -253,22 +254,13 @@ def test_three_instances_are_signed_then_installed_and_recorded(tmp_path: Path, 
     results = h.install()
 
     assert [r["bundle_id"] for r in results] == [PRIMARY, LC2, LC3]
-    assert [s[:5] for s in h.runner.spawned] == [
-        ["ideviceinstaller", "-u", "u1", "--network", "install"]
-    ] * 3
+    assert h.device.installs == [("u1", f"{lc_instance.instance_name(n)}.ipa") for n in (1, 2, 3)]
+    assert not [c for c in h.runner.calls if c and c[0] == "ideviceinstaller"]
     assert h.log.lc_installed_bundle_ids("u1") == {PRIMARY, LC2, LC3}
     assert h.of("lc-installed")[0] == {
         "udid": "u1", "bundle_id": PRIMARY, "instance": 1, "version": "3.8.14",
         "channel": "nightly",
     }
-
-
-def test_a_usb_device_is_installed_without_network(tmp_path: Path, ipa: Path) -> None:
-    h = Harness(tmp_path, ipa, transport="USB")
-
-    h.install(instances=(3,))
-
-    assert h.runner.spawned[0][:4] == ["ideviceinstaller", "-u", "u1", "install"]
 
 
 def test_every_signature_is_made_before_the_first_install(tmp_path: Path, ipa: Path) -> None:
@@ -278,12 +270,11 @@ def test_every_signature_is_made_before_the_first_install(tmp_path: Path, ipa: P
 
     h.install()
 
-    first_spawn = h.runner.calls.index(h.runner.spawned[0])
     restore = max(
         i for i, c in enumerate(h.runner.calls)
         if c == ["security", "list-keychains", "-d", "user", "-s", LOGIN, SYSTEM]
     )
-    assert restore < first_spawn
+    assert restore < h.device.install_marks[0]
 
 
 def test_progress_names_each_step_of_each_instance(tmp_path: Path, ipa: Path) -> None:
@@ -311,15 +302,20 @@ def test_the_signing_summary_is_reported(tmp_path: Path, ipa: Path) -> None:
 def test_an_install_still_blocked_says_to_close_livecontainer_once(
     tmp_path: Path, ipa: Path
 ) -> None:
-    h = Harness(tmp_path, ipa, runner=InstallRunner([FakeProc(timeouts=1)]))
+    h = Harness(tmp_path, ipa)
+    h.device.install_gate = threading.Event()
+    threading.Timer(0.3, h.device.install_gate.set).start()
 
-    h.install(instances=(1,))
+    h.install(instances=(1,), wait_notice_seconds=0.05)
 
     assert h.of("lc-install-waiting") == [{
         "udid": "u1", "instance": 1, "bundle_id": PRIMARY,
         "message": "close LiveContainer on the device to finish",
     }]
     assert [e["bundle_id"] for e in h.of("lc-installed")] == [PRIMARY]
+    # cli-1: from the notice on, installd's silence is the user's time.
+    (switch,) = h.device.waiting_on_user
+    assert switch is not None and switch.is_set()
 
 
 def test_an_install_that_finishes_promptly_says_nothing_about_waiting(
@@ -330,6 +326,8 @@ def test_an_install_that_finishes_promptly_says_nothing_about_waiting(
     h.install(instances=(1,))
 
     assert h.of("lc-install-waiting") == []
+    (switch,) = h.device.waiting_on_user
+    assert switch is not None and not switch.is_set(), "60 s of silence is still a phone gone"
 
 
 # ---- failures ----
@@ -338,8 +336,9 @@ def test_an_install_that_finishes_promptly_says_nothing_about_waiting(
 def test_a_mismatched_application_identifier_says_to_delete_the_old_copy(
     tmp_path: Path, ipa: Path
 ) -> None:
-    out = "Install: Error occurred: MismatchedApplicationIdentifierEntitlement\n"
-    h = Harness(tmp_path, ipa, runner=InstallRunner([FakeProc(out, returncode=1)]))
+    h = Harness(tmp_path, ipa)
+    h.device.install_error = device_install.DeviceInstallError(
+        "MismatchedApplicationIdentifierEntitlement: upgrade refused")
 
     with pytest.raises(InstallError) as exc:
         h.install(instances=(1,))
@@ -352,15 +351,6 @@ def test_a_mismatched_application_identifier_says_to_delete_the_old_copy(
     assert h.log.lc_installed_bundle_ids("u1") == set()
 
 
-def test_an_output_saying_complete_with_a_failing_exit_is_a_failure(
-    tmp_path: Path, ipa: Path
-) -> None:
-    h = Harness(tmp_path, ipa, runner=InstallRunner([FakeProc("Install: Complete", 1)]))
-
-    with pytest.raises(InstallError):
-        h.install(instances=(1,))
-
-
 def test_a_main_app_without_its_app_id_stops_and_explains(tmp_path: Path, ipa: Path) -> None:
     profiles = FakeProfiles(tmp_path / "profiles", missing={LC2})
     (tmp_path / "profiles").mkdir()
@@ -371,7 +361,7 @@ def test_a_main_app_without_its_app_id_stops_and_explains(tmp_path: Path, ipa: P
 
     assert exc.value.message == f"App ID {LC2} is not registered in this account"
     assert "App Group" in exc.value.hint
-    assert h.runner.spawned == []
+    assert h.device.installs == []
     # Stopped before the keychain was ever made.
     assert not any(c[:2] == ["security", "create-keychain"] for c in h.runner.calls)
 
@@ -393,7 +383,7 @@ def test_an_extension_that_needs_its_app_group_stops_without_its_app_id(
     assert exc.value.message == f"App ID {PRIMARY}.{ext} is not registered in this account"
     assert "App Group" in exc.value.hint
     assert not any(c[:2] == ["security", "create-keychain"] for c in h.runner.calls)
-    assert h.runner.spawned == []
+    assert h.device.installs == []
 
 
 def test_an_extension_without_its_app_id_rides_the_wildcard(tmp_path: Path, ipa: Path) -> None:
@@ -531,6 +521,49 @@ def test_clean_with_nothing_to_remove_says_so() -> None:
     assert rec.of("lc-cleaned")[0]["removed"] == []
 
 
+class _UnlistableDevice(FakeDevice):
+    """Another LiveContainer whose sandbox HouseArrest won't vend (a
+    TrollStore install, or one signed for distribution)."""
+
+    def __init__(self, *a, unlistable: set[str], **k) -> None:
+        super().__init__(*a, **k)
+        self.unlistable = unlistable
+
+    def list_documents(self, udid: str, bundle_id: str) -> list[str]:
+        if bundle_id in self.unlistable:
+            raise lc_manage.LiveContainerError(f"could not talk to {udid}: InstallationLookupFailed")
+        return super().list_documents(udid, bundle_id)
+
+
+@pytest.mark.parametrize("other", ["com.kdt.livecontainer.AAAAAAAAAA", "com.kdt.livecontainer",
+                                   "com.kdt.LiveContainer2.ZZZZZZZZZZ", "com.kdt.livecontainer.ZZZZZZZZZZ"])
+def test_an_unrecorded_livecontainer_that_cant_be_listed_is_skipped_with_a_note(other: str) -> None:
+    """Combined fix check #4: the full clean visits every LiveContainer for
+    partials, and one it can't open ended the clean, before (or after)
+    the recorded container was cleaned, and its records were never forgotten."""
+    device = _UnlistableDevice({PRIMARY: {}, other: {}}, docs={PRIMARY: ["example.ipa"]},
+                               unlistable={other})
+    rec = Recorder()
+
+    payloads = lc_manage.clean(udid="u1", device_ops=device, events=rec.events,
+                               pushed={PRIMARY: {"example.ipa"}})
+
+    assert device.removed == [(PRIMARY, "example.ipa")]
+    assert [p["bundle_id"] for p in payloads] == [PRIMARY]
+    notes = [f["line"] for f in rec.of("log") if f["source"] == "graft"]
+    assert notes == [f"{other}: skipped, its Documents couldn't be listed "
+                     "(could not talk to u1: InstallationLookupFailed)"], rec.all()
+
+
+def test_a_recorded_livecontainer_that_cant_be_listed_still_fails_the_clean() -> None:
+    """Only one Graft never used is skipped: a failure on the container the
+    records are about is the clean's failure, as it always was."""
+    device = _UnlistableDevice({PRIMARY: {}}, docs={PRIMARY: ["example.ipa"]}, unlistable={PRIMARY})
+    with pytest.raises(lc_manage.LiveContainerError):
+        lc_manage.clean(udid="u1", device_ops=device, events=Recorder().events,
+                        pushed={PRIMARY: {"example.ipa"}})
+
+
 # ---- the legacy build path ----
 
 
@@ -574,3 +607,102 @@ def test_instances_parse() -> None:
     for bad in ("4", "1,x", "", "0"):
         with pytest.raises(ConfigError):
             lc_manage.parse_instances(bad)
+
+
+
+# ---- cli-1: the longer wait ends in words about LiveContainer, and a Stop ends it ----
+
+
+def test_a_wait_past_the_longer_bound_says_to_close_livecontainer(tmp_path: Path, ipa: Path) -> None:
+    from graft_ipa import device_install
+
+    h = Harness(tmp_path, ipa)
+    h.device.install_error = device_install.DeviceInstallError(
+        "StillWaitingError: the install was still waiting for the app it replaces to be closed on the "
+        "device, 15 minutes on, so Graft stopped waiting"
+    )
+    with pytest.raises(InstallError) as e:
+        h.install(instances=(1,))
+    assert "close LiveContainer" in (e.value.hint or "")
+    assert "unlock" not in (e.value.hint or ""), "not the locked-phone hint"
+
+
+def test_a_stop_ends_an_install_waiting_on_the_user(tmp_path: Path, ipa: Path) -> None:
+    """The main thread waits in `done.wait()`, which a Stop interrupts."""
+    import os
+    import signal
+    import time
+
+    from graft_ipa.errors import Stopped
+
+    device = FakeDevice()
+    gate = threading.Event()
+    device.install_gate = gate
+    events = lc_manage.LcEvents(emitter=None, say=lambda _: None)
+    with lc_manage.exit_on_termination():
+        threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGTERM)).start()
+        started = time.monotonic()
+        with pytest.raises(Stopped):
+            lc_manage._install_one(device, udid="u1", ipa=ipa, instance=1, bundle_id=PRIMARY,
+                                   events=events, wait_notice_seconds=0.05)
+        assert time.monotonic() - started < 2
+    gate.set()
+
+
+def test_the_real_device_hands_the_switch_to_the_install(tmp_path: Path, monkeypatch) -> None:
+    seen: list = []
+    monkeypatch.setattr(device_install, "install_ipa", lambda ipa, **kw: seen.append(kw))
+    switch = threading.Event()
+    lc_manage.UsbmuxDevice().install_ipa("u1", tmp_path / "x.ipa", waiting_on_user=switch)
+    assert seen == [{"udid": "u1", "on_progress": None, "waiting_on_user": switch}]
+
+
+class _UnremovableDevice(FakeDevice):
+    """A LiveContainer whose Documents list, but won't let a file go."""
+
+    def __init__(self, *a, unremovable: set[str], **k) -> None:
+        super().__init__(*a, **k)
+        self.unremovable = unremovable
+
+    def remove_document(self, udid: str, bundle_id: str, name: str) -> None:
+        if bundle_id in self.unremovable:
+            raise lc_manage.LiveContainerError(f"could not talk to {udid}: AfcException")
+        super().remove_document(udid, bundle_id, name)
+
+
+def _abandoned_partial() -> str:
+    """A partial a push from this Mac left, by a process that is gone."""
+    import subprocess
+    import sys
+
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    return f".example.ipa.{device_install.this_mac()}-{gone.pid}.graft-partial"
+
+
+def test_a_partial_that_cant_be_removed_from_an_unrecorded_livecontainer_is_skipped_with_a_note() -> None:
+    """cli-8: the sweep of a container Graft never pushed to raised out of
+    `_remove_partials` and ended the clean, as an unlistable one once did."""
+    other = "com.kdt.livecontainer.AAAAAAAAAA"
+    partial = _abandoned_partial()
+    assert lc_manage.is_abandoned_partial(partial), "premise"
+    device = _UnremovableDevice({PRIMARY: {}, other: {}}, docs={PRIMARY: ["example.ipa"], other: [partial]},
+                                unremovable={other})
+    rec = Recorder()
+
+    payloads = lc_manage.clean(udid="u1", device_ops=device, events=rec.events,
+                               pushed={PRIMARY: {"example.ipa"}})
+
+    assert device.removed == [(PRIMARY, "example.ipa")]
+    assert [p["bundle_id"] for p in payloads] == [PRIMARY]
+    notes = [f["line"] for f in rec.of("log") if f["source"] == "graft"]
+    assert notes == [f"{other}: skipped, what an unfinished push left in its Documents couldn't be "
+                     "removed (could not talk to u1: AfcException)"], rec.all()
+
+
+def test_a_partial_that_cant_be_removed_from_a_recorded_livecontainer_still_fails_the_clean() -> None:
+    device = _UnremovableDevice({PRIMARY: {}}, docs={PRIMARY: ["example.ipa", _abandoned_partial()]},
+                                unremovable={PRIMARY})
+    with pytest.raises(lc_manage.LiveContainerError):
+        lc_manage.clean(udid="u1", device_ops=device, events=Recorder().events,
+                        pushed={PRIMARY: {"example.ipa"}})

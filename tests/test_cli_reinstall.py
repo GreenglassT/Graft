@@ -550,3 +550,41 @@ def test_reinstalling_a_sideloaded_livecontainer_build_is_refused(
     events = [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
     end = next(e for e in events if e["type"] == "build-end")
     assert end["ok"] is False, "refused inside the envelope, so the GUI sees a build-end"
+
+
+def test_a_reinstall_holds_its_archive_until_it_is_delivered(
+    temp_config_env: Path, tmp_path: Path
+) -> None:
+    """`--reinstall-build` re-ships an archive of any age, which at
+    `archive_keep: 0` is exactly the one a sweep would take. It shares the
+    retention lock from before it opens the archive until it is delivered, so
+    a sweep in another process mid-push is refused."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.lc_runner import LCDeliveryResult
+
+    from .retention_procs import sweep_from_another_process
+
+    _seed_app_in_config(temp_config_env, "echo", delivery="livecontainer")
+    cfg = load_config(temp_config_env)
+    cfg.built_dir.mkdir(parents=True, exist_ok=True)
+    archive = cfg.built_dir / "echo_1.0_20260101T000000.ipa"
+    archive.write_bytes(b"x" * 1024)
+    build_id = _seed_build(cfg, "echo", archive)
+    trash = tmp_path / "Trash"
+    seen: dict = {}
+
+    def push(ipa, **_):
+        seen["sweep"] = sweep_from_another_process(cfg, trash=trash, home=tmp_path)
+        seen["archive_there"] = archive.exists()
+        return LCDeliveryResult(udid="00008130-test", bundle_id="com.kdt.livecontainer",
+                                documents_path="Documents/echo.ipa", size_bytes=1024)
+
+    with patch.object(cli_mod, "select_device", return_value=("00008130-test", "usb")), \
+         patch.object(cli_mod.lc_runner, "push_ipa_to_livecontainer", side_effect=push):
+        cli_mod._do_reinstall_build(cfg, build_id, emitter=JsonEmitter(stream=StringIO()))
+
+    sweep = seen["sweep"]
+    assert sweep.returncode == 1, sweep.stdout + sweep.stderr
+    assert "refused: a build is delivering" in sweep.stdout, sweep.stdout
+    assert seen["archive_there"], "another process trashed the archive mid-delivery"
+    assert archive.exists()

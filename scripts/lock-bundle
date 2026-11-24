@@ -1,0 +1,26 @@
+#!/bin/bash
+# Regenerate the bundle's two hash-locked sets, resolved for the bundled
+# CPython 3.13 on arm64 macOS:
+#   bundle/requirements.lock        graft-ipa's runtime dependencies (from pyproject.toml)
+#   bundle/build-requirements.lock  the build backends for graft and cyan (from
+#                                   bundle/build-requirements.in), constrained to
+#                                   the runtime lock wherever the two overlap
+#
+# Run from the repo root with relative paths, so the locks' headers and their
+# "# via" comments name pyproject.toml rather than this checkout's absolute
+# path (the locks are committed, and the repo is public).
+set -euo pipefail
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO"
+# pip-compile evaluates markers for the Python it runs on: only the bundle's.
+.venv/bin/python scripts/graft_bundle.py check-python
+export CUSTOM_COMPILE_COMMAND="scripts/lock-bundle"
+compile() {
+  .venv/bin/pip-compile --quiet --generate-hashes --strip-extras \
+    --allow-unsafe --no-emit-index-url --output-file "$@"
+}
+compile bundle/requirements.lock pyproject.toml
+compile bundle/build-requirements.lock bundle/build-requirements.in
+for lock in bundle/requirements.lock bundle/build-requirements.lock; do
+  echo "wrote $lock ($(grep -c '==' "$lock") packages)"
+done

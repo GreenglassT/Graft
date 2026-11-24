@@ -1,4 +1,4 @@
-"""`main` dispatches from `_VERBS`, and the order in that tuple is behaviour.
+"""`main` dispatches from `_VERBS`, and the order in that tuple is behavior.
 
 The body used to be forty-nine `if`s. Three things about their *sequence* were
 load-bearing and none of them was written down:
@@ -62,7 +62,8 @@ _NON_VERB_PARAMS: dict[str, str] = {
     "apps": (
         "The positional argument. It is what the walk falls through *to*, so a "
         "row in `_VERBS` selecting on it would make every build take the verb "
-        "path and `_verb_build_apps` unreachable."
+        "path and `_verb_build_apps` unreachable. Beside a verb, which never "
+        "reads it, `_ModifierGate` refuses it."
     ),
     "config_path": (
         "`--config` says where the config is, not which verb runs. `main` "
@@ -74,13 +75,30 @@ _NON_VERB_PARAMS: dict[str, str] = {
         "`--json` changes how every verb reports, not which one runs. It is the "
         "one flag in the signature that all 31 handlers read."
     ),
+    "init_account": (
+        "`--account` qualifies `--init`: free or paid, and no questions. Not in "
+        "`_VERB_ONLY_FLAGS`: `--init` sits above the stray-flag gate, which needs a "
+        "config `--init` is there to create, and no verb above the gate may consume a "
+        "verb-only flag. `_ModifierGate` refuses it beside anything else, before any "
+        "config load."
+    ),
+    "init_p12": "`--p12` qualifies `--init --account paid`; refused elsewhere like `--account`.",
+    "init_profile": "`--profile` qualifies `--init --account paid`; refused elsewhere like `--account`.",
+    "init_replace": (
+        "`--replace` qualifies `--init --account paid` on a paid config: a new certificate "
+        "and profile. Refused elsewhere like `--account`."
+    ),
     "dry_run": (
-        "A build modifier, read by `_verb_build_apps` and `_verb_prune_builds`. "
+        "A build modifier, read by `_verb_build_apps`, `_verb_prune_builds` and "
+        "`_verb_init` (with `--account`). "
         "Not in `_VERB_ONLY_FLAGS`: it has a default of False, and the verbs "
         "that may take it are read off their handlers (`_Verb.honours_dry_run`) "
         "by `_DryRunGate`, which refuses it everywhere else."
     ),
-    "skip_install": "A build modifier: stop after signing rather than pushing to a device.",
+    "skip_install": (
+        "A build modifier: stop after signing rather than pushing to a device. "
+        "`_ModifierGate` refuses it beside a verb, none of which reads it."
+    ),
     "for_playcover": (
         "A build modifier: also make the artifact loadable on this Mac. Not a "
         "verb-only flag — those *require* one of their verbs, and putting it "
@@ -91,13 +109,14 @@ _NON_VERB_PARAMS: dict[str, str] = {
     "device": (
         "Names the target device for a build or a `--reconcile`. Global rather "
         "than verb-only — several verbs read it and none is selected by it, "
-        "which is why it is deliberately absent from `_Verb.accepts` too."
+        "which is why it is deliberately absent from `_Verb.accepts` too. "
+        "`_ModifierGate` refuses it beside a verb whose handler doesn't take it."
     ),
     "fetch_sha": (
         "`--fetch-sha` qualifies `--fetch`'s download and is verified after it. "
-        "Not in `_VERB_ONLY_FLAGS`: passing it without `--fetch` is inert "
-        "rather than a lie about what happened, and rejecting it would be new "
-        "behaviour rather than a guard."
+        "Not in `_VERB_ONLY_FLAGS`, whose flags need a verb: a build is "
+        "refused it too. `_ModifierGate` refuses it anywhere `--fetch` isn't "
+        "what runs, since a checksum nobody checks reads as one that passed."
     ),
     "refresh": "`--refresh` qualifies `--repo-packages`: re-fetch the index before listing.",
     "refresh_artwork": (
@@ -352,7 +371,7 @@ def test_the_option_bundle_is_a_copy_of_the_frame() -> None:
     `pyproject.toml` declares `requires-python = ">=3.11"`, so those are
     supported interpreters. This suite runs on 3.13, where `locals()` is
     already a copy — which is exactly why the bug was invisible and why this
-    test is over the source rather than over the behaviour. There is no
+    test is over the source rather than over the behavior. There is no
     runtime assertion available here that would fail on 3.13; the spelling is
     the only thing that distinguishes the two, so the spelling is what gets
     pinned.
@@ -433,9 +452,13 @@ def test_the_verbs_that_take_the_path_are_the_ones_that_repair_it() -> None:
     repair, and routing the read through a validated `Config` made the pane
     inert on exactly those configs. That is a weaker requirement than a loaded
     `Config` and a stronger one than nothing, which is why it is neither.
+
+    The two App Store Connect writers joined them: `load_config` refuses an
+    `app_store_connect:` section that is missing a key, and replacing or
+    removing that section is what `--set-portal` and `--clear-portal` do.
     """
     assert {v.flag for v in _verbs() if v.needs is _Needs.PATH} == {
-        "--settings", "--set-settings",
+        "--settings", "--set-settings", "--set-portal", "--clear-portal",
     }
 
 
@@ -462,7 +485,7 @@ def test_a_path_verb_below_the_gate_runs_on_an_unloadable_config(
     # than leaving a green test that no longer covers anything.
     gate = next(i for i, s in enumerate(_VERBS) if isinstance(s, _StrayFlagGate))
     below = {s.flag for s in _VERBS[gate:] if isinstance(s, _Verb) and s.needs is _Needs.PATH}
-    assert below == {"--settings", "--set-settings"}, "premise: both sit below the gate"
+    assert {"--settings", "--set-settings"} <= below, "premise: both sit below the gate"
 
     result = _invoke(["--config", str(broken), "--json", *verb])
     assert result.exit_code == 0, result.output
@@ -500,7 +523,7 @@ def test_reconcile_is_considered_before_delivery_state() -> None:
 
 
 # ---------------------------------------------------------------------------
-# …and the behaviour those positions produce
+# …and the behavior those positions produce
 # ---------------------------------------------------------------------------
 
 
@@ -580,7 +603,7 @@ def test_a_build_still_loads_the_config_nothing_asked_for(
     No entry in `_VERBS` matches a bare app name, so `graft example` walks
     the whole table without selecting anything and then builds. `main` now
     resolves the verb *first* and loads a config only for the selected one —
-    which is behaviour-preserving for every verb and would hand the build
+    which is behavior-preserving for every verb and would hand the build
     `None`, turning a broken config.yaml from a config error into a failed
     build with an AttributeError in it. `selected is None` is the clause that
     stops that, and this is what holds it in place.
@@ -661,3 +684,36 @@ def test_a_stray_positive_flag_is_still_named_correctly(
     assert result.exit_code != 0
     assert "--strip-encrypted-extensions" in result.output
     assert "--keep-encrypted-extensions" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("positive", "negative"),
+    [
+        ("--auto-profile", "--no-auto-profile"),
+        ("--keep-bundle-id", "--no-keep-bundle-id"),
+        ("--strip-extensions", "--no-strip-extensions"),
+        ("--strip-supported-devices", "--no-strip-supported-devices"),
+    ],
+)
+def test_every_negated_verb_only_flag_is_named_as_typed(
+    temp_config_env: Path, positive: str, negative: str
+) -> None:
+    """Review #11: only one `--x/--no-x` pair was in the table, so
+    `--builds --no-auto-profile` was refused as "--auto-profile requires ..."."""
+    result = _invoke(["--builds", negative])
+
+    assert result.exit_code == 2, result.output
+    said = " ".join(result.output.split())
+    assert f"{negative} requires" in said
+    assert f"{positive} requires" not in said
+
+
+def test_the_negated_table_covers_every_pair_main_declares() -> None:
+    """Derived from the declarations, so a new pair cannot be left out."""
+    declared = {
+        decl.split("/", 1)[0]
+        for p in inspect.signature(cli_mod.main).parameters.values()
+        for decl in getattr(p.default, "param_decls", ()) or ()
+        if "/" in decl
+    }
+    assert declared and declared == set(cli_mod._NEGATED_FLAGS)

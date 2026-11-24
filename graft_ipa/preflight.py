@@ -6,15 +6,13 @@ Each check returns a structured CheckResult so the CLI can print a tidy table.
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from . import install_hints, mobileprovision
-from .child_env import child_env
+from . import tools as resolver
 from .config import DELIVERIES, AppConfig, Config, paid_upgrade
 from .cyan_runner import CYAN_INSTALL_COMMAND
 from .errors import GraftError, PaidAccountRequiredError, PreflightError, SigningError
@@ -39,6 +37,9 @@ class CheckResult:
     # The same command the hint says after "install with: ", without the
     # prose around it, so the GUI can offer it to copy.
     install: str | None = None
+    # For a tool row: which rung of `tools.resolve` found it ("bundled",
+    # "PATH", ...). None on every other row.
+    source: str | None = None
 
     @property
     def status(self) -> str:
@@ -50,13 +51,8 @@ class CheckResult:
 REQUIRED_TOOLS = {
     "cyan": CYAN_INSTALL_COMMAND,
     "zsign": "brew install zsign",
-    "ideviceinstaller": "brew install ideviceinstaller",
-    "otool": "xcode-select --install",
     "security": "(builtin) /usr/bin/security",
 }
-
-#: Tools whose MacPorts port is worth naming beside the Homebrew one.
-MACPORTS = {"ideviceinstaller": "sudo port install ideviceinstaller"}
 
 
 def _install_command(tool: str) -> str | None:
@@ -66,105 +62,43 @@ def _install_command(tool: str) -> str | None:
 
 
 def _install_hint(tool: str) -> str:
-    return "install with: " + install_hints.with_prerequisites(
-        REQUIRED_TOOLS[tool], macports=MACPORTS.get(tool)
-    )
-
-
-#: What Apple's `/usr/bin/otool` shim says when there is nothing behind it.
-#: Lower-cased. The first is no tools at all; the rest are a developer
-#: directory that is selected but gone (an Xcode deleted or renamed, or
-#: `DEVELOPER_DIR` pointing nowhere) — measured: "xcrun: error: missing
-#: DEVELOPER_DIR path: /nonexistent".
-_OTOOL_STUB_MARKERS = (
-    "requires the command line developer tools",
-    "invalid active developer path",
-    "invalid developer_dir path",
-    "missing developer_dir path",
-    "missing xcrun",
-)
-
-
-def _otool_stub_problem(path: str) -> str | None:
-    """Why `/usr/bin/otool` is Apple's shim with nothing behind it, or None.
-
-    `which` finds the shim on every Mac, so it is asked. First `xcode-select -p`:
-    failing means no developer directory is selected, and a path it prints that
-    no longer exists means the selected one is gone. Only then is the shim run,
-    because run with no tools it raises an install dialog — and it is asked
-    `--version`, which a working otool answers with exit 0. (`-version` is six
-    flags to it: exit 1 and usage, from a perfectly good otool.)
-
-    A stub is recognised by the shim's own words, never by its exit status
-    alone: a working otool that exits non-zero must not fail every build.
-    """
-    if path != "/usr/bin/otool":
-        return None
-    try:
-        selected = subprocess.run(
-            ["xcode-select", "-p"], capture_output=True, text=True, timeout=10,
-            env=child_env(),
-        )
-        if selected.returncode != 0:
-            return f"{path} is a stub: the Command Line Tools are not installed"
-        developer_dir = selected.stdout.strip()
-        if developer_dir and not os.path.isdir(developer_dir):
-            return (
-                f"{path} cannot run: the selected developer directory "
-                f"{developer_dir} is missing"
-            )
-        probe = subprocess.run(
-            [path, "--version"], capture_output=True, text=True, timeout=10,
-            env=child_env(),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    text = f"{probe.stdout}{probe.stderr}".lower()
-    if probe.returncode == 0 or not any(m in text for m in _OTOOL_STUB_MARKERS):
-        return None
-    if _OTOOL_STUB_MARKERS[0] in text:
-        return f"{path} is a stub: the Command Line Tools are not installed"
-    return f"{path} cannot run: the selected developer directory is missing"
+    return "install with: " + install_hints.with_prerequisites(REQUIRED_TOOLS[tool])
 
 
 def check_tools(tools: Iterable[str] | None = None) -> list[CheckResult]:
     names = list(tools) if tools is not None else list(REQUIRED_TOOLS)
     results = []
     for tool in names:
-        path = shutil.which(tool)
-        stub = _otool_stub_problem(path) if path and tool == "otool" else None
-        if stub is not None:
-            hint = _install_hint(tool)
-            if "developer directory" in stub:
-                # Xcode may be installed elsewhere; pointing back at what is
-                # there is the other fix.
-                hint += ", or select the one that is installed: sudo xcode-select --reset"
-            results.append(CheckResult(name=tool, ok=False, detail=stub, hint=hint,
-                                       install=_install_command(tool)))
-        elif path:
-            results.append(CheckResult(name=tool, ok=True, detail=path))
+        r = resolver.resolve(tool)
+        if r.found:
+            detail = f"{r.path} (bundled)" if r.source == resolver.SOURCE_BUNDLED else str(r.path)
+            results.append(CheckResult(name=tool, ok=True, detail=detail, source=r.source))
+        elif (bundled := resolver.bundled_tools_dir()) is not None and tool in resolver.BUNDLED_TOOLS:
+            # Graft.app carries it, so missing means a damaged app: the pipx or
+            # Homebrew command would be the wrong advice (review #12).
+            results.append(CheckResult(name=tool, ok=False, install=None,
+                                       hint=f"Graft.app is damaged: {bundled / tool} is missing. "
+                                            "Download Graft again."))
         else:
             results.append(CheckResult(name=tool, ok=False, hint=_install_hint(tool),
                                        install=_install_command(tool)))
     return results
 
 
-def required_tools_for(delivery: str, will_install: bool) -> list[str]:
+def required_tools_for(delivery: str) -> list[str]:
     """The external tools a build actually invokes for this delivery mode.
 
     livecontainer never signs (no zsign), and pushes into LiveContainer over
     pymobiledevice3, which comes with the CLI; sideload always signs, and
-    installs with `ideviceinstaller`. `otool` is needed in both modes for the
-    cryptid (decryption) check. Finding the device is pymobiledevice3's in
-    both (`list_connected_devices`), so no mode needs libimobiledevice's
-    `idevice_id`.
+    installs over pymobiledevice3 too (`device_install`), so installing on the
+    device adds no tool either way. Neither needs `otool`: the cryptid
+    (decryption) check reads the load commands itself (`macho`), so no mode
+    needs the Xcode Command Line Tools. Finding the device is pymobiledevice3's
+    in both (`list_connected_devices`), so no mode needs libimobiledevice.
     """
     if delivery == "livecontainer":
-        return ["cyan", "otool"]
-    tools = ["cyan", "zsign", "otool", "security"]
-    if will_install:
-        tools.append("ideviceinstaller")
-    return tools
+        return ["cyan"]
+    return ["cyan", "zsign", "security"]
 
 
 def planned_profile(cfg: Config, app: AppConfig | None) -> ProfilePlan | None:
@@ -243,11 +177,18 @@ def check_signing_files(cfg: Config, *, app: AppConfig | None = None) -> list[Ch
     has_env = bool(os.environ.get(env_var))
     # Keyed as `--set-p12-password` writes it: by `cfg.team_id`, never by a
     # placeholder it refuses to store under.
-    in_keychain = bool(team and keychain.read_p12_password(team))
+    # `is not None`: "" is a blank-password .p12's password, stored.
+    try:
+        in_keychain = bool(team) and keychain.read_p12_password(team) is not None
+        no_answer = False
+    except keychain.KeychainNoAnswer:
+        in_keychain, no_answer = False, True
     if has_env:
         detail, ok = f"env {env_var} set", True
     elif in_keychain:
         detail, ok = "keychain entry present", True
+    elif no_answer:
+        detail, ok = keychain.NO_ANSWER, False
     else:
         detail, ok = "(missing)", False
     results.append(
@@ -324,7 +265,7 @@ def cached_profile_refresh_note(cfg: Config, plan: ProfilePlan) -> str | None:
     by an interrupted download stopped every build of that app before the only
     code that could heal it, with no remedy but deleting a file under ~/.config
     by hand. That is the dead end this whole rule exists to remove, surviving in
-    the one branch the generalisation skipped.
+    the one branch the generalization skipped.
 
     None for a profile the user manages: nothing in the product will replace it,
     so a failure there is theirs to act on and saying otherwise would be a lie
@@ -332,8 +273,11 @@ def cached_profile_refresh_note(cfg: Config, plan: ProfilePlan) -> str | None:
     """
     if not plan.created_on_demand:
         return None
+    # The team, as stage 4 asks it (`signer.resolve_profile_for_app`). The
+    # certificate stage 4 also asks about needs the .p12's password, so it
+    # is left to stage 4.
     return mobileprovision.cache_problem(
-        plan.path, device_udids=auto_profile_device_udids(cfg)
+        plan.path, device_udids=auto_profile_device_udids(cfg), team_id=cfg.team_id
     )
 
 
@@ -365,12 +309,29 @@ def check_profile_contents(cfg: Config, *, app: AppConfig | None = None) -> list
     team_ids: list[str] = plist.get("TeamIdentifier") or []
     expected = cfg.team_id
     team_ok = expected is not None and expected in team_ids
+    team_detail = f"profile={team_ids} config={expected}"
+    # Which way to point depends on who owns the file. A profile the user
+    # chose may be the wrong one or signing.team_id may be: say both. It used
+    # to say only "update signing.team_id to match the profile", which after
+    # a move to another team pointed back at the team just left.
+    team_hint = (
+        f"the profile was made by team {', '.join(team_ids) or '(none)'}; use a "
+        f"profile made by {expected} (signing.team_id), or correct "
+        "signing.team_id in config.yaml if the profile is the right one"
+    )
+    if not team_ok and cached_profile_refresh_note(cfg, plan) is not None:
+        # An auto-provisioned profile from another team is a cache miss:
+        # stage 4 makes a new one with this team's key (`cache_problem`'s
+        # team rule), so failing here aborted the build before the only code
+        # that can fix it, as an expired one did.
+        team_ok, team_hint = True, ""
+        team_detail += f" — cached copy; {_REFRESH_NOTE}"
     results.append(
         CheckResult(
             name="profile team id matches config",
             ok=team_ok,
-            detail=f"profile={team_ids} config={expected}",
-            hint="update signing.team_id in config.yaml to match the profile",
+            detail=team_detail,
+            hint=team_hint,
         )
     )
 
@@ -520,7 +481,7 @@ def check_devices(
         # Development profiles list devices; distribution profiles do not.
         if provisioned:
             # Case-insensitively, like `cache_problem` and like the
-            # `configured`/`renewing` pair below. ASC normalises UDIDs to lower
+            # `configured`/`renewing` pair below. ASC normalizes UDIDs to lower
             # case in places and config.yaml does not, and an exact match here
             # against case-insensitive rules three lines away made pre-flight
             # promise a refresh that never happens — or hard-fail a build whose
@@ -550,6 +511,18 @@ def check_devices(
                     detail = (
                         f"{', '.join(renewing)} not in the cached profile — App "
                         "Store Connect re-provisions it at sign time"
+                    )
+                else:
+                    # Not the portal: Xcode may well have registered the
+                    # phone there already. The list auto-provisioning covers
+                    # is the snapshot Save and test took.
+                    hint = (
+                        "auto-provisioning covers app_store_connect.device_udids "
+                        "and the default device, and this phone is neither. Once "
+                        "it is registered at developer.apple.com -> Devices, press "
+                        "Save and test in Settings › App Store Connect (or run "
+                        "`graft --set-portal` again) to refresh the list, or make "
+                        "it the default device"
                     )
             results.append(
                 CheckResult(
@@ -591,9 +564,9 @@ def run_all_checks(
 
     `deliveries` is `--check`'s, for a paid config: every mode its apps use
     (`deliveries_in_use`), in place of `delivery`. The tools are the ones
-    those modes run — zsign and ideviceinstaller only when some app
-    sideloads, so a paid user whose apps all go into LiveContainer is not
-    told two tools are missing on every launch — and the profile's device
+    those modes run — zsign only when some app sideloads, so a paid user
+    whose apps all go into LiveContainer is not told a tool is missing on
+    every launch — and the profile's device
     list only matters then too. The signing rows stay: a paid config's
     identity is what `--lc-install` and `--lc-push-cert` sign with, and
     those report the tools they need when they run.
@@ -602,7 +575,7 @@ def run_all_checks(
     sideloads = "sideload" in modes
     tools: list[str] = []
     for mode in modes:
-        tools.extend(t for t in required_tools_for(mode, will_install) if t not in tools)
+        tools.extend(t for t in required_tools_for(mode) if t not in tools)
     results: list[CheckResult] = []
     results.extend(check_tools(tools))
     if sideloads or deliveries is not None:
@@ -717,7 +690,7 @@ def run_free_account_checks(
     """`graft --check` for a free Apple ID.
 
     What a LiveContainer build needs and nothing it does not: the account as
-    information, cyan and otool, a device, and a LiveContainer on it. No zsign,
+    information, cyan, a device, and a LiveContainer on it. No zsign,
     no .p12, profile or password — a free Apple ID has none of them, and a red
     row for each would read as a broken setup rather than a different one.
     `installed_apps` is `check_livecontainer`'s, None for the real device.
@@ -729,7 +702,7 @@ def run_free_account_checks(
     return [
         check_account(cfg),
         *check_app_deliveries(cfg),
-        *check_tools(required_tools_for("livecontainer", will_install=True)),
+        *check_tools(required_tools_for("livecontainer")),
         *check_devices(cfg, check_profile=False, udids=udids),
         *check_livecontainer(cfg, udids, installed_apps=installed_apps),
     ]

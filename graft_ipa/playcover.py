@@ -23,12 +23,23 @@ from Preferences, one class and one ivar.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
 
+from . import macho, tools
 from .child_env import child_env
+
+#: What to do on a Mac without what a stand-in framework needs. The Command
+#: Line Tools are not enough: they have no iOS SDK.
+XCODE_HINT = (
+    "install Xcode from the App Store and open it once, then run "
+    "`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`; "
+    "the Command Line Tools alone have no iOS SDK"
+)
 
 #: iOS private frameworks a tweak may link that macOS does not provide, and for
 #: which `tools/` has a stub. Keyed by framework name.
@@ -44,59 +55,100 @@ def _private_framework_path(name: str) -> str:
     return f"/System/Library/PrivateFrameworks/{name}.framework/{name}"
 
 
-def linked_private_frameworks(macho: Path) -> list[str]:
-    """Which stubbable iOS private frameworks `macho` links, if any.
+def linked_private_frameworks(binary: Path) -> list[str]:
+    """Which stubbable iOS private frameworks `binary` links, if any.
 
-    Reads `otool -L` rather than parsing Mach-O by hand: the load commands are
-    what dyld will act on, and `otool` is already a hard dependency of the
-    verify step.
+    Reads the load commands directly (`macho.dylib_names`), which are what
+    dyld will act on, with no `otool` and no Xcode Command Line Tools.
 
-    Skips the first two lines deliberately. Line one is the file's own path and
-    line two is its `LC_ID_DYLIB` -- and that id is
-    `/Library/MobileSubstrate/DynamicLibraries/<name>.dylib` for every tweak,
-    which contains the substring "Substrate". An earlier survey grepped the
-    whole output and reported nearly every tweak as Substrate-linked because of
-    it.
+    `dylib_names` returns dependencies only, never the file's own
+    `LC_ID_DYLIB`, which is why there is no line-two skip here any more. That
+    id is `/Library/MobileSubstrate/DynamicLibraries/<name>.dylib` for every
+    tweak, which contains the substring "Substrate". An earlier survey grepped
+    the whole of `otool -L` and reported nearly every tweak as Substrate-linked
+    because of it.
     """
     try:
-        out = subprocess.run(
-            ["otool", "-L", str(macho)], capture_output=True, text=True, check=True,
-            env=child_env(),
-        ).stdout
-    except FileNotFoundError as exc:
+        deps = macho.dylib_names(binary)
+    except macho.MachOError as exc:
+        # Never `return []` here: an empty list means "nothing to stub", and the
+        # build would report every injected dylib fine without having read one.
+        # The user would ship an IPA that still dies at launch, having been told
+        # the opposite. This function is the only gate on the whole feature.
         raise PlayCoverPrepError(
-            "otool is not installed, so this cannot tell which frameworks "
-            f"{macho.name} needs",
-            hint="install Xcode's command line tools: xcode-select --install",
-        ) from exc
-    except (OSError, subprocess.CalledProcessError) as exc:
-        # Never `return []` here. An empty list means "nothing to stub", which
-        # the build reports as "every injected dylib already links frameworks
-        # macOS has" — an assertion about dylibs that were never read. The user
-        # would ship an IPA that still dies at launch, having been told the
-        # opposite. This function is the only gate on the whole feature.
-        raise PlayCoverPrepError(
-            f"couldn't read {macho.name}'s linked libraries",
+            f"couldn't read {binary.name}'s linked libraries",
             hint=str(exc)[:200],
         ) from exc
+    return [n for n in STUBBABLE_PRIVATE_FRAMEWORKS if _private_framework_path(n) in deps]
 
-    # Dependency lines are indented; the un-indented ones are the file's own
-    # path and, on a fat binary, one `path (architecture x):` header per slice.
-    # A fixed `[2:]` drops only the first slice's header and id, so slice two's
-    # header re-enters the list — the file reporting itself as a dependency,
-    # which is the survey bug this docstring describes. Indentation is
-    # arch-count independent.
-    deps = [
-        line.split()[0]
-        for line in out.splitlines()
-        if line.startswith((" ", "\t")) and line.strip()
-    ]
-    # The LC_ID_DYLIB is indented too, so drop any entry equal to this file's
-    # own install name.
-    own = {line.split()[0] for line in out.splitlines()[1:2] if line.strip()}
-    deps = [d for d in deps if d not in own]
-    return [n for n in STUBBABLE_PRIVATE_FRAMEWORKS
-            if _private_framework_path(n) in deps]
+
+def developer_dir() -> Path | None:
+    """The active Xcode (or Command Line Tools) directory, or None.
+
+    Asked of `DEVELOPER_DIR`, then of `/usr/bin/xcode-select -p`, which only
+    reports. Never of an xcrun shim: on a Mac without the tools,
+    `/usr/bin/xcrun`, `/usr/bin/install_name_tool` and `/usr/bin/clang` pop
+    macOS's "install the command line developer tools" dialog, from a
+    GUI-spawned CLI too, and fail; the FileNotFoundError hint in `_run_tool`
+    could never show, because the shim always exists.
+    """
+    env = os.environ.get("DEVELOPER_DIR")
+    if env:
+        path = Path(env)
+        # xcrun takes Xcode.app itself as well as its Contents/Developer.
+        if (path / "Contents" / "Developer").is_dir():
+            return path / "Contents" / "Developer"
+        return path if path.is_dir() else None
+    try:
+        out = subprocess.run(
+            ["/usr/bin/xcode-select", "-p"],
+            capture_output=True, text=True, timeout=10, env=child_env(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    path = Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
+    return path if path is not None and path.is_dir() else None
+
+
+def has_ios_sdk(dev: Path | None) -> bool:
+    """Whether `dev` (`developer_dir`) has an iOS SDK: full Xcode does, the
+    Command Line Tools do not."""
+    if dev is None:
+        return False
+    return any((dev / "Platforms" / "iPhoneOS.platform" / "Developer" / "SDKs").glob("iPhoneOS*.sdk"))
+
+
+#: Graft.app's own install_name_tool, relative to Contents: cyan's, built
+#: from cctools-port with its fake-sign hook compiled out
+#: (bundle/patches/cctools-port-no-fake-sign.patch).
+BUNDLED_INSTALL_NAME_TOOL = Path(
+    "Resources/GraftPython/lib/python3.13/site-packages/cyan/tools/Darwin/arm64/install_name_tool")
+
+
+def install_name_tool() -> Path:
+    """The `install_name_tool` a retarget runs, by absolute path.
+
+    Graft.app's own copy (BUNDLED_INSTALL_NAME_TOOL) when this is the app's
+    CLI, else the active developer directory's. Not PATH: there it is the
+    xcrun shim `developer_dir` explains. Raises `PlayCoverPrepError` naming
+    the fix when neither is there.
+    """
+    bundled = tools.bundled_tools_dir()
+    if bundled is not None and tools.executable(bundled.parent.parent / BUNDLED_INSTALL_NAME_TOOL):
+        return bundled.parent.parent / BUNDLED_INSTALL_NAME_TOOL
+    dev = developer_dir()
+    if dev is not None:
+        for candidate in (
+            dev / "Toolchains" / "XcodeDefault.xctoolchain" / "usr" / "bin" / "install_name_tool",
+            dev / "usr" / "bin" / "install_name_tool",
+        ):
+            if tools.executable(candidate):
+                return candidate
+    raise PlayCoverPrepError(
+        "install_name_tool isn't installed, and a tweak in this build needs it "
+        "to run under PlayCover",
+        hint=XCODE_HINT,
+    )
 
 
 def _run_tool(argv: list[str], *, doing: str) -> None:
@@ -124,10 +176,10 @@ def _run_tool(argv: list[str], *, doing: str) -> None:
         raise PlayCoverPrepError(f"{doing} failed: {exc}") from exc
 
 
-def retarget_to_bundled_framework(macho: Path, framework: str) -> None:
-    """Point `macho` at `@rpath/<framework>.framework/...` instead of /System.
+def retarget_to_bundled_framework(binary: Path, framework: str) -> None:
+    """Point `binary` at `@rpath/<framework>.framework/...` instead of /System.
 
-    Re-signs afterwards, and the honest reason is narrower than it looks.
+    Re-signs afterward, and the honest reason is narrower than it looks.
     **On this toolchain `install_name_tool` already re-signs ad-hoc by itself**
     -- measured: patch a signed dylib, skip the `codesign` below, and
     `codesign -v` still passes. Older `install_name_tool` did invalidate, and a
@@ -139,10 +191,11 @@ def retarget_to_bundled_framework(macho: Path, framework: str) -> None:
     Ad-hoc is the right identity regardless: PlayCover re-signs the whole
     bundle on install.
     """
+    tool = str(install_name_tool())
     _run_tool(
-        ["install_name_tool", "-change", _private_framework_path(framework),
-         f"@rpath/{framework}.framework/{framework}", str(macho)],
-        doing=f"pointing {macho.name} at the bundled {framework}.framework",
+        [tool, "-change", _private_framework_path(framework),
+         f"@rpath/{framework}.framework/{framework}", str(binary)],
+        doing=f"pointing {binary.name} at the bundled {framework}.framework",
     )
     # `@rpath` is meaningless without an LC_RPATH that reaches the bundle, and
     # a tweak dylib injected by cyan carries none of its own — dyld would fail
@@ -153,32 +206,21 @@ def retarget_to_bundled_framework(macho: Path, framework: str) -> None:
     #
     # Adding a duplicate rpath is a warning, not an error, and this runs again
     # on an already-prepared IPA, so an existing one is checked for first.
-    if "@loader_path" not in _rpaths(macho):
+    if "@loader_path" not in _rpaths(binary):
         _run_tool(
-            ["install_name_tool", "-add_rpath", "@loader_path", str(macho)],
-            doing=f"giving {macho.name} an rpath that reaches the bundle",
+            [tool, "-add_rpath", "@loader_path", str(binary)],
+            doing=f"giving {binary.name} an rpath that reaches the bundle",
         )
-    _run_tool(["codesign", "-f", "-s", "-", str(macho)],
-              doing=f"re-signing {macho.name}")
+    _run_tool(["codesign", "-f", "-s", "-", str(binary)],
+              doing=f"re-signing {binary.name}")
 
 
-def _rpaths(macho: Path) -> list[str]:
-    """The LC_RPATH entries already on `macho`."""
+def _rpaths(binary: Path) -> list[str]:
+    """The LC_RPATH entries already on `binary`."""
     try:
-        out = subprocess.run(
-            ["otool", "-l", str(macho)], capture_output=True, text=True, check=True,
-            env=child_env(),
-        ).stdout
-    except (OSError, subprocess.CalledProcessError):
+        return macho.rpaths(binary)
+    except macho.MachOError:
         return []
-    found, lines = [], out.splitlines()
-    for i, line in enumerate(lines):
-        if "LC_RPATH" in line:
-            for follow in lines[i:i + 4]:
-                if "path " in follow:
-                    found.append(follow.split("path ", 1)[1].split(" (")[0].strip())
-                    break
-    return found
 
 
 #: Where the stub builder lives.
@@ -214,13 +256,28 @@ def build_stub(framework: str, dest_dir: Path) -> Path:
     """
     if framework not in STUBBABLE_PRIVATE_FRAMEWORKS:
         raise PlayCoverPrepError(f"no stub is available for {framework}.framework")
+    out = dest_dir / f"{framework}.framework"
+    # Graft.app carries the stub, built at release (scripts/graft_bundle.py),
+    # so a Mac without Xcode can make a PlayCover build too.
+    prebuilt = STUB_TOOLS_DIR / f"{framework}.framework"
+    if (prebuilt / framework).is_file():
+        shutil.rmtree(out, ignore_errors=True)
+        shutil.copytree(prebuilt, out)
+        return out
     script = STUB_TOOLS_DIR / "build.sh"
     if not script.is_file():
         raise PlayCoverPrepError(
             f"the stub builder is missing at {script}",
             hint="it ships in this repo under graft_ipa/stubs/preferences-stub/",
         )
-    out = dest_dir / f"{framework}.framework"
+    if not has_ios_sdk(developer_dir()):
+        # Checked rather than tried: the script's `xcrun` is a shim on a Mac
+        # without the tools, and it pops the install dialog before failing.
+        raise PlayCoverPrepError(
+            f"a tweak in this build links {framework}.framework, which macOS lacks, "
+            "and building the stand-in Graft bundles for it needs Xcode with its iOS SDK",
+            hint=XCODE_HINT,
+        )
     try:
         # `sh script`, not `./script`: whether the +x bit survives a wheel
         # build is not something this should depend on, and an installed copy
@@ -252,13 +309,13 @@ def prepare_frameworks_dir(frameworks: Path) -> list[str]:
     if not frameworks.is_dir():
         return []
     fixed: list[str] = []
-    for macho in sorted(frameworks.glob("*.dylib")):
-        for framework in linked_private_frameworks(macho):
+    for binary in sorted(frameworks.glob("*.dylib")):
+        for framework in linked_private_frameworks(binary):
             bundled = frameworks / f"{framework}.framework"
             if not bundled.exists():
                 build_stub(framework, frameworks)
-            retarget_to_bundled_framework(macho, framework)
-            fixed.append(f"{macho.name} → bundled {framework}.framework")
+            retarget_to_bundled_framework(binary, framework)
+            fixed.append(f"{binary.name} → bundled {framework}.framework")
     return fixed
 
 

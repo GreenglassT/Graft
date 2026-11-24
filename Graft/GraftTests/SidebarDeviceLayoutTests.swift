@@ -152,7 +152,7 @@ final class SidebarDeviceLayoutTests: XCTestCase {
         let apps =
             #"{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":["a.deb"],"display_name":"Example+","delivery":"livecontainer","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}\n"#
             + #"{"type":"app","name":"delta","bundle_id":"com.delta.app","preferred_version":"44.7.0","tweaks":["v.deb"],"display_name":null,"delivery":"sideload","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}\n"#
-        let store = ConfigStore(runner: sh(), cliArgs: ["-c", "printf '\(apps)'"])
+        let store = ConfigStore(runner: sh(), cliArgs: ["-c", "printf '\(apps)'"], notify: { _ in })
         _ = try? await store.loadApps()
         return store
     }
@@ -191,7 +191,8 @@ final class SidebarDeviceLayoutTests: XCTestCase {
             NavigationSplitView {
                 SidebarView(
                     store: config, selection: $selection,
-                    artwork: artwork, devices: devices
+                    artwork: artwork, devices: devices,
+                    appStore: AppStoreStore(runner: config.runner, shell: NoAdminShell())
                 )
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
             } detail: {
@@ -389,7 +390,7 @@ final class SidebarDeviceLayoutTests: XCTestCase {
     }
 
     /// With one of them selected, which is the state the row's second line
-    /// changes colour for.
+    /// changes color for.
     func test_the_sidebar_fits_with_a_device_selected() async {
         let devices = await devicesStore(printing: Self.twoDevices)
         await assertFits(
@@ -591,7 +592,7 @@ final class SidebarDeviceLayoutTests: XCTestCase {
 /// joined Library; the counts below are of the whole column, so every fixed row
 /// is in them, and only the two device rows are what this case is about.) So a
 /// script that drives this app via
-/// AX cannot be used to judge selection behaviour; the assertion below is what
+/// AX cannot be used to judge selection behavior; the assertion below is what
 /// judges it.
 @MainActor
 final class SidebarDeviceSelectionTests: XCTestCase {
@@ -612,7 +613,8 @@ final class SidebarDeviceSelectionTests: XCTestCase {
             NavigationSplitView {
                 SidebarView(
                     store: config, selection: $box.selection,
-                    artwork: ArtworkStore(runner: config.runner), devices: devices
+                    artwork: ArtworkStore(runner: config.runner), devices: devices,
+                    appStore: AppStoreStore(runner: config.runner, shell: NoAdminShell())
                 )
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
             } detail: {
@@ -632,7 +634,7 @@ final class SidebarDeviceSelectionTests: XCTestCase {
         let sh = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
         let devices = DevicesStore(runner: sh)
         _ = try? await devices.load(argsOverride: ["-c", "printf '\(Self.fifteen)'"])
-        let config = ConfigStore(runner: sh, cliArgs: ["-c", "true"])
+        let config = ConfigStore(runner: sh, cliArgs: ["-c", "true"], notify: { _ in })
         let box = Box(.device("UDID-15"))
 
         let host = NSHostingView(rootView: Harness(config: config, devices: devices, box: box))
@@ -729,7 +731,8 @@ final class SidebarSectionRowTests: XCTestCase {
             NavigationSplitView {
                 SidebarView(
                     store: config, selection: $box.selection,
-                    artwork: ArtworkStore(runner: config.runner), devices: devices
+                    artwork: ArtworkStore(runner: config.runner), devices: devices,
+                    appStore: AppStoreStore(runner: config.runner, shell: NoAdminShell())
                 )
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
             } detail: {
@@ -752,7 +755,7 @@ final class SidebarSectionRowTests: XCTestCase {
         _ = try? await devices.load(
             argsOverride: ["-c", #"printf '{"type":"devices-end","count":0,"failed":0}\n'"#]
         )
-        let config = ConfigStore(runner: sh, cliArgs: ["-c", "true"])
+        let config = ConfigStore(runner: sh, cliArgs: ["-c", "true"], notify: { _ in })
         let box = Box(.section(section))
 
         let host = NSHostingView(rootView: Harness(config: config, devices: devices, box: box))

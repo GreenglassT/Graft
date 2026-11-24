@@ -170,7 +170,7 @@ final class CLIContractTests: XCTestCase {
     /// `eventsHandled ⊆ CLI` (above) catches the GUI decoding something the CLI
     /// stopped emitting. It cannot catch the reverse — the CLI emitting
     /// something the GUI ignores — because `BuildEvent.decode`'s `default:`
-    /// turns an unrecognised type into `.unknown` and every `pick` closure in
+    /// turns an unrecognized type into `.unknown` and every `pick` closure in
     /// `Services/` then filters it out. Nothing fails, nothing logs, and the
     /// feature the event was added for simply does not exist on this side.
     ///
@@ -372,7 +372,7 @@ final class CLIContractTests: XCTestCase {
     /// when the icon scans needed them, and lifted into `SourceScan` when
     /// `MarksTests` was about to be a third copy. Two copies of the same three
     /// helpers is one copy that stops being fixed: the rule in `codeLines(of:)`
-    /// is the one with judgement in it — it drops lines whose first non-space
+    /// is the one with judgment in it — it drops lines whose first non-space
     /// characters are `//` and nothing else, so a flag or a `systemName:`
     /// inside a `/* … */` would still be reported (no app source uses block
     /// comments today, which is why that has never mattered) — and a change to
@@ -383,7 +383,7 @@ final class CLIContractTests: XCTestCase {
     /// shared home was the right one: `appSources()` is the app-source
     /// directory, `swiftSources(under:)` is a directory walk, `codeLines(of:)`
     /// is "the lines a scan should look at". A caller wanting different
-    /// judgement about any of the three should take a parameter, not a copy.
+    /// judgment about any of the three should take a parameter, not a copy.
     private func sourceRoot() throws -> URL { try SourceScan.appSources() }
 
     private func codeLines(of file: URL) throws -> [(number: Int, text: String)] {
@@ -678,6 +678,27 @@ final class CLIContractTests: XCTestCase {
             String(data: errData, encoding: .utf8) ?? "",
             scratch
         )
+    }
+
+    /// What the first-run screen runs for "No, I have a free Apple ID",
+    /// against the real CLI in an empty home: a free config, and the steps for
+    /// the device in the result the app shows.
+    func test_the_free_setup_the_app_runs_writes_a_free_config() throws {
+        let run = try Self.runInEmptyHome([
+            CLIContract.Flag.json, CLIContract.Flag.initSetup,
+            CLIContract.Flag.account, AccountMode.free.rawValue,
+        ])
+        defer { try? FileManager.default.removeItem(at: run.scratch) }
+        XCTAssertEqual(run.status, 0, run.stderr)
+        guard case let .initResult(result)? = run.stdout.buildEvents().last else {
+            return XCTFail("no init-result: \(run.stdout)")
+        }
+        XCTAssertEqual(result.account, .free)
+        XCTAssertEqual(result.change, "created")
+        XCTAssertEqual(result.steps.count, 3)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: run.scratch.appendingPathComponent("config/graft/config.yaml").path
+        ))
     }
 
     /// Settings → Paths shows what `--settings` reports, so the installed CLI

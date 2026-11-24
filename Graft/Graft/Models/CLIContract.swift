@@ -5,9 +5,9 @@ import Foundation
 /// The two sides talk over a process boundary with no schema between them:
 /// Swift builds argument vectors out of string literals, the CLI answers with
 /// JSON-Lines events, and `String.buildEvents()` decodes each line with `try?`
-/// — so a line the switch in `BuildEvent.decode` doesn't recognise is silently
+/// — so a line the switch in `BuildEvent.decode` doesn't recognize is silently
 /// dropped and the UI just shows nothing. Flags fail even more quietly: an
-/// unrecognised option makes Click abort with a usage error the GUI surfaces
+/// unrecognized option makes Click abort with a usage error the GUI surfaces
 /// as an opaque failure, and (worse, historically) an option in the wrong
 /// position is parsed as a positional argument instead.
 ///
@@ -49,6 +49,9 @@ enum CLIContract {
         static let bundleId = "--bundle-id"
         static let displayName = "--display-name"
         static let delivery = "--delivery"
+        /// With `--add-app-manual`: the App Store a Search result came from, so
+        /// `--appstore-check` and `--artwork` look the app up there.
+        static let storeCountry = "--store-country"
         static let provideIPA = "--provide-ipa"
         static let app = "--app"
         static let cachedIPA = "--cached-ipa"
@@ -69,6 +72,15 @@ enum CLIContract {
         static let signingCert = "--signing-cert"
         static let signingProfile = "--signing-profile"
         static let signingTeamId = "--signing-team-id"
+        /// The App Store Connect key, without `--setup-portal`'s prompts:
+        /// checked against App Store Connect first, written only if that
+        /// worked. Settings' "App Store Connect" section sends it with the
+        /// three companions below, and `--clear-portal` to remove it.
+        static let setPortal = "--set-portal"
+        static let clearPortal = "--clear-portal"
+        static let ascKeyId = "--asc-key-id"
+        static let ascIssuerId = "--asc-issuer-id"
+        static let ascKeyFile = "--asc-key-file"
         /// Ask the device what it actually holds, then re-report the delivery
         /// state. Scoped with `--app`, targeted with `--device` — neither is
         /// this verb's own flag, and both are already declared above.
@@ -95,6 +107,11 @@ enum CLIContract {
         /// other, never both.
         static let lcBundleId = "--lc-bundle-id"
         static let noLcBundleId = "--no-lc-bundle-id"
+        /// The app's `auto_profile:` — make its provisioning profile through
+        /// App Store Connect — on or off (C-AUTOPROFILE). The Edit sheet's
+        /// toggle sends one or the other.
+        static let autoProfile = "--auto-profile"
+        static let noAutoProfile = "--no-auto-profile"
 
         // TweaksStore
         static let tweaks = "--tweaks"
@@ -146,6 +163,10 @@ enum CLIContract {
         static let buildLog = "--build-log"
         static let revealBuild = "--reveal-build"
         static let reinstallBuild = "--reinstall-build"
+        /// Builds' "Clean up old builds…": the retention sweep a build runs,
+        /// on demand, at config.yaml's `archive_keep`. First with `--dry-run`
+        /// (declared below) to say what would go, then for real.
+        static let pruneBuilds = "--prune-builds"
 
         // DevicesStore
         static let devices = "--devices"
@@ -217,18 +238,58 @@ enum CLIContract {
         /// pane.
         static let refreshArtwork = "--refresh-artwork"
 
-        // AppStoreStore — getting an app from the App Store and decrypting it
-        // on this Mac (ipatool + UnfairPlay). Signing in and enrolling are
-        // never sent from here: they take a password, a 2FA code and root, and
-        // stay Terminal commands the Settings pane shows for copying.
-        // `--allow-unverified` is deliberately absent — the GUI does not offer
-        // staging a decrypt that failed Apple's own page-hash check.
+        // AppStoreStore and AppStoreAccountStore. Getting an app from the App
+        // Store and decrypting it on this Mac (ipatool + UnfairPlay). Since
+        // 2.0, signing in, enrolling and claiming free apps too. The Apple ID,
+        // the password and the code only ever go to the CLI's stdin.
         static let appstoreStatus = "--appstore-status"
+        /// Sign ipatool in. The Apple ID and the password go on stdin, then
+        /// the 2FA code if the CLI emits `appstore-login {state: "needs-code"}`
+        /// (`AppStoreAccountStore`). None of them is ever an argument.
+        static let appstoreLogin = "--appstore-login"
+        /// With `--appstore-login`: the ipatool the sign-in sheet named, from
+        /// the status it read as it opened (`appstore-status`'s
+        /// `ipatool.path`). Sent on every sign-in. If ipatool now resolves
+        /// anywhere else, the CLI reads nothing from stdin and fails with
+        /// `appstore-login {state: "failed", reason: "ipatool-changed"}`, a
+        /// message naming both paths (fix-check #10).
+        static let expectIpatool = "--expect-ipatool"
+        static let appstoreLogout = "--appstore-logout"
+        /// Requires `--app`. The $0 "Get" for an app the CLI's iTunes lookup
+        /// says is free; it refuses anything else. Sent only from Get (free).
+        static let appstoreClaim = "--appstore-claim"
+        /// The installed apps that can enroll this Mac (`AppStoreEnrollSheet`).
+        static let appstoreEnrollCandidates = "--appstore-enroll-candidates"
+        /// With `--app PATH`: the script root runs to enroll this Mac. The app
+        /// runs it behind the administrator prompt and adds nothing (`AdminShell`).
+        static let appstoreEnrollCommand = "--appstore-enroll-command"
+        /// With `--appstore-enroll-command`: hand over a script whose UnfairPlay
+        /// nothing checks (an ad hoc Graft.app, or an UnfairPlay that isn't
+        /// Graft.app's own). Without it the CLI refuses with `appstore-refused
+        /// {reason: "unverified-helper"}`. Sent only from the enroll sheet's
+        /// "Run Unchecked Copy as Root…", after that refusal was shown.
+        static let allowUnverifiedHelper = "--allow-unverified-helper"
+        /// With the folder that script printed: move the model in, as the user.
+        static let appstoreEnrollFinish = "--appstore-enroll-finish"
         /// Scoped with `--app`; this app only ever asks about one at a time.
         static let appstoreCheck = "--appstore-check"
         /// Requires `--app`. Streams `appstore-stage` as it goes, then
         /// `ipa-provided` exactly as a drop does.
         static let appstoreGet = "--appstore-get"
+        /// With `--appstore-get` or `--provide-ipa`: stage a decrypt UnfairPlay
+        /// could not verify against Apple's page hashes. Sent only from "Use it
+        /// anyway…", after a confirmation, to re-run a get or drop the CLI just
+        /// refused with `appstore-refused` (C-UNVERIFIED). Never on a first try.
+        static let allowUnverified = "--allow-unverified"
+        /// Search the App Store for iPhone apps (`AppStoreSearchStore`). Sent
+        /// attached, `--appstore-search=<term>`, so a term that starts with a
+        /// dash is still the term.
+        static let appstoreSearch = "--appstore-search"
+        /// Pairs with `--appstore-search`: which country's store, the one the
+        /// sheet's store picker holds (`Storefronts`), which starts at this
+        /// Mac's region. Never `--limit`: the CLI's default of 25 is what the
+        /// sheet shows.
+        static let country = "--country"
 
         // SettingsStore
         static let check = "--check"
@@ -242,6 +303,17 @@ enum CLIContract {
         /// Dock-launched app inherits the launchd environment, so the
         /// `GRAFT_SSH_PASS` escape hatch a shell has does not exist for the GUI.
         static let setSSHPassword = "--set-ssh-password"
+
+        // AccountSetupStore — `--init` without its questions: the first-run
+        // screen and Settings › Account. The .p12 password goes on stdin,
+        // never in argv.
+        static let initSetup = "--init"
+        static let account = "--account"
+        static let p12 = "--p12"
+        static let profile = "--profile"
+        /// With `--account paid` on a paid config: swap in a new certificate
+        /// and profile (Settings › Account › Replace certificate and profile).
+        static let replace = "--replace"
 
         // BuildOptions (per-build toggles). `BuildOptions.Option.cliArgs`
         // renders these.
@@ -284,26 +356,30 @@ enum CLIContract {
         static let all: Set<String> = [
             json,
             list, addApp, addAppManual, name, bundleId,
-            displayName, delivery, provideIPA, app, cachedIPA, stagedIPAs, deleteStaged, force, installToMac, attachTweak,
+            displayName, delivery, storeCountry, provideIPA, app, cachedIPA, stagedIPAs, deleteStaged, force, installToMac, attachTweak,
             detachTweak, removeApp, setAppOptions, reconcile, deliveryState,
             preferredVersion,
             settings, setSettings, defaultDevice, archiveKeep,
             signingCert, signingProfile, signingTeamId,
+            setPortal, clearPortal, ascKeyId, ascIssuerId, ascKeyFile,
             keepBundleId, noKeepBundleId, stripExtensions, noStripExtensions,
             stripSupportedDevices, noStripSupportedDevices, compressionLevel,
-            lcBundleId, noLcBundleId,
+            lcBundleId, noLcBundleId, autoProfile, noAutoProfile,
             tweaks, tweakUpdates, updateTweak, deviceApps, decrypt, decryptFrontmost,
             stripEncryptedExtensions, keepEncryptedExtensions, decryptBackend,
             decryptCheck, verbose,
             deleteTweak,
             repos, addRepo, removeRepo, repoPackages, refresh, fetch, fetchSha,
             search,
-            builds, buildsApp, buildsLimit, buildLog, revealBuild, reinstallBuild,
+            builds, buildsApp, buildsLimit, buildLog, revealBuild, reinstallBuild, pruneBuilds,
             devices, brief, deviceInfo, withIcons,
             lcStatus, lcInstall, lcPushCert, lcClean, instances, channel, certOnly,
             artwork, refreshArtwork,
-            appstoreStatus, appstoreCheck, appstoreGet,
+            appstoreStatus, appstoreCheck, appstoreGet, allowUnverified, appstoreSearch, country,
+            appstoreLogin, expectIpatool, appstoreLogout, appstoreClaim, appstoreEnrollCandidates, appstoreEnrollCommand,
+            appstoreEnrollFinish, allowUnverifiedHelper,
             check, setP12Password, setSSHPassword,
+            initSetup, account, p12, profile, replace,
             dryRun, skipInstall, skipDecryptCheck, device,
             forPlaycover,
         ]
@@ -334,6 +410,137 @@ enum CLIContract {
     /// the device. A build transcript still shows them, as the context line
     /// they are.
     static let startupLogSource = "startup"
+
+    /// `source` on the `log` events `_warn` writes: a warning about the verb
+    /// that ran, which carried on anyway. The App Store path reads these off a
+    /// get or drop so the line the CLI printed for an unverified decrypt is
+    /// still on screen after "Use it anyway…".
+    static let warningLogSource = "warning"
+
+    /// `source` on the `log` events the CLI writes while it waits on the phone
+    /// itself: "Unlock the phone and tap Trust on the 'Trust This Computer?'
+    /// prompt (waiting up to 60 s)". Information, for while the wait lasts. It
+    /// is never a verb's result: a check that went on to succeed after the
+    /// user tapped Trust succeeded (fix-check #19, #21).
+    static let deviceLogSource = "device"
+
+    /// `source` on the `log` events `--prune-builds` writes for an archive it
+    /// could not move to the Trash, one per file: "<name>: <why>".
+    static let retentionLogSource = "retention"
+
+    /// `appstore-refused`'s `reason` values the app branches on (C-UNVERIFIED).
+    /// Pinned from the Python side: tests/test_cli_appstore.py reads this
+    /// literal against `appstore.REFUSED_UNVERIFIED`.
+    enum AppStoreRefusal {
+        /// UnfairPlay decrypted it but couldn't verify it against Apple's page
+        /// hashes. The app pane offers "Use it anyway…" for this one.
+        static let unverified = "unverified"
+        /// The Apple ID doesn't own the app. The App Store row offers Get (free)
+        /// when the refusal's `price` is 0, and Open in App Store otherwise.
+        static let needsLicense = "needs-license"
+        /// `--appstore-claim` on an app that isn't free.
+        static let paid = "paid"
+        /// `--appstore-enroll-command` without `--allow-unverified-helper`,
+        /// for a script whose UnfairPlay nothing would check before root runs
+        /// it. The event carries `kind` (`UnverifiedHelperKind`), `helper` and
+        /// the CLI's `message`.
+        static let unverifiedHelper = "unverified-helper"
+    }
+
+    /// `appstore-status`'s `ipatool.source`: where the ipatool that gets the
+    /// Apple ID and password was found (`graft_ipa/tools.py` `SOURCE_*`).
+    enum ToolSource {
+        /// Graft.app's own copy.
+        static let bundled = "bundled"
+        /// config.yaml's `appstore.ipatool`, which comes before the bundled one.
+        static let config = "config"
+        /// The old default place, ~/.local/bin, in a Graft with none of its own.
+        static let defaultPath = "default"
+        /// Found on PATH, in a Graft with none of its own.
+        static let path = "PATH"
+    }
+
+    /// The enrollment script's own exit statuses (`graft_ipa/enrollment.py`
+    /// `EXIT_*`), as AppleScript reports them: the `do shell script` error
+    /// number. 67 and 68 both mean the trap removed root's folder and nothing
+    /// was changed.
+    enum EnrolExit {
+        static let notInApplications = 64
+        static let notRoots = 65
+        static let writable = 66
+        /// The app created the command's `cancel_file`.
+        static let stopped = 67
+        /// The run reached `time_limit_seconds`.
+        static let timedOut = 68
+    }
+
+    /// `kind` on an `unverified-helper` refusal, and `unverified_kind` on the
+    /// `appstore-enroll-command` that follows `--allow-unverified-helper`.
+    enum UnverifiedHelperKind {
+        /// This Graft.app has no team signature to check UnfairPlay against.
+        static let adHoc = "ad-hoc"
+        /// The CLI isn't Graft.app's own (a Debug build running the repo's
+        /// CLI), so the UnfairPlay is someone's own build. A Release build
+        /// refuses it outright (`AppStoreAccountStore.mayRunUnchecked`).
+        static let notBundled = "not-bundled"
+    }
+
+    /// `appstore-login`'s `state` values (`graft_ipa/appstore_login.py`
+    /// `STATE_*`), pinned from the Python side by tests/test_appstore_login.py.
+    enum AppStoreLogin {
+        static let preparing = "preparing"
+        static let waiting = "waiting"
+        static let needsCode = "needs-code"
+        static let verifying = "verifying"
+        static let signedIn = "signed-in"
+        static let failed = "failed"
+    }
+
+    /// `appstore-status`'s `ipatool.unknown_reason` values the app words
+    /// itself when the CLI sends no `unknown_message` (`graft_ipa/ipatool.py`
+    /// `UNKNOWN_*`). Any other reason, "keychain-locked" included, shows the
+    /// CLI's `unknown_message`, or the reason itself.
+    enum UnknownSignIn {
+        /// `auth info` hung, crashed or printed no verdict.
+        static let noVerdict = "no-verdict"
+        /// The login keychain didn't answer when Graft asked about ipatool's items.
+        static let keychainNoAnswer = "keychain-no-answer"
+        /// Graft.app's own ipatool made this sign-in, and the ipatool status
+        /// ran (one set in config.yaml, or found on PATH) can't read it without
+        /// Keychain dialogs, so the CLI didn't ask it. Sign In… gives that
+        /// ipatool its own sign-in (the CLI clears Graft's items first).
+        static let graftIpatoolSignin = "graft-ipatool-signin"
+    }
+
+    /// Settings › App Store's button labels that the CLI's hints name, so a
+    /// hint and the button it sends the user to can be pinned to one spelling
+    /// (the fix-check's #9 and #13: a hint naming a button that isn't on
+    /// screen). Each ends in the ellipsis character, never three full stops.
+    enum SettingsLabel {
+        /// Beside the ipatool row when nobody is signed in, or only Graft
+        /// 1.x's ipatool is.
+        static let signIn = "Sign In…"
+        /// Beside Sign Out while signed in: the same sheet, for a sign-in
+        /// that has expired but still reads as signed in.
+        static let signInAgain = "Sign In Again…"
+        /// Beside the UnfairPlay row with no model this user can use.
+        static let setUpDecryption = "Set Up Decryption…"
+        /// Beside the UnfairPlay row on an enrolled Mac.
+        static let setUpAgain = "Set Up Again…"
+    }
+
+    /// `appstore-search-failed`'s `reason` values the app branches on. Pinned
+    /// from the Python side: tests/test_itunes_search.py reads these literals
+    /// against `itunes.OFFLINE` and `itunes.RATE_LIMITED`.
+    enum AppStoreSearchFailure {
+        /// itunes.apple.com couldn't be reached. Add App's Search shows its own
+        /// offline state for this, and the CLI's message for every other reason
+        /// but `rateLimited`.
+        static let offline = "offline"
+        /// Apple answered 403, 429 or 503: its per-IP limit on the Search API.
+        /// Search shows `AppStoreSearchRateLimited.message` for it.
+        static let rateLimited = "rate-limited"
+    }
 
     enum DecryptBackend {
         static let bagbak = "bagbak"
@@ -468,6 +675,12 @@ enum CLIContract {
         /// which also exit 2 — so the status alone never decides anything
         /// here; `Message.configNotFound` says which one it was.
         static let configError: Int32 = 2
+
+        /// The app's own launcher, `Contents/Helpers/graft`, started but found
+        /// part of Graft.app missing, such as its Python (`bundle/launcher.c`).
+        /// A shell exits 126 for a command it can't execute as well, so
+        /// `Message.bundleDamaged` decides.
+        static let bundleDamaged: Int32 = 126
     }
 
     /// Sentences the CLI prints that the GUI branches on.
@@ -482,6 +695,10 @@ enum CLIContract {
         /// `config._load_raw`'s message for a config.yaml that does not exist,
         /// up to the path it names — the setup screen's "create your config".
         static let configNotFound = "config file not found at "
+
+        /// What the launcher prints first on stderr with `Exit.bundleDamaged`,
+        /// followed by what is missing.
+        static let bundleDamaged = "graft: Graft.app is damaged:"
     }
 
     /// Every flag the app passes to the CLI.
@@ -573,12 +790,27 @@ enum CLIContract {
         "tweak-detached",
         "settings",
         "settings-updated",
+        "portal-set",
+        "portal-cleared",
         "tweak-deleted",
         "tweak-in-use",
         "appstore-status",
         "appstore-version",
         "appstore-stage",
         "appstore-decrypted",
+        "appstore-refused",
+        "appstore-login",
+        "appstore-logout",
+        "appstore-enroll-candidate",
+        "appstore-enroll-candidates-end",
+        "appstore-enroll-command",
+        "appstore-enrolled",
+        "appstore-claimed",
+        "appstore-search-result",
+        "appstore-search-end",
+        "appstore-search-failed",
+        "init-step",
+        "init-result",
     ]
 
     /// Events the CLI emits that the GUI deliberately does *not* decode, each
@@ -590,7 +822,7 @@ enum CLIContract {
     /// here in a sentence. "Nobody noticed" stops being an available outcome,
     /// which is exactly how `device-error` reached a release.
     ///
-    /// Membership here is not a licence to ignore an event forever: it is a
+    /// Membership here is not a license to ignore an event forever: it is a
     /// claim that no user-visible state depends on it. If that stops being
     /// true, move it to `eventsHandled` and give it a case.
     ///
@@ -626,6 +858,11 @@ enum CLIContract {
         /// `--lc-bundle-id` and `--no-lc-bundle-id` both report this one name
         /// in `changed` (C-LCPIN).
         case lcBundleId = "lc_bundle_id"
+        /// `--auto-profile` and `--no-auto-profile` both report this
+        /// (C-AUTOPROFILE).
+        case autoProfile = "auto_profile"
+        /// `--store-country`: the App Store the app's lookups ask.
+        case storeCountry = "store_country"
     }
 
     static let appOptionFieldsSent: Set<String> = Set(

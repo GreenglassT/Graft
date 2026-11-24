@@ -27,13 +27,23 @@ from pathlib import Path
 
 import pytest
 
-from graft_ipa import appstore, decrypt_runner, host, install_hints, ipatool, preflight, unfairplay
+from graft_ipa import (
+    appstore,
+    decrypt_runner,
+    host,
+    install_hints,
+    ipatool,
+    preflight,
+    tools,
+    unfairplay,
+)
 from graft_ipa.config import AppStoreToolsConfig
 from graft_ipa.decrypt_runner import DecryptError
-from graft_ipa.errors import InstallError, SigningError
+from graft_ipa.errors import SigningError
 from graft_ipa.json_output import JsonEmitter
 from tests.appstore_fakes import FakeTools
 from tests.test_ipatool_discovery import _install_copy
+from tests.tool_fakes import fake_path
 
 BREW_NOTE = "Homebrew is needed first: https://brew.sh"
 
@@ -48,9 +58,9 @@ def homebrew(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(install_hints, "homebrew_present", lambda: True)
 
 
-def _missing(monkeypatch: pytest.MonkeyPatch, *tools: str) -> dict[str, preflight.CheckResult]:
-    monkeypatch.setattr(preflight.shutil, "which", lambda tool: None)
-    return {r.name: r for r in preflight.check_tools(list(tools))}
+def _missing(monkeypatch: pytest.MonkeyPatch, *names: str) -> dict[str, preflight.CheckResult]:
+    monkeypatch.setattr(tools, "which", lambda tool: None)
+    return {r.name: r for r in preflight.check_tools(list(names))}
 
 
 # ---- T2: Homebrew first ----
@@ -59,25 +69,21 @@ def _missing(monkeypatch: pytest.MonkeyPatch, *tools: str) -> dict[str, prefligh
 def test_a_brew_hint_says_homebrew_is_needed_when_it_is_not_there(
     monkeypatch: pytest.MonkeyPatch, no_homebrew
 ) -> None:
-    rows = _missing(monkeypatch, "zsign", "ideviceinstaller")
+    rows = _missing(monkeypatch, "zsign")
     assert rows["zsign"].hint.startswith("install with: brew install zsign")
     assert BREW_NOTE in rows["zsign"].hint
-    # libimobiledevice's tools have a MacPorts port too.
-    assert BREW_NOTE in rows["ideviceinstaller"].hint
-    assert "sudo port install ideviceinstaller" in rows["ideviceinstaller"].hint
 
 
 def test_no_homebrew_note_when_homebrew_is_installed(
     monkeypatch: pytest.MonkeyPatch, homebrew
 ) -> None:
-    rows = _missing(monkeypatch, "zsign", "ideviceinstaller")
+    rows = _missing(monkeypatch, "zsign")
     assert rows["zsign"].hint == "install with: brew install zsign"
-    assert "brew.sh" not in rows["ideviceinstaller"].hint
 
 
 def test_a_non_brew_hint_gets_no_homebrew_note(monkeypatch: pytest.MonkeyPatch, no_homebrew) -> None:
-    rows = _missing(monkeypatch, "otool")
-    assert "brew.sh" not in rows["otool"].hint
+    rows = _missing(monkeypatch, "security")
+    assert "brew.sh" not in rows["security"].hint
 
 
 def test_cyan_says_pipx_is_needed_first(monkeypatch: pytest.MonkeyPatch, homebrew) -> None:
@@ -102,17 +108,7 @@ def test_homebrew_is_found_where_it_installs_even_off_path(
     assert install_hints.homebrew_present() is False
 
 
-def test_the_other_brew_hints_say_it_too(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, no_homebrew
-) -> None:
-    from graft_ipa import installer
-
-    monkeypatch.setattr(installer.shutil, "which", lambda tool: None)
-    with pytest.raises(InstallError) as e:
-        installer.install(tmp_path / "a.ipa")
-    assert BREW_NOTE in e.value.hint
-    assert "sudo port install ideviceinstaller" in e.value.hint
-
+def test_the_other_brew_hints_say_it_too(no_homebrew) -> None:
     hint = decrypt_runner.iproxy_install_hint()
     assert hint.startswith("brew install libimobiledevice")
     assert BREW_NOTE in hint and "sudo port install libimobiledevice" in hint
@@ -141,29 +137,28 @@ def test_zsign_not_found_says_it_too(
 def test_a_failing_tool_row_carries_its_install_command(
     monkeypatch: pytest.MonkeyPatch, homebrew
 ) -> None:
-    rows = _missing(monkeypatch, "zsign", "ideviceinstaller", "otool", "cyan", "security")
+    rows = _missing(monkeypatch, "zsign", "cyan", "security")
     assert rows["zsign"].install == "brew install zsign"
-    assert rows["ideviceinstaller"].install == "brew install ideviceinstaller"
-    assert rows["otool"].install == "xcode-select --install"
     assert rows["cyan"].install.startswith("pipx install --force https://github.com/")
     # Not a command: there is nothing to paste for a builtin.
     assert rows["security"].install is None
 
 
-def test_a_passing_row_has_no_install_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(preflight.shutil, "which", lambda tool: f"/opt/fake/{tool}")
+def test_a_passing_row_has_no_install_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tools, "which", fake_path(tmp_path / "path-bin"))
     (row,) = preflight.check_tools(["zsign"])
     assert row.ok and row.install is None
 
 
 def test_every_preflight_check_event_carries_install(
-    temp_config_env: Path, monkeypatch: pytest.MonkeyPatch, homebrew
+    tmp_path: Path, temp_config_env: Path, monkeypatch: pytest.MonkeyPatch, homebrew
 ) -> None:
     from graft_ipa import cli as cli_mod
     from graft_ipa.config import load_config
 
-    monkeypatch.setattr(preflight.shutil, "which",
-                        lambda tool: None if tool == "zsign" else f"/opt/fake/{tool}")
+    monkeypatch.setattr(tools, "which", fake_path(tmp_path / "path-bin", missing={"zsign"}))
     monkeypatch.setattr(preflight, "list_connected_devices", lambda: [])
     out = StringIO()
     cli_mod._do_check(load_config(temp_config_env), JsonEmitter(stream=out))
@@ -220,10 +215,8 @@ def test_the_unfairplay_build_is_spelled_out(
 
 
 def test_the_enrollment_command_says_which_app_in_words() -> None:
-    command = unfairplay.setup_command(Path("/opt/up/unfairplay"))
-    assert "YOUR_IPAD_APP" not in command
-    assert command == (
-        'sudo /opt/up/unfairplay setup --app '
+    assert unfairplay.ENROLL_COMMAND == (
+        'graft --appstore-enroll-command --app '
         '"/Applications/<an iPhone/iPad app from the Mac App Store, opened once>.app"'
     )
 
@@ -249,7 +242,7 @@ def test_status_prints_the_commands_and_runs_none_of_them(
         assert step in commands, step
     for step in unfairplay.build_steps(nothing_installed.unfairplay):
         assert step in commands, step
-    assert unfairplay.setup_command(nothing_installed.unfairplay) in commands
+    assert unfairplay.ENROLL_COMMAND in commands
     # Printed, not run.
     assert not nothing_installed.ipatool.exists()
     assert not nothing_installed.unfairplay.exists()
@@ -263,11 +256,16 @@ def test_status_tools_carry_install(nothing_installed: AppStoreToolsConfig, home
     )
 
 
-def test_status_install_is_null_for_a_tool_that_is_ready(tmp_path: Path) -> None:
+def test_status_install_is_null_for_a_tool_that_is_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Discovery also looks in ~/.local/bin: keep this Mac's out of it.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     fakes = FakeTools(tmp_path / "tools")
-    tools = AppStoreToolsConfig(ipatool=fakes.ipatool, unfairplay=fakes.unfairplay,
-                                unfairplay_models=fakes.models)
-    payload = appstore.status(tools)
+    chosen = AppStoreToolsConfig(ipatool=fakes.ipatool, unfairplay=fakes.unfairplay,
+                                 unfairplay_models=fakes.models,
+                                 explicit=frozenset({"ipatool", "unfairplay"}))
+    payload = appstore.status(chosen)
     assert payload["ipatool"]["install"] is None
     assert payload["unfairplay"]["install"] is None
 
@@ -305,10 +303,10 @@ def test_a_bad_ipatool_at_the_configured_path_names_the_config_key(
     fakes = FakeTools(tmp_path / "tools")
     fakes.set(ipatool_version="2.8.1")
     configured = fakes.ipatool  # appstore.ipatool points straight at the 2.8.1
-    tools = AppStoreToolsConfig(ipatool=configured, unfairplay=fakes.unfairplay,
-                                unfairplay_models=fakes.models)
+    chosen = AppStoreToolsConfig(ipatool=configured, unfairplay=fakes.unfairplay,
+                                 unfairplay_models=fakes.models, explicit=frozenset({"ipatool"}))
 
-    payload = appstore.status(tools)
+    payload = appstore.status(chosen)
 
     warning = payload["ipatool"]["warning"]
     assert f"appstore.ipatool in config.yaml points at {configured}" in warning
@@ -326,10 +324,10 @@ def test_a_bad_ipatool_on_path_is_fixed_by_the_default_location(
     fakes.set(ipatool_version="2.8.1")
     _install_copy(fakes, tmp_path / "pathdir")
     monkeypatch.setenv("PATH", f"{tmp_path / 'pathdir'}:/usr/bin:/bin")
-    tools = AppStoreToolsConfig(ipatool=home / ".local" / "bin" / "ipatool",
-                                unfairplay=fakes.unfairplay, unfairplay_models=fakes.models)
+    defaults = AppStoreToolsConfig(ipatool=home / ".local" / "bin" / "ipatool",
+                                   unfairplay=fakes.unfairplay, unfairplay_models=fakes.models)
 
-    payload = appstore.status(tools)
+    payload = appstore.status(defaults)
 
     assert "~/.local/bin/ipatool" in payload["ipatool"]["warning"]
     assert payload["ipatool"]["install"] == ipatool.install_command(home / ".local" / "bin" / "ipatool")

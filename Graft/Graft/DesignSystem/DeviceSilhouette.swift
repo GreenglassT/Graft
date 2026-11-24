@@ -14,8 +14,8 @@ import SwiftUI
 /// **Deliberately does not tint from `DeviceColor` or `DeviceEnclosureColor`.**
 /// Both come back from lockdown as bare integers — `1` and `9` on the device
 /// this was built against — with no Apple-published mapping from integer to
-/// colour. Guessing one wrong reads as *this app thinks your phone is a
-/// colour it is not*, which is worse than the neutral gradient below. If a
+/// color. Guessing one wrong reads as *this app thinks your phone is a
+/// color it is not*, which is worse than the neutral gradient below. If a
 /// real mapping ever surfaces, wire it in then; don't add a guessed one
 /// here believing this was an oversight.
 struct DeviceSilhouette: View {
@@ -96,7 +96,7 @@ extension DeviceSilhouette {
         case dynamicIsland
         case notch
         case homeButton
-        /// The honest fallback for anything unrecognised — an iPad, a future
+        /// The honest fallback for anything unrecognized — an iPad, a future
         /// identifier this parser can't read, or a malformed string. Chosen
         /// deliberately over guessing: a plain body with no face detail is
         /// truthful about what this component doesn't know, where a

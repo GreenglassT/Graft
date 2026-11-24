@@ -43,7 +43,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from graft_ipa import apple_portal, mobileprovision, preflight
+from graft_ipa import apple_portal, mobileprovision, preflight, tools
 from graft_ipa.apple_portal import (
     BundleId,
     Certificate,
@@ -110,7 +110,7 @@ def test_a_profile_missing_the_device_is_not_reusable(tmp_path: Path) -> None:
 
 
 def test_device_matching_ignores_case(tmp_path: Path) -> None:
-    """ASC normalises UDIDs to lower case in places; config.yaml does not.
+    """ASC normalizes UDIDs to lower case in places; config.yaml does not.
 
     A case-sensitive comparison would re-provision on every build — a round
     trip to Apple per build, and a new profile each time.
@@ -203,6 +203,7 @@ def test_an_expired_cache_is_replaced_rather_than_returned(tmp_path: Path) -> No
     cache.mkdir()
     (cache / "com_bravo_x.mobileprovision").write_bytes(b"STALE")
     client = _portal_client()
+    _remote(client, b"STALE")
 
     with _stale_only("the cached profile expired"):
         result = ensure_profile_for_bundle(
@@ -221,15 +222,17 @@ def test_an_expired_cache_is_replaced_rather_than_returned(tmp_path: Path) -> No
 def test_a_stale_cache_deletes_the_remote_profile_it_came_from(tmp_path: Path) -> None:
     """Re-downloading is not refreshing.
 
-    The remote profile of the same name is the one this stale file was
-    downloaded from, so reusing it fetches the same expired bytes back and the
-    next build finds the cache stale all over again. The refresh has to delete
-    and recreate.
+    The remote profile of the same name is usually the one this stale file was
+    downloaded from, so reusing it would fetch the same expired bytes back and
+    the next build would find the cache stale all over again. It is read and
+    judged first (review #16: never deleted unread), refused for the same
+    reason, and only then deleted and recreated.
     """
     cache = tmp_path / "profiles"
     cache.mkdir()
     (cache / "com_bravo_x.mobileprovision").write_bytes(b"STALE")
     client = _portal_client()
+    _remote(client, b"STALE")
 
     with _stale_only("expired"):
         ensure_profile_for_bundle(
@@ -240,8 +243,34 @@ def test_a_stale_cache_deletes_the_remote_profile_it_came_from(tmp_path: Path) -
             cache_dir=cache,
         )
 
+    client.get_profile.assert_called_once_with("old1", with_content=True)
+    client.create_profile.assert_called_once()
     client.delete_profile.assert_called_once_with("old1")
-    client.get_profile.assert_not_called()
+
+
+def test_a_stale_cache_keeps_a_remote_profile_that_is_fine(tmp_path: Path) -> None:
+    """Review #16: the local file being stale says nothing certain about the
+    remote one. Another Mac may already have refreshed it; deleting it unread
+    replaced a profile that Mac was using."""
+    cache = tmp_path / "profiles"
+    cache.mkdir()
+    (cache / "com_bravo_x.mobileprovision").write_bytes(b"STALE")
+    client = _portal_client()
+    _remote(client, b"REFRESHED_ELSEWHERE")
+
+    with _stale_only("expired"):
+        result = ensure_profile_for_bundle(
+            client,
+            bundle_id="com.bravo.app",
+            cert_serial="DEADBEEF",
+            device_udids=[UDID],
+            cache_dir=cache,
+        )
+
+    assert result.profile_path.read_bytes() == b"REFRESHED_ELSEWHERE"
+    assert result.refresh_reason == "expired"
+    client.create_profile.assert_not_called()
+    client.delete_profile.assert_not_called()
 
 
 def test_a_usable_cache_still_makes_no_network_call(tmp_path: Path) -> None:
@@ -437,6 +466,7 @@ def test_a_registered_device_the_profile_lacks_still_refreshes(tmp_path: Path) -
     cached = cache / "com_bravo_x.mobileprovision"
     cached.write_bytes(b"CACHED")
     client = _portal_client()
+    _remote(client, b"CACHED")  # the remote copy lacks the phone too
 
     with _decoder(
         {
@@ -508,6 +538,7 @@ def test_a_refresh_that_resolves_nothing_stops_rather_than_repeating(
     cache.mkdir()
     (cache / "com_bravo_x.mobileprovision").write_bytes(b"STALE")
     client = _portal_client()
+    _remote(client, b"STALE")
 
     with patch.object(
         apple_portal.mobileprovision, "cache_problem", return_value="expired on arrival"
@@ -521,8 +552,9 @@ def test_a_refresh_that_resolves_nothing_stops_rather_than_repeating(
         )
 
     # Created before the old one is deleted, so a stop here leaves the account
-    # with a profile rather than with none.
-    client.delete_profile.assert_not_called()
+    # with a profile rather than with none. The refused new one does not stay:
+    # left there, each build would add another (review #1).
+    client.delete_profile.assert_called_once_with("new1")
     assert (cache / "com_bravo_x.mobileprovision").read_bytes() == b"STALE", (
         "a profile that failed its own check became the cache"
     )
@@ -590,7 +622,7 @@ def test_a_signing_run_with_no_refresh_carries_no_note() -> None:
 # …and pre-flight reads the same rule, on all three of its conditions
 # ---------------------------------------------------------------------------
 #
-# The dead end above survived in the one condition the generalisation skipped.
+# The dead end above survived in the one condition the generalization skipped.
 # `cache_problem` has three — undecodable, expired, missing a device — and
 # pre-flight re-derived two of them by hand while `check_profile_contents`
 # hard-failed on the third: a `CheckResult(name="profile parse", ok=False)` with
@@ -685,7 +717,7 @@ def _preflight_with_an_unreadable_cache(cfg: Config, app: AppConfig) -> list:
     """
     from graft_ipa import keychain
 
-    with patch.object(preflight.shutil, "which", return_value="/usr/bin/true"), \
+    with patch.object(tools, "which", return_value="/usr/bin/true"), \
          patch.object(keychain, "read_p12_password", return_value="hunter2"), \
          patch.object(preflight, "list_connected_devices", return_value=[UDID]), \
          _undecodable():
@@ -812,3 +844,68 @@ def test_preflight_and_stage_four_answer_from_the_same_function(tmp_path: Path) 
     assert "is a teapot" in row.detail, (
         "pre-flight reached its own verdict instead of `cache_problem`'s"
     )
+
+
+# ---------------------------------------------------------------------------
+# Review re-check #5: a phone that arrived after the last Save and test
+# ---------------------------------------------------------------------------
+
+NEW_PHONE = "00008140-000A1B2C3D4E5F60"
+
+
+def test_the_default_phone_is_provisioned_though_device_udids_predates_it(
+    tmp_path: Path,
+) -> None:
+    """`device_udids` is a snapshot from the last Save and test. A phone made
+    the default after it was left out of every profile, because the default
+    counted only when the list was empty."""
+    from graft_ipa import signer
+
+    cfg = _auto_cfg(tmp_path)
+    cfg.default_device_udid = NEW_PHONE
+
+    assert signer.auto_profile_device_udids(cfg) == [UDID, NEW_PHONE]
+
+
+def test_a_default_phone_already_listed_is_not_listed_twice(tmp_path: Path) -> None:
+    from graft_ipa import signer
+
+    cfg = _auto_cfg(tmp_path)
+    cfg.default_device_udid = UDID.lower()
+
+    assert signer.auto_profile_device_udids(cfg) == [UDID]
+
+
+def _device_row(cfg: Config, connected: str) -> preflight.CheckResult:
+    cached = cfg.app_store_connect.profile_cache_dir / "com_bravo_x.mobileprovision"
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"CACHED")
+    plist = {"ProvisionedDevices": [UDID],
+             "ExpirationDate": datetime.now(UTC) + timedelta(days=200)}
+    with patch.object(mobileprovision, "decode", return_value=plist):
+        rows = preflight.check_devices(cfg, app=_auto_app(auto_profile=True), udids=[connected])
+    return next(r for r in rows if r.name == "device in provisioning profile")
+
+
+def test_a_new_default_phone_is_renewed_at_sign_time_not_refused(tmp_path: Path) -> None:
+    cfg = _auto_cfg(tmp_path)
+    cfg.default_device_udid = NEW_PHONE
+
+    row = _device_row(cfg, NEW_PHONE)
+
+    assert row.ok is True, row.hint
+    assert "re-provisions it at sign time" in row.detail
+
+
+def test_a_phone_auto_provisioning_does_not_cover_names_save_and_test(tmp_path: Path) -> None:
+    """The phone may already be in the portal (Xcode registers it), so "add
+    it in the portal and regenerate the profile" sent the user to a step
+    that was done. What refreshes the list is Save and test."""
+    cfg = _auto_cfg(tmp_path)
+
+    row = _device_row(cfg, NEW_PHONE)
+
+    assert row.ok is False
+    assert "Save and test" in row.hint
+    assert "graft --set-portal" in row.hint
+    assert "default device" in row.hint

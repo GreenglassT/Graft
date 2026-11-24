@@ -31,7 +31,7 @@ this is the rule a fourth rung has to keep:
   achievable, and promising it anyway is what turns bugs into mysteries.
 
 `resolve` sniffs again after the winning rung, and `_cached_artwork` sniffs
-what is already on disk. That is defence in depth rather than duplication: the
+what is already on disk. That is defense in depth rather than duplication: the
 cache is a directory anything can write to, so the bytes served on a *hit* were
 not necessarily produced by a rung at all.
 """
@@ -52,8 +52,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import data_dirs
-from .device_session import closing_best_effort
+from . import data_dirs, host
+from .device_session import PAIR_TIMEOUT_SECONDS, closing_best_effort
 from .itunes import lookup_by_bundle_id
 
 #: Which rung answered. Recorded in the sidecar and reported to the GUI, so a
@@ -425,7 +425,7 @@ def _looks_like_an_image(data: bytes) -> bool:
     return data.startswith(b"\x89PNG\r\n\x1a\n") or data.startswith(b"\xff\xd8\xff")
 
 
-def _download_app_store_icon(bundle_id: str) -> bytes | None:
+def _download_app_store_icon(bundle_id: str, *, store_country: str | None = None) -> bytes | None:
     """Acquire the raw bytes of `bundle_id`'s App Store artwork, or None.
 
     Reuses `_MAX_ICON_BYTES` as the download cap rather than a second
@@ -485,13 +485,30 @@ def _download_app_store_icon(bundle_id: str) -> bytes | None:
     # Outside the `try`, deliberately: that catch is `except Exception`, so an
     # import placed inside it would turn a broken install into "this app has
     # no icon" rather than an error anyone could act on.
-    import requests
+    import requests  # noqa: F401  -- outside the try, for the reason above
 
     try:
-        app = lookup_by_bundle_id(bundle_id)
-        if not app.artwork_url:
-            return None
-        resp = requests.get(app.artwork_url, timeout=_APP_STORE_ARTWORK_TIMEOUT, stream=True)
+        # The one chain every lookup shares: the app's store, else this
+        # Mac's region's, then the US.
+        app, _ = host.look_up(store_country, lambda country: lookup_by_bundle_id(bundle_id, country=country))
+    except Exception:
+        return None
+    if not app.artwork_url:
+        return None
+    return _fetch_image_bytes(app.artwork_url, timeout=_APP_STORE_ARTWORK_TIMEOUT)
+
+
+def _fetch_image_bytes(url: str, *, timeout: float) -> bytes | None:
+    """Acquire up to `_MAX_ICON_BYTES` from `url`, or None on any failure.
+
+    The acquisition half of the rung contract (module docstring): streamed
+    and capped, for the reason `_download_app_store_icon`'s docstring gives.
+    Shared by that rung and by `fetch_image`.
+    """
+    import requests  # outside the try: see `_download_app_store_icon`
+
+    try:
+        resp = requests.get(url, timeout=timeout, stream=True)
         if resp.status_code != 200:
             # Closed explicitly, like the oversize path below. `stream=True`
             # means the body was never read, so without this the connection is
@@ -506,15 +523,23 @@ def _download_app_store_icon(bundle_id: str) -> bytes | None:
                 resp.close()
                 return None
             chunks.append(chunk)
-        content = b"".join(chunks)
-        if not content:
-            return None
-        return content
+        return b"".join(chunks) or None
     except Exception:
         return None
 
 
-def icon_from_app_store(bundle_id: str) -> bytes | None:
+def fetch_image(url: str, *, timeout: float = _APP_STORE_ARTWORK_TIMEOUT) -> bytes | None:
+    """A PNG or JPEG from `url`, or None.
+
+    Acquisition is caught whole and validation sits outside the catch, as for
+    every rung: a 200 carrying an HTML block page is not an image.
+    `appstore_search` uses this for the icons of search results.
+    """
+    raw = _fetch_image_bytes(url, timeout=timeout)
+    return raw if raw and _looks_like_an_image(raw) else None
+
+
+def icon_from_app_store(bundle_id: str, *, store_country: str | None = None) -> bytes | None:
     """The app icon image for `bundle_id`, fetched from its App Store listing.
 
     Second rung of the cascade (see the module docstring): it exists because
@@ -529,7 +554,7 @@ def icon_from_app_store(bundle_id: str) -> bytes | None:
     body all arrive as a 200 with a body, and `resolve` would cache it under a
     sidecar stamped `source: "app-store"` that then reads as resolved forever.
     """
-    raw = _download_app_store_icon(bundle_id)
+    raw = _download_app_store_icon(bundle_id, store_country=store_country)
     return raw if raw and _looks_like_an_image(raw) else None
 
 
@@ -611,7 +636,7 @@ async def icons_over_service(service: Any, bundle_ids: Iterable[str]) -> dict[st
 
     What must not be duplicated is the probe. A second copy of the comparison
     would drift from this one, and the failure mode of a drifted copy is
-    *silently caching a grey placeholder as an app's icon*, which the artwork
+    *silently caching a gray placeholder as an app's icon*, which the artwork
     cache then serves forever — precisely the defect `_ABSENT_BUNDLE_ID` exists
     to prevent. So there is one copy, here, and both callers go through it.
 
@@ -670,7 +695,7 @@ async def _icon_from_device_async(bundle_id: str, udid: str) -> bytes | None:
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.springboard import SpringBoardServicesService
 
-    lockdown = await create_using_usbmux(serial=udid)
+    lockdown = await create_using_usbmux(serial=udid, pair_timeout=PAIR_TIMEOUT_SECONDS)
     # This close used to be bare, and it was the fourth copy of the defect
     # `device_session` documents — the one that shipped and stayed. The icon is
     # already decoded when the teardown runs, and `icon_from_device` wraps this
@@ -682,7 +707,7 @@ async def _icon_from_device_async(bundle_id: str, udid: str) -> bytes | None:
     # never noticed in use.
     #
     # A failure from the body still propagates and still reaches
-    # `icon_from_device`'s catch, which is the behaviour that rung's docstring
+    # `icon_from_device`'s catch, which is the behavior that rung's docstring
     # describes: a locked phone, a refused handshake, an expired pairing record.
     async with closing_best_effort(lockdown):
         service = SpringBoardServicesService(lockdown=lockdown)
@@ -904,7 +929,7 @@ def _cached_artwork(
     return Artwork(
         bundle_id=bundle_id,
         path=png,
-        # `Artwork.source` has to be a string — Task 6 serialises it into the
+        # `Artwork.source` has to be a string — Task 6 serializes it into the
         # GUI's contract — but this file is one anything could have touched,
         # and `str()` on a stray `42` would cheerfully produce `"42"`. See
         # `SOURCE_UNKNOWN` for why the fallback is not one of the real rungs.
@@ -944,6 +969,7 @@ def resolve(
     ipa: Path | None,
     udid: str | None = None,
     refresh: bool = False,
+    store_country: str | None = None,
 ) -> Artwork | None:
     """Artwork for `bundle_id`, from the cache or from the first rung that has it.
 
@@ -955,6 +981,10 @@ def resolve(
     *deletes* nothing, so a `refresh` whose rungs all miss — an offline
     machine, say — leaves the previous answer cached and still servable rather
     than trading a stale icon for none at all.
+
+    `store_country` is the app's own store, which the App Store rung asks
+    through the chain every lookup shares (`host.look_up`): that store, else
+    this Mac's region's, then the US.
 
     The cache is authoritative unless `refresh` is set, the IPA it was resolved
     against has changed, or — for an entry with no IPA behind it at all — it
@@ -981,7 +1011,7 @@ def resolve(
     # re-checking them and leaving two copies of the rule to drift apart.
     rungs = {
         SOURCE_IPA: lambda: icon_from_ipa(ipa),
-        SOURCE_APP_STORE: lambda: icon_from_app_store(bundle_id),
+        SOURCE_APP_STORE: lambda: icon_from_app_store(bundle_id, store_country=store_country),
         SOURCE_DEVICE: lambda: icon_from_device(bundle_id, udid=udid),
     }
     for source in attempted_sources(ipa, udid):
@@ -993,7 +1023,7 @@ def resolve(
         #
         # The sniff below independently rejects `b""` (no signature to match),
         # so these two guards do overlap and a mutation swapping this one for
-        # `data is None` changes no behaviour. Both are kept because they say
+        # `data is None` changes no behavior. Both are kept because they say
         # different things — "no answer" and "an answer that is not an image" —
         # and only this one can run first: `_looks_like_an_image(None)` raises.
         if not data:

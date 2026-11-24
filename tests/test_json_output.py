@@ -53,7 +53,7 @@ def test_emit_rejects_an_unregistered_event_type() -> None:
 def test_emit_rejects_an_unregistered_stage_name() -> None:
     """The `stage` event's `name` is a second vocabulary inside the first.
 
-    Registering the event type proves the GUI recognises the line; it says
+    Registering the event type proves the GUI recognizes the line; it says
     nothing about the string inside it, and `ConfigStore.note` branches on one
     of those strings — `"verify"` — for the decryption check's only all-clear.
     A renamed stage keeps decoding and keeps rendering, so the CLI is the only

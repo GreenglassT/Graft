@@ -11,7 +11,7 @@ import Foundation
 /// asking for five fields and getting five back proves nothing if four of them
 /// were never edited.
 ///
-/// Modelled as baseline + edits rather than "current values plus a dirty flag"
+/// Modeled as baseline + edits rather than "current values plus a dirty flag"
 /// because reverting has to be exact. A user who types into Team ID and then
 /// deletes what they typed has changed nothing, and `hasChanges` says so.
 struct SettingsDraft: Equatable {

@@ -2,7 +2,7 @@
 
 A free config has no signing identity, and that is information, not a failure:
 no zsign, .p12, profile or password rows. What a LiveContainer build does need
-is still checked — cyan, otool, a device — plus one thing only this mode asks:
+is still checked — cyan and a device — plus one thing only this mode asks:
 that a LiveContainer is on the device, found the way the push finds it.
 
 The account mode reaches the Mac app on two events: every `app` from `--list`
@@ -20,10 +20,11 @@ import pytest
 import yaml
 
 from graft_ipa import cli as cli_mod
-from graft_ipa import preflight
+from graft_ipa import preflight, tools
 from graft_ipa.config import load_config
 from graft_ipa.json_output import JsonEmitter
 from graft_ipa.lc_runner import LiveContainerError
+from tests.tool_fakes import fake_path
 
 PRIMARY = "com.kdt.livecontainer.ABCDE12345"
 LC2 = "com.kdt.LiveContainer2.ABCDE12345"
@@ -37,15 +38,10 @@ def _free(tmp_path: Path, apps: dict | None = None, **extra) -> Path:
 
 
 @pytest.fixture
-def tools_and_device(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def tools_and_device(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every tool present, one phone connected. Returns the tools looked up."""
     looked_up: list[str] = []
-
-    def which(tool: str) -> str:
-        looked_up.append(tool)
-        return f"/opt/fake/bin/{tool}"
-
-    monkeypatch.setattr(preflight.shutil, "which", which)
+    monkeypatch.setattr(tools, "which", fake_path(tmp_path / "path-bin", seen=looked_up))
     monkeypatch.setattr(preflight, "list_connected_devices", lambda: ["UDID1"])
     return looked_up
 
@@ -71,23 +67,22 @@ def test_no_signing_reads_as_information(tmp_path: Path, tools_and_device) -> No
 def test_signing_files_and_zsign_are_not_checked(tmp_path: Path, tools_and_device) -> None:
     rows = _rows(load_config(_free(tmp_path)), _installed(PRIMARY))
 
-    assert set(tools_and_device) == {"cyan", "otool"}
+    assert set(tools_and_device) == {"cyan"}
     for absent in ("zsign", "security", "ideviceinstaller", "signing.cert (.p12)",
                    "signing.team_id", ".p12 password", preflight.PROFILE_CHECK_NAME):
         assert absent not in rows
     assert all(r.ok for r in rows.values())
 
 
-def test_cyan_otool_and_a_device_are_still_required(
+def test_cyan_and_a_device_are_still_required(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(preflight.shutil, "which", lambda tool: None)
+    monkeypatch.setattr(tools, "which", lambda tool: None)
     monkeypatch.setattr(preflight, "list_connected_devices", lambda: [])
 
     rows = _rows(load_config(_free(tmp_path)), _installed(PRIMARY))
 
     assert rows["cyan"].ok is False
-    assert rows["otool"].ok is False
     assert rows["connected ios device(s)"].ok is False
     # No device, no LiveContainer row: the device row already says why.
     assert preflight.LIVECONTAINER_CHECK_NAME not in rows
@@ -124,7 +119,7 @@ def test_two_primaries_fail_until_the_apps_are_pinned(tmp_path: Path, tools_and_
 
     assert unpinned.ok is False
     assert PRIMARY in unpinned.detail and OTHER_PRIMARY in unpinned.detail
-    assert "lc_bundle_id" in unpinned.hint
+    assert "--lc-bundle-id" in unpinned.hint
     assert pinned.ok is True
     assert pinned.detail == f"UDID1: {OTHER_PRIMARY} (also installed: {PRIMARY})"
 

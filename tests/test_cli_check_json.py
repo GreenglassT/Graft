@@ -17,7 +17,7 @@ def test_check_json_emits_results_and_end(temp_config_env: Path) -> None:
     fake_results = [
         CheckResult(name="cyan", ok=True, detail="/opt/homebrew/bin/cyan"),
         CheckResult(name="zsign", ok=False, detail="not found on PATH", hint="brew install zsign"),
-        CheckResult(name="ideviceinstaller", ok=True, detail="/opt/homebrew/bin/ideviceinstaller"),
+        CheckResult(name="security", ok=True, detail="/usr/bin/security"),
     ]
 
     buf = StringIO()

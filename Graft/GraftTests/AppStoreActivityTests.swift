@@ -44,19 +44,19 @@ final class AppStoreActivityTests: XCTestCase {
     private static let provided = #"{"type":"ipa-provided","app":"a","bundle_id":"com.a","version":"2","filename":"com.a_2.ipa","path":"/c/com.a_2.ipa","size_bytes":1}"#
     private static let version = #"{"type":"appstore-version","app":"a","bundle_id":"com.a","store_version":"2","cached_version":"2","update_available":false,"error":null}"#
 
-    // MARK: I2 — a cancelled load is not a failed one
+    // MARK: I2 — a canceled load is not a failed one
 
     @MainActor
     func test_a_cancelled_status_load_latches_nothing() async throws {
         let (runner, dir) = try scriptRunner("exec sleep 30")
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         let load = Task { await store.loadStatus() }
         await waitUntil { !self.runs(dir).isEmpty }
         load.cancel()
         await load.value
 
-        XCTAssertFalse(store.hasLoadedStatus, "a cancelled load must leave the next .task free to load")
+        XCTAssertFalse(store.hasLoadedStatus, "a canceled load must leave the next .task free to load")
         XCTAssertNil(store.statusError, "the CLI being killed is not a status failure")
         XCTAssertFalse(store.isLoadingStatus)
     }
@@ -64,7 +64,7 @@ final class AppStoreActivityTests: XCTestCase {
     @MainActor
     func test_a_cancelled_version_check_records_nothing() async throws {
         let (runner, dir) = try scriptRunner("exec sleep 30")
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         let check = Task { await store.checkVersion(app: "a") }
         await waitUntil { !self.runs(dir).isEmpty }
@@ -82,7 +82,7 @@ final class AppStoreActivityTests: XCTestCase {
         echo "error: this Apple ID doesn't own com.a yet" >&2
         exit 20
         """)
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         XCTAssertTrue(store.startGet(app: "a"))
         await waitUntil { !store.isBusy("a") }
@@ -100,7 +100,7 @@ final class AppStoreActivityTests: XCTestCase {
           *--appstore-check*) printf '%s\\n' '\(Self.version)' ;;
         esac
         """)
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         XCTAssertTrue(store.startGet(app: "a"))
         await waitUntil { store.versions["a"] != nil && !store.isBusy("a") }
@@ -122,8 +122,8 @@ final class AppStoreActivityTests: XCTestCase {
             printf '%s\\n' '\(Self.provided)' ;;
         esac
         """)
-        let store = AppStoreStore(runner: runner)
-        let config = ConfigStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        let config = ConfigStore(runner: runner, notify: { _ in })
 
         XCTAssertTrue(store.startProvide(app: "a", fileURL: URL(fileURLWithPath: "/tmp/a.ipa"), config: config))
         await waitUntil { store.stages["a"] == .decrypt }
@@ -144,8 +144,8 @@ final class AppStoreActivityTests: XCTestCase {
           *--provide-ipa*) printf '%s\\n' '\(Self.provided)' ;;
         esac
         """)
-        let store = AppStoreStore(runner: runner)
-        let config = ConfigStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        let config = ConfigStore(runner: runner, notify: { _ in })
 
         XCTAssertTrue(store.startGet(app: "a"))
         XCTAssertTrue(store.isBusy("a"))
@@ -171,7 +171,7 @@ final class AppStoreActivityTests: XCTestCase {
         sleep 30 &
         wait $!
         """)
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         XCTAssertTrue(store.startGet(app: "a"))
         await waitUntil { store.stages["a"] == .download }
@@ -193,7 +193,7 @@ final class AppStoreActivityTests: XCTestCase {
     func test_a_fresh_answer_is_reused_and_a_stale_or_forced_one_is_not() async throws {
         let (runner, dir) = try scriptRunner("printf '%s\\n' '\(Self.version)'")
         var now = Date(timeIntervalSince1970: 1_000_000)
-        let store = AppStoreStore(runner: runner, now: { now })
+        let store = AppStoreStore(runner: runner, now: { now }, shell: NoAdminShell())
 
         await store.checkVersion(app: "a")
         await store.checkVersion(app: "a")
@@ -217,7 +217,7 @@ final class AppStoreActivityTests: XCTestCase {
     @MainActor
     func test_a_pin_edit_or_a_changed_cache_asks_again_inside_the_window() async throws {
         let (runner, dir) = try scriptRunner("printf '%s\\n' '\(Self.version)'")
-        let store = AppStoreStore(runner: runner, now: { Date(timeIntervalSince1970: 1_000_000) })
+        let store = AppStoreStore(runner: runner, now: { Date(timeIntervalSince1970: 1_000_000) }, shell: NoAdminShell())
         let latest = AppStoreStore.VersionContext(pin: "latest", cachedVersion: "21.40.0")
 
         await store.checkVersion(app: "a", context: latest)
@@ -236,8 +236,8 @@ final class AppStoreActivityTests: XCTestCase {
     @MainActor
     func test_a_refused_drop_says_why_in_that_apps_banner() async throws {
         let (runner, _) = try scriptRunner("exec sleep 30")
-        let store = AppStoreStore(runner: runner)
-        let config = ConfigStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        let config = ConfigStore(runner: runner, notify: { _ in })
         XCTAssertTrue(store.startGet(app: "a"))
 
         let started = store.startProvide(
@@ -258,7 +258,7 @@ final class AppStoreActivityTests: XCTestCase {
     @MainActor
     func test_a_failed_check_is_not_cached() async throws {
         let (runner, dir) = try scriptRunner("exit 13")
-        let store = AppStoreStore(runner: runner)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
 
         await store.checkVersion(app: "a")
         await store.checkVersion(app: "a")

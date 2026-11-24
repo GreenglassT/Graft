@@ -123,7 +123,7 @@ def test_falls_through_to_the_app_store(temp_config_env: Path, tmp_path: Path) -
     assert result is not None
     assert result.source == artwork.SOURCE_APP_STORE
     from_ipa.assert_called_once()
-    from_store.assert_called_once_with("com.example.app")
+    from_store.assert_called_once_with("com.example.app", store_country=None)
     # The cascade stops at the first hit; the phone is never touched.
     from_device.assert_not_called()
 

@@ -142,7 +142,7 @@ struct ContentView: View {
     /// here does buy: `hasLoaded` and `byBundleId` survive a detour through
     /// an app or settings pane, the previous join stays on screen during a
     /// ~0.25s reload instead of every row reverting to its pre-feature shape,
-    /// and it keeps this store declared and initialised beside its siblings
+    /// and it keeps this store declared and initialized beside its siblings
     /// — `deviceInfoStore`, `deviceDeliveryStore`, `deviceAppsStore` — so a
     /// reader looking for "where the device pane's stores live" finds them
     /// together rather than one singled out below. See `StagedIPAStore`, and
@@ -153,6 +153,10 @@ struct ContentView: View {
     /// Settings (is this Mac set up?) and by the app pane (Get latest), so it
     /// lives here: one status load per session rather than one per pane entry.
     @State private var appStoreStore: AppStoreStore
+    /// The first-run screen's account setup, and Settings › Account's. Two, so
+    /// a Settings flow's result never holds up the first-run screen.
+    @State private var accountSetupStore: AccountSetupStore
+    @State private var settingsAccountStore: AccountSetupStore
     @State private var selection: SidebarItem?
     /// The Cache pane's "Add as app", mid-flight.
     ///
@@ -228,7 +232,10 @@ struct ContentView: View {
     ///   `.task` below still opens on the first app when this is nil, and still
     ///   leaves a non-nil selection alone — which is what makes the injected
     ///   value survive the fixture load rather than being overwritten by it.
-    init(store: ConfigStore, selection: SidebarItem? = nil) {
+    /// `adminShell` is the one Set Up Decryption runs behind macOS's
+    /// administrator prompt. No default: `GraftApp` passes the real one, a
+    /// test a fake (`NoRealDefaultsTests`).
+    init(store: ConfigStore, selection: SidebarItem? = nil, adminShell: PrivilegedShell) {
         self._store = Bindable(store)
         self._selection = State(initialValue: selection)
         self._tweaksStore = State(initialValue: TweaksStore(runner: store.runner))
@@ -243,14 +250,19 @@ struct ContentView: View {
         self._deviceAppsStore = State(initialValue: DeviceAppsStore(runner: store.runner))
         self._liveContainerStore = State(initialValue: LiveContainerStore(runner: store.runner))
         self._stagedIPAStore = State(initialValue: StagedIPAStore(runner: store.runner))
-        self._appStoreStore = State(initialValue: AppStoreStore(runner: store.runner))
+        self._appStoreStore = State(initialValue: AppStoreStore(runner: store.runner, shell: adminShell))
+        self._accountSetupStore = State(initialValue: AccountSetupStore(runner: store.runner))
+        self._settingsAccountStore = State(initialValue: AccountSetupStore(runner: store.runner))
     }
 
     var body: some View {
         NavigationSplitView {
             SidebarView(
                 store: store, selection: $selection,
-                artwork: artworkStore, devices: devicesStore
+                artwork: artworkStore, devices: devicesStore,
+                // Add App stages a chosen IPA through it, as the app pane's
+                // drop zone does.
+                appStore: appStoreStore
             )
                 // Wider than the 200/220/260 this column used to get, because
                 // it now carries the app rows the second column used to: an
@@ -267,11 +279,25 @@ struct ContentView: View {
             // Over every pane, not only the app pane: each of them runs the
             // same CLI against the same missing config, and each would put up
             // its own alert about it. The sidebar stays — empty, but usable.
-            if let need = store.setupNeed {
+            if let need = Self.setupScreen(need: store.setupNeed, holding: accountSetupStore.holdsSetupScreen) {
                 SetupView(
                     need: need, isChecking: store.isCheckingSetup,
-                    onCheckAgain: { Task { await checkSetup(refreshingEnvironment: true) } },
-                    onContinueWithoutTools: { store.continueWithoutTools() }
+                    onCheckAgain: { Task { await checkSetup(.checkAgain) } },
+                    onContinueWithoutTools: { store.continueWithoutTools() },
+                    accountSetup: accountSetupStore,
+                    onAccountSetupFinished: {
+                        Task {
+                            // A check already in flight (a window return
+                            // starts one) would make this one return at once,
+                            // and finish() would put Welcome back up until it
+                            // landed. Wait it out, then check.
+                            while store.isCheckingSetup {
+                                try? await Task.sleep(for: .milliseconds(50))
+                            }
+                            await checkSetup(.accountSetupFinished)
+                            accountSetupStore.finish()
+                        }
+                    }
                 )
             } else {
                 sectionContent
@@ -294,12 +320,13 @@ struct ContentView: View {
             }
         }
         .task {
-            await checkSetup()
+            await checkSetup(.launch)
         }
         // Coming back to the window is the moment a user who just ran the
         // command in Terminal expects the app to have noticed. On the setup
-        // screen that is Check again, shell and all: what the user just ran may
-        // have been `pipx ensurepath`.
+        // screen that is the setup check again, but with the login shell's
+        // environment from launch: asking the shell again is Check again's
+        // alone (`SetupCheck.asksShellAgain`).
         //
         // Once set up, it is a quiet re-read of the app list (`refreshOnReturn`).
         // This used to do nothing at all past setup, and the list is what
@@ -317,7 +344,7 @@ struct ContentView: View {
         .onChange(of: controlActiveState) { previous, active in
             guard Self.isReturn(from: previous, to: active) else { return }
             if store.setupNeed != nil {
-                Task { await checkSetup(refreshingEnvironment: true) }
+                Task { await checkSetup(.windowReturn) }
             } else if didLoadApps, returnRefresh.begin() {
                 Task {
                     await Self.refreshOnReturn(config: store, settings: settingsStore)
@@ -404,9 +431,9 @@ struct ContentView: View {
             guard case let .section(section) = selection else { return }
             // Every catch below routes through this rather than assigning
             // `lastError` directly, because leaving a section *cancels* this
-            // task — and a cancelled load is not a failed one.
+            // task — and a canceled load is not a failed one.
             //
-            // The distinction is invisible from the error itself. Cancelling
+            // The distinction is invisible from the error itself. Canceling
             // SIGTERMs the child, `CLIRunner` reports the kill as an ordinary
             // non-zero exit, and the resulting RunError is indistinguishable
             // from a real failure. Written to the store it *latches*: nothing
@@ -467,7 +494,7 @@ struct ContentView: View {
             // `stagedIPAStore` is the one store up here that is *not* this
             // pane's alone — the device pane reads it too, and reloads it after
             // every dump. A load driven from here would be a second, invisible
-            // owner of a store two panes already write. The behaviour is the
+            // owner of a store two panes already write. The behavior is the
             // same either way: this task and that one both restart when the
             // selection moves onto the pane, so a cache that changed on disk
             // while the user was elsewhere is re-read on the way back in.
@@ -496,7 +523,7 @@ struct ContentView: View {
                 // broken to load, which is exactly when the settings read
                 // matters most. That combination put "Couldn't read your
                 // settings." on the pane built to repair that config, with the
-                // read cancelled rather than failed. Catching each on its own
+                // read canceled rather than failed. Catching each on its own
                 // keeps them as independent as they were when sequential.
                 do { try await preflight }
                 catch { report(error) { settingsStore.lastError = $0 } }
@@ -566,14 +593,33 @@ struct ContentView: View {
         }
     }
 
+    /// What started a setup check.
+    enum SetupCheck: Equatable {
+        case launch
+        /// The setup screen's Check again, pressed.
+        case checkAgain
+        /// The window coming back while the setup screen is up.
+        case windowReturn
+        /// A free or paid account setup finished on the setup screen.
+        case accountSetupFinished
+
+        /// Whether it asks the login shell for its environment again
+        /// (`ConfigStore.checkSetup(refreshingEnvironment:)`): only Check
+        /// again. A return to the window used to as well, and a startup file
+        /// that runs a Command Line Tools stub put up macOS's install dialog
+        /// again each time it was dismissed, since dismissing it is a return
+        /// (whole-diff review, app-1).
+        var asksShellAgain: Bool { self == .checkAgain }
+    }
+
     /// The first load of the app list — and the setup screen's Check again,
     /// and the re-check on coming back to the window.
     ///
     /// `ConfigStore.checkSetup` decides between the setup screen and the
     /// alert; what is left here is what only this view owns.
-    private func checkSetup(refreshingEnvironment: Bool = false) async {
+    private func checkSetup(_ trigger: SetupCheck) async {
         let loaded = await store.checkSetup(
-            refreshingEnvironment: refreshingEnvironment,
+            refreshingEnvironment: trigger.asksShellAgain,
             toolChecks: {
                 // The same scan, and the same store, Settings shows: one
                 // `--check` answers the setup step, the notice and the pane.
@@ -608,6 +654,30 @@ struct ContentView: View {
         if selection == nil, let first = apps.first {
             selection = .app(first.id)
         }
+    }
+
+    /// After Settings › Account changed the account. Re-read the list, which
+    /// carries the account every pane gates on; the settings, where the signing
+    /// fields unlock or lock; and the checks, since a paid account has .p12 rows
+    /// a free one doesn't. Quiet, like `refreshOnReturn`: the change itself
+    /// landed, and a failed re-read is staleness the next visit fixes.
+    static func afterAccountChange(config: ConfigStore, settings: SettingsStore) async {
+        try? await config.reload()
+        _ = try? await settings.loadSettings()
+        try? await settings.runChecks()
+    }
+
+    /// What the detail area shows instead of the panes, if anything: the setup
+    /// need, or the account setup's own result after the load that cleared the
+    /// need, until the user has read it and pressed Start using Graft.
+    /// Without this, a window return between writing config.yaml and reading
+    /// the free Apple ID's steps took the steps away.
+    static func setupScreen(need: SetupNeed?, holding: Bool) -> SetupNeed? {
+        // A missing tool waits for the result to be read: it is the next
+        // step, and showing it now took the free device steps away mid-read.
+        if holding, case .tools = need { return SetupNeed.config(path: nil) }
+        if let need { return need }
+        return holding ? SetupNeed.config(path: nil) : nil
     }
 
     /// What returning to a set-up window re-reads: the app list, which carries
@@ -684,6 +754,9 @@ struct ContentView: View {
                     // The Edit sheet's LiveContainer picker reads the same
                     // `--lc-status` answers the device pane shows.
                     liveContainer: liveContainerStore,
+                    // The Edit sheet's auto-provisioning toggle asks whether
+                    // an App Store Connect key is set.
+                    settings: settingsStore,
                     // The build-target bar's Change control. `selection` is
                     // owned here, so the pane is handed the navigation rather
                     // than a binding into this view's state — it has no other
@@ -716,6 +789,7 @@ struct ContentView: View {
                     deviceApps: deviceAppsStore,
                     staged: stagedIPAStore,
                     liveContainer: liveContainerStore,
+                    appStore: appStoreStore,
                     onSelectApp: { selection = .app($0) }
                 )
             } else {
@@ -765,11 +839,11 @@ struct ContentView: View {
             // row selected — and this view owns both. `DeviceDetailView` makes
             // the same split for the same sheet.
             //
-            // `onAdded:` is a labelled argument, not a trailing closure; see
+            // `onAdded:` is a labeled argument, not a trailing closure; see
             // `DeviceDetailView`'s own call site for why that does not compile
             // the other way.
             .sheet(item: $addingApp) { prefill in
-                AddAppSheet(store: store, onAdded: { added in
+                AddAppSheet(store: store, appStore: appStoreStore, onAdded: { added in
                     // The CLI's settled key, not the name the sheet showed:
                     // `add_app` dedups a collision to `name_2`, and selecting
                     // the locally-derived name would select nothing.
@@ -781,7 +855,10 @@ struct ContentView: View {
         case .section(.settings):
             SettingsView(
                 store: settingsStore, devicesStore: devicesStore, appStore: appStoreStore,
-                account: store.account
+                account: store.account,
+                accountSetup: settingsAccountStore,
+                onAccountChanged: { await Self.afterAccountChange(config: store, settings: settingsStore) },
+                isBuilding: store.buildingApp != nil
             )
         case .none:
             // Three ways to be here, and they are not interchangeable: before
@@ -851,7 +928,7 @@ struct ReturnRefreshGate {
 /// "2 tools missing — see Settings": the main window's word that `--check`
 /// found tools a build needs, before a build fails for want of one.
 ///
-/// A strip under the pane, in the window's own colours with a warning mark:
+/// A strip under the pane, in the window's own colors with a warning mark:
 /// not the red `ErrorBanner`, because nothing has failed yet, and not an
 /// alert, because nothing needs answering.
 struct MissingToolsNotice: View {

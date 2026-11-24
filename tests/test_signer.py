@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from graft_ipa import mobileprovision, signer
+from graft_ipa import mobileprovision, signer, tools
 from graft_ipa.apple_portal import ProvisionResult
 from graft_ipa.config import (
     AppConfig,
@@ -19,6 +19,15 @@ from graft_ipa.errors import SigningError
 from graft_ipa.signer import run_zsign
 
 from .test_lc_sign import _make_p12
+from .tool_fakes import fake_path
+
+
+@pytest.fixture(autouse=True)
+def _zsign_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zsign to find, whatever this Mac has: `run_zsign` refuses before it
+    resolves a profile when there is none. `subprocess.run` is faked in every
+    test that gets that far, so it is never run."""
+    monkeypatch.setattr(tools, "which", fake_path(tmp_path / "path-bin"))
 
 
 def make_cfg(tmp_path: Path, password: str = "supersecret") -> Config:
@@ -300,6 +309,63 @@ def test_dry_run_says_the_real_run_would_reprovision_an_expired_cache(
 
     assert "a real run would try to re-provision" in res.stdout
     assert "expired" in res.stdout
+
+
+def test_dry_run_says_the_real_run_would_reprovision_another_team_s_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review re-check #4: after a team switch, pre-flight said the cached
+    file would be re-provisioned and stage 4 replaced it, while --dry-run
+    said "a real run reuses this file". It asked the offline question without
+    the team; it now asks pre-flight's."""
+    from datetime import UTC, datetime, timedelta
+
+    cfg = make_cfg(tmp_path)  # signing.team_id ABC1234567
+    cfg.app_store_connect = _asc_config(tmp_path)
+    cached = tmp_path / "profiles" / "com_example_x.mobileprovision"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"x")
+    monkeypatch.setenv("TEST_P12_PASS", "supersecret")
+    plist = {
+        "TeamIdentifier": ["OLDTEAM123"],
+        "ProvisionedDevices": ["00008130-001A2B3C0123456D"],
+        "ExpirationDate": datetime.now(UTC) + timedelta(days=300),
+    }
+
+    serial, client, ensure = _portal_tripwires()
+    with serial, client, ensure, patch.object(mobileprovision, "decode", return_value=plist):
+        res = run_zsign(
+            cfg, tmp_path / "in.ipa", tmp_path / "out.ipa",
+            app=_auto_profile_app(), dry_run=True,
+        )
+
+    assert "a real run reuses this file" not in res.stdout
+    assert "a real run would try to re-provision" in res.stdout
+    assert "belongs to team OLDTEAM123, not ABC1234567" in res.stdout
+
+
+def test_dry_run_does_not_promise_reuse_it_cannot_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one question stage 4 asks that a dry run can't: whether the file
+    lists the .p12's certificate, which needs the .p12 opened. Saying "reuses"
+    flatly was a promise about something it never looked at."""
+    cfg = make_cfg(tmp_path)
+    cfg.app_store_connect = _asc_config(tmp_path)
+    cached = tmp_path / "profiles" / "com_example_x.mobileprovision"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b"x")
+    monkeypatch.setenv("TEST_P12_PASS", "supersecret")
+
+    serial, client, ensure = _portal_tripwires()
+    with serial, client, ensure, _decoded_profile(devices=["00008130-001A2B3C0123456D"]):
+        res = run_zsign(
+            cfg, tmp_path / "in.ipa", tmp_path / "out.ipa",
+            app=_auto_profile_app(), dry_run=True,
+        )
+
+    assert "already cached" in res.stdout
+    assert "certificate" in res.stdout
 
 
 def test_a_real_run_still_auto_provisions_through_the_portal(

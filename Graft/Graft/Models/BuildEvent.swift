@@ -28,12 +28,27 @@ struct AppRecord: Decodable, Identifiable, Hashable {
     /// CLI too old to say" — and the second also has no `--lc-bundle-id` to
     /// send, so the Edit sheet offers the picker only when this is true.
     let reportsLCPin: Bool
+    /// The app's own `profile:` path in config.yaml, or nil. It outranks
+    /// `autoProfile` (`signer._plan_profile`), so the Profile cell names it
+    /// rather than saying "auto" for a build that signs with this file.
+    /// Optional: no CLI before it sends it.
+    let profileOverride: String?
+    /// The App Store this app was found in (`store_country:`), which its
+    /// update check and artwork ask; nil when unset (this Mac's region's
+    /// store, then the US: `host.look_up`).
+    let storeCountry: String?
+    /// Whether the CLI reported the store at all, for `reportsLCPin`'s
+    /// reason: only then is there a `--store-country` to send, so only then
+    /// does the Edit sheet show its store picker.
+    let reportsStoreCountry: Bool
 
     var id: String { name }
 
     enum CodingKeys: String, CodingKey {
         case name, tweaks, delivery, account
+        case storeCountry = "store_country"
         case lcBundleId = "lc_bundle_id"
+        case profileOverride = "profile_override"
         case bundleId = "bundle_id"
         case preferredVersion = "preferred_version"
         case displayName = "display_name"
@@ -78,6 +93,9 @@ struct AppRecord: Decodable, Identifiable, Hashable {
         // CLI before C-LCPIN, and not worth dropping the app over.
         reportsLCPin = c.contains(.lcBundleId)
         lcBundleId = (try? c.decodeIfPresent(String.self, forKey: .lcBundleId)) ?? nil
+        profileOverride = (try? c.decodeIfPresent(String.self, forKey: .profileOverride)) ?? nil
+        reportsStoreCountry = c.contains(.storeCountry)
+        storeCountry = (try? c.decodeIfPresent(String.self, forKey: .storeCountry)) ?? nil
     }
 }
 
@@ -107,6 +125,15 @@ struct AppRemovedRecord: Decodable, Hashable {
 struct AppUpdatedRecord: Decodable, Hashable {
     let name: String
     let changed: [String]
+    /// What the CLI warned about on the way (`log` events sourced
+    /// `warning`), such as a per-app `profile:` that outranks the
+    /// `auto_profile` just turned on. Not part of the event: filled in by
+    /// `ConfigStore.updateAppOptions` from the same run.
+    var warnings: [String] = []
+
+    enum CodingKeys: String, CodingKey {
+        case name, changed
+    }
 }
 
 struct CachedIPARecord: Decodable, Hashable {
@@ -593,6 +620,19 @@ struct SettingsRecord: Decodable, Hashable, Equatable {
     /// Whether `paths` are the defaults rather than what this config says,
     /// which is what they are when the config did not parse (C-SETTINGS).
     var pathsAreDefaults: Bool = false
+    /// The App Store Connect key config.yaml names, or nil when it names none
+    /// — or when the CLI is too old to say, which `reportsAppStoreConnect`
+    /// tells apart. Who the key is and where its .p8 is; never the key.
+    var appStoreConnect: AppStoreConnectSummary? = nil
+    /// Whether the event carried `app_store_connect` at all. False from a CLI
+    /// that predates `--set-portal`: then nothing is known about the key, and
+    /// nothing is disabled for the lack of one (`AccountMode`'s rule for an
+    /// unknown).
+    var reportsAppStoreConnect: Bool = false
+    /// The CLI's own version (`graft_version`), which Settings shows — read off
+    /// the call the pane already makes rather than a `--version` of its own.
+    /// nil from a CLI too old to send it.
+    var cliVersion: String? = nil
 
     /// The contract enum itself, not a second copy of its five spellings —
     /// see `CLIContract.SettingField`.
@@ -604,6 +644,8 @@ extension SettingsRecord {
         case paths
         case parseError = "parse_error"
         case pathsAreDefaults = "paths_are_defaults"
+        case appStoreConnect = "app_store_connect"
+        case cliVersion = "graft_version"
     }
 
     /// Written out because `paths` is not a setting: the five settings keep
@@ -625,6 +667,63 @@ extension SettingsRecord {
         // about it, which is what decoding to nil/false reproduces.
         parseError = (try? extra?.decodeIfPresent(String.self, forKey: .parseError)) ?? nil
         pathsAreDefaults = (try? extra?.decodeIfPresent(Bool.self, forKey: .pathsAreDefaults)) ?? false
+        // Present-and-null is "no key"; absent is "this CLI doesn't say".
+        reportsAppStoreConnect = extra?.contains(.appStoreConnect) ?? false
+        appStoreConnect = (try? extra?.decodeIfPresent(
+            AppStoreConnectSummary.self, forKey: .appStoreConnect
+        )) ?? nil
+        cliVersion = (try? extra?.decodeIfPresent(String.self, forKey: .cliVersion)) ?? nil
+    }
+}
+
+/// `settings`' `app_store_connect`: the key auto-provisioning signs in with,
+/// as config.yaml names it. Optional fields because the CLI reports a
+/// hand-edited section as it finds it, gaps and all.
+struct AppStoreConnectSummary: Decodable, Hashable {
+    let keyId: String?
+    let issuerId: String?
+    /// Where the .p8 is, `~` expanded.
+    let keyFile: String?
+    /// Whether that file is there. A key whose file went missing signs nothing.
+    let keyFileExists: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case keyId = "key_id"
+        case issuerId = "issuer_id"
+        case keyFile = "key_file"
+        case keyFileExists = "key_file_exists"
+    }
+
+    /// Usable for auto-provisioning: named, and its file is on disk.
+    var isUsable: Bool { keyId?.isEmpty == false && keyFileExists }
+}
+
+/// `portal-set`: `--set-portal` checked the key and wrote it.
+struct PortalSetRecord: Decodable, Hashable {
+    let keyId: String
+    let issuerId: String
+    /// Where the CLI copied the .p8, beside config.yaml.
+    let keyFile: String
+    /// How many iOS devices App Store Connect listed when the key was checked.
+    let devices: Int
+
+    enum CodingKeys: String, CodingKey {
+        case devices
+        case keyId = "key_id"
+        case issuerId = "issuer_id"
+        case keyFile = "key_file"
+    }
+}
+
+/// `portal-cleared`: `--clear-portal` removed the setting (the .p8 stays).
+struct PortalClearedRecord: Decodable, Hashable {
+    /// False when there was no key to remove.
+    let removed: Bool
+    let keyFile: String?
+
+    enum CodingKeys: String, CodingKey {
+        case removed
+        case keyFile = "key_file"
     }
 }
 
@@ -879,7 +978,7 @@ struct DeviceRecord: Decodable, Identifiable, Hashable {
 
     // Written out rather than left to the synthesised conformance:
     // `isDefault` needs `decodeIfPresent(...) ?? false` where every other
-    // field keeps the exact behaviour the synthesised initializer already
+    // field keeps the exact behavior the synthesised initializer already
     // gave it — required keys stay required, and `livecontainerBundleId`
     // (an `Optional` stored property) keeps decoding via `decodeIfPresent`
     // under the hood, same as synthesis would produce.
@@ -1066,7 +1165,7 @@ struct BuildRecord: Decodable, Identifiable, Hashable {
     let udid: String?
     /// `"device"` or `"mac"` — which target this artifact was prepared for.
     ///
-    /// Never optional, and deliberately so. The CLI normalises the column on
+    /// Never optional, and deliberately so. The CLI normalizes the column on
     /// read (`build_log._target_of`): a row written before the column existed
     /// reads NULL and comes back `"device"`, as does any spelling other than
     /// the exact string `"mac"`. So every row `--builds --json` emits carries
@@ -1354,6 +1453,11 @@ enum BuildEvent {
     case tweakInUse(TweakInUseRecord)
     case settingsUpdated(SettingsUpdatedRecord)
     case settings(SettingsRecord)
+    case portalSet(PortalSetRecord)
+    case portalCleared(PortalClearedRecord)
+    /// `--init --account …` (`AccountSetupStore`): one thing done, then the result.
+    case initStep(InitStepRecord)
+    case initResult(InitResultRecord)
     case buildRecord(BuildRecord)
     case buildPruned(BuildPrunedRecord)
     case pruneEnd(PruneSummary)
@@ -1379,6 +1483,17 @@ enum BuildEvent {
     case appStoreVersion(AppStoreVersionRecord)
     case appStoreStage(AppStoreStageRecord)
     case appStoreDecrypted(AppStoreDecryptedRecord)
+    case appStoreRefused(AppStoreRefusalRecord)
+    case appStoreLogin(AppStoreLoginRecord)
+    case appStoreLogout(AppStoreLogoutRecord)
+    case appStoreEnrollCandidate(EnrollCandidateRecord)
+    case appStoreEnrollCandidatesEnd(EnrollCandidatesEndRecord)
+    case appStoreEnrollCommand(EnrollCommandRecord)
+    case appStoreEnrolled(EnrolledRecord)
+    case appStoreClaimed(AppStoreClaimedRecord)
+    case appStoreSearchResult(AppStoreSearchResult)
+    case appStoreSearchEnd(AppStoreSearchEndRecord)
+    case appStoreSearchFailed(AppStoreSearchFailedRecord)
     case unknown(type: String, raw: [String: Any])
 
     enum DecodeError: Error {
@@ -1706,6 +1821,10 @@ enum BuildEvent {
             return .settings(try decoder.decode(SettingsRecord.self, from: data))
         case "settings-updated":
             return .settingsUpdated(try decoder.decode(SettingsUpdatedRecord.self, from: data))
+        case "portal-set":
+            return .portalSet(try decoder.decode(PortalSetRecord.self, from: data))
+        case "portal-cleared":
+            return .portalCleared(try decoder.decode(PortalClearedRecord.self, from: data))
         case "tweak-in-use":
             return .tweakInUse(try decoder.decode(TweakInUseRecord.self, from: data))
         case "tweak-deleted":
@@ -1720,6 +1839,32 @@ enum BuildEvent {
             return .appStoreStage(AppStoreStageRecord(app: p.app, stage: AppStoreStage(raw: p.stage)))
         case "appstore-decrypted":
             return .appStoreDecrypted(try decoder.decode(AppStoreDecryptedRecord.self, from: data))
+        case "appstore-refused":
+            return .appStoreRefused(try decoder.decode(AppStoreRefusalRecord.self, from: data))
+        case "appstore-login":
+            return .appStoreLogin(try decoder.decode(AppStoreLoginRecord.self, from: data))
+        case "appstore-logout":
+            return .appStoreLogout(try decoder.decode(AppStoreLogoutRecord.self, from: data))
+        case "appstore-enroll-candidate":
+            return .appStoreEnrollCandidate(try decoder.decode(EnrollCandidateRecord.self, from: data))
+        case "appstore-enroll-candidates-end":
+            return .appStoreEnrollCandidatesEnd(try decoder.decode(EnrollCandidatesEndRecord.self, from: data))
+        case "appstore-enroll-command":
+            return .appStoreEnrollCommand(try decoder.decode(EnrollCommandRecord.self, from: data))
+        case "appstore-enrolled":
+            return .appStoreEnrolled(try decoder.decode(EnrolledRecord.self, from: data))
+        case "appstore-claimed":
+            return .appStoreClaimed(try decoder.decode(AppStoreClaimedRecord.self, from: data))
+        case "appstore-search-result":
+            return .appStoreSearchResult(try decoder.decode(AppStoreSearchResult.self, from: data))
+        case "appstore-search-end":
+            return .appStoreSearchEnd(try decoder.decode(AppStoreSearchEndRecord.self, from: data))
+        case "appstore-search-failed":
+            return .appStoreSearchFailed(try decoder.decode(AppStoreSearchFailedRecord.self, from: data))
+        case "init-step":
+            return .initStep(try decoder.decode(InitStepRecord.self, from: data))
+        case "init-result":
+            return .initResult(try decoder.decode(InitResultRecord.self, from: data))
         default:
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 throw DecodeError.notJsonObject
@@ -1803,6 +1948,21 @@ extension Optional where Wrapped == DeliveryMode {
     /// the error saying so used to read "→ re-install: gone (sideload)" —
     /// naming a mode nothing had looked up, usually the wrong one.
     var buildLogLabel: String { self?.rawValue ?? "delivery unknown" }
+}
+
+extension Array where Element == BuildEvent {
+    /// The lines `_warn` wrote (`log` events sourced
+    /// `CLIContract.warningLogSource`): warnings about the verb that ran,
+    /// which carried on anyway. A startup notice, or a device's "tap Trust",
+    /// is not one.
+    var warningLines: [String] {
+        compactMap { event in
+            if case let .log(source, line) = event, source == CLIContract.warningLogSource {
+                return line
+            }
+            return nil
+        }
+    }
 }
 
 extension BuildEvent {

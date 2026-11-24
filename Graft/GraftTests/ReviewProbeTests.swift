@@ -1,7 +1,7 @@
 import XCTest
 @testable import Graft
 
-/// The v1.1 review's probes: each asserts the correct behaviour, and each
+/// The v1.1 review's probes: each asserts the correct behavior, and each
 /// failed against the code the review read. They stay as regression tests
 /// for the six defects they demonstrated.
 @MainActor
@@ -55,7 +55,7 @@ final class ReviewProbeTests: XCTestCase {
     /// `FORCE_COLOR=1` is a common export (npm/jest/CI habits), and Rich
     /// honours `TTY_COMPATIBLE` and `TTY_INTERACTIVE` the same way. None of
     /// them may reach the CLI, from the login shell or from the app's own
-    /// environment: coloured stderr is stderr `CLIFailure` cannot read.
+    /// environment: colored stderr is stderr `CLIFailure` cannot read.
     func test_probe_the_colour_variables_never_reach_the_cli() {
         let colour = [
             "FORCE_COLOR": "1", "TTY_COMPATIBLE": "1", "TTY_INTERACTIVE": "1",
@@ -82,7 +82,7 @@ final class ReviewProbeTests: XCTestCase {
             shell: isolatedShell(["FORCE_COLOR": "1"]),
             process: ["PATH": "/usr/bin:/bin"], home: scratch.path
         )
-        let store = ConfigStore(runner: CLIRunner(executable: graft, environment: env))
+        let store = ConfigStore(runner: CLIRunner(executable: graft, environment: env), notify: { _ in })
         _ = await store.checkSetup()
         XCTAssertEqual(
             store.setupNeed?.step, 2,
@@ -91,7 +91,7 @@ final class ReviewProbeTests: XCTestCase {
         XCTAssertFalse(store.lastError?.contains("\u{1b}") ?? false, "ANSI escapes reached the alert text")
     }
 
-    /// The backstop: a CLI that colours its stderr anyway — forced past the
+    /// The backstop: a CLI that colors its stderr anyway — forced past the
     /// environment filter here — still reads as the setup step, and no escape
     /// byte reaches anything the user is shown.
     func test_probe_coloured_stderr_still_parses() async throws {
@@ -100,11 +100,11 @@ final class ReviewProbeTests: XCTestCase {
             shell: isolatedShell([:]), process: ["PATH": "/usr/bin:/bin"], home: scratch.path
         )
         env["FORCE_COLOR"] = "1"
-        let store = ConfigStore(runner: CLIRunner(executable: graft, environment: env))
+        let store = ConfigStore(runner: CLIRunner(executable: graft, environment: env), notify: { _ in })
         _ = await store.checkSetup()
         XCTAssertEqual(
             store.setupNeed?.step, 2,
-            "coloured stderr lost the setup screen; got lastError=\(String(reflecting: store.lastError))"
+            "colored stderr lost the setup screen; got lastError=\(String(reflecting: store.lastError))"
         )
         XCTAssertFalse(store.lastError?.contains("\u{1b}") ?? false, "ANSI escapes reached the alert text")
     }
@@ -143,7 +143,7 @@ final class ReviewProbeTests: XCTestCase {
             .write(to: graft, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: graft.path)
 
-        let store = ConfigStore(runner: CLIRunner(executable: graft))
+        let store = ConfigStore(runner: CLIRunner(executable: graft), notify: { _ in })
         _ = await store.checkSetup()
         XCTAssertNotEqual(
             store.setupNeed, .cli,
@@ -205,7 +205,7 @@ final class ReviewProbeTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shell.path)
         defer { Self.sh("/usr/bin/pkill -9 -f \(tag)") }
 
-        let env = await LoginShell.resolve(shell: shell.path, timeout: 0.5)
+        let env = await LoginShell.resolve(shell: shell.path, timeout: 0.5, run: LoginShell.runProcess)
         XCTAssertNil(env)
         try await Task.sleep(nanoseconds: 2_000_000_000)
         let survivors = Self.sh("/usr/bin/pgrep -f \(tag)")

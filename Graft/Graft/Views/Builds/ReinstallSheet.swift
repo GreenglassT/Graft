@@ -11,6 +11,8 @@ struct ReinstallSheet: View {
     /// store that carries those badges.
     let config: ConfigStore
     let artwork: ArtworkStore
+    /// Held while `--reinstall-build` runs (`reinstall`); a test passes its own.
+    var hold: TerminationHold = .shared
     let onClose: () -> Void
 
     @State private var state: BuildState = .idle
@@ -115,13 +117,26 @@ struct ReinstallSheet: View {
         }
     }
 
+    /// `--reinstall-build` for the build with this `id`, with sudden and
+    /// automatic termination held off from start to end, however it ends
+    /// (the try14 delta audit, D14-APP-2). It pushes to the phone and records
+    /// a delivery, as a build does, and a Graft that macOS ended halfway
+    /// would orphan the CLI mid-push (`TerminationHold`).
+    @MainActor
+    static func reinstall(
+        build id: Int, runner: CLIRunner, hold: TerminationHold,
+        onEvent: @escaping @MainActor (BuildEvent) -> Void
+    ) async throws -> CLIRunner.RunResult {
+        hold.begin(TerminationHold.reinstalling)
+        defer { hold.end(TerminationHold.reinstalling) }
+        return try await runner.stream(arguments: [Flag.json, Flag.reinstallBuild, String(id)], onEvent: onEvent)
+    }
+
     @MainActor
     private func runReinstall() async {
         state = .running(stage: "starting")
         do {
-            let result = try await runner.stream(
-                arguments: [Flag.json, Flag.reinstallBuild, String(build.id)]
-            ) { event in
+            let result = try await Self.reinstall(build: build.id, runner: runner, hold: hold) { event in
                 handle(event: event)
             }
             // A stop the CLI reported (C-STOP) is not a failure, whatever the

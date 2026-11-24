@@ -45,7 +45,7 @@ BUILT_PRODUCTS_DIR="$DERIVED_DATA/Build/Products/Debug"
 # mid-edit, or an xcodegen too old for the spec would abort the script *before*
 # xcodebuild — with the output swallowed by `>/dev/null`, so all the user saw
 # was "regenerating the Xcode project…" and no install. Building the project as
-# it stands is the documented behaviour and the right one: the worst case is a
+# it stands is the documented behavior and the right one: the worst case is a
 # file that isn't compiled yet, said out loud, rather than no app.
 PROJECT_YML="$REPO_ROOT/Graft/project.yml"
 # Both temp files exist before the trap that removes them: a trap body naming
@@ -210,7 +210,7 @@ cp -R "$BUILT_PRODUCTS_DIR/Graft.app" "$STAGE"
 #
 # Written here rather than baked into project.yml because only this script
 # knows the path, and written *before* signing because editing Info.plist
-# afterwards would invalidate the signature. Its absence is the feature's off
+# afterward would invalidate the signature. Its absence is the feature's off
 # switch: an Xcode run and the test bundle have no such key and so never
 # rebuild anything.
 /usr/libexec/PlistBuddy -c "Add :GraftRepoPath string $REPO_ROOT" \
@@ -290,7 +290,7 @@ sign_bundle "$STAGE"
 # This used to be `rm -rf` then `mv`, which reopened the exact window staging
 # was introduced to close: between the two commands there was no app at all,
 # and if the `mv` failed (a full disk, an EBUSY, a permission or SIP denial) or
-# the script was signalled, `set -e` aborted straight into the EXIT trap, which
+# the script was signaled, `set -e` aborted straight into the EXIT trap, which
 # deleted the stage as well. Both copies gone, and under GRAFT_SKIP_QUIT the app
 # that ran the script is still running out of a bundle that no longer exists.
 #

@@ -36,7 +36,7 @@ def _app(pinned: str) -> AppConfig:
 
 def test_latest_picks_the_newest_not_the_first_filename(tmp_path: Path) -> None:
     # Lexicographically "…_21.16.2" sorts before "…_22.1.0", so the old
-    # first-match-wins behaviour returned the OLDER build.
+    # first-match-wins behavior returned the OLDER build.
     _fake_ipa(tmp_path, "21.16.2")
     _fake_ipa(tmp_path, "22.1.0")
 

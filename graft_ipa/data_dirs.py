@@ -20,6 +20,7 @@ from __future__ import annotations
 import errno
 import os
 import re
+import secrets
 import shutil
 import tempfile
 import time
@@ -321,6 +322,55 @@ def private_copy(src: Path, dest: Path) -> None:
     try:
         with os.fdopen(fd, "wb") as out, src.open("rb") as source:
             shutil.copyfileobj(source, out, 1 << 20)
+        os.replace(tmp, dest)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def private_stage(data: bytes, dest: Path) -> Path:
+    """`data` in a fresh owner-only file beside `dest`, synced, not yet in its
+    place; returns that file. `private_write` renames it over `dest`;
+    `account_setup` renames it there itself, once the old entry is kept aside.
+
+    Created 0600 with `O_EXCL | O_NOFOLLOW`, so nothing already at its random
+    name, a planted link included, is written through. Removed again if the
+    write fails.
+    """
+    tmp = dest.parent / f".{dest.name}.{secrets.token_hex(8)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            # The umask can only narrow the mode above; this makes it exact.
+            os.fchmod(fd, 0o600)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return tmp
+
+
+def private_write(data: bytes, dest: Path) -> None:
+    """Put `data` at `dest`, owner-only (0600) from the first byte.
+
+    Bytes, not a source path: what lands at `dest` is exactly what the caller
+    read and checked, whatever the source path holds by now.
+
+    A `copy2` followed by a `chmod` leaves the file at `dest` with the
+    umask's mode until the chmod lands, and opening `dest` for writing follows
+    a symlink planted there. So the bytes go into a fresh file beside it
+    (`private_stage`) and are renamed over `dest`: a rename replaces a
+    symlink at `dest` rather than writing through it.
+
+    The App Store Connect key (`setup_portal`) is written this way.
+    """
+    tmp = private_stage(data, dest)
+    try:
         os.replace(tmp, dest)
     except BaseException:
         tmp.unlink(missing_ok=True)

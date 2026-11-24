@@ -6,6 +6,7 @@ import os
 import plistlib
 import shutil
 import stat
+import struct
 import zipfile
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from graft_ipa.ipa_inspect import (
     read_info_plist,
     verify_zip,
 )
+
+from . import macho_builder as mb
 
 
 def _make_ipa(tmp_path: Path, bundle_id: str = "com.example.app", version: str = "1.2.3") -> Path:
@@ -477,7 +480,7 @@ class TestExtensionImportance:
 
 
 class TestLostCapabilities:
-    """What the user is told they lost, in words they will recognise.
+    """What the user is told they lost, in words they will recognize.
 
     "AutoFillExtension.appex was removed" is a filename. "password
     autofill will not work" is the thing they notice next Tuesday and blame on
@@ -663,6 +666,46 @@ class TestSymlinksAreNotWalkedTwice:
         assert stat.S_IMODE(real.stat().st_mode) == 0o755
 
 
+def _fat64_with_cryptid(cryptid: int) -> bytes:
+    """A minimal fat64 Mach-O: one `fat_arch_64` pointing at a thin arm64
+    slice whose only load command is `LC_ENCRYPTION_INFO_64`."""
+    cpu_arm64 = 0x0100000C
+    # mach_header_64: magic, cputype, cpusubtype, filetype (MH_EXECUTE),
+    # ncmds, sizeofcmds, flags, reserved.
+    thin = struct.pack("<8I", 0xFEEDFACF, cpu_arm64, 0, 2, 1, 24, 0, 0)
+    # encryption_info_command_64: cmd, cmdsize, cryptoff, cryptsize, cryptid, pad.
+    thin += struct.pack("<6I", 0x2C, 24, 0, 0, cryptid, 0)
+    offset = 0x1000
+    # fat_header + fat_arch_64 (cputype, cpusubtype, offset, size, align, reserved).
+    fat = struct.pack(">2I", 0xCAFEBABF, 1)
+    fat += struct.pack(">iiQQII", cpu_arm64, 0, offset, len(thin), 12, 0)
+    return fat.ljust(offset, b"\x00") + thin
+
+
+class TestFat64BinariesAreChecked:
+    """A fat64 binary (`cafebabf`) was missing from the magic set, so an
+    encrypted one was never handed to the cryptid check — and stage 2.5 then
+    called the IPA decrypted."""
+
+    def test_a_fat64_binary_is_listed(self, tmp_path: Path):
+        binary = tmp_path / "Payload/Example.app/Example"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(_fat64_with_cryptid(1))
+
+        found = ipa_inspect.list_macho_in_extract(tmp_path)
+        assert found == [binary]
+
+    def test_an_encrypted_fat64_binary_is_reported_encrypted(self, tmp_path: Path):
+        binary = tmp_path / "Payload/Example.app/Example"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(_fat64_with_cryptid(1))
+
+        results = ipa_inspect.verify_decrypted(tmp_path)
+        assert [r.binary for r in results] == [binary]
+        assert results[0].cryptids == [1]
+        assert not results[0].is_decrypted
+
+
 # --- what the sidecar records, and what it deliberately does not claim ---
 
 
@@ -792,3 +835,242 @@ class TestTheStrippedSidecar:
         ipa_inspect.mark_stripped(ipa, ["a.appex"], lost=[], importance={"a.appex": "cosmetic"})
         ipa_inspect.clear_stripped(ipa)
         assert ipa_inspect.stripped_note(ipa) is None
+
+
+def test_check_cryptid_reads_the_binary_itself(tmp_path, monkeypatch):
+    """No otool, no child of any kind: on a Mac without the Command Line
+    Tools, /usr/bin/otool is a shim that offers to install them, once per
+    binary. The guard used to set `ipa_inspect.subprocess`, which the module
+    doesn't import, so nothing tripped it (review #30)."""
+    from .tripwires import forbid_child_processes
+
+    p = tmp_path / "Example"
+    p.write_bytes(mb.thin([mb.encryption_cmd(1)]))
+    app = tmp_path / "Payload" / "Example.app"
+    app.mkdir(parents=True)
+    (app / "Example").write_bytes(mb.thin([mb.encryption_cmd(1)]))
+    forbid_child_processes(monkeypatch, "the decryption check")
+    result = ipa_inspect.check_cryptid(p)
+    assert result.cryptids == [1]
+    assert result.is_decrypted is False
+    assert [r.cryptids for r in ipa_inspect.verify_decrypted(tmp_path)] == [[1]]
+
+
+def test_an_unreadable_binary_is_an_inspection_error_not_decrypted(tmp_path):
+    p = tmp_path / "Example"
+    p.write_bytes(b"\xcf\xfa\xed\xfe" + b"\0" * 8)  # a 64-bit magic, then truncated
+    with pytest.raises(IPAInspectionError, match="couldn't read Example's load commands"):
+        ipa_inspect.check_cryptid(p)
+
+
+JAVA_CLASS = b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + b"\0" * 64  # cafebabe, then version 52
+SWAPPED_FAT = b"\xbe\xba\xfe\xca\x02\x00\x00\x00" + b"\0" * 64
+
+
+class TestFilesThatOnlyLookLikeAMachO:
+    """`list_macho_in_extract` picks files by their first four bytes, and a
+    Java `.class` file starts `cafebabe` like a fat binary. otool printed no
+    cryptid for one and the build went on; the reader raised on it and failed
+    stage 2.5 instead. A file that is no Mach-O at all is skipped now, while a
+    real Mach-O the reader can't parse still fails."""
+
+    def _extracted(self, tmp_path: Path, extra: dict[str, bytes]) -> Path:
+        ipa = tmp_path / "example.ipa"
+        with zipfile.ZipFile(ipa, "w") as zf:
+            zf.writestr("Payload/Example.app/Example", mb.thin([mb.encryption_cmd(0)]))
+            for name, data in extra.items():
+                zf.writestr(f"Payload/Example.app/{name}", data)
+        return ipa_inspect.extract_ipa(ipa, tmp_path / "verify")
+
+    def test_a_java_class_file_is_skipped_and_not_counted(self, tmp_path: Path):
+        extract = self._extracted(tmp_path, {"Some.class": JAVA_CLASS})
+        assert "Some.class" in [p.name for p in ipa_inspect.list_macho_in_extract(extract)]
+
+        results = ipa_inspect.verify_decrypted(extract)
+
+        assert [r.binary.name for r in results] == ["Example"]
+        assert all(r.is_decrypted for r in results)
+
+    def test_a_byte_swapped_fat_magic_is_skipped(self, tmp_path: Path):
+        extract = self._extracted(tmp_path, {"Resource.bin": SWAPPED_FAT})
+        assert "Resource.bin" in [p.name for p in ipa_inspect.list_macho_in_extract(extract)]
+
+        results = ipa_inspect.verify_decrypted(extract)
+
+        assert [r.binary.name for r in results] == ["Example"]
+
+    def test_a_real_mach_o_with_truncated_load_commands_still_fails(self, tmp_path: Path):
+        broken = mb.thin([mb.encryption_cmd(1)])[:-4]
+        extract = self._extracted(tmp_path, {
+            "Some.class": JAVA_CLASS, "Frameworks/Y.framework/Y": broken,
+        })
+
+        with pytest.raises(IPAInspectionError, match="couldn't read Y's load commands"):
+            ipa_inspect.verify_decrypted(extract)
+
+    def test_check_cryptid_on_a_class_file_still_raises(self, tmp_path: Path):
+        """Called directly, it has no "skip": `appstore.main_binary_encrypted`
+        decides for itself what an unreadable main executable means."""
+        p = tmp_path / "Some.class"
+        p.write_bytes(JAVA_CLASS)
+        with pytest.raises(IPAInspectionError, match=r"couldn't read Some\.class's load commands"):
+            ipa_inspect.check_cryptid(p)
+
+
+def test_a_universal_static_library_in_the_bundle_is_skipped_not_fatal(tmp_path):
+    """A pod that copies its `lipo`-made `.a` into a resource bundle (review
+    #18): the check used to refuse the whole IPA over it, where 1.1's otool
+    read it as no binary. The app's own binary is still checked."""
+    from .test_macho import AR
+
+    app = tmp_path / "Payload" / "Example.app"
+    (app / "SDK.bundle").mkdir(parents=True)
+    (app / "Example").write_bytes(mb.thin([mb.encryption_cmd(1)]))
+    (app / "SDK.bundle" / "libsdk.a").write_bytes(mb.fat([(mb.CPU_ARM64, AR), (mb.CPU_X86_64, AR)]))
+    results = ipa_inspect.verify_decrypted(tmp_path)
+    assert [(r.binary.name, r.cryptids) for r in results] == [("Example", [1])]
+
+
+# --- a binary that could not be read was never checked (review #17) -----------------
+
+
+def _info_plist(executable: str) -> bytes:
+    return plistlib.dumps({"CFBundleExecutable": executable, "CFBundleIdentifier": "com.example.app"})
+
+
+def test_a_binary_stored_without_owner_read_is_still_checked(tmp_path):
+    """The decimal-for-octal slip, `S_IFREG | 755` (= 0o1363, owner -wx),
+    came out of extraction unreadable, was passed over, and the IPA read as
+    "0 Mach-O binaries, all cryptid 0" with its app still encrypted."""
+    ipa = tmp_path / "slip.ipa"
+    with zipfile.ZipFile(ipa, "w") as zf:
+        for name, data in [
+            ("Payload/Example.app/Info.plist", _info_plist("Example")),
+            ("Payload/Example.app/Example", mb.thin([mb.encryption_cmd(1)])),
+            ("Payload/Example.app/Frameworks/Kit.framework/Kit", mb.thin([mb.encryption_cmd(1)])),
+        ]:
+            entry = zipfile.ZipInfo(name)
+            entry.external_attr = (stat.S_IFREG | 755) << 16  # decimal, by mistake
+            zf.writestr(entry, data)
+    extract = ipa_inspect.extract_ipa(ipa, tmp_path / "x")
+    results = ipa_inspect.verify_decrypted(extract)
+    assert sorted((r.binary.name, r.cryptids) for r in results) == [("Example", [1]), ("Kit", [1])]
+
+
+def test_a_binary_that_cannot_be_read_fails_the_check_by_name(tmp_path):
+    app = tmp_path / "Payload" / "Example.app"
+    kit = app / "Frameworks" / "Kit.framework" / "Kit"
+    kit.parent.mkdir(parents=True)
+    (app / "Example").write_bytes(mb.thin([mb.encryption_cmd(0)]))
+    kit.write_bytes(mb.thin([mb.encryption_cmd(1)]))
+    kit.chmod(0o200)
+    try:
+        with pytest.raises(IPAInspectionError, match="Kit"):
+            ipa_inspect.verify_decrypted(tmp_path)
+    finally:
+        kit.chmod(0o644)
+
+
+def test_the_main_executable_is_checked_whatever_its_name(tmp_path):
+    """A `CFBundleExecutable` with a resource suffix (`Foo.js`) was passed over
+    by the listing's name rule."""
+    app = tmp_path / "Payload" / "Foo.app"
+    app.mkdir(parents=True)
+    (app / "Info.plist").write_bytes(_info_plist("Foo.js"))
+    (app / "Foo.js").write_bytes(mb.thin([mb.encryption_cmd(1)]))
+    (app / "bundle.js").write_text("console.log('a resource, not the binary')")
+    results = ipa_inspect.verify_decrypted(tmp_path)
+    assert [(r.binary.name, r.cryptids) for r in results] == [("Foo.js", [1])]
+
+
+# --- every bundle's executable is checked, and none drops out (re-check #9/#10) ---
+
+
+def _bundle(path: Path, executable: str, binary: bytes | None) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "Info.plist").write_bytes(_info_plist(executable))
+    if binary is not None:
+        (path / executable).write_bytes(binary)
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    [
+        "PlugIns/Widget.appex",
+        "Frameworks/Kit.framework",
+        "Watch/Watch.app",
+        "Watch/Watch.app/PlugIns/WatchExt.appex",
+    ],
+)
+def test_a_nested_bundle_s_executable_is_checked_whatever_its_name(tmp_path, bundle):
+    """Re-check #9: only `Payload/*.app`'s executable was exempt from the
+    resource-suffix rule, so an extension, framework or Watch app whose
+    binary is named `*.js` and still at cryptid 1 read as decrypted."""
+    app = tmp_path / "Payload" / "App.app"
+    _bundle(app, "App", mb.thin([mb.encryption_cmd(0)]))
+    nested = app / bundle
+    _bundle(nested, "Code.js", mb.thin([mb.encryption_cmd(1)]))
+
+    results = ipa_inspect.verify_decrypted(tmp_path)
+
+    by_path = {r.binary.relative_to(tmp_path).as_posix(): r.cryptids for r in results}
+    assert by_path[f"Payload/App.app/{bundle}/Code.js"] == [1]
+    assert by_path["Payload/App.app/App"] == [0]
+
+
+def test_a_main_executable_the_reader_cannot_take_is_an_error_not_decrypted(tmp_path):
+    """Re-check #10: 17 encrypted arm64 slices is more than the reader takes
+    (`MAX_FAT_ARCHS`), so it was NotMachO and dropped: `[]`, which read as
+    "0 binaries, cryptid 0", while otool reads cryptid 1."""
+    slice_ = mb.thin([mb.encryption_cmd(1)])
+    app = tmp_path / "Payload" / "App.app"
+    _bundle(app, "App", mb.fat([(0x0100000C, slice_)] * 17))
+
+    with pytest.raises(IPAInspectionError, match=r"App\.app.*App"):
+        ipa_inspect.verify_decrypted(tmp_path)
+
+
+def test_an_extension_executable_that_is_no_mach_o_is_an_error(tmp_path):
+    app = tmp_path / "Payload" / "App.app"
+    _bundle(app, "App", mb.thin([mb.encryption_cmd(0)]))
+    _bundle(app / "PlugIns" / "Widget.appex", "Widget", b"\xca\xfe\xba\xbe" + b"\0" * 60)
+
+    with pytest.raises(IPAInspectionError, match="Widget"):
+        ipa_inspect.verify_decrypted(tmp_path)
+
+
+@pytest.mark.parametrize("bundle", ["", "PlugIns/Widget.appex/"])
+def test_a_declared_executable_that_is_missing_is_an_error(tmp_path, bundle):
+    app = tmp_path / "Payload" / "App.app"
+    _bundle(app, "App", mb.thin([mb.encryption_cmd(0)]))
+    if bundle:
+        _bundle(app / bundle, "Widget", None)
+    else:
+        (app / "App").unlink()
+
+    with pytest.raises(IPAInspectionError, match="no such file"):
+        ipa_inspect.verify_decrypted(tmp_path)
+
+
+def test_an_executable_that_is_a_link_is_checked_at_its_target(tmp_path):
+    """The second route #10 named: `App -> App.js` in the same bundle. The
+    listing skips the link, and the suffix rule skipped the target."""
+    app = tmp_path / "Payload" / "App.app"
+    _bundle(app, "App", None)
+    (app / "App.js").write_bytes(mb.thin([mb.encryption_cmd(1)]))
+    (app / "App").symlink_to("App.js")
+
+    results = ipa_inspect.verify_decrypted(tmp_path)
+
+    assert [(r.binary.name, r.cryptids) for r in results] == [("App.js", [1])]
+
+
+def test_an_executable_linked_out_of_the_bundle_is_an_error(tmp_path):
+    outside = tmp_path / "elsewhere"
+    outside.write_bytes(mb.thin([mb.encryption_cmd(0)]))
+    app = tmp_path / "x" / "Payload" / "App.app"
+    _bundle(app, "App", None)
+    (app / "App").symlink_to(outside)
+
+    with pytest.raises(IPAInspectionError, match="outside"):
+        ipa_inspect.verify_decrypted(tmp_path / "x")

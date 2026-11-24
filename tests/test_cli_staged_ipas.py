@@ -113,7 +113,7 @@ def test_a_non_string_bundle_id_reaches_the_wire_as_a_string(tmp_path: Path) -> 
     worse than `display_name` besides: `find_in_cache` compares
     `info.bundle_id != app.bundle_id` directly, so a non-string value is
     silently unequal to every string bundle id and the file is skipped
-    there too, a second wrong behaviour from the same uncoerced value.
+    there too, a second wrong behavior from the same uncoerced value.
 
     The filename still has to satisfy `find_in_cache`'s own candidate test
     against the *coerced* bundle id ("999888", stringified) — Finding 1 means

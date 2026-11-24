@@ -2,7 +2,7 @@
 
 `--reinstall-build` chose how to ship by the app's *current* delivery, and the
 builds table did not say how the archive had been built. After a mode flip
-that hands an unsigned LiveContainer archive to ideviceinstaller (free, then
+that hands an unsigned LiveContainer archive to the sideload install (free, then
 paid with `--delivery sideload`, as `--init` suggests), or pushes a
 zsign-signed archive into LiveContainer (paid, then `signing:` removed). The
 row now records its delivery, and a re-install whose archive was built for the
@@ -70,7 +70,7 @@ def _row(cfg, ipa: Path, *, delivery: str | None, signing_team: str | None) -> i
 
 @pytest.fixture
 def shipped(monkeypatch):
-    """What reached each door: ideviceinstaller and the LiveContainer push."""
+    """What reached each door: the sideload install and the LiveContainer push."""
     got: dict[str, bytes] = {}
     monkeypatch.setattr(cli_mod, "select_device", lambda u: (u or "UDID1", "usb"))
 
@@ -173,7 +173,7 @@ def test_free_then_paid_sideload_refuses_the_unsigned_livecontainer_archive(
     with pytest.raises(GraftError) as exc:
         cli_mod._do_reinstall_build(paid, build_id)
 
-    assert shipped == {}, "nothing may reach ideviceinstaller"
+    assert shipped == {}, "nothing may reach the sideload install"
     assert "livecontainer" in exc.value.message and "sideload" in exc.value.message
     assert "rebuild" in exc.value.hint and "graft example" in exc.value.hint
 
@@ -235,7 +235,7 @@ def test_an_old_signed_row_is_refused_for_livecontainer(
 
 
 @pytest.mark.parametrize("archive", ["zip", "unreadable"])
-def test_an_old_signed_row_reinstalls_through_ideviceinstaller(
+def test_an_old_signed_row_reinstalls_through_the_sideload_install(
     tmp_path: Path, shipped, archive: str
 ) -> None:
     """The recorded team is enough on its own: only zsign builds have one."""

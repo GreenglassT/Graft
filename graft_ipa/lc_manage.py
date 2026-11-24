@@ -21,21 +21,19 @@ stored copy back over anything else on its schedule. Replacing them would
 orphan the former and lose to the latter, so `install` refuses there without
 `force`, and says how to update through AltStore instead.
 
-Every external effect goes through a seam — `DeviceOps` for the phone, a
-profile source for App Store Connect, `lc_sign.Runner` for `codesign`,
-`security` and `ideviceinstaller`, `fetch_ipa` / `get_json` / `download` for
+Every external effect goes through a seam — `DeviceOps` for the phone (its
+installs included), a profile source for App Store Connect, `lc_sign.Runner`
+for `codesign` and `security`, `fetch_ipa` / `get_json` / `download` for
 GitHub — so the tests touch none of them.
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import hashlib
 import plistlib
 import re
 import signal
-import subprocess
 import tempfile
 import threading
 import uuid
@@ -45,12 +43,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from . import USER_AGENT, lc_discovery, lc_instance, lc_sign, mobileprovision
+from . import USER_AGENT, device_install, lc_discovery, lc_instance, lc_sign, mobileprovision
 from .apple_portal import AppIdNotRegistered
 from .config import FREE_INSTALLERS
 from .errors import ConfigError, InstallError, Stopped
 from .json_output import JsonEmitter
-from .lc_runner import LiveContainerError
+from .lc_runner import LiveContainerError, is_abandoned_partial
 
 #: The AltStore sources upstream publishes; also what a user adds to AltStore.
 STABLE_SOURCE_URL = "https://github.com/LiveContainer/LiveContainer/releases/download/1.0/apps.json"
@@ -80,7 +78,7 @@ ALTSTORE_IDS = re.compile(
 )
 #: How long an install may run before we say why it might be stuck. iOS stages
 #: an install over a *running* LiveContainer and applies it only once the app
-#: is closed, and `ideviceinstaller` blocks until then.
+#: is closed, and the install blocks until then.
 WAIT_NOTICE_SECONDS = 20.0
 WAITING_MESSAGE = "close LiveContainer on the device to finish"
 
@@ -94,7 +92,7 @@ def exit_on_termination():
     Python's default for both signals kills the process outright, skipping
     every `finally`. SIGTERM is exactly what the GUI's Stop and CLIRunner's
     cancellation send, so without this a stopped install left an unlocked
-    keychain on the search list. The previous handlers come back afterwards.
+    keychain on the search list. The previous handlers come back afterward.
     Main thread only, which every CLI verb is.
 
     A SIGHUP that arrived ignored is left ignored: that is `nohup graft …`
@@ -419,7 +417,7 @@ def altstore_present(apps: dict[str, dict]) -> bool:
     there would have let `--lc-install` replace AltStore's copies without
     `--force`.
 
-    Second line of defence: a LiveContainer carrying the `ALT…` Info.plist keys
+    Second line of defense: a LiveContainer carrying the `ALT…` Info.plist keys
     AltStore is understood to write into apps it installs (`ALTCertificateID`
     is how LiveContainer looks for AltStore's certificate; upstream's own IPA
     has none). **Unconfirmed on a real AltStore install** — the iPhone was not
@@ -510,6 +508,8 @@ class DeviceOps(Protocol):
     def read_document(self, udid: str, bundle_id: str, name: str) -> bytes: ...
     def push_document(self, udid: str, bundle_id: str, name: str, data: bytes) -> None: ...
     def remove_document(self, udid: str, bundle_id: str, name: str) -> None: ...
+    def install_ipa(self, udid: str, ipa: Path, on_progress=None,
+                    waiting_on_user: threading.Event | None = None) -> None: ...
 
 
 #: What `installed_apps` asks of every app on the device; the LiveContainers
@@ -550,33 +550,47 @@ class UsbmuxDevice:
             await ha.rm(f"Documents/{_plain(name)}")
         self._run(udid, self._sandbox(udid, bundle_id, go))
 
+    def install_ipa(self, udid: str, ipa: Path, on_progress=None,
+                    waiting_on_user: threading.Event | None = None) -> None:
+        # Not through `_run`: its `DeviceInstallError` carries the device's own
+        # words, which `_install_one` maps to a hint.
+        device_install.install_ipa(ipa, udid=udid, on_progress=on_progress,
+                                   waiting_on_user=waiting_on_user)
+
     @staticmethod
     def _run(udid: str, coro):
-        """pymobiledevice3's own exceptions, as one this CLI reports cleanly."""
+        """pymobiledevice3's own exceptions, as one this CLI reports cleanly.
+        Under `device_session.run`: a Stop lands at an await."""
+        from . import device_session
+
         try:
-            return asyncio.run(coro)
+            return device_session.run(coro)
         except LiveContainerError:
             raise
         except Exception as e:
+            from .installer import connection_hint
+
             raise LiveContainerError(
                 f"could not talk to {udid}: {e}",
-                hint="is the device connected (USB or Wi-Fi), unlocked and trusted?",
+                hint=connection_hint(f"{type(e).__name__}: {e}")
+                or "is the device connected (USB or Wi-Fi), unlocked and trusted?",
             ) from e
 
     @staticmethod
     async def _apps(udid: str) -> dict[str, dict]:
-        from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
-        from .device_session import closing_best_effort
+        from .device_session import closing_best_effort, open_lockdown
 
         # Two listings, not one with everything: a System listing with every
-        # attribute is the whole OS's app catalogue, entitlements included,
+        # attribute is the whole OS's app catalog, entitlements included,
         # and only the LiveContainers' metadata is read (their version, their
         # application-identifier, AltStore's `ALT…` keys). Every app's id and
         # type still come back — AltStore is found by its id, and `install`
         # refuses a listing with no User app in it.
-        lock = await create_using_usbmux(serial=udid)
+        # The first session of an --lc-install, so the one that pairs a
+        # phone that has never trusted this Mac (`open_lockdown`).
+        lock = await open_lockdown(udid)
         async with closing_best_effort(lock):
             proxy = InstallationProxyService(lockdown=lock)
             async with closing_best_effort(proxy):
@@ -594,22 +608,19 @@ class UsbmuxDevice:
 
     @staticmethod
     async def _bundle_ids(udid: str) -> list[str]:
-        from pymobiledevice3.lockdown import create_using_usbmux
+        from .device_session import closing_best_effort, open_lockdown
 
-        from .device_session import closing_best_effort
-
-        lock = await create_using_usbmux(serial=udid)
+        lock = await open_lockdown(udid)
         async with closing_best_effort(lock):
             return await lc_discovery.installed_bundle_ids(lock)
 
     @staticmethod
     async def _sandbox(udid: str, bundle_id: str, body):
-        from pymobiledevice3.lockdown import create_using_usbmux
         from pymobiledevice3.services.house_arrest import HouseArrestService
 
-        from .device_session import closing_best_effort
+        from .device_session import closing_best_effort, open_lockdown
 
-        lock = await create_using_usbmux(serial=udid)
+        lock = await open_lockdown(udid)
         async with closing_best_effort(lock):
             ha = await HouseArrestService.create(lockdown=lock, bundle_id=bundle_id)
             async with closing_best_effort(ha):
@@ -620,16 +631,6 @@ def _plain(name: str) -> str:
     if Path(name).name != name or name in ("", ".", ".."):
         raise LiveContainerError(f"refusing a Documents path that is not a plain file name: {name!r}")
     return name
-
-
-def usbmux_transport(udid: str) -> str:
-    """`USB` or `Network`, as usbmux sees the device right now."""
-    from .devices import list_devices_brief
-
-    for dev in list_devices_brief():
-        if dev.udid == udid:
-            return dev.connection_type
-    raise InstallError(f"device {udid} is not connected", hint="connect it, or pair it over Wi-Fi")
 
 
 # ---------- profiles ----------
@@ -734,6 +735,11 @@ def altstore_refusal(udid: str) -> LiveContainerError:
 
 
 def _install_hint(output: str) -> str:
+    if "StillWaitingError" in output:
+        return (
+            "iOS finishes this install only once LiveContainer is closed: close LiveContainer on "
+            "the device (swipe it up out of the app switcher), then run the install again"
+        )
     if "MismatchedApplicationIdentifierEntitlement" in output:
         return (
             "the LiveContainer on the device was signed with a wildcard application "
@@ -746,26 +752,41 @@ def _install_hint(output: str) -> str:
 
 
 def _install_one(
-    runner: lc_sign.Runner, *, udid: str, transport: str, ipa: Path, instance: int,
+    device_ops: DeviceOps, *, udid: str, ipa: Path, instance: int,
     bundle_id: str, events: LcEvents, wait_notice_seconds: float,
 ) -> None:
-    cmd = ["ideviceinstaller", "-u", udid]
-    if transport.lower().startswith("network"):
-        cmd.append("--network")
-    cmd += ["install", str(ipa)]
-    proc = runner.spawn(cmd)
-    try:
-        output, _ = proc.communicate(timeout=wait_notice_seconds)
-    except subprocess.TimeoutExpired:
-        events.waiting(udid=udid, instance=instance, bundle_id=bundle_id,
-                       message=WAITING_MESSAGE)
-        output, _ = proc.communicate()
-    output = output or ""
-    if proc.returncode != 0 or "ERROR" in output or "Error occurred" in output:
-        raise InstallError(
-            f"installing {bundle_id} failed (ideviceinstaller exit {proc.returncode})",
-            hint=_install_hint(output),
-        )
+    """Install one prepared instance, saying so when it waits on the user.
+
+    An install over a running LiveContainer blocks until the user closes it
+    on the device, so after `wait_notice_seconds` the user is told why
+    nothing is moving, and the install keeps waiting: from then on installd's
+    silence is the user's time, not a phone gone quiet (`waiting_on_user`,
+    up to `device_install.PATIENT_SECONDS`; the whole-diff review's cli-1).
+    A Stop ends the wait here, on the main thread.
+    """
+    done = threading.Event()
+    waiting_on_user = threading.Event()
+    failure: list[BaseException] = []
+
+    def work() -> None:
+        try:
+            device_ops.install_ipa(udid, ipa, waiting_on_user=waiting_on_user)
+        except BaseException as e:  # re-raised below, on this thread
+            failure.append(e)
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=work, name=f"lc-install-{instance}", daemon=True)
+    worker.start()
+    if not done.wait(wait_notice_seconds):
+        waiting_on_user.set()
+        events.waiting(udid=udid, instance=instance, bundle_id=bundle_id, message=WAITING_MESSAGE)
+        done.wait()
+    worker.join()
+    if failure:
+        e = failure[0]
+        output = e.output if isinstance(e, device_install.DeviceInstallError) else str(e)
+        raise InstallError(f"installing {bundle_id} failed", hint=_install_hint(output)) from e
 
 
 def install(
@@ -780,7 +801,6 @@ def install(
     profiles: ProfileSource,
     device_ops: DeviceOps,
     runner: lc_sign.Runner,
-    transport: Callable[[str], str],
     log: Any,
     events: LcEvents,
     fetch_ipa: Callable[[str], tuple[Release, Path]],
@@ -849,11 +869,10 @@ def install(
                 signed.append((n, prepared, out))
 
         results = []
-        how = transport(udid)
         for n, prepared, out in signed:
             events.progress(udid, n, "install", prepared.bundle_id)
             _install_one(
-                runner, udid=udid, transport=how, ipa=out, instance=n,
+                device_ops, udid=udid, ipa=out, instance=n,
                 bundle_id=prepared.bundle_id, events=events,
                 wait_notice_seconds=wait_notice_seconds,
             )
@@ -942,17 +961,53 @@ def clean(
     the configured team's primary, where `--lc-push-cert` put one before it
     was recorded. Found there, or anywhere this lists, it is reported, never
     deleted.
+
+    Unless `cert_only`, every LiveContainer installed also loses the partial
+    files pushes from this Mac left and nothing is writing any more
+    (`lc_runner.is_abandoned_partial`), recorded or not: the push that left
+    one was cut off before it could be recorded. Said in a note, not in
+    `lc-cleaned`, whose `removed` are files the user knew were there.
     """
     certs = certs or {}
     installed = set(device_ops.installed_apps(udid))
     wanted = {b for b, names in certs.items() if names}
     if not cert_only:
         wanted |= {b for b, names in pushed.items() if names}
+    visited = (wanted | set(look_for_cert)) & installed
+    swept_in = set() if cert_only else visited | set(lc_discovery.livecontainers(installed))
+    swept = False
     payloads = []
-    for bundle_id in sorted((wanted | set(look_for_cert)) & installed):
+    for bundle_id in sorted(visited | swept_in):
+        if bundle_id in visited:
+            docs = device_ops.list_documents(udid, bundle_id)
+        else:
+            # Only swept, never one Graft recorded anything in: a LiveContainer
+            # some other tool installed (a TrollStore one, or one signed for
+            # distribution) may not let its sandbox be opened at all, and that
+            # must not cost the containers Graft did use their clean
+            # (combined fix check #4).
+            try:
+                docs = device_ops.list_documents(udid, bundle_id)
+            except LiveContainerError as e:
+                events.note(f"{bundle_id}: skipped, its Documents couldn't be listed ({e.message})")
+                continue
+        if bundle_id in swept_in:
+            try:
+                left = _remove_partials(udid, bundle_id, docs, device_ops, events)
+            except LiveContainerError as e:
+                if bundle_id in visited:
+                    raise
+                # Only swept, as above: a partial there that won't go must
+                # not cost the containers Graft did use their clean (the
+                # whole-diff review's cli-8).
+                events.note(f"{bundle_id}: skipped, what an unfinished push left in its Documents "
+                            f"couldn't be removed ({e.message})")
+                continue
+            swept, docs = swept or len(left) < len(docs), left
+        if bundle_id not in visited:
+            continue
         names = set() if cert_only else set(pushed.get(bundle_id, ()))
         cert_names = set(certs.get(bundle_id, ()))
-        docs = device_ops.list_documents(udid, bundle_id)
         if bundle_id in wanted:
             removed = sorted(
                 n for n in docs if n in cert_names or (n.endswith(".ipa") and n in names)
@@ -969,9 +1024,25 @@ def clean(
                 "pushing it (it predates those records, or is someone else's); remove "
                 "it in the Files app if it is yours to remove"
             )
-    if not payloads:
+    if not payloads and not swept:
         events.note(f"{udid}: nothing Graft recorded pushing is installed there; nothing removed")
     return payloads
+
+
+def _remove_partials(
+    udid: str, bundle_id: str, docs: list[str], device_ops: DeviceOps, events: LcEvents,
+) -> list[str]:
+    """Remove the abandoned push partials among `docs`, saying so; `docs`
+    without them."""
+    partials = [n for n in docs if is_abandoned_partial(n)]
+    for name in partials:
+        device_ops.remove_document(udid, bundle_id, name)
+    if partials:
+        events.note(
+            f"{bundle_id}: removed what an unfinished push from this Mac left in Documents "
+            f"({', '.join(partials)})"
+        )
+    return [n for n in docs if n not in partials]
 
 
 # ---------- the legacy build path ----------
@@ -1085,7 +1156,7 @@ def run_install(
     team, target = _paid_team(cfg, "--lc-install"), _target(cfg, udid)
     picked, channel = parse_instances(instances), check_channel(channel)
     password = signer.resolve_p12_password(cfg)
-    if not password:
+    if password is None:
         raise SigningError(
             f".p12 password not available (env {cfg.signing.cert_password_env} unset "
             "and not in Keychain)",
@@ -1094,7 +1165,7 @@ def run_install(
     return install(
         udid=target, team=team, instances=picked, channel=channel, force=force,
         p12=cfg.signing.cert, p12_password=password, profiles=AscProfiles(cfg, password),
-        device_ops=UsbmuxDevice(), runner=lc_sign.Runner(), transport=usbmux_transport,
+        device_ops=UsbmuxDevice(), runner=lc_sign.Runner(),
         log=BuildLog(cfg.state_dir / "log.sqlite"), events=events,
         fetch_ipa=lambda ch: fetch_ipa(ch, cfg.cache_dir, note=events.note,
                                          warn=events.warning),

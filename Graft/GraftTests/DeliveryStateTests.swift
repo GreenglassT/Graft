@@ -135,7 +135,7 @@ final class DeliveryStateTests: XCTestCase {
     /// tests, so the GUI joins on the pair rather than "fixing" either.
     @MainActor
     func test_loadApps_keys_the_state_by_the_app_events_name() async throws {
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoApps])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoApps], notify: { _ in })
         let apps = try await store.loadApps()
 
         XCTAssertEqual(apps.map(\.name), ["delta", "example"])
@@ -152,7 +152,7 @@ final class DeliveryStateTests: XCTestCase {
     /// and a badge that fires on everything is a badge nobody reads.
     @MainActor
     func test_an_app_with_no_state_event_is_left_unbadged() async throws {
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.oneAppHasNoState])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.oneAppHasNoState], notify: { _ in })
         let apps = try await store.loadApps()
 
         XCTAssertEqual(apps.map(\.name), ["bravo", "delta", "example"])
@@ -165,7 +165,7 @@ final class DeliveryStateTests: XCTestCase {
     /// does not control. A repeated app must cost a badge, not the process.
     @MainActor
     func test_a_repeated_state_for_one_app_does_not_trap() async throws {
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.duplicateState])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.duplicateState], notify: { _ in })
         _ = try await store.loadApps()
         XCTAssertEqual(store.deliveryStates.count, 1)
         // Last wins, matching how a config re-read resolves a repeated key.
@@ -186,7 +186,7 @@ final class DeliveryStateTests: XCTestCase {
         else touch '\(marker.path)'; \(Fixture.twoApps); fi
         """
 
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script], notify: { _ in })
         _ = try await store.loadApps()
         XCTAssertNotNil(store.deliveryStates["example"])
 
@@ -207,7 +207,7 @@ final class DeliveryStateTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: marker) }
 
         let script = "echo run >> '\(marker.path)'\n" + Fixture.twoApps
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script], notify: { _ in })
         _ = try await store.loadApps()
 
         XCTAssertFalse(store.deliveryStates.isEmpty, "no states — the fixture didn't run")
@@ -235,7 +235,7 @@ final class DeliveryStateTests: XCTestCase {
             bytes, 64 * 1024,
             "fixture must exceed the stdout pipe buffer or it proves nothing"
         )
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script], notify: { _ in })
 
         guard let outcome = await finishing(within: 20, { @MainActor in
             try await store.loadApps()
@@ -275,7 +275,7 @@ final class DeliveryStateTests: XCTestCase {
         else touch '\(marker.path)'; \(Fixture.twoApps); fi
         """
 
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script], notify: { _ in })
         _ = try await store.loadApps()
         XCTAssertEqual(store.deliveryStates["example"]?.kind, .stale, "premise")
 
@@ -303,7 +303,7 @@ final class DeliveryStateTests: XCTestCase {
         else touch '\(marker.path)'; \(Fixture.twoApps); fi
         """
 
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", script], notify: { _ in })
         _ = try await store.loadApps()
 
         await store.refreshDeliveryStates()
@@ -324,8 +324,7 @@ final class DeliveryStateTests: XCTestCase {
     @MainActor
     func test_a_cancelled_refresh_is_silent() async throws {
         let store = ConfigStore(
-            runner: shRunner(), cliArgs: ["-c", "sleep 5; " + Fixture.twoApps]
-        )
+            runner: shRunner(), cliArgs: ["-c", "sleep 5; " + Fixture.twoApps], notify: { _ in })
         let task = Task { @MainActor in await store.refreshDeliveryStates() }
         try await Task.sleep(nanoseconds: 500_000_000)
         task.cancel()
@@ -345,7 +344,7 @@ final class DeliveryStateTests: XCTestCase {
     /// come back demoted.
     @MainActor
     func test_a_device_check_folds_the_answer_into_the_badges() async throws {
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent], notify: { _ in })
         _ = try await store.loadApps()
         XCTAssertEqual(store.deliveryStates["example"]?.kind, .current, "premise")
 
@@ -370,7 +369,7 @@ final class DeliveryStateTests: XCTestCase {
     /// one app.
     @MainActor
     func test_a_scoped_check_leaves_every_other_badge_alone() async throws {
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoApps])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoApps], notify: { _ in })
         _ = try await store.loadApps()
         XCTAssertEqual(store.deliveryStates.count, 2, "premise")
 
@@ -393,7 +392,7 @@ final class DeliveryStateTests: XCTestCase {
     /// looked at.
     @MainActor
     func test_a_check_that_reached_no_device_says_so() async throws {
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent], notify: { _ in })
         _ = try await store.loadApps()
 
         let outcome = try await store.reconcile(
@@ -413,7 +412,7 @@ final class DeliveryStateTests: XCTestCase {
     /// check that did reach the phone read as one that had not.
     @MainActor
     func test_a_startup_notice_is_not_a_device_check_warning() async throws {
-        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent])
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent], notify: { _ in })
         _ = try await store.loadApps()
 
         let clean = try await store.reconcile(
@@ -426,6 +425,72 @@ final class DeliveryStateTests: XCTestCase {
         )
         XCTAssertEqual(warned.warnings, ["no device checked: no iOS devices connected"],
                        "the check's own warning still arrives")
+    }
+
+    /// Fix-check #19/#21: the phone's "tap Trust" prompt, written while the
+    /// check waits on it, is not the check's result. The user tapped Trust,
+    /// the listing worked, and the pane must say the record still stands.
+    @MainActor
+    func test_a_trust_prompt_is_not_a_device_check_warning() async throws {
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent], notify: { _ in })
+        _ = try await store.loadApps()
+
+        let clean = try await store.reconcile(
+            appName: "example", argsOverride: ["-c", Fixture.checkAfterATrustPrompt]
+        )
+        XCTAssertEqual(clean.warnings, [], "the prompt was read as the check's result")
+        XCTAssertEqual(store.deliveryStates["example"]?.kind, .current)
+
+        let warned = try await store.reconcile(
+            appName: "example", argsOverride: ["-c", Fixture.checkWithNoDeviceAfterATrustPrompt]
+        )
+        XCTAssertEqual(warned.warnings, ["no device checked: no iOS devices connected"],
+                       "the check's own warning still arrives")
+    }
+
+    /// The same prompt, live: shown while the check waits on the phone, not
+    /// after it is over, and gone once the check ends.
+    @MainActor
+    func test_a_trust_prompt_shows_while_the_check_waits() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("trust-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let tapped = dir.appendingPathComponent("tapped").path
+        // Prints the prompt, then waits — up to 10 s — for the test to "tap
+        // Trust" before it answers.
+        let script = "printf '%s\\n' '\(Fixture.trustPrompt)'; "
+            + "i=0; while [ ! -e '\(tapped)' ] && [ $i -lt 100 ]; do sleep 0.1; i=$((i+1)); done; "
+            + Fixture.checkAfterANotice
+
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent], notify: { _ in })
+        _ = try await store.loadApps()
+        XCTAssertTrue(store.beginDeviceCheck(appName: "example"))
+        let check = Task { @MainActor in
+            try await store.reconcile(appName: "example", argsOverride: ["-c", script])
+        }
+        await eventually({ store.deviceCheckStatus != nil }, timeout: 5)
+        XCTAssertEqual(store.deviceCheckStatus, Fixture.trustPromptLine, "not shown while the check waited")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: tapped), "premise: still waiting")
+
+        FileManager.default.createFile(atPath: tapped, contents: nil)
+        let outcome = try await check.value
+        XCTAssertEqual(outcome.warnings, [])
+        store.endDeviceCheck(appName: "example")
+        XCTAssertNil(store.deviceCheckStatus, "the prompt outlived the check")
+    }
+
+    /// And in a build, the same line is a transcript line in the color of
+    /// information, and leaves the build's record alone.
+    @MainActor
+    func test_a_trust_prompt_in_a_build_is_information() throws {
+        guard case let .log(source, line)? = Fixture.trustPrompt.buildEvents().first else {
+            return XCTFail("the prompt did not decode as a log event")
+        }
+        let event = BuildEvent.log(source: source, line: line)
+        XCTAssertEqual(BuildLogView.lines(for: event).map(\.kind), [.dim])
+        let store = ConfigStore(runner: shRunner(), notify: { _ in })
+        store.note(try XCTUnwrap(event.progress), forBuildOf: "example")
+        XCTAssertNil(store.buildFailures["example"])
     }
 
     /// Omitting `--device` is not neutral. `_do_reconcile` falls back to
@@ -493,7 +558,7 @@ final class DeliveryStateTests: XCTestCase {
             try? FileManager.default.removeItem(atPath: capturePath)
         }
 
-        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: scriptPath)))
+        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: scriptPath)), notify: { _ in })
         _ = try await store.reconcile(appName: appName, deviceUDID: deviceUDID)
 
         let captured = try String(contentsOfFile: capturePath, encoding: .utf8)
@@ -544,6 +609,15 @@ final class DeliveryStateTests: XCTestCase {
         /// environment variable is still set.
         static let startupNotice = #"{"type":"log","source":"startup","line":"TB_SSH_PASS is set but no longer read; use GRAFT_SSH_PASS"}"#
         static let checkAfterANotice = emit([startupNotice, exampleStateCurrent])
+        /// What the CLI writes while `open_lockdown` waits on a phone that
+        /// has not trusted this Mac (`say_trust_prompt`).
+        static let trustPromptLine = "Unlock the phone and tap Trust on the 'Trust This Computer?' "
+            + "prompt (waiting up to 60 s)"
+        static let trustPrompt = #"{"type":"log","source":"device","line":"Unlock the phone and tap Trust on the \u0027Trust This Computer?\u0027 prompt (waiting up to 60 s)"}"#
+        static let checkAfterATrustPrompt = emit([trustPrompt, exampleStateCurrent])
+        static let checkWithNoDeviceAfterATrustPrompt = emit(
+            [trustPrompt, noDeviceWarning, exampleStateCurrent]
+        )
         static let checkWithNoDeviceAfterANotice = emit(
             [startupNotice, noDeviceWarning, exampleStateCurrent]
         )

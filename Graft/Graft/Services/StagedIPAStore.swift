@@ -210,7 +210,7 @@ final class StagedIPAStore {
         ///
         /// `objection` is the CLI's **own sentence**, carried rather than
         /// composed. The `staged-ipa-in-use` event names the apps as data and
-        /// this store reads it — but only to *recognise* the refusal. The
+        /// this store reads it — but only to *recognize* the refusal. The
         /// words come off stderr, because the CLI is the side that knows which
         /// apps `find_in_cache` would leave with nothing, and a second
         /// sentence assembled here drifts from that one the first time either

@@ -32,7 +32,7 @@ final class RepoStoreTests: XCTestCase {
     }
 
     /// The rule every other mutating store already follows: the write landed
-    /// in config.yaml, so a refresh that fails afterwards is "it worked, the
+    /// in config.yaml, so a refresh that fails afterward is "it worked, the
     /// list is stale" — `lastError`, not a throw. This used to rethrow, which
     /// made ReposView clear nothing, keep the URL in the field, and tell the
     /// user the repo wasn't added, about a repo that was.

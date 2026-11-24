@@ -14,7 +14,7 @@ import Foundation
 ///
 /// Read as `AccountMode?` everywhere, and nil means *not known*: before the
 /// first `--list` has landed, or a CLI too old to say. Nil disables nothing.
-/// Guessing free would grey out a paid user's controls on a stale CLI, and
+/// Guessing free would gray out a paid user's controls on a stale CLI, and
 /// guessing paid costs at most a refusal the CLI words itself, which every
 /// banner already shows.
 enum AccountMode: String, Decodable, Hashable {
@@ -34,13 +34,33 @@ enum AccountMode: String, Decodable, Hashable {
         switch self {
         case .free:
             return "Graft builds unsigned IPAs and LiveContainer signs them when you "
-                + "import them. To use a paid membership, run graft --init in Terminal "
-                + "and answer yes."
+                + "import them. With a paid Apple Developer membership, choose Add a paid account."
         case .paid:
             return "Graft signs with your certificate and profile, for sideload "
                 + "delivery and for installing LiveContainer."
         }
     }
+
+    /// Settings › Account's button: the way to the other account.
+    var changeLabel: String {
+        switch self {
+        case .free: return "Add a paid account…"
+        case .paid: return "Switch to a free Apple ID…"
+        }
+    }
+
+    /// Settings › Account on a paid account: the yearly renewal, in the app.
+    static let replaceLabel = "Replace certificate and profile…"
+    /// Why the account can't change now: a build signs with it, and a change
+    /// halfway through its run would sign with half the old and half the new.
+    static let waitForBuild = "Wait for the build to finish."
+
+    static let switchToFreeTitle = "Switch to a free Apple ID?"
+    static let switchToFreeMessage = "Graft removes the signing section from config.yaml and "
+        + "keeps your apps, repos and settings. Your certificate and profile stay in the "
+        + "config folder, and the certificate's password stays in your login keychain; "
+        + "remove them yourself if you're done with them. Apps set to Sideload stay set, "
+        + "and won't build until you switch them to LiveContainer."
 }
 
 /// The one-line reasons a paid-only control is disabled on a free Apple ID.
@@ -74,7 +94,15 @@ enum PaidOnly {
 
     /// Settings: the signing certificate, profile and team id.
     static let signingSettings = "Signing is only used with a paid Apple Developer "
-        + "account. Run graft --init and answer yes to set it up."
+        + "account. Add one with Add a paid account, above."
+
+    /// The Edit sheet's "Create the provisioning profile automatically".
+    static let autoProfile = "Making a provisioning profile needs a paid Apple Developer "
+        + "account. With a free Apple ID, LiveContainer signs the app."
+
+    /// Settings: the App Store Connect key.
+    static let appStoreConnect = "An App Store Connect key is only used with a paid "
+        + "Apple Developer account, to make provisioning profiles."
 }
 
 extension Optional where Wrapped == AccountMode {

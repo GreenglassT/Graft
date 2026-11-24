@@ -13,11 +13,12 @@ replace the reader underneath it.
 from __future__ import annotations
 
 import errno
+import subprocess
 import sys
 
 import pytest
 
-from graft_ipa import host
+from graft_ipa import host, storefronts
 
 
 @pytest.mark.parametrize(
@@ -82,3 +83,100 @@ def test_the_unpinned_arm64_reader_is_right_about_this_mac(
     assert REAL_SYSCTL_ARM64() == expected
     monkeypatch.setattr(host, "_sysctl_arm64", REAL_SYSCTL_ARM64)
     assert host.apple_silicon() is (expected == 1)
+
+
+# --- this Mac's region (`mac_region`) -----------------------------------------
+
+# Captured at import, before conftest's `_no_real_mac_region` pins the seam.
+_real_read_apple_locale = host._read_apple_locale
+
+
+@pytest.mark.parametrize(
+    ("value", "region"),
+    [
+        ("en_US", "US"),
+        ("en_GB\n", "GB"),
+        ("zh-Hans_CN", "CN"),
+        # A region chosen apart from the language is an `rg` keyword.
+        ("en_US@rg=gbzzzz", "GB"),
+        ("en_US@calendar=gregorian;rg=dezzzz", "DE"),
+        # Latin America has a numeric UN M.49 code, which no App Store answers to.
+        ("es_419", None),
+        ("en", None),
+        ("", None),
+    ],
+)
+def test_the_region_is_read_out_of_apple_locale(value: str, region: str | None) -> None:
+    assert host.region_from_apple_locale(value) == region
+
+
+def test_the_region_is_asked_of_defaults_by_absolute_path() -> None:
+    calls: list[tuple[list[str], dict]] = []
+
+    def run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout="en_GB\n", stderr="")
+
+    assert _real_read_apple_locale(run=run) == "en_GB\n"
+    argv, kwargs = calls[0]
+    # Absolute: the 2.0 acceptance test runs with PATH=/usr/bin:/bin:/usr/sbin:/sbin.
+    assert argv == ["/usr/bin/defaults", "read", "-g", "AppleLocale"]
+    assert kwargs["timeout"] == host.REGION_TIMEOUT
+
+
+@pytest.mark.parametrize("outcome", ["exits non-zero", "cannot run", "times out"])
+def test_a_region_defaults_cannot_give_is_none(outcome: str) -> None:
+    def run(argv, **kwargs):
+        if outcome == "cannot run":
+            raise OSError("no such file")
+        if outcome == "times out":
+            raise subprocess.TimeoutExpired(argv, host.REGION_TIMEOUT)
+        return subprocess.CompletedProcess(argv, 1, stdout="", stderr="does not exist")
+
+    assert _real_read_apple_locale(run=run) is None
+
+
+def test_mac_region_is_the_parsed_reading(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host, "_read_apple_locale", lambda: "en_US@rg=gbzzzz")
+    assert host.mac_region() == "GB"
+    monkeypatch.setattr(host, "_read_apple_locale", lambda: None)
+    assert host.mac_region() is None
+
+
+@pytest.mark.parametrize(
+    ("locale", "store"),
+    [("es_PR", "US"), ("fr_RE", "FR"), ("da_GL", "DK"), ("sv_AX", "FI"), ("fa_IR", "US"),
+     ("en_US@rg=aqzzzz", "US")],
+)
+def test_mac_region_is_the_store_the_region_shops_in(
+    monkeypatch: pytest.MonkeyPatch, locale: str, store: str
+) -> None:
+    monkeypatch.setattr(host, "_read_apple_locale", lambda: locale)
+    assert host.mac_region() == store
+
+
+def test_a_region_with_no_store_is_the_us_store_with_a_note(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(host, "_read_apple_locale", lambda: "fa_IR")
+    assert host.mac_store() == storefronts.Store("US", note=storefronts.NO_STORE_NOTE)
+    monkeypatch.setattr(host, "_read_apple_locale", lambda: "es_PR")
+    assert host.mac_store() == storefronts.Store("US")
+    monkeypatch.setattr(host, "_read_apple_locale", lambda: None)
+    assert host.mac_store() == storefronts.Store("US")
+
+
+@pytest.mark.parametrize(
+    ("store_country", "locale", "stores"),
+    [("DE", "en_GB", ("DE",)), (None, "de_DE", ("DE", "US")), (None, "es_PR", ("US",)),
+     (None, "fa_IR", ("US",)), (None, None, ("US",)), (None, "en_US", ("US",))],
+)
+def test_an_apps_store_is_its_own_else_this_macs_mapped_then_the_us(
+    monkeypatch: pytest.MonkeyPatch, store_country: str | None, locale: str | None, stores: tuple
+) -> None:
+    """Combined fix check #21: the US second, because every 1.x lookup asked it."""
+    monkeypatch.setattr(host, "_read_apple_locale", lambda: locale)
+    assert host.lookup_countries(store_country) == stores
+
+
+def test_no_test_reads_the_real_region() -> None:
+    """conftest's pin is in place: a suite run never depends on the Mac's locale."""
+    assert host.mac_region() is None

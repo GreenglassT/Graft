@@ -90,7 +90,9 @@ def test_a_key_sends_no_password_at_all(
     assert SECRET not in seen["env"].values()
 
 
-def test_a_dry_run_does_not_print_the_password(clone: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_dry_run_does_not_print_the_password(
+    clone: Path, monkeypatch: pytest.MonkeyPatch, fake_iproxy: Path,
+) -> None:
     monkeypatch.setenv("GRAFT_SSH_PASS", SECRET)
     out = decrypt_runner.decrypt_app("com.example.app", clone / "out", udid="UDID-EXAMPLE",
                                      backend=decrypt_runner.FRIDA, dry_run=True).stdout

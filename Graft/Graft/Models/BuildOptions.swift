@@ -221,7 +221,7 @@ struct BuildOptions: Equatable {
     /// than a value meant for deciding. `BuildTargetBar` needs to decide, and
     /// recovering "was that Dry run or Install skipped?" by comparing the
     /// sentence back against these strings would make the wording load-bearing:
-    /// changing "Dry run" to "Dry-run" would silently change behaviour on
+    /// changing "Dry run" to "Dry-run" would silently change behavior on
     /// another screen.
     ///
     /// `activeOptions` order puts `dryRun` first, which is the more complete

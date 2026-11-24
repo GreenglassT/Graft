@@ -16,7 +16,7 @@ xcuserdata/
 DerivedData/
 .worktrees/
 
-# Large binary artefacts that occasionally end up in the working tree
+# Large binary artifacts that occasionally end up in the working tree
 *.ipa
 *.deb
 *.profraw

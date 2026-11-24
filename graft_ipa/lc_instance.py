@@ -19,7 +19,7 @@ install it with:
   that kept `livecontainer` would claim the primary's scheme and believe it was
   the primary;
 * no `UTExportedTypeDeclarations` (the primary owns the document type);
-* grey icons, `PrimaryLiveContainerTeamId = <TEAM>`;
+* gray icons, `PrimaryLiveContainerTeamId = <TEAM>`;
 * the executable renamed to the instance name with a fresh `LC_UUID`, because
   iOS must not see two installed apps whose executables share a UUID;
 * `PlugIns/` removed — extensions belong to the primary.

@@ -223,7 +223,7 @@ final class DeviceDetailLayoutTests: XCTestCase {
         + deliveryJSON(app: "example", kind: "current", summary: "Matches the last delivery.")
 
     private func configStore(printing lines: String) async -> ConfigStore {
-        let store = ConfigStore(runner: sh(), cliArgs: ["-c", "printf '\(lines)'"])
+        let store = ConfigStore(runner: sh(), cliArgs: ["-c", "printf '\(lines)'"], notify: { _ in })
         _ = try? await store.loadApps()
         return store
     }
@@ -556,6 +556,7 @@ final class DeviceDetailLayoutTests: XCTestCase {
                     // section measures its error state — the tallest it has
                     // before a device answers.
                     liveContainer: LiveContainerStore(runner: config.runner),
+                    appStore: AppStoreStore(runner: config.runner, shell: NoAdminShell()),
                     // No sidebar to navigate in this harness — this file
                     // measures layout, not the `.configured` row's click,
                     // which `InstalledAppsSectionTests` already pins.
@@ -826,7 +827,7 @@ final class DeviceDetailLayoutTests: XCTestCase {
     ///
     /// **What the banner receives is not what this fixture says**, which is worth
     /// stating because the fixture is written to look pathological. `ErrorBanner`
-    /// normalises through `displayed()` before anything is laid out: each
+    /// normalizes through `displayed()` before anything is laid out: each
     /// space-separated token longer than `tokenLimit` (60) is elided from the
     /// middle to 59 characters, and the whole message is then capped at
     /// `messageLimit` (420). Measured on this exact string: **221 characters in,
@@ -992,7 +993,7 @@ final class DeviceDetailLayoutTests: XCTestCase {
     ///
     /// The message shape carries the same caveat the Refresh banner's case
     /// spells out, and the numbers for this fixture are its own:
-    /// `ErrorBanner.displayed()` normalises it from **153 characters to 114 and
+    /// `ErrorBanner.displayed()` normalizes it from **153 characters to 114 and
     /// its longest token from 98 to 59** before any of it is laid out, so the
     /// sqlite path the fixture is built around never reaches the view at length.
     /// It is not an unbreakable run to begin with — CoreText breaks it after

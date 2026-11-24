@@ -84,9 +84,12 @@ final class DeviceAppsStore {
     var lastError: String?
 
     let runner: CLIRunner
+    /// Held while a dump runs (`runDecrypt`); a test passes its own.
+    private let hold: TerminationHold
 
-    init(runner: CLIRunner) {
+    init(runner: CLIRunner, hold: TerminationHold = .shared) {
         self.runner = runner
+        self.hold = hold
     }
 
     /// Apps worth decrypting on `udid`: the FairPlay-encrypted ones, by name.
@@ -334,7 +337,7 @@ final class DeviceAppsStore {
     /// nothing. See `DeviceDetailLayoutTests`.
     func checkReadiness(udid: String, argsOverride: [String]? = nil) async {
         // Deliberately not guarded on `isChecking`. `.task(id:)` re-fires when
-        // the device picker changes, and the cancelled probe has not run its
+        // the device picker changes, and the canceled probe has not run its
         // `defer` yet — so a guard dropped the *new* request while the old one
         // resolved to nil, leaving the card blank with the button disabled and
         // no stated reason.
@@ -413,7 +416,15 @@ final class DeviceAppsStore {
     /// The dump both entry points share: run the CLI, take the `decrypt-end`
     /// record it emits after its own cryptid-0 check, and remember it. The two
     /// differ only in which app they target and how they show progress.
+    ///
+    /// Sudden and automatic termination are held off from start to end,
+    /// however it ends (the try14 delta audit, D14-APP-2): a dump takes
+    /// minutes and stages an IPA, closing the window doesn't stop it, and a
+    /// Graft that macOS ended halfway would orphan the CLI mid-dump
+    /// (`TerminationHold`).
     private func runDecrypt(_ args: [String], failing: String) async -> DecryptEndRecord? {
+        hold.begin(TerminationHold.decrypting)
+        defer { hold.end(TerminationHold.decrypting) }
         // Fresh slate: exactly one of lastDecrypt/lastError is set by the end of
         // this call, so the card can never show a prior run's success line
         // beside this run's error banner (or the reverse).

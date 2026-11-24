@@ -33,7 +33,7 @@ final class DeviceSilhouetteTests: XCTestCase {
     func test_future_model_parses_to_the_newest_face_not_generic() {
         // The pattern parses even though nothing has assigned this
         // identifier yet — a future phone should read as "the newest thing
-        // we know how to draw," not as unrecognised.
+        // we know how to draw," not as unrecognized.
         XCTAssertEqual(DeviceSilhouette.Face(productType: "iPhone999,1"), .dynamicIsland)
     }
 

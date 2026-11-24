@@ -172,3 +172,16 @@ def test_the_upgrade_writes_the_section_it_is_given(tmp_path: Path) -> None:
     assert cfg.team_id == "ABCDE12345"
     assert cfg.signing.cert == tmp_path / "c.p12"
     assert next(iter(yaml.safe_load(path.read_text()))) == "signing"
+
+
+def test_a_preview_of_the_upgrade_names_the_apps_it_would_pin_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.yaml"
+    write_default_config(path, free_account=True)
+    add_app(path, "plain", {"bundle_id": "com.example.plain"})
+    add_app(path, "pinned", {"bundle_id": "com.example.pinned", "delivery": "livecontainer"})
+    before = path.read_text()
+
+    assert add_signing_section(path, write=False, team_id="ABCDE12345") == ["plain"]
+    assert path.read_text() == before

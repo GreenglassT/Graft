@@ -29,13 +29,13 @@ final class TweaksStore: CLIStore {
     ///   perfectly successful load that leaves this array empty forever. Same
     ///   re-spawn, silently.
     ///
-    /// **A cancelled load is not an attempt**, the correction `DevicesStore`
+    /// **A canceled load is not an attempt**, the correction `DevicesStore`
     /// already carries. `AppDetailView`'s library load lives in a
     /// `.task(id: app.id)`, which is torn down the instant the user clicks
     /// another sidebar row; `CLIRunner` reports the SIGTERM'd child as an
     /// ordinary non-zero exit, so an interrupted load would otherwise latch this
     /// true and the pane would never try again. Only ever set true, never back
-    /// to false, so a cancelled *re*-load leaves the earlier attempt standing.
+    /// to false, so a canceled *re*-load leaves the earlier attempt standing.
     ///
     /// Deliberately not read by the three call sites that reload
     /// unconditionally — `ContentView` on entering the Tweaks section,

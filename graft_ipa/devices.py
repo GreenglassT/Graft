@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
-from .device_session import closing_best_effort
+from .device_session import PAIR_TIMEOUT_SECONDS, closing_best_effort
 
 
 @dataclass
@@ -143,7 +143,7 @@ async def _describe_device(mux_dev, udid: str) -> DeviceInfo:
     # for what a bare close cost here, which was the disappearing-phone defect
     # this file exists to end, reintroduced one line from the end of the
     # function that fixed it.
-    lockdown = await create_using_usbmux(serial=udid)
+    lockdown = await create_using_usbmux(serial=udid, pair_timeout=PAIR_TIMEOUT_SECONDS)
     async with closing_best_effort(lockdown):
         name = _safe_attr(lockdown, "display_name") or _safe_attr(lockdown, "device_name") or udid
         model = _safe_attr(lockdown, "product_type") or "unknown"

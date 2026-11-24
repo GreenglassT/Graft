@@ -25,7 +25,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 
 from . import artwork
-from .device_session import closing_best_effort
+from .device_session import PAIR_TIMEOUT_SECONDS, closing_best_effort
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ async def _list_installed_apps_async(udid: str | None) -> list[InstalledApp]:
         if udid is None:
             return []
 
-    lock = await create_using_usbmux(serial=udid)
+    lock = await create_using_usbmux(serial=udid, pair_timeout=PAIR_TIMEOUT_SECONDS)
     # What a bare close cost here specifically: `raw` is the phone's complete
     # answer by the time the teardown runs, and `list_installed_apps` is
     # documented to raise so that a connection failure doesn't read as an empty
@@ -164,7 +164,7 @@ def icons_for(
         else:
             wanted.append(bundle_id)
     if not wanted:
-        # Not merely an optimisation: with nothing to ask about there is no
+        # Not merely an optimization: with nothing to ask about there is no
         # reason to open a lockdown session, so a fully-cached listing costs
         # nothing on a phone that is asleep or off the network — and reports
         # every icon anyway.
@@ -263,7 +263,7 @@ async def _icons_from_device_async(
     from pymobiledevice3.lockdown import create_using_usbmux
     from pymobiledevice3.services.springboard import SpringBoardServicesService
 
-    lock = await create_using_usbmux(serial=udid)
+    lock = await create_using_usbmux(serial=udid, pair_timeout=PAIR_TIMEOUT_SECONDS)
     # What a bare close cost here specifically: 67 icons read over ~4s, the
     # phone drops off the network on `wait_closed()`, and `icons_for`'s broad
     # `except` returned `{}` — no `icon_path` reported for any app, and nothing
@@ -334,7 +334,7 @@ def _is_encrypted(meta: dict) -> bool:
     Only an App Store install is, and only that is signed by Apple's store
     identity. A developer- or enterprise-signed build (a sideload, an AltStore
     app, anything re-signed) is already decrypted, so dumping it is a no-op the
-    UI should grey out rather than offer.
+    UI should gray out rather than offer.
 
     `ApplicationDSID` — the account that bought it, present on store apps and
     absent on the sideload — corroborates, and covers a record where

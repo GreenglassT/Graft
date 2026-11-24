@@ -49,7 +49,7 @@ final class DeviceInfoStoreTests: XCTestCase {
         XCTAssertEqual(store.info["UDID-TWO"]?.batteryPercent, 15)
     }
 
-    /// The judgement call this whole task rests on: a `reachable: false`
+    /// The judgment call this whole task rests on: a `reachable: false`
     /// result arriving after a good reading must not blank the strip. If
     /// `load` overwrote unconditionally, `info["UDID"]?.batteryPercent` would
     /// read nil after the second call — this assertion fails exactly then.

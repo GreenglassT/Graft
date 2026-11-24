@@ -43,7 +43,16 @@ def test_configured_path_wins_over_everything(tmp_path: Path, home: Path, monkey
     on_path = _install_copy(FakeTools(tmp_path / "c"), tmp_path / "pathdir")
     monkeypatch.setenv("PATH", f"{on_path.parent}:/usr/bin:/bin")
 
-    assert ipatool.locate(configured) == configured
+    assert ipatool.locate(configured, explicit=True) == configured
+
+
+def test_a_path_the_user_chose_is_used_even_when_it_is_missing(
+    tmp_path: Path, home: Path
+) -> None:
+    """So the error names the place they chose, not a copy they never meant."""
+    chosen = tmp_path / "chosen" / "ipatool"
+    _install_copy(FakeTools(tmp_path / "b"), home / ".local" / "bin")
+    assert ipatool.locate(chosen, explicit=True) == chosen
 
 
 def test_default_location_is_next(tmp_path: Path, home: Path, monkeypatch) -> None:

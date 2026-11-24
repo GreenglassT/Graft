@@ -5,8 +5,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graft-ipa"
-version = "1.1.0"
-description = "IPA signer and tweak injector for paid Apple Developer accounts: inject tweaks, sign, and install or deliver to LiveContainer."
+version = "2.0.0"
+description = "Inject tweaks and install IPAs on iPhone and iPad: into LiveContainer with a free Apple ID, or signed with a paid Apple Developer account."
 readme = "README.md"
 requires-python = ">=3.11"
 # Graft's own code is MIT. It depends on pymobiledevice3, which is
@@ -47,19 +47,27 @@ dependencies = [
     # async only from 8.0.0; under 7.x the first `await` is a TypeError. And
     # before 9.36.2 `services.afc` (which installation_proxy and house_arrest
     # import) fails to import against construct-typing 0.8, which pip
-    # resolves on a fresh install. The test suite passes at 9.36.2.
-    "pymobiledevice3>=9.36.2",
-    # Used to detect whether an app is running on the device before an attach-
-    # based decrypt (frida-ios-dump backend). pymobiledevice3 lists installed
-    # apps; only frida reports live pids.
+    # resolves on a fresh install. 10.4.0 is the oldest release checked
+    # against what installs now use (AFC `fopen`/`fwrite`/`fread`/`listdir`/
+    # `rm_single`/`aclose`, `InstallationProxyService.send_package`,
+    # `create_using_usbmux(serial=)`) and against the test suite's no-phone
+    # guard, which needs `USBMUXD_SOCKET_ADDRESS` honoured at the socket
+    # layer. The test suite passes at 10.4.0 and 11.61.0. AFC `fseek` came
+    # after 10.4.0 (11.58.0 has it), so the LiveContainer tail read uses it
+    # only where it exists and otherwise reads forward
+    # (`lc_runner._read_end`); tests/test_dependency_caps.py fails on any AFC
+    # call 10.4.0 lacks.
     #
-    # Pinned to 16.x, and it must match the device's frida-server major: the
-    # wire protocol changed at 17.0, so a 17.x client cannot talk to a 16.x
-    # server (or vice-versa). frida-ios-dump's agent also relies on pre-17 APIs
-    # (the ObjC bridge, `Memory.read*` statics) that 17.0 removed. Run a 16.x
-    # frida-server on the device; a mismatched major makes the decrypt backend
-    # time out. 16.1.5 is the floor with rootless deb support.
-    "frida>=16.1.5,<17",
+    # Capped below the next major: it shipped four in 2026 (8.0 to 11.0), and
+    # a 12.0 that renamed `fopen`/`fwrite` or changed `send_package` would
+    # break every sideload and LiveContainer install on a fresh pipx install
+    # while this suite, which fakes pymobiledevice3, stayed green. Raise the
+    # cap after running the suite against the new major.
+    "pymobiledevice3>=10.4.0,<12",
+    # No frida: Graft's few frida questions (is the app running, what's on
+    # screen, launch it) are asked of frida-ios-dump's own virtualenv, which
+    # has frida 16 for its dump.py (graft_ipa/frida_probe.py). Graft.app would
+    # otherwise ship frida's native module, which statically links LGPL code.
     # SSH, for the decrypt path. frida-ios-dump pulls the app bundle over it and
     # bagbak 4.x does too, but both reach it through their own interpreters — so
     # without this the CLI could *use* SSH and not *check* it, and the readiness
@@ -72,6 +80,8 @@ dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
     "ruff>=0.4",
+    # scripts/lock-bundle: pip-compile writes bundle/requirements.lock.
+    "pip-tools>=7.4",
 ]
 
 [project.scripts]

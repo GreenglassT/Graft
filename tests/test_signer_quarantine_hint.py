@@ -16,19 +16,22 @@ from unittest.mock import patch
 
 import pytest
 
-from graft_ipa import signer
+from graft_ipa import signer, tools
 from graft_ipa.errors import SigningError
 from graft_ipa.signer import run_zsign
 from tests.test_signer import make_cfg
+from tests.tool_fakes import fake_path
 
-ZSIGN = "/opt/fake/bin/zsign"
+#: Relative to each test's tmp_path: where `tools.which` finds zsign.
+ZSIGN_IN = Path("path-bin") / "zsign"
 
 
 def _run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int, stderr: str,
          *, quarantined: bool = False) -> SigningError:
     cfg = make_cfg(tmp_path, password="pw")
     monkeypatch.setenv("TEST_P12_PASS", "pw")
-    monkeypatch.setattr(signer, "child_which", lambda name: ZSIGN)
+    monkeypatch.setattr(tools, "which", fake_path(tmp_path / ZSIGN_IN.parent))
+    zsign = str(tmp_path / ZSIGN_IN)
     asked: list[str] = []
     monkeypatch.setattr(signer, "_quarantined",
                         lambda path: asked.append(path) or quarantined)
@@ -36,7 +39,7 @@ def _run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, returncode: int, stder
     with patch("subprocess.run", return_value=fake), pytest.raises(SigningError) as exc:
         run_zsign(cfg, tmp_path / "in.ipa", tmp_path / "out.ipa")
     if quarantined:
-        assert asked == [ZSIGN]
+        assert asked == [zsign]
     return exc.value
 
 
@@ -45,7 +48,7 @@ def test_a_quarantined_zsign_killed_with_no_output_gets_the_hint(
 ) -> None:
     """The OS kills a quarantined zsign: returncode -9 and no text at all."""
     err = _run(tmp_path, monkeypatch, -9, "", quarantined=True)
-    assert f"xattr -d com.apple.quarantine {ZSIGN}" in (err.hint or "")
+    assert f"xattr -d com.apple.quarantine {tmp_path / ZSIGN_IN}" in (err.hint or "")
 
 
 def test_a_sigkill_without_quarantine_does_not_blame_it(
@@ -67,7 +70,7 @@ def test_a_code_signature_complaint_on_a_quarantined_zsign_gets_the_hint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     err = _run(tmp_path, monkeypatch, 1, "Killed: 9", quarantined=True)
-    assert f"xattr -d com.apple.quarantine {ZSIGN}" in (err.hint or "")
+    assert f"xattr -d com.apple.quarantine {tmp_path / ZSIGN_IN}" in (err.hint or "")
 
 
 def test_an_ordinary_failure_does_not_get_the_quarantine_hint(

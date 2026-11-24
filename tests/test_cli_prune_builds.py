@@ -10,8 +10,10 @@ nothing here may reach `~/.Trash`.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import sqlite3
+import time
 from io import StringIO
 from pathlib import Path
 
@@ -244,10 +246,13 @@ def test_pruned_event_names_the_build_rows_it_cleared(
 
     log = BuildLog(cfg.state_dir / "log.sqlite")
     doomed = _archive(cfg, "bravo_1.0_20260601T000000.ipa")
-    _archive(cfg, "bravo_1.0_20260601T010000.ipa")
-    build_id = log.record(
-        app="bravo", bundle_id="com.bravo.app", version="1.0", tweaks=[],
-        ipa_path=doomed, signing_team=None, udid=None, success=True,
+    newer = _archive(cfg, "bravo_1.0_20260601T010000.ipa")
+    build_id, _ = (
+        log.record(
+            app="bravo", bundle_id="com.bravo.app", version="1.0", tweaks=[],
+            ipa_path=path, signing_team=None, udid=None, success=True,
+        )
+        for path in (doomed, newer)
     )
 
     buf = StringIO()
@@ -511,3 +516,287 @@ def test_a_failure_is_described_on_the_json_stream_not_just_counted(
     assert "Permission denied" in logs[0]["line"]
     summary = next(e for e in events if e["type"] == "prune-end")
     assert summary["failed"] == 1 and summary["removed"] == 0
+
+
+# --- a build in another process ---------------------------------------------
+#
+# A build archives its IPA and only then pushes or installs it, which can take
+# minutes, and `--reinstall-build` re-ships an archive of any age. Both share
+# `retention.lock` while that archive is in flight, and every sweep holds it
+# alone: so at `archive_keep: 0` an on-demand sweep (the app's "Clean up old
+# builds…", or a Terminal) can no longer move an archive mid-delivery to the
+# Trash. It waits, then refuses. These hold the lock from a real second
+# process (`tests/retention_procs.py`).
+
+
+def test_a_sweep_cannot_trash_an_archive_while_another_process_shares_the_lock(
+    cfg: Config, trash: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.errors import GraftError
+
+    from .retention_procs import held_by_another_process
+
+    delivering = _archive(cfg, "bravo_1.0_20260601T000000.ipa")
+    monkeypatch.setattr(cli_mod, "_RETENTION_LOCK_TIMEOUT", 0.3)
+
+    with held_by_another_process(cfg, "sh", home=tmp_path):
+        with pytest.raises(GraftError, match="a build is delivering"):
+            cli_mod._do_prune_builds(cfg, keep=0, trash_dir=trash)
+        assert delivering.exists(), "the sweep trashed an archive a build was delivering"
+        assert not trash.exists() or list(trash.iterdir()) == []
+
+    # The build is done with it: the same sweep now takes it.
+    cli_mod._do_prune_builds(cfg, keep=0, trash_dir=trash)
+    assert _remaining(cfg) == []
+
+
+def test_prune_builds_gives_up_cleanly_after_its_wait(
+    temp_config_env: Path, cfg: Config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It waits a while for the build to finish, then says why it won't, with a
+    non-zero exit and nothing moved — no traceback, no half-done sweep."""
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+
+    from .retention_procs import held_by_another_process
+
+    # Nothing may reach the real ~/.Trash, even if the lock fails to hold.
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(cli_mod, "_RETENTION_LOCK_TIMEOUT", 0.6)
+    delivering = _archive(cfg, "bravo_1.0_20260601T000000.ipa")
+
+    with held_by_another_process(cfg, "sh", home=tmp_path):
+        started = time.monotonic()
+        result = CliRunner().invoke(cli_mod.app, ["--json", "--prune-builds", "--keep", "0"])
+        took = time.monotonic() - started
+
+    assert result.exit_code == 1, result.output
+    said = " ".join(result.stderr.split())
+    assert "a build is delivering an archived IPA, or another clean-up of old builds is running" in said, said
+    assert "try again when it has finished" in said, said
+    assert "Traceback" not in result.output
+    assert not [line for line in result.stdout.splitlines() if '"prune-end"' in line]
+    assert delivering.exists()
+    assert 0.6 <= took < 10, f"gave up after {took:.2f}s, not after its wait"
+
+
+def test_an_archive_no_one_holds_is_pruned_however_new(cfg: Config, trash: Path) -> None:
+    """No more "written in the last ten minutes" guess: the lock says whether
+    a build still has it, so a fresh archive nobody holds is like any other,
+    and `prune-end` no longer reports a `recent` count."""
+    from graft_ipa import cli as cli_mod
+
+    _archive(cfg, "bravo_1.0_20260601T000000.ipa")
+    _archive(cfg, "bravo_1.0_20260601T010000.ipa")
+
+    buf = StringIO()
+    cli_mod._do_prune_builds(cfg, keep=0, emitter=JsonEmitter(stream=buf), trash_dir=trash)
+
+    assert _remaining(cfg) == []
+    summary = next(e for e in _events(buf) if e["type"] == "prune-end")
+    assert summary["removed"] == 2
+    assert "recent" not in summary
+
+
+def test_the_sweep_after_a_build_still_keeps_only_what_it_was_told(
+    cfg: Config, trash: Path
+) -> None:
+    """A build's own sweep excludes its own archive by path, and
+    `archive_keep: 0` still means "keep nothing but the build just made"."""
+    from graft_ipa import cli as cli_mod
+
+    older = _archive(cfg, "bravo_1.0_20260601T000000.ipa")
+    mine = _archive(cfg, "bravo_1.0_20260601T010000.ipa")
+
+    cli_mod._prune_archives(cfg, keep=0, dry_run=False, exclude=[mine], trash_dir=trash)
+
+    assert _remaining(cfg) == [mine.name]
+    assert [p.name for p in trash.iterdir()] == [older.name]
+
+
+def test_a_second_sweep_waits_for_the_first(
+    cfg: Config, trash: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two sweeps at once planned the same removals; the second then failed on
+    every file the first had already moved, and exited 1 saying archives
+    "could not be moved". They now take turns on one lock."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.errors import GraftError
+
+    _archive(cfg, "bravo_1.0_20260601T000000.ipa")
+    monkeypatch.setattr(cli_mod, "_RETENTION_LOCK_TIMEOUT", 0.2)
+
+    lock = cfg.cache_dir / ".locks" / "retention.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with lock.open("w") as other_sweep:
+        fcntl.flock(other_sweep, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(GraftError, match="another clean-up of old builds is running"):
+            cli_mod._do_prune_builds(cfg, keep=0, trash_dir=trash)
+        assert len(_remaining(cfg)) == 1, "it moved files while another sweep held the lock"
+
+    # Released: the same sweep now runs.
+    cli_mod._do_prune_builds(cfg, keep=0, trash_dir=trash)
+    assert _remaining(cfg) == []
+
+
+def _built(log: BuildLog, path: Path, *, delivered: bool) -> int:
+    """A history row as the build envelope writes it: a build whose push or
+    install failed after archiving has no ipa_path (`_record_history`)."""
+    return log.record(
+        app="example", bundle_id="com.example.app", version="1.0", tweaks=[],
+        ipa_path=path if delivered else None, signing_team=None, udid=None,
+        success=delivered, error=None if delivered else "no iOS devices connected",
+    )
+
+
+def test_archives_from_failed_deliveries_never_outrank_the_re_installable_one(
+    cfg: Config, trash: Path
+) -> None:
+    """Finding #1: one build that shipped, then two whose phone wasn't
+    plugged in. The two later ones archived before they failed, so their
+    files are newest — and ranking on the filename alone kept those two and
+    trashed the only archive with a Re-install button, clearing its row for
+    good. The re-installable archive takes a slot first; the default keep's
+    second goes to the newest of the others (re-check #15), never ahead of it."""
+    from graft_ipa import cli as cli_mod
+
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    good = _archive(cfg, "example_1.0_20261119T100000.ipa")
+    good_id = _built(log, good, delivered=True)
+    for stamp in ("20261119T110000", "20261119T120000"):
+        _built(log, _archive(cfg, f"example_1.0_{stamp}.ipa"), delivered=False)
+    assert cfg.archive_keep == 2
+
+    cli_mod._do_prune_builds(cfg, trash_dir=trash)
+
+    assert _remaining(cfg) == [good.name, "example_1.0_20261119T120000.ipa"]
+    with sqlite3.connect(cfg.state_dir / "log.sqlite") as conn:
+        (kept,) = conn.execute("SELECT ipa_path FROM builds WHERE id = ?", (good_id,)).fetchone()
+    assert kept == str(good), "the re-installable build lost its Re-install pointer"
+
+    cli_mod._do_prune_builds(cfg, keep=1, trash_dir=trash)
+
+    assert _remaining(cfg) == [good.name], "at keep 1 a failed delivery took the only slot"
+
+
+def test_a_failed_delivery_never_displaces_a_re_installable_archive(
+    cfg: Config, trash: Path
+) -> None:
+    """keep: 2 with two re-installable builds and a newer orphan: both
+    re-installable archives keep their slots, and the orphan, which holds
+    none, goes."""
+    from graft_ipa import cli as cli_mod
+
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    older = _archive(cfg, "example_1.0_20261119T090000.ipa")
+    newer = _archive(cfg, "example_1.0_20261119T100000.ipa")
+    for path in (older, newer):
+        _built(log, path, delivered=True)
+    orphan = _archive(cfg, "example_1.0_20261119T110000.ipa")
+    _built(log, orphan, delivered=False)
+
+    cli_mod._do_prune_builds(cfg, keep=2, trash_dir=trash)
+
+    assert _remaining(cfg) == [older.name, newer.name]
+    assert [p.name for p in trash.iterdir()] == [orphan.name]
+
+
+def test_a_build_s_own_sweep_still_spares_its_archive_before_its_row_counts(
+    cfg: Config, trash: Path
+) -> None:
+    """`exclude` vetoes removal whatever the history says, so a build's own
+    archive survives its sweep even at keep: 0."""
+    from graft_ipa import cli as cli_mod
+
+    BuildLog(cfg.state_dir / "log.sqlite")
+    mine = _archive(cfg, "example_1.0_20261119T120000.ipa")
+
+    cli_mod._prune_archives(cfg, keep=0, dry_run=False, exclude=[mine], trash_dir=trash)
+
+    assert _remaining(cfg) == [mine.name]
+
+
+def test_a_failed_move_gives_the_row_its_archive_back(
+    cfg: Config, trash: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #5: the row was cleared before the move and left cleared when
+    the move failed, so an archive still on disk lost its Re-install button."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.errors import GraftError
+
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    paths = [_archive(cfg, f"bravo_1.0_{s}.ipa") for s in ("20260601T000000", "20260601T010000")]
+    ids = [
+        log.record(app="bravo", bundle_id="com.bravo.app", version="1.0", tweaks=[],
+                   ipa_path=p, signing_team=None, udid=None, success=True)
+        for p in paths
+    ]
+
+    def _broken(path: Path, *, trash_dir: Path | None = None) -> Path:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(cli_mod, "move_to_trash", _broken)
+
+    with pytest.raises(GraftError, match="could not be moved"):
+        cli_mod._do_prune_builds(cfg, keep=1, trash_dir=trash)
+
+    with sqlite3.connect(cfg.state_dir / "log.sqlite") as conn:
+        rows = dict(conn.execute("SELECT id, ipa_path FROM builds").fetchall())
+    assert rows == {ids[0]: str(paths[0]), ids[1]: str(paths[1])}
+
+
+def test_a_history_naming_none_of_the_archives_keeps_the_newest_n(
+    cfg: Config, trash: Path
+) -> None:
+    """Re-check #15, the reviewer's case: a state directory reset, then one
+    build that failed pre-flight, which leaves a log.sqlite with a single
+    row naming no archive. `--keep 10` then trashed all six archives, while
+    with no log.sqlite it said "nothing to prune"."""
+    from graft_ipa import cli as cli_mod
+
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    _built(log, cfg.built_dir / "never-archived.ipa", delivered=False)
+    names = [
+        _archive(cfg, f"{app}_1.0_{stamp}.ipa").name
+        for app in ("example", "other")
+        for stamp in ("20261119T100001", "20261119T100002", "20261119T100003")
+    ]
+
+    cli_mod._do_prune_builds(cfg, keep=10, trash_dir=trash)
+
+    assert _remaining(cfg) == sorted(names)
+
+
+# --- re-check #28: a history it can't read refuses the clean-up ----------------
+
+
+def test_a_history_that_cannot_be_read_moves_nothing(
+    cfg: Config, trash: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Planning without it is #1's loss: a failed delivery's archive outranks
+    the re-installable one, which is trashed and its row cleared."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.errors import GraftError
+
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    good = _archive(cfg, "example_1.0_20261119T100000.ipa")
+    good_id = _built(log, good, delivered=True)
+    for stamp in ("20261119T110000", "20261119T120000"):
+        _built(log, _archive(cfg, f"example_1.0_{stamp}.ipa"), delivered=False)
+    before = _remaining(cfg)
+
+    def busy(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(BuildLog, "reinstallable_paths", busy)
+
+    with pytest.raises(GraftError, match="couldn't read the build history") as raised:
+        cli_mod._do_prune_builds(cfg, keep=1, trash_dir=trash)
+
+    assert "nothing was moved" in raised.value.hint
+    assert _remaining(cfg) == before
+    with sqlite3.connect(cfg.state_dir / "log.sqlite") as conn:
+        (kept,) = conn.execute("SELECT ipa_path FROM builds WHERE id = ?", (good_id,)).fetchone()
+    assert kept == str(good)

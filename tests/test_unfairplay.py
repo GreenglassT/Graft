@@ -98,6 +98,30 @@ def test_a_failed_decrypt_carries_the_tools_own_words(fakes: FakeTools, tmp_path
     )
 
 
+def test_a_failed_decrypt_says_to_use_the_same_apple_id_or_set_up_again_in_graft(
+    fakes: FakeTools, tmp_path: Path
+) -> None:
+    """The critic: the model works only for the Apple ID the Mac App Store
+    app was installed with, and the old hint sent Graft.app users to
+    `unfairplay doctor` in Terminal, with no way to set up again in the app."""
+    fakes.set(decrypt_error="no enrollment model matches this IPA's SINF")
+    with pytest.raises(AppStoreError) as e:
+        _decrypt(fakes, tmp_path)
+    hint = e.value.hint
+    assert "use the same Apple ID in Graft as in the Mac App Store" in hint
+    # Only an enrolled Mac decrypts, and its button reads "Set Up Again…"
+    # (the fix re-check's problem 9), never "Set Up Decryption…".
+    assert "in Graft.app, Settings › App Store › Set Up Again…" in hint
+    assert "Set Up Decryption…" not in hint
+    assert "installed from the Mac App Store under the same Apple ID that Graft signs in with" in hint
+    assert (
+        'in Terminal, `graft --appstore-enroll-command --app "/Applications/<an iPhone/iPad app '
+        'from the Mac App Store, opened once>.app"`' in hint
+    )
+    assert "`unfairplay doctor` in Terminal can say more" in hint
+    assert "sudo " + str(fakes.unfairplay) not in hint
+
+
 def test_the_report_it_leaves_beside_the_input_is_removed(
     fakes: FakeTools, tmp_path: Path
 ) -> None:
@@ -145,3 +169,59 @@ def test_a_missing_binary_is_an_install_hint(tmp_path: Path) -> None:
         )
 
     assert e.value.message == f"UnfairPlay not found at {tmp_path / 'nope'}"
+
+
+def test_a_model_owned_by_this_user_and_readable_is_enrolled(tmp_path: Path) -> None:
+    (tmp_path / "m.bin").write_bytes(b"model")
+    assert unfairplay.model_state(tmp_path) == unfairplay.ModelState(enrolled=True)
+
+
+def test_no_folder_or_no_model_is_simply_not_enrolled(tmp_path: Path) -> None:
+    assert unfairplay.model_state(tmp_path / "missing") == unfairplay.ModelState(enrolled=False)
+    assert unfairplay.model_state(tmp_path) == unfairplay.ModelState(enrolled=False)
+
+
+def test_a_model_someone_else_owns_is_not_enrolled_and_says_why(tmp_path: Path) -> None:
+    """What `unfairplay setup` leaves when run as root without the chown (S2.1)."""
+    import os
+
+    (tmp_path / "m.bin").write_bytes(b"model")
+    state = unfairplay.model_state(tmp_path, uid=os.getuid() + 1)
+    assert state.enrolled is False
+    assert "set up decryption again" in state.problem
+
+
+def test_a_model_file_someone_else_owns_in_your_folder_is_not_enrolled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The folder is yours, the model inside isn't: still not usable."""
+    import os
+
+    model = tmp_path / "m.bin"
+    model.write_bytes(b"model")
+    real_stat = Path.stat
+
+    def stat(self: Path, *a, **kw):
+        st = real_stat(self, *a, **kw)
+        if self == model:
+            return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                                   os.getuid() + 1, st.st_gid, st.st_size,
+                                   int(st.st_atime), int(st.st_mtime), int(st.st_ctime)))
+        return st
+
+    monkeypatch.setattr(Path, "stat", stat)
+    state = unfairplay.model_state(tmp_path)
+    assert state.enrolled is False
+    assert "the model in" in state.problem
+
+
+def test_an_unreadable_model_is_not_enrolled(tmp_path: Path) -> None:
+    model = tmp_path / "m.bin"
+    model.write_bytes(b"model")
+    model.chmod(0)
+    try:
+        state = unfairplay.model_state(tmp_path)
+    finally:
+        model.chmod(0o600)
+    assert state.enrolled is False
+    assert "can't read" in state.problem

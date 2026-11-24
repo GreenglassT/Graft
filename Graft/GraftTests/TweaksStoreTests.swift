@@ -245,7 +245,7 @@ extension TweaksStoreTests {
         XCTAssertTrue(sut.hasLoaded, "an empty library is an answer, not a missing one")
     }
 
-    /// **A cancelled load is not an attempt.** The pane's load lives in a
+    /// **A canceled load is not an attempt.** The pane's load lives in a
     /// `.task(id: app.id)`, torn down the instant another sidebar row is
     /// clicked, and `CLIRunner` reports the SIGTERM'd child as an ordinary
     /// non-zero exit — indistinguishable from the failure above. Latching the

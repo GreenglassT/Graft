@@ -5,7 +5,7 @@ import SwiftUI
 /// Rebuilds the installed app when its source has changed, before the app is
 /// used.
 ///
-/// The behaviour `scripts/tb-launcher` used to provide, moved inside the real
+/// The behavior `scripts/tb-launcher` used to provide, moved inside the real
 /// binary. The shell version could rebuild *before* the process started, which
 /// was tidier — but it could only do that by being the bundle's declared
 /// executable and exec'ing the Swift binary under another name, which cost the
@@ -46,22 +46,27 @@ final class RebuildCoordinator {
     /// arrange the relaunch, in which case it must *not* have quit.
     var relaunch: () -> Bool
 
+    /// No defaults: the real installer and relaunch (`installFromRepo`,
+    /// `quitAndReopen`) are named in `GraftApp` only (`NoRealDefaultsTests`).
     init(
-        runInstaller: (() async -> String?)? = nil,
-        relaunch: (() -> Bool)? = nil
+        runInstaller: @escaping () async -> String?,
+        relaunch: @escaping () -> Bool
     ) {
-        self.runInstaller = runInstaller ?? RebuildCoordinator.installFromRepo
-        self.relaunch = relaunch ?? RebuildCoordinator.quitAndReopen
+        self.runInstaller = runInstaller
+        self.relaunch = relaunch
     }
 
     /// Decide, at launch, whether to rebuild. Everything here is cheap enough
     /// to run before the first frame: an Info.plist read, a marker stat, and a
     /// directory walk that stops at the first newer file.
+    ///
+    /// No defaults: the real ones read and write the marker under the user's
+    /// Caches folder, and `GraftApp` names them (`NoRealDefaultsTests`).
     func startIfStale(
-        isStale: () -> Bool = { SourceWatch.staleSource() != nil },
-        recentlyAttempted: () -> Bool = { SourceWatch.recentlyAttempted() },
-        recordAttempt: () -> Void = { SourceWatch.recordAttempt() },
-        clearAttempt: @escaping () -> Void = { SourceWatch.clearAttempt() }
+        isStale: () -> Bool,
+        recentlyAttempted: () -> Bool,
+        recordAttempt: () -> Void,
+        clearAttempt: @escaping () -> Void
     ) {
         guard !hasChecked else { return }
         hasChecked = true
@@ -87,7 +92,7 @@ final class RebuildCoordinator {
             phase = .failed(log: """
                 The rebuild has been running for \(Int(Self.installTimeout / 60)) minutes \
                 and has not finished. It is most likely waiting on something invisible — \
-                an Xcode licence prompt, or a keychain dialog this window is covering.
+                an Xcode license prompt, or a keychain dialog this window is covering.
 
                 Run scripts/graft-install from a terminal to see what it is asking for.
                 """)
@@ -163,7 +168,8 @@ final class RebuildCoordinator {
         }
     }
 
-    private static func installFromRepo() async -> String? {
+    /// The real installer. Named only by `GraftApp`, the composition point.
+    static func installFromRepo() async -> String? {
         guard let repoRoot = SourceWatch.repoRoot else { return "no repo path in Info.plist" }
         let script = repoRoot.appending(path: "scripts/graft-install")
 
@@ -210,7 +216,8 @@ final class RebuildCoordinator {
     /// The helper is a detached `/bin/sh`, so it outlives the app that spawned
     /// it — which is the entire trick, since nothing inside this process can
     /// run after this process ends.
-    private static func quitAndReopen() -> Bool {
+    /// The real relaunch. Named only by `GraftApp`, the composition point.
+    static func quitAndReopen() -> Bool {
         // This process's pid, not `pgrep -x Graft`. A debug build running
         // from Xcode carries the same process name and the same bundle id, so
         // matching by name waited on *that* one, burned the whole timeout, and

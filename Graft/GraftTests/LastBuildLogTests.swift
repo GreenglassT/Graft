@@ -62,14 +62,15 @@ final class LastBuildLogTests: XCTestCase {
 
         let appLine = #"{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":[],"display_name":"Example+","delivery":"livecontainer","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}"#
         let sh = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
-        let config = ConfigStore(runner: sh, cliArgs: ["-c", "printf '%s\\n' '\(appLine)'"])
+        let config = ConfigStore(runner: sh, cliArgs: ["-c", "printf '%s\\n' '\(appLine)'"], notify: { _ in })
         let apps = try await config.loadApps()
         let app = try XCTUnwrap(apps.first)
         let pane = AppDetailView(
             app: app, runner: runner, store: config, artwork: ArtworkStore(runner: sh),
             devices: DevicesStore(runner: sh), tweaksStore: TweaksStore(runner: sh),
-            staged: StagedIPAStore(runner: sh), appStore: AppStoreStore(runner: sh),
-            liveContainer: LiveContainerStore(runner: sh), showSettings: {}
+            staged: StagedIPAStore(runner: sh), appStore: AppStoreStore(runner: sh, shell: NoAdminShell()),
+            liveContainer: LiveContainerStore(runner: sh),
+            settings: SettingsStore(runner: sh), showSettings: {}
         )
         let hosted = hosted(pane, size: NSSize(width: 900, height: 1200))
         // Awaited, not pumped: the pane's `.task` reads `--builds` and resumes
@@ -187,7 +188,7 @@ final class StoppedBuildPaneTests: XCTestCase {
 
         let appLine = #"{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":[],"display_name":"Example+","delivery":"livecontainer","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}"#
         let sh = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
-        let config = ConfigStore(runner: sh, cliArgs: ["-c", "printf '%s\\n' '\(appLine)'"])
+        let config = ConfigStore(runner: sh, cliArgs: ["-c", "printf '%s\\n' '\(appLine)'"], notify: { _ in })
         config.postNote = { _ in }
         let apps = try await config.loadApps()
         let app = try XCTUnwrap(apps.first)
@@ -195,7 +196,8 @@ final class StoppedBuildPaneTests: XCTestCase {
             app: app, runner: CLIRunner(executable: cli), store: config,
             artwork: ArtworkStore(runner: sh), devices: DevicesStore(runner: sh),
             tweaksStore: TweaksStore(runner: sh), staged: StagedIPAStore(runner: sh),
-            appStore: AppStoreStore(runner: sh), liveContainer: LiveContainerStore(runner: sh),
+            appStore: AppStoreStore(runner: sh, shell: NoAdminShell()), liveContainer: LiveContainerStore(runner: sh),
+            settings: SettingsStore(runner: sh),
             showSettings: {}
         )
         let box = hosted(view, size: NSSize(width: 1000, height: 1000))
@@ -234,7 +236,7 @@ final class StoppedBuildPaneTests: XCTestCase {
     }
 
     /// A real Stop cancels the build's Task, and the pane then re-read the
-    /// newest history row inside that cancelled Task: `runOnce` killed its own
+    /// newest history row inside that canceled Task: `runOnce` killed its own
     /// child at once, the read came back nil, and "Last build" went from
     /// "just now" to "—" over a history the stop had not touched. Seen on a
     /// real Stop from the app.
@@ -261,7 +263,7 @@ final class StoppedBuildPaneTests: XCTestCase {
 
         let appLine = #"{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":[],"display_name":"Example+","delivery":"livecontainer","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}"#
         let sh = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
-        let config = ConfigStore(runner: sh, cliArgs: ["-c", "printf '%s\\n' '\(appLine)'"])
+        let config = ConfigStore(runner: sh, cliArgs: ["-c", "printf '%s\\n' '\(appLine)'"], notify: { _ in })
         config.postNote = { _ in }
         let apps = try await config.loadApps()
         let app = try XCTUnwrap(apps.first)
@@ -269,7 +271,8 @@ final class StoppedBuildPaneTests: XCTestCase {
             app: app, runner: CLIRunner(executable: cli), store: config,
             artwork: ArtworkStore(runner: sh), devices: DevicesStore(runner: sh),
             tweaksStore: TweaksStore(runner: sh), staged: StagedIPAStore(runner: sh),
-            appStore: AppStoreStore(runner: sh), liveContainer: LiveContainerStore(runner: sh),
+            appStore: AppStoreStore(runner: sh, shell: NoAdminShell()), liveContainer: LiveContainerStore(runner: sh),
+            settings: SettingsStore(runner: sh),
             showSettings: {}
         )
         let probe = try await CLIRunner(executable: cli).runOnce(
@@ -361,7 +364,7 @@ final class StoppedBuildPaneTests: XCTestCase {
         let sh = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
         let sheet = ReinstallSheet(
             build: build, runner: CLIRunner(executable: cli),
-            config: ConfigStore(runner: sh, cliArgs: ["-c", "true"]),
+            config: ConfigStore(runner: sh, cliArgs: ["-c", "true"], notify: { _ in }),
             artwork: ArtworkStore(runner: sh), onClose: {}
         )
         let box = hosted(sheet, size: NSSize(width: 640, height: 460))

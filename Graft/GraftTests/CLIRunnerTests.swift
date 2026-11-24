@@ -166,6 +166,119 @@ final class CLIRunnerTests: XCTestCase {
         ))
     }
 
+    // MARK: - Release builds run their own CLI
+
+    func test_a_release_build_runs_the_bundled_cli_even_with_one_on_path() {
+        let bundle = URL(fileURLWithPath: "/Applications/Graft.app")
+        let url = GraftExecutable.resolve(
+            home: "/Users/x", path: "/Users/x/.local/bin:/usr/bin",
+            bundleURL: bundle, preferBundled: true,
+            isExecutable: { $0 == "/Applications/Graft.app/Contents/Helpers/graft" || $0 == "/Users/x/.local/bin/graft" }
+        )
+        XCTAssertEqual(url.path, "/Applications/Graft.app/Contents/Helpers/graft")
+    }
+
+    func test_a_release_build_with_no_bundled_cli_points_at_where_it_should_be() {
+        let bundle = URL(fileURLWithPath: "/Applications/Graft.app")
+        let url = GraftExecutable.resolve(
+            home: "/Users/x", path: "/Users/x/.local/bin", bundleURL: bundle, preferBundled: true,
+            isExecutable: { $0 == "/Users/x/.local/bin/graft" }
+        )
+        XCTAssertEqual(url.path, "/Applications/Graft.app/Contents/Helpers/graft",
+                       "never falls back to a PATH graft: the launch failure says the app is damaged")
+    }
+
+    func test_a_debug_build_keeps_the_path_lookup() {
+        let url = GraftExecutable.resolve(
+            home: "/Users/x", path: "/Users/x/.local/bin", bundleURL: URL(fileURLWithPath: "/tmp/Graft.app"),
+            preferBundled: false, isExecutable: { $0 == "/Users/x/.local/bin/graft" }
+        )
+        XCTAssertEqual(url.path, "/Users/x/.local/bin/graft")
+    }
+
+    /// The suite is a Debug build, and every test above that leaves
+    /// `preferBundled` out relies on it meaning the PATH lookup.
+    func test_the_suite_runs_with_the_path_lookup() {
+        XCTAssertFalse(GraftExecutable.preferBundledDefault)
+    }
+
+    /// The app's runner, with release behavior asked for: what it launches
+    /// is the bundled launcher, not the `graft` the login shell's PATH has.
+    ///
+    /// The stand-in bundle is deliberately not named `.app`: macOS assesses
+    /// code run from inside an app bundle, and one with no seal can put up a
+    /// "damaged" dialog.
+    func test_the_apps_runner_in_a_release_build_launches_the_bundled_cli() async throws {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("graft-bundled-\(UUID().uuidString)")
+        let bundle = dir.appendingPathComponent("FakeBundle")
+        let helpers = bundle.appendingPathComponent("Contents/Helpers")
+        let onPath = dir.appendingPathComponent("bin")
+        try fm.createDirectory(at: helpers, withIntermediateDirectories: true)
+        try fm.createDirectory(at: onPath, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: dir) }
+        for (folder, word) in [(helpers, "bundled"), (onPath, "path")] {
+            let graft = folder.appendingPathComponent("graft")
+            try "#!/bin/sh\necho \(word)\n".write(to: graft, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: graft.path)
+        }
+        let shell = ShellEnvironment { ["PATH": onPath.path + ":/usr/bin:/bin"] }
+        let runner = CLIRunner.forApp(
+            shell: shell, process: [:], home: dir.appendingPathComponent("home").path,
+            bundleURL: bundle, preferBundled: true
+        )
+        let result = try await runner.runOnce(arguments: [])
+        XCTAssertEqual(result.stdout, "bundled\n")
+    }
+
+    /// A release build's launch failure, as every pane's banner shows it: the
+    /// app is damaged, and no pipx command is offered.
+    func test_a_missing_bundled_cli_says_the_app_is_damaged() async throws {
+        let text = try await bannerForMissingLauncher(info: true, helpers: true)
+        XCTAssertTrue(text.hasPrefix(SetupNeed.damagedAppMessage), text)
+        XCTAssertTrue(text.contains("/Contents/Helpers/graft would not start"), text)
+        XCTAssertFalse(text.contains("pipx"), text)
+    }
+
+    /// #16 and #17, in the banner: a plain Release build, which has no
+    /// `Contents/Helpers`, and an app moved while open, whose old path is
+    /// empty, each say so instead of "download Graft again".
+    func test_a_plain_build_and_a_moved_app_say_what_they_are_in_the_banner() async throws {
+        let plain = try await bannerForMissingLauncher(info: true, helpers: false)
+        XCTAssertTrue(plain.hasPrefix(BundledCLIFailure.builtWithoutCLIMessage), plain)
+        let moved = try await bannerForMissingLauncher(info: false, helpers: false)
+        XCTAssertTrue(moved.hasPrefix(BundledCLIFailure.movedMessage), moved)
+        for text in [plain, moved] {
+            XCTAssertFalse(text.contains("Download Graft again"), text)
+            XCTAssertFalse(text.contains("pipx"), text)
+        }
+    }
+
+    /// The banner for launching `<bundle>/Contents/Helpers/graft` where no
+    /// launcher is, in a bundle with or without its `Info.plist` and
+    /// `Helpers`. The bundle is not named `.app`, and nothing in it runs.
+    private func bannerForMissingLauncher(info: Bool, helpers: Bool) async throws -> String {
+        let fm = FileManager.default
+        let bundle = fm.temporaryDirectory.appendingPathComponent("graft-missing-\(UUID().uuidString)/FakeBundle")
+        addTeardownBlock { try? fm.removeItem(at: bundle.deletingLastPathComponent()) }
+        let contents = bundle.appendingPathComponent("Contents")
+        if info {
+            try fm.createDirectory(at: contents, withIntermediateDirectories: true)
+            try Data("<plist/>".utf8).write(to: contents.appendingPathComponent("Info.plist"))
+        }
+        if helpers {
+            try fm.createDirectory(at: contents.appendingPathComponent("Helpers"), withIntermediateDirectories: true)
+        }
+        let runner = CLIRunner(executable: contents.appendingPathComponent("Helpers/graft"))
+        do {
+            _ = try await runner.runOnce(arguments: ["--list", "--json"])
+            XCTFail("launching a missing executable must throw")
+            return ""
+        } catch {
+            return error.localizedDescription
+        }
+    }
+
     /// What a user who installed the app but not the CLI is shown: the banner
     /// text is `error.localizedDescription`, so the launch failure itself has
     /// to say what is missing and the command that installs it.
@@ -248,7 +361,7 @@ final class CLIRunnerTests: XCTestCase {
     func test_stream_drains_large_stdout_without_deadlock() async throws {
         // Build a script that emits 200 fat repo-package events (~600 bytes
         // each ≈ 120 KB total — well over the 64 KB stdout pipe buffer) and
-        // a terminator, then exits. Modelled on a real APT repo's
+        // a terminator, then exits. Modeled on a real APT repo's
         // listing.
         let pkgLine = #"{"type":"repo-package","package_id":"com.example.tweak.PADXX","name":"Tweak PADXX","version":"1.2.3","description":"some description here padded out to roughly match what an APT Packages stanza looks like in practice","author":"someone","section":"Tweaks","filename":"debs/com.example.tweak.PADXX_1.2.3_iphoneos-arm.deb","size_bytes":54321,"sha256":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","depiction":"https://example.com/depiction/PADXX","download_url":"https://repo.example.com/debs/com.example.tweak.PADXX_1.2.3_iphoneos-arm.deb"}"#
         var script = ""
@@ -334,7 +447,7 @@ final class CLIRunnerTests: XCTestCase {
     /// with the grace set to `0.0` (measured, 20 iterations, 0 failures),
     /// because a healthy run never reaches the wait at all. They therefore say
     /// nothing about the value, and cannot catch the regression that actually
-    /// costs something: a drainer that stops signalling on EOF makes *every*
+    /// costs something: a drainer that stops signaling on EOF makes *every*
     /// CLI call the app issues pay the full grace, silently, forever. A build
     /// that got half a second slower is not going to fail anyone's test.
     ///
@@ -357,7 +470,7 @@ final class CLIRunnerTests: XCTestCase {
         XCTAssertLessThan(
             elapsed, 0.25,
             "a healthy run took \(elapsed)s — it is now waiting out the drain grace "
-            + "instead of being signalled at EOF, which taxes every CLI call in the app"
+            + "instead of being signaled at EOF, which taxes every CLI call in the app"
         )
     }
 
@@ -420,7 +533,7 @@ final class CLIRunnerTests: XCTestCase {
         killer.waitUntilExit()
     }
 
-    // NOTE: deliberately does NOT `await task.value` after cancelling. Awaiting
+    // NOTE: deliberately does NOT `await task.value` after canceling. Awaiting
     // blocks until the child exits on its own, so the probe would run after the
     // sleep had already elapsed and would pass against the unfixed code — this
     // test did exactly that before being rewritten. Probe while the child would
@@ -440,7 +553,7 @@ final class CLIRunnerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 3_500_000_000)  // SIGTERM, then the 2s SIGKILL escalation
 
         XCTAssertFalse(processExists(marker),
-                       "cancelling the Task must terminate the subprocess, not orphan it")
+                       "canceling the Task must terminate the subprocess, not orphan it")
     }
 
     /// A Stop's SIGTERM is graft's cue to delete the build's work dir: a real
@@ -482,7 +595,7 @@ final class CLIRunnerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 3_500_000_000)
 
         XCTAssertFalse(processExists(marker),
-                       "a cancelled build must not keep signing and installing")
+                       "a canceled build must not keep signing and installing")
     }
 
     func test_cancelling_before_launch_does_not_spawn_anything() async throws {
@@ -497,7 +610,7 @@ final class CLIRunnerTests: XCTestCase {
         try await Task.sleep(nanoseconds: 1_500_000_000)
 
         XCTAssertFalse(processExists(marker),
-                       "a Task cancelled during setup must not leave a subprocess behind")
+                       "a Task canceled during setup must not leave a subprocess behind")
     }
 
     func test_uncancelled_run_still_completes_normally() async throws {
@@ -505,6 +618,33 @@ final class CLIRunnerTests: XCTestCase {
         let result = try await runner.runOnce(arguments: ["-c", "echo hello; exit 3"])
         XCTAssertEqual(result.exitCode, 3, "cancellation plumbing must not disturb normal exits")
         XCTAssertTrue(result.stdout.contains("hello"))
+    }
+
+    // MARK: - streamEvents' trailing closure
+
+    /// An unlabeled trailing closure is `onEvent`, with no `refusal:` given.
+    /// `refusal` was a defaulted closure parameter in front of it, which an
+    /// unlabeled trailing closure binds to under forward-scan matching
+    /// (SE-0286): this call compiled only through the deprecated backward
+    /// scan, with a warning, and a Swift 6 build reads the closure as the
+    /// refusal. The build log is where that shows; this pins that the call
+    /// does what it reads as.
+    @MainActor
+    func test_an_unlabeled_trailing_closure_is_on_event() async throws {
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        var seen: [BuildEvent] = []
+
+        let events = try await runner.streamEvents(
+            ["-c", #"printf '{"type":"log","source":"a","line":"hello"}\n'"#], failing: "Test"
+        ) { event in
+            seen.append(event)
+        }
+
+        // `onEvent` hops onto the MainActor and can land after the return.
+        let deadline = Date().addingTimeInterval(5)
+        while seen.isEmpty, Date() < deadline { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(events.count, 1)
+        XCTAssertEqual(seen.count, 1)
     }
 
     // MARK: - Reading a failure off stderr
@@ -679,7 +819,7 @@ final class CLIRunnerTests: XCTestCase {
     /// the user name is padded to keep it there. Rich only folds a word longer
     /// than the line, so a path that fits in 80 wraps cleanly at the space
     /// before it and the real-Rich control below stops measuring anything:
-    /// shortening `tweak-build` to `graft` here did exactly that.
+    /// renaming the cache folder to the shorter `graft` did exactly that.
     private static let foldedPathStderr = [
         "error: nothing to re-install for build 41: ",
         "/Users/exampleuser/Library/Caches/graft/built/example_19.16.3_20260201T101500.ip",
@@ -844,9 +984,9 @@ final class CLIRunnerTests: XCTestCase {
         )
     }
 
-    // MARK: - coloured stderr
+    // MARK: - colored stderr
 
-    /// What Rich writes for `_fatal` once something forces colour: the exact
+    /// What Rich writes for `_fatal` once something forces color: the exact
     /// bytes a `FORCE_COLOR=1` run of `graft --json --list` produced
     /// against a missing config, path shortened.
     private static let colouredMissingConfig =
@@ -861,7 +1001,7 @@ final class CLIRunnerTests: XCTestCase {
     }
 
     /// Every surface reads stderr through `stderrLines`, so a traceback in
-    /// colour reaches a banner without an escape byte too.
+    /// color reaches a banner without an escape byte too.
     func test_no_escape_byte_survives_into_any_rendering() {
         let traceback = "Traceback (most recent call last):\n"
             + "  \u{1B}[2mFile \"x.py\"\u{1B}[0m\n\u{1B}[1;31mKeyError\u{1B}[0m: 'x'\n"
@@ -878,7 +1018,7 @@ final class CLIRunnerTests: XCTestCase {
         )
     }
 
-    /// The sequence shapes Rich and the tools it runs emit: SGR colour, a
+    /// The sequence shapes Rich and the tools it runs emit: SGR color, a
     /// cursor move, an OSC 8 hyperlink terminated either way, and a two-byte
     /// escape. Plain text, including non-ASCII, passes through untouched.
     func test_terminal_escapes_are_stripped_and_nothing_else() {
@@ -1102,7 +1242,7 @@ final class CLIRunnerTests: XCTestCase {
     /// cancels a scan running `exec sleep 30` and failed intermittently at
     /// **30.4s** — the full sleep, to the tenth of a second.
     ///
-    /// Racing it does not work. An earlier attempt cancelled the `Task`
+    /// Racing it does not work. An earlier attempt canceled the `Task`
     /// immediately and finished eight iterations in 0.001s, because that lands
     /// before the body starts, `adopt` refuses, and nothing is forked. So the
     /// runner takes a `willLaunch` seam and this blocks in it, which is the
@@ -1114,7 +1254,7 @@ final class CLIRunnerTests: XCTestCase {
             executable: URL(fileURLWithPath: "/bin/sh"),
             willLaunch: {
                 inWindow.signal()        // "the handle has adopted; run() is next"
-                mayProceed.wait()        // held open until the test has cancelled
+                mayProceed.wait()        // held open until the test has canceled
             }
         )
 
@@ -1153,7 +1293,7 @@ final class CLIRunnerTests: XCTestCase {
 /// through it.
 extension XCTestCase {
     /// The call's outcome, or nil if `seconds` elapsed first. The losing task
-    /// is cancelled so a child wedged on a full pipe gets SIGTERM'd instead of
+    /// is canceled so a child wedged on a full pipe gets SIGTERM'd instead of
     /// leaking into whatever test runs next.
     func finishing<T: Sendable>(
         within seconds: Double,

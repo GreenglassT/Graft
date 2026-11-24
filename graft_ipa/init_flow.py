@@ -28,11 +28,12 @@ from typing import Any
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
+from .account_setup import config_state, prepare_dirs
 from .config import (
     ACCOUNT_FREE,
+    ACCOUNT_PAID,
     FREE_SETUP_STEPS,
     TEAM_ID_PLACEHOLDER,
-    account_of,
     add_signing_section,
     default_cache_dir,
     default_config_path,
@@ -41,7 +42,7 @@ from .config import (
     write_default_config,
 )
 from .data_dirs import private_copy
-from .errors import ConfigError
+from .mobileprovision import is_team_id
 from .preflight import list_connected_devices, parse_mobileprovision
 
 
@@ -51,13 +52,9 @@ def run_init(console: Console | None = None, cfg_path: Path | None = None) -> Pa
     console.rule("[bold]graft setup[/bold]")
 
     cfg_path = cfg_path or default_config_path()
-    cfg_dir = cfg_path.parent
-    # 0700 when this makes it: it is about to hold the .p12 and the profile.
-    cfg_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cfg_dir = prepare_dirs(cfg_path)
     tweaks_dir = default_tweaks_dir()
-    tweaks_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = default_cache_dir()
-    cache_dir.mkdir(parents=True, exist_ok=True)
 
     console.print(f"config dir: [cyan]{cfg_dir}[/cyan]")
     console.print(f"cache dir:  [cyan]{cache_dir}[/cyan]")
@@ -99,23 +96,13 @@ def run_init(console: Console | None = None, cfg_path: Path | None = None) -> Pa
 def _is_free_config(cfg_path: Path) -> bool:
     """A config is there and it is a free Apple ID's. One that does not parse
     is neither: the fresh-start path asks before replacing it."""
-    if not cfg_path.exists():
-        return False
-    try:
-        return account_of(cfg_path) == ACCOUNT_FREE
-    except ConfigError:
-        return False
+    return config_state(cfg_path) == ACCOUNT_FREE
 
 
 def _is_paid_config(cfg_path: Path) -> bool:
     """A config is there and it is a paid account's; one that does not parse
     is neither, as for `_is_free_config`."""
-    if not cfg_path.exists():
-        return False
-    try:
-        return account_of(cfg_path) != ACCOUNT_FREE
-    except ConfigError:
-        return False
+    return config_state(cfg_path) == ACCOUNT_PAID
 
 
 def _switch_to_free(console: Console, cfg_path: Path) -> Path:
@@ -229,9 +216,18 @@ def _ask_signing(console: Console, cfg_dir: Path) -> dict[str, Any]:
         try:
             plist = parse_mobileprovision(profile_dest)
             team_ids = plist.get("TeamIdentifier") or []
-            if team_ids:
-                team_id = team_ids[0]
+            # Checked before it is stored: config.yaml's team becomes the
+            # Keychain account `--set-p12-password` writes through
+            # `security -i`, so a crafted one is never kept.
+            first = team_ids[0] if isinstance(team_ids, list) and team_ids else None
+            if isinstance(first, str) and is_team_id(first):
+                team_id = first
                 console.print(f"[green]✓[/green] team id from profile: [bold]{team_id}[/bold]")
+            elif team_ids:
+                console.print(
+                    "[yellow]![/yellow] the profile's team ID isn't a valid Apple team ID "
+                    "(10 capital letters and digits), so it was not used"
+                )
         except Exception as e:
             console.print(f"[yellow]![/yellow] could not parse profile: {e}")
     if team_id == TEAM_ID_PLACEHOLDER:

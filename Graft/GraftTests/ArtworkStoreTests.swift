@@ -217,7 +217,7 @@ final class ArtworkStoreImageAtPathTests: XCTestCase {
     /// the old picture for the rest of the session — the same staleness
     /// `ArtworkStore.load` avoids by not trusting `cached` on its own.
     ///
-    /// The two fixtures differ in *size* as well as colour, so the assertion
+    /// The two fixtures differ in *size* as well as color, so the assertion
     /// can name what came back rather than resting on object identity alone.
     func test_a_rewritten_file_is_read_again() throws {
         let pngURL = try makePNGFixture(fill: .systemBlue, side: 4)

@@ -1,6 +1,6 @@
 """GLOBAL ASSERTION 4 — the `stage` event's `name` is a vocabulary too.
 
-`EVENT_TYPES` and the partition around it prove the GUI recognises a `stage`
+`EVENT_TYPES` and the partition around it prove the GUI recognizes a `stage`
 *line*. They say nothing about the string inside it, and one of those strings is
 read for meaning rather than for display.
 

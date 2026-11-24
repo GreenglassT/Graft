@@ -3,7 +3,7 @@ import XCTest
 @testable import Graft
 
 /// What the Cache pane can say before anything is wired to a button: the one
-/// line a row summarises a file with, the mark on the file a build would
+/// line a row summarizes a file with, the mark on the file a build would
 /// actually reach for, and — separately from both — whether the pane has been
 /// told anything about the cache at all.
 ///
@@ -333,7 +333,7 @@ final class CachePaneTests: XCTestCase {
 
     // MARK: - The pane asks for the listing itself
 
-    /// Task 5's one piece of behaviour, as opposed to its declarations.
+    /// Task 5's one piece of behavior, as opposed to its declarations.
     ///
     /// A sidebar row and a `switch` arm are checked by the compiler and by a
     /// row count (`SidebarSectionRowTests`, `SidebarDeviceLayoutTests.
@@ -355,7 +355,7 @@ final class CachePaneTests: XCTestCase {
     /// this and wrote it down: `RunLoop.main.run(until:)` blocks the main actor,
     /// so a `.task` awaiting a subprocess makes no progress across it (twelve
     /// pumps totalling 600 ms got nowhere, one `Task.sleep` got there at once).
-    /// `settle` afterwards is for the render, which is a different problem.
+    /// `settle` afterward is for the render, which is a different problem.
     func test_the_pane_reads_the_cache_when_it_appears() async throws {
         let store = StagedIPAStore(runner: CLIRunner(executable: try stubCLI()))
         XCTAssertFalse(
@@ -406,7 +406,7 @@ final class CachePaneTests: XCTestCase {
     // where a click anywhere fires everything; the two that must *not* fire
     // are what says the click reached the control it was aimed at.
 
-    /// The centre of one of the row's three controls, counted from the
+    /// The center of one of the row's three controls, counted from the
     /// trailing edge — index 0 is the trailing-most.
     ///
     /// Derived from `CacheRow`'s own two geometry constants rather than a

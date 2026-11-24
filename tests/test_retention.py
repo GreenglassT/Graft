@@ -257,3 +257,73 @@ def test_bytes_removed_sums_only_the_doomed_files(tmp_path: Path) -> None:
 def test_a_negative_keep_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="keep must be >= 0"):
         plan_prune(tmp_path, keep=-1)
+
+
+def test_re_installable_archives_take_keep_slots_first(tmp_path: Path) -> None:
+    """Finding #1: an archive no successful row names (a failed delivery's)
+    cannot push out one that does, however new it is."""
+    good = _archive(tmp_path, "example_1.0_20261119T100000.ipa")
+    _archive(tmp_path, "example_1.0_20261119T110000.ipa")
+    _archive(tmp_path, "example_1.0_20261119T120000.ipa")
+
+    plan = plan_prune(tmp_path, keep=1, reinstallable=[good])
+
+    assert _names(plan.kept) == [good.name]
+    assert _names(plan.remove) == [
+        "example_1.0_20261119T110000.ipa",
+        "example_1.0_20261119T120000.ipa",
+    ]
+
+
+def test_a_slot_no_re_installable_archive_wants_goes_to_the_newest_other(tmp_path: Path) -> None:
+    """Re-check #15: an archive no row names got no slot at all, so at keep 2
+    the newer failed build went though a slot was free."""
+    good = _archive(tmp_path, "example_1.0_20261119T100000.ipa")
+    _archive(tmp_path, "example_1.0_20261119T110000.ipa")
+    _archive(tmp_path, "example_1.0_20261119T120000.ipa")
+
+    plan = plan_prune(tmp_path, keep=2, reinstallable=[good])
+
+    assert _names(plan.kept) == [good.name, "example_1.0_20261119T120000.ipa"]
+    assert _names(plan.remove) == ["example_1.0_20261119T110000.ipa"]
+
+
+def test_a_history_that_names_none_of_the_archives_still_keeps_n(tmp_path: Path) -> None:
+    """Re-check #15: a log.sqlite with no row naming these files (a reset
+    state directory, a history write that failed) trashed every one of them
+    at any keep, where no log.sqlite at all kept the newest N."""
+    for app in ("example", "other"):
+        for stamp in ("20261119T100000", "20261119T110000", "20261119T120000"):
+            _archive(tmp_path, f"{app}_1.0_{stamp}.ipa")
+
+    plan = plan_prune(tmp_path, keep=10, reinstallable=[])
+
+    assert plan.remove == []
+    assert len(plan.kept) == 6
+
+
+def test_a_row_recorded_through_a_symlinked_built_dir_still_counts(
+    tmp_path: Path,
+) -> None:
+    """The row holds whatever spelling `built_dir` had when the build ran."""
+    real = tmp_path / "real"
+    good = _archive(real, "example_1.0_20261119T100000.ipa")
+    _archive(real, "example_1.0_20261119T110000.ipa")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    plan = plan_prune(real, keep=1, reinstallable=[link / good.name])
+
+    assert _names(plan.kept) == [good.name]
+
+
+def test_with_no_history_every_archive_competes_on_its_timestamp(tmp_path: Path) -> None:
+    for stamp in ("20261119T100000", "20261119T110000", "20261119T120000"):
+        _archive(tmp_path, f"example_1.0_{stamp}.ipa")
+
+    plan = plan_prune(tmp_path, keep=2, reinstallable=None)
+
+    assert _names(plan.kept) == [
+        "example_1.0_20261119T110000.ipa",
+        "example_1.0_20261119T120000.ipa",
+    ]

@@ -3,7 +3,7 @@
 The GUI's Stop is a SIGTERM. During zsign, `exit_on_termination` turned it
 into `SystemExit(143)`, and the build envelope recorded that like any other
 exception: a failed history row, and `build-end {ok: false, error: "143"}`. The
-app showed "Last build failed / 143" for a build the user cancelled. And
+app showed "Last build failed / 143" for a build the user canceled. And
 outside zsign SIGTERM's default disposition killed the process where it stood,
 so a Stop during cyan or the push left no `build-end` at all.
 
@@ -66,7 +66,7 @@ def test_a_stop_ends_the_build_as_stopped_and_records_no_row(tmp_path, raised) -
     assert end["ok"] is False
     assert end["stopped"] is True
     assert "error" in end and end["error"] is None
-    assert log.recent() == [], "a cancelled build is not a failed one"
+    assert log.recent() == [], "a canceled build is not a failed one"
 
 
 def test_a_failure_is_still_a_failure(tmp_path) -> None:

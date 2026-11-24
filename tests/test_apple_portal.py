@@ -345,7 +345,7 @@ def test_a_udid_ASC_does_not_know_is_skipped_and_carried_out_on_the_result(
 
 
 def test_a_registered_udid_is_matched_case_insensitively(tmp_path: Path) -> None:
-    """ASC normalises UDIDs to lower case in places and config.yaml does not.
+    """ASC normalizes UDIDs to lower case in places and config.yaml does not.
 
     The resolution below has always been case-insensitive; asserted here so the
     hard failure above cannot become a hard failure over letter case.
@@ -460,7 +460,7 @@ def test_the_exact_match_ignores_case(tmp_path: Path) -> None:
 
 
 def test_a_prefix_match_alone_is_not_the_app_id_asked_for(tmp_path: Path) -> None:
-    """Default behaviour registers the missing pattern rather than borrowing a
+    """Default behavior registers the missing pattern rather than borrowing a
     neighbour's App ID — `matches[0]` used to hand back `.LiveProcess` here."""
     client = _lc_client([
         BundleId(id="LP", identifier=f"{_MAIN}.LiveProcess", name="lp", platform="IOS"),
@@ -538,6 +538,10 @@ def test_a_cached_profile_for_the_wrong_app_id_is_replaced_and_the_remote_delete
         id="OLD", name=f"graft {_MAIN} dev", profile_type="IOS_APP_DEVELOPMENT",
         uuid="u", expiration=None, profile_content_b64=None,
     )]
+    client.get_profile.return_value = Profile(
+        id="OLD", name=f"graft {_MAIN} dev", profile_type="IOS_APP_DEVELOPMENT",
+        uuid="u", expiration=None, profile_content_b64=base64.b64encode(b"BAD").decode(),
+    )
     client.create_profile.return_value = Profile(
         id="NEW", name="x", profile_type="IOS_APP_DEVELOPMENT", uuid="u2", expiration=None,
         profile_content_b64=base64.b64encode(b"GOOD").decode(),
@@ -582,7 +586,7 @@ def test_a_profile_this_tool_made_is_reused_under_either_name(
 ) -> None:
     """Profiles created before the rename are called `tweak-build <id> dev`.
 
-    Recognised by the new name only, every existing install would create a
+    Recognized by the new name only, every existing install would create a
     second profile for each app on its first build after upgrading, and keep
     the orphan in the account forever — the reuse path is the only thing
     that ever looks at an existing remote profile.

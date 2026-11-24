@@ -2,8 +2,8 @@
 
 The config is what `--init` writes for a free account plus an app added with
 no `delivery:` key. Everything between that and the phone is real except the
-three things a test cannot have: the external tools' presence (cyan and otool
-are looked up, not run), cyan itself (it copies the IPA through),
+three things a test cannot have: the external tools' presence (cyan is looked
+up, not run), cyan itself (it copies the IPA through),
 and the device, which is the fake pymobiledevice3 services from
 test_lc_discovery.py — an InstallationProxy listing apps and a HouseArrest that
 records what was written. No team id is configured anywhere; the push has to
@@ -23,10 +23,12 @@ from types import SimpleNamespace
 import pytest
 
 from graft_ipa import cli as cli_mod
-from graft_ipa import preflight
+from graft_ipa import preflight, tools
 from graft_ipa.build_log import BuildLog
 from graft_ipa.config import add_app, default_config_path, load_config, write_default_config
 from graft_ipa.json_output import JsonEmitter
+from tests.appstore_fakes import macho
+from tests.tool_fakes import fake_path
 
 from .test_lc_discovery import fake_device
 
@@ -44,11 +46,14 @@ def _stage_ipa(cache: Path, bundle_id: str = "com.example.app", version: str = "
     })
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr("Payload/Example.app/Info.plist", info)
+        # The executable Info.plist names, decrypted: stage 2.5 refuses an
+        # app whose executable isn't there to check (re-check #10).
+        zf.writestr("Payload/Example.app/Example", macho(0))
     return path
 
 
 @pytest.fixture
-def free_config(monkeypatch: pytest.MonkeyPatch):
+def free_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     path = default_config_path()
     write_default_config(path, free_account=True, default_device_udid="UDID1")
     add_app(path, "example", {"bundle_id": "com.example.app", "tweaks": []})
@@ -58,7 +63,7 @@ def free_config(monkeypatch: pytest.MonkeyPatch):
     _stage_ipa(cfg.cache_dir)
 
     # The tools are looked up, never run; the phone is one connected device.
-    monkeypatch.setattr(preflight.shutil, "which", lambda tool: f"/opt/fake/bin/{tool}")
+    monkeypatch.setattr(tools, "which", fake_path(tmp_path / "path-bin"))
     monkeypatch.setattr(preflight, "list_connected_devices", lambda: ["UDID1"])
     monkeypatch.setattr(cli_mod, "select_device", lambda udid: ("UDID1", "usb"))
 
@@ -70,7 +75,7 @@ def free_config(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(cli_mod, "run_cyan", cyan)
     # Signing must not be reached at all on this path.
     monkeypatch.setattr(cli_mod, "run_zsign", lambda *a, **k: pytest.fail("zsign ran"))
-    monkeypatch.setattr(cli_mod, "install", lambda *a, **k: pytest.fail("ideviceinstaller ran"))
+    monkeypatch.setattr(cli_mod, "install", lambda *a, **k: pytest.fail("a sideload install ran"))
     return cfg
 
 

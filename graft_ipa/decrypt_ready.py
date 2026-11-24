@@ -23,6 +23,7 @@ guess.
 from __future__ import annotations
 
 import re
+import shlex
 import shutil
 import socket
 from dataclasses import dataclass, field
@@ -202,7 +203,8 @@ def check(udid: str | None = None, device_name: str | None = None) -> Readiness:
 
     front = _frontmost(udid) if frida_ok else None
     r.frontmost = front
-    r.backends = _backends(frida_ok, ssh_ok, server_version, key_only=key_only)
+    r.backends = _backends(frida_ok, ssh_ok, server_version, key_only=key_only,
+                           frida_unchecked=not frida_ok and bool(_CLIENT_SIDE.search(frida_detail)))
     r.checks.append(Check(
         key="foreground",
         label="App on screen",
@@ -238,10 +240,16 @@ def _check_frida(udid: str | None) -> tuple[bool, str, str | None]:
         # Folded into the generic branch below it told the user to restart the
         # jailbreak on a perfectly healthy device, and threw away the one
         # actionable sentence — reinstall the CLI — that the error carried.
-        return False, str(e), getattr(e, "hint", None)
+        # The message alone: the hint is the fix, shown on its own line.
+        return False, e.message, e.hint
     try:
         device = decrypt_runner._frida_device(frida, udid)
         count = len(device.enumerate_processes())
+    except decrypt_runner.FridaNotImportable as e:
+        # This Mac's, like the missing module above: never "restart the
+        # jailbreak" (the whole-diff review's cli-10).
+        err = decrypt_runner.frida_not_importable(e, "check the jailbreak")
+        return False, err.message, err.hint
     except Exception as e:
         text = str(e)
         if re.search(r"major versions match", text, re.I):
@@ -251,13 +259,15 @@ def _check_frida(udid: str | None) -> tuple[bool, str, str | None]:
             # healthy. Measured 2026-08-17: this checkout's venv had drifted to
             # frida 17.17.0 against its own `frida<17` pin while the device ran
             # 16.x, and restarting the jailbreak could not have fixed it.
+            # Ours is frida-ios-dump's: Graft asks frida through its virtualenv.
             ours = getattr(frida, "__version__", "unknown")
+            major = ours.split(".")[0] if ours[:1].isdigit() else "16"
+            pip = shlex.quote(str(decrypt_runner.frida_ios_dump_pip()))
             return False, (
                 f"frida-server's major version differs from ours (we have {ours})"
             ), (
-                "the phone is fine — align this end: "
-                f"`.venv/bin/pip install 'frida>={ours.split('.')[0]}.0,<{int(ours.split('.')[0]) + 1}'` "
-                "to match the device, or check pyproject.toml's pin"
+                "the phone is fine — align this end, in frida-ios-dump's virtualenv: "
+                f"`{pip} install 'frida=={major}.*'` to match the device's frida-server"
             )
         return False, f"frida-server is not reachable: {text[:90]}", None
     return True, f"reachable, {count} processes", _server_version(udid)
@@ -438,10 +448,23 @@ def _frontmost(udid: str | None) -> tuple[str, str] | None:
     return bundle, bundle
 
 
+#: bagbak's note when frida-server couldn't be checked from this Mac.
+FRIDA_SERVER_UNCHECKED = ("frida-server not checked (Graft checks it with frida-ios-dump's Python, "
+                          "which isn't set up)")
+
+
 def _backends(
-    frida_ok: bool, ssh_ok: bool, server_version: str | None, *, key_only: bool = False
+    frida_ok: bool, ssh_ok: bool, server_version: str | None, *, key_only: bool = False,
+    frida_unchecked: bool = False,
 ) -> list[BackendStatus]:
-    """Which backends could run, given what the probes found."""
+    """Which backends could run, given what the probes found.
+
+    `frida_unchecked`: the frida probe failed on this Mac's side (frida-ios-dump
+    not set up, or its frida broken), so frida-server's state is unknown, not
+    bad. bagbak brings its own frida and needs none of Graft's, so a check
+    Graft can't run doesn't block it: it is usable, unverified
+    (FRIDA_SERVER_UNCHECKED), and an unreachable frida-server is bagbak's own
+    error to report when it runs."""
     out: list[BackendStatus] = []
 
     if decrypt_runner.frida_ios_dump_available() is None:
@@ -463,7 +486,7 @@ def _backends(
     bag_version = _bagbak_frida_version()
     if decrypt_runner.bagbak_available() is None:
         out.append(BackendStatus(decrypt_runner.BAGBAK, False, "bagbak is not installed"))
-    elif not frida_ok:
+    elif not frida_ok and not frida_unchecked:
         out.append(BackendStatus(decrypt_runner.BAGBAK, False, "frida-server is not reachable"))
     elif decrypt_runner.mode_is_supported() is False and (not ssh_ok or key_only):
         # bagbak 4.x pulls the bundle over SSH (see `bagbak_env`), and 4.x is
@@ -477,7 +500,7 @@ def _backends(
             "is set up for key auth (GRAFT_SSH_KEY)" if key_only else
             "this bagbak pulls the app over SSH, which is not available",
         ))
-    elif _frida_mismatch(bag_version, server_version):
+    elif frida_ok and _frida_mismatch(bag_version, server_version):
         out.append(BackendStatus(
             decrypt_runner.BAGBAK, False,
             f"bagbak bundles frida {bag_version} and the phone runs frida-server "
@@ -486,7 +509,8 @@ def _backends(
         ))
     else:
         out.append(BackendStatus(
-            decrypt_runner.BAGBAK, True, note=_version_skew_note(bag_version, server_version)
+            decrypt_runner.BAGBAK, True,
+            note=FRIDA_SERVER_UNCHECKED if frida_unchecked else _version_skew_note(bag_version, server_version),
         ))
     return out
 

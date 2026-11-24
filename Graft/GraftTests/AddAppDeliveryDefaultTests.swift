@@ -13,6 +13,10 @@ import XCTest
 /// which skips when macOS is not serving it (`AccessibilityTree`). Each render
 /// gets a throwaway `UserDefaults` suite through `.defaultAppStorage`, so the
 /// test host's own preferences are never read or written.
+///
+/// The sheet is opened in URL mode explicitly. This was written for the URL
+/// form's picker, and once Search became the mode the sheet opens in, a sheet
+/// built with no `initialMode` drew Search instead.
 @MainActor
 final class AddAppDeliveryDefaultTests: XCTestCase {
     private func selectedDelivery(remembered: String?) throws -> String? {
@@ -25,8 +29,9 @@ final class AddAppDeliveryDefaultTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
         if let remembered { defaults.set(remembered, forKey: "lastDeliveryMode") }
 
-        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true")))
-        let sheet = AddAppSheet(store: store).defaultAppStorage(defaults)
+        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true")), notify: { _ in })
+        let sheet = AddAppSheet(store: store, appStore: AppStoreStore(runner: store.runner, shell: NoAdminShell()), initialMode: .url)
+            .defaultAppStorage(defaults)
         let box = hosted(sheet, width: 480)
         settle(box)
         let radios = try AccessibilityTree.nodes(in: box.window).filter {
@@ -35,6 +40,11 @@ final class AddAppDeliveryDefaultTests: XCTestCase {
                     .contains($0.name)
         }
         XCTAssertEqual(radios.count, 2, "premise: the delivery picker's two segments")
+        let selectedMode = try AccessibilityTree.nodes(in: box.window).first {
+            $0.role == kAXRadioButtonRole && ($0.value as? NSNumber)?.boolValue == true
+                && AddAppSheet.Mode.allCases.map(\.rawValue).contains($0.name)
+        }?.name
+        XCTAssertEqual(selectedMode, AddAppSheet.Mode.url.rawValue, "premise: the URL form")
         return radios.first { ($0.value as? NSNumber)?.boolValue == true }?.name
     }
 

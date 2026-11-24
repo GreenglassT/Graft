@@ -60,7 +60,7 @@ final class AddAppFreeAccountTests: XCTestCase {
             try? FileManager.default.removeItem(atPath: capture)
         }
 
-        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: script)))
+        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: script)), notify: { _ in })
         _ = try await store.loadApps()
         XCTAssertEqual(store.account, account, "premise: the store knows the account")
         try? FileManager.default.removeItem(atPath: capture)
@@ -72,7 +72,11 @@ final class AddAppFreeAccountTests: XCTestCase {
                                             filename: "com.example.app_1.0.ipa"),
                 installedVersion: nil)
             : nil
-        let sheet = AddAppSheet(store: store, onAdded: { _ in added = true }, prefill: prefill)
+        let sheet = AddAppSheet(
+            store: store, appStore: AppStoreStore(runner: store.runner, shell: NoAdminShell()),
+            onAdded: { _ in added = true }, prefill: prefill,
+            initialMode: path == .url ? .url : AddAppSheet.defaultMode
+        )
             .defaultAppStorage(defaults)
         let box = hosted(sheet, width: 480)
         settle(box)
@@ -167,7 +171,11 @@ final class AddAppFreeAccountTests: XCTestCase {
             let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
             defer { defaults.removePersistentDomain(forName: suiteName) }
             defaults.set("sideload", forKey: "lastDeliveryMode")
-            let box = hosted(AddAppSheet(store: store).defaultAppStorage(defaults), width: 480)
+            let box = hosted(
+                AddAppSheet(store: store, appStore: AppStoreStore(runner: store.runner, shell: NoAdminShell()))
+                    .defaultAppStorage(defaults),
+                width: 480
+            )
             settle(box)
             let nodes = try AccessibilityTree.nodes(in: box.window)
             let segments = nodes.filter {

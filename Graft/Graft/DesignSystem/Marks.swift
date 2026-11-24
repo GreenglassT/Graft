@@ -38,7 +38,7 @@ import SwiftUI
 /// - Every PDF is **16×16pt natural size carrying 15.5pt of ink**, at a 1.25pt
 ///   stroke matched to SF Symbols Regular at 15pt. SF's own stroke varies by
 ///   glyph — `minus` 1.311pt, `circle` 1.248, `iphone` 1.188, `rectangle` 1.179
-///   — and 1.25 is the centre of that spread.
+///   — and 1.25 is the center of that spread.
 /// - **A 16pt frame belongs beside an SF Symbol set at 15pt**, which is what
 ///   `canvas` and `matchedPointSize` name and `frame(forPointSize:)` extends.
 ///   It looks like an off-by-one and is not: **the point size is not the drawn
@@ -91,7 +91,7 @@ struct Mark {
     ///
     /// The two bare-form call sites are 13pt for two different reasons, and it
     /// is worth having both written down rather than the one an earlier draft
-    /// generalised from. `DeviceDecryptSection`'s Decrypt button is a label
+    /// generalized from. `DeviceDecryptSection`'s Decrypt button is a label
     /// inside a regular-sized `Button`, so 13pt is what macOS gives it. The
     /// other is not a button at all — it is the *heading* of `SettingsView`'s
     /// p12-password sheet, set explicitly to `AppFont.bodyMedium`, which is

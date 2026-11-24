@@ -147,6 +147,7 @@ final class DeviceVitalsPollTests: XCTestCase {
                 deviceApps: DeviceAppsStore(runner: config.runner),
                 staged: StagedIPAStore(runner: config.runner),
                 liveContainer: LiveContainerStore(runner: config.runner),
+                appStore: AppStoreStore(runner: config.runner, shell: NoAdminShell()),
                 // No sidebar to navigate in this harness — it exists to
                 // watch the vitals poll's timing, not row selection.
                 onSelectApp: { _ in },
@@ -165,7 +166,7 @@ final class DeviceVitalsPollTests: XCTestCase {
     /// a new *value* for the same view, which is what a selection change and a
     /// window losing focus both are. Building a second `NSHostingView` instead
     /// would give the pane a fresh identity and restart every task in it
-    /// unconditionally — which is the behaviour under test, so it would prove
+    /// unconditionally — which is the behavior under test, so it would prove
     /// nothing.
     ///
     /// A case must hold this until it is done: an `NSWindow` released mid-test
@@ -238,7 +239,7 @@ final class DeviceVitalsPollTests: XCTestCase {
         return Pane(
             store: store,
             info: try infoStore(log: log),
-            config: ConfigStore(runner: sh(), cliArgs: ["-c", "true"]),
+            config: ConfigStore(runner: sh(), cliArgs: ["-c", "true"], notify: { _ in }),
             interval: interval,
             device: device,
             active: active
@@ -316,7 +317,7 @@ final class DeviceVitalsPollTests: XCTestCase {
     /// `cliArgs:` seam came off this store nothing *could*: a test that hands
     /// the store its args cannot also check them. Every line in the log is
     /// asserted rather than the last one, so a poll that names the right phone
-    /// once and something else afterwards fails here.
+    /// once and something else afterward fails here.
     func test_every_vitals_read_sends_the_production_argv() async throws {
         let log = runLog()
         let pane = try await hostPane(log: log, interval: Self.testInterval, active: .key)
@@ -470,7 +471,7 @@ final class DeviceVitalsPollTests: XCTestCase {
         )
 
         pane.show(second, active: .key)
-        // Three intervals for the first phone's task to be cancelled and
+        // Three intervals for the first phone's task to be canceled and
         // whatever it had in flight to land, so what follows is only what the
         // switch left running.
         try await Task.sleep(nanoseconds: 600_000_000)
@@ -630,7 +631,7 @@ final class DeviceVitalsPollTests: XCTestCase {
     func test_a_pane_built_without_an_interval_polls_at_the_shipped_one() async throws {
         let store = await devicesStore()
         let device = try XCTUnwrap(store.devices.first)
-        let config = ConfigStore(runner: sh(), cliArgs: ["-c", "true"])
+        let config = ConfigStore(runner: sh(), cliArgs: ["-c", "true"], notify: { _ in })
         let pane = DeviceDetailView(
             device: device,
             store: store,
@@ -641,6 +642,7 @@ final class DeviceVitalsPollTests: XCTestCase {
             deviceApps: DeviceAppsStore(runner: config.runner),
             staged: StagedIPAStore(runner: config.runner),
             liveContainer: LiveContainerStore(runner: config.runner),
+            appStore: AppStoreStore(runner: config.runner, shell: NoAdminShell()),
             // No sidebar to navigate — this case only reads back
             // `vitalsPollInterval`.
             onSelectApp: { _ in }

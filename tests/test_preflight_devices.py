@@ -9,10 +9,11 @@ Both now ask usbmuxd the way the Devices tab does.
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
-from graft_ipa import preflight
+from graft_ipa import preflight, tools
 
 PACKAGE = Path(__file__).resolve().parent.parent / "graft_ipa"
 
@@ -68,8 +69,8 @@ def test_a_bare_path_still_sees_the_device() -> None:
     def no_subprocess(*_a, **_k):
         raise AssertionError("the device check ran a subprocess")
 
-    with patch.object(preflight.shutil, "which", return_value=None), \
-         patch.object(preflight.subprocess, "run", side_effect=no_subprocess), \
+    with patch.object(tools, "which", return_value=None), \
+         patch.object(subprocess, "run", side_effect=no_subprocess), \
          _bus(_Mux("00008130-FFFF")):
         assert preflight.list_connected_devices() == ["00008130-FFFF"]
 

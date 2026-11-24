@@ -13,7 +13,7 @@ enum Palette {
     /// The quietest text in the app — bundle ids, hints, empty states, path
     /// rows — and almost always at `AppFont.monoSmall`, the smallest type here.
     ///
-    /// Lightened from #64748B, which was the one colour in this palette that
+    /// Lightened from #64748B, which was the one color in this palette that
     /// failed WCAG AA everywhere it was used: 3.75:1 on `bg` and 3.49:1 on a
     /// `cardStyle` surface against the 4.5:1 a body text needs. Smallest type
     /// at the lowest contrast is the worst pairing available, and it carried
@@ -31,7 +31,7 @@ enum Palette {
     /// The app's tint: what fills a selected row and a sheet's default button.
     ///
     /// A darker indigo than `accent`, and not interchangeable with it. `accent`
-    /// is a *foreground* colour — icons, a hover border, arrows in the log —
+    /// is a *foreground* color — icons, a hover border, arrows in the log —
     /// and using it as the tint put white on #818CF8 at 2.98:1 on every
     /// prominent button and `Palette.text` at 2.85:1 on the selected row. This
     /// carries them at 6.29:1 and 6.01:1.
@@ -50,14 +50,14 @@ enum Palette {
     ///
     /// Necessary because no selection fill can carry `textDim`: 4.5:1 against
     /// it needs a fill below 0.022 luminance, which is darker than `bg` itself,
-    /// so the row's quiet text has to change colour when selected rather than
+    /// so the row's quiet text has to change color when selected rather than
     /// the fill bending to accommodate it. 5.10:1 on `accentSelect`.
     static let onAccentMuted = Color(hex: 0xE0E7FF)
 
     /// The fill behind white text in `ErrorBanner`, and the only reason it is
     /// not `danger`.
     ///
-    /// `danger` is a *foreground* colour — dots, labels, failure text — and at
+    /// `danger` is a *foreground* color — dots, labels, failure text — and at
     /// 6.45:1 on `bg` it is a good one. Reused as a banner fill under white
     /// text it gives 2.77:1, which fails AA and even AA-large, on the app's
     /// single "that didn't work" surface at 11pt. Darkening it here rather than

@@ -132,7 +132,7 @@ def test_status_says_it_couldnt_tell_and_suggests_no_login(cfg: Config, fakes: F
     payload = appstore.status(cfg.appstore)
 
     assert payload["ipatool"]["signed_in"] is None
-    assert not any("auth login" in c for c in payload["setup_commands"])
+    assert not any("--appstore-login" in c for c in payload["setup_commands"])
     # Not silence, either: "couldn't tell" with nothing to do about it leaves
     # the Settings pane with a red dot and no next step.
     assert payload["setup_commands"] == [
@@ -293,7 +293,7 @@ def test_the_guis_stop_leaves_no_work_dir_behind(
     events = [json.loads(line) for line in stdout.splitlines()]
     assert not [e for e in events if e.get("type") == "ipa-provided"]
 
-    # Only the CLI was signalled here — the GUI also SIGTERMs descendants, this
+    # Only the CLI was signaled here — the GUI also SIGTERMs descendants, this
     # deliberately does not — so a dead child proves `subprocess.run` killed
     # it on the way out rather than leaving a download running orphaned.
     (sleeper,) = [c for c in fakes.calls() if c.get("sleeping")]

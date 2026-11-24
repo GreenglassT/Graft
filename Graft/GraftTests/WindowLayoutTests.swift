@@ -40,8 +40,7 @@ final class WindowLayoutTests: XCTestCase {
         """#
         return ConfigStore(
             runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")),
-            cliArgs: ["-c", script]
-        )
+            cliArgs: ["-c", script], notify: { _ in })
     }
 
     /// The shared measurement harness plus the store behind it.
@@ -72,7 +71,7 @@ final class WindowLayoutTests: XCTestCase {
     ) async -> Hosted {
         let store = store ?? stubStore()
         let layout = laidOutForMeasurement(
-            ContentView(store: store, selection: selection), width: width, height: height
+            ContentView(store: store, selection: selection, adminShell: NoAdminShell()), width: width, height: height
         )
         let host = layout.root
         let window = layout.window
@@ -266,8 +265,7 @@ final class WindowLayoutTests: XCTestCase {
         // so the detail column holds the placeholder and the probe must say so.
         let empty = ConfigStore(
             runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")),
-            cliArgs: ["-c", "true"]
-        )
+            cliArgs: ["-c", "true"], notify: { _ in })
         let withoutApps = await laidOut(
             width: 1470, height: 922, store: empty, expectsApps: false
         )

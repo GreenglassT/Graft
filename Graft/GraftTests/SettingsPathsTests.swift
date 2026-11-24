@@ -93,9 +93,9 @@ final class SettingsPathsTests: XCTestCase {
         """.write(to: graft, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: graft.path)
 
-        let store = ConfigStore(runner: CLIRunner(executable: graft))
+        let store = ConfigStore(runner: CLIRunner(executable: graft), notify: { _ in })
         let pane = hosted(
-            ContentView(store: store, selection: .section(.tweaks)),
+            ContentView(store: store, selection: .section(.tweaks), adminShell: NoAdminShell()),
             size: NSSize(width: 1100, height: 700)
         )
         let expected = "No tweaks in /x/debs."
@@ -240,7 +240,7 @@ final class SettingsPathsTests: XCTestCase {
         let sh = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
         let pane = SettingsView(
             store: store, devicesStore: DevicesStore(runner: sh),
-            appStore: AppStoreStore(runner: sh), account: .paid
+            appStore: AppStoreStore(runner: sh, shell: NoAdminShell()), account: .paid
         )
         let box = hosted(pane, size: NSSize(width: 900, height: 1600))
         try await Task.sleep(nanoseconds: 300_000_000)

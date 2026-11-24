@@ -36,10 +36,10 @@ final class BuildsViewTests: XCTestCase {
     /// A row whose target the CLI could not state reads as a phone build.
     ///
     /// Not a hypothetical: every row in a build log written before this column
-    /// existed is one, and `_target_of` normalises those to `device` on the
+    /// existed is one, and `_target_of` normalizes those to `device` on the
     /// Python side. Offering the phone action there is correct — that is what
     /// they are — and the failure this pins is the opposite one, where an
-    /// unrecognised value fell to `mac` and withheld the action that worked.
+    /// unrecognized value fell to `mac` and withheld the action that worked.
     func test_an_unrecognised_target_offers_the_phone_action() throws {
         XCTAssertEqual(BuildsView.action(for: try record(target: "wat")), .reinstall)
     }
@@ -54,7 +54,7 @@ final class BuildsViewTests: XCTestCase {
         XCTAssertTrue(try record(target: "mac").isForThisMac)
         XCTAssertFalse(try record(target: "device").isForThisMac)
         XCTAssertFalse(try record(target: "wat").isForThisMac,
-                       "an unrecognised target is not a Mac build")
+                       "an unrecognized target is not a Mac build")
     }
 
     // MARK: - F15: the menus

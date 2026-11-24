@@ -1,0 +1,179 @@
+# Apple's App Store countries and regions: the ISO code and name columns of the
+# table on https://developer.apple.com/help/app-store-connect/reference/app-store-localizations
+# as published on 2026-11-20 (175 rows), in the page's order. Tab-separated.
+# tests/test_storefronts.py checks graft_ipa/storefronts.py against it.
+AFG	Afghanistan
+ALB	Albania
+DZA	Algeria
+AGO	Angola
+AIA	Anguilla
+ATG	Antigua and Barbuda
+ARG	Argentina
+ARM	Armenia
+AUS	Australia
+AUT	Austria
+AZE	Azerbaijan
+BHS	Bahamas
+BHR	Bahrain
+BRB	Barbados
+BLR	Belarus
+BEL	Belgium
+BLZ	Belize
+BEN	Benin
+BMU	Bermuda
+BTN	Bhutan
+BOL	Bolivia
+BIH	Bosnia and Herzegovina
+BWA	Botswana
+BRA	Brazil
+VGB	British Virgin Islands
+BRN	Brunei
+BGR	Bulgaria
+BFA	Burkina Faso
+KHM	Cambodia
+CMR	Cameroon
+CAN	Canada
+CPV	Cape Verde
+CYM	Cayman Islands
+TCD	Chad
+CHL	Chile
+CHN	China mainland
+COL	Colombia
+COD	Congo, Democratic Republic of the
+COG	Congo, Republic of the
+CRI	Costa Rica
+CIV	Cote d’Ivoire
+HRV	Croatia
+CYP	Cyprus
+CZE	Czechia
+DNK	Denmark
+DMA	Dominica
+DOM	Dominican Republic
+ECU	Ecuador
+EGY	Egypt
+SLV	El Salvador
+EST	Estonia
+SWZ	Eswatini
+FJI	Fiji
+FIN	Finland
+FRA	France
+GAB	Gabon
+GMB	Gambia
+GEO	Georgia
+DEU	Germany
+GHA	Ghana
+GRC	Greece
+GRD	Grenada
+GTM	Guatemala
+GNB	Guinea-Bissau
+GUY	Guyana
+HND	Honduras
+HKG	Hong Kong
+HUN	Hungary
+ISL	Iceland
+IND	India
+IDN	Indonesia
+IRQ	Iraq
+IRL	Ireland
+ISR	Israel
+ITA	Italy
+JAM	Jamaica
+JPN	Japan
+JOR	Jordan
+KAZ	Kazakhstan
+KEN	Kenya
+XKS	Kosovo
+KWT	Kuwait
+KGZ	Kyrgyzstan
+LAO	Laos
+LVA	Latvia
+LBN	Lebanon
+LBR	Liberia
+LBY	Libya
+LTU	Lithuania
+LUX	Luxembourg
+MAC	Macau
+MDG	Madagascar
+MWI	Malawi
+MYS	Malaysia
+MDV	Maldives
+MLI	Mali
+MLT	Malta
+MRT	Mauritania
+MUS	Mauritius
+MEX	Mexico
+FSM	Micronesia
+MDA	Moldova
+MNG	Mongolia
+MNE	Montenegro
+MSR	Montserrat
+MAR	Morocco
+MOZ	Mozambique
+MMR	Myanmar
+NAM	Namibia
+NRU	Nauru
+NPL	Nepal
+NLD	Netherlands
+NZL	New Zealand
+NIC	Nicaragua
+NER	Niger
+NGA	Nigeria
+MKD	North Macedonia
+NOR	Norway
+OMN	Oman
+PAK	Pakistan
+PLW	Palau
+PAN	Panama
+PNG	Papua New Guinea
+PRY	Paraguay
+PER	Peru
+PHL	Philippines
+POL	Poland
+PRT	Portugal
+QAT	Qatar
+KOR	Republic of Korea
+ROU	Romania
+RUS	Russia
+RWA	Rwanda
+STP	Sao Tome and Principe
+SAU	Saudi Arabia
+SEN	Senegal
+SRB	Serbia
+SYC	Seychelles
+SLE	Sierra Leone
+SGP	Singapore
+SVK	Slovakia
+SVN	Slovenia
+SLB	Solomon Islands
+ZAF	South Africa
+ESP	Spain
+LKA	Sri Lanka
+KNA	St. Kitts and Nevis
+LCA	St. Lucia
+VCT	St. Vincent and the Grenadines
+SUR	Suriname
+SWE	Sweden
+CHE	Switzerland
+TWN	Taiwan
+TJK	Tajikistan
+TZA	Tanzania
+THA	Thailand
+TON	Tonga
+TTO	Trinidad and Tobago
+TUN	Tunisia
+TUR	Türkiye
+TKM	Turkmenistan
+TCA	Turks and Caicos Islands
+UGA	Uganda
+UKR	Ukraine
+ARE	United Arab Emirates
+GBR	United Kingdom
+USA	United States
+URY	Uruguay
+UZB	Uzbekistan
+VUT	Vanuatu
+VEN	Venezuela
+VNM	Vietnam
+YEM	Yemen
+ZMB	Zambia
+ZWE	Zimbabwe

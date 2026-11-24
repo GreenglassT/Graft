@@ -1,61 +1,116 @@
 #!/usr/bin/env bash
-# Build a distributable Graft.app: Release configuration, hardened runtime,
-# secure timestamp, signed inside-out with a Developer ID identity.
+# Build a distributable Graft.app: Release configuration, with the graft CLI,
+# its own Python, cyan, ipatool, UnfairPlay, zsign and OpenSSL inside it;
+# hardened runtime and a secure timestamp on every Mach-O, signed inside-out
+# with a Developer ID identity; then zipped and checked.
+#
+# The app's own executable is universal (arm64 and x86_64) so that on an
+# Intel Mac it opens and shows its "needs Apple silicon, use Graft 1.1"
+# screen; an arm64-only one would get macOS's generic "can't be opened".
+# Everything it runs (the Python, the tools, OpenSSL, the launchers) is arm64
+# only. verify-bundle checks both.
 #
 #   GRAFT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 #     scripts/graft-release [output-dir]
 #
 # GRAFT_SIGN_IDENTITY may also be the identity's SHA-1 (see
 # `security find-identity -v -p codesigning`). The output directory defaults to
-# ./build/release and must not already contain a Graft.app.
+# ./build/release and must not already contain a Graft.app. It ends up with
+# Graft.app, Graft.zip, components.json (every bundled artifact and Python
+# package, with the exact file and SHA-256 it came from) and
+# Graft-<version>-sources.tar.gz, which goes on the release page beside the
+# zip: Graft's source at the commit built, the source of every bundled binary
+# built from source and of every copyleft Python package, and SOURCES.md
+# saying how each was built.
+#
+# It builds a commit, not a working tree: it records HEAD first, refuses a
+# checkout with any change (untracked files included), builds the app and
+# stages everything from a `git archive` export of that commit, archives that
+# same commit as the source, and checks at the end that HEAD hasn't moved.
+#
+# The order matters. Everything bundled is staged by scripts/graft_bundle.py
+# outside any .app; the app is assembled and signed; its seal is verified;
+# and only then does scripts/verify-bundle run anything inside it. Running
+# code from an app whose seal is incomplete makes macOS put "“Graft” is
+# damaged" on screen and block until someone answers it.
 #
 # This does NOT notarize. Submit the resulting zip with `xcrun notarytool`,
-# then `xcrun stapler staple Graft.app` and re-zip the stapled app.
+# then `xcrun stapler staple Graft.app`, re-zip the stapled app with
+# `ditto -c -k --keepParent Graft.app Graft.zip` (never `zip -r`, which stores
+# symlinks as files and breaks the seal), and run `verify-bundle --zip` on it.
 #
 # Unlike scripts/graft-install (a developer build that installs into
 # /Applications and records this checkout so the app can rebuild itself), a
 # release build carries no repository path, so the app's rebuild-on-launch
-# behaviour stays off.
+# behavior stays off.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_DIR="${1:-$REPO_ROOT/build/release}"
 IDENTITY="${GRAFT_SIGN_IDENTITY:?set GRAFT_SIGN_IDENTITY to a Developer ID Application identity}"
+PY="$REPO_ROOT/.venv/bin/python"
 
-if [[ -e "$OUT_DIR/Graft.app" ]]; then
-  echo "error: $OUT_DIR/Graft.app already exists; move it away first" >&2
+# Nothing of an earlier run's may sit beside this one's (review #35).
+for old in "$OUT_DIR/Graft.app" "$OUT_DIR/Graft.zip" "$OUT_DIR/components.json" "$OUT_DIR"/Graft-*-sources.tar.gz; do
+  if [[ -e "$old" ]]; then
+    echo "error: $old already exists; move the earlier release away first" >&2
+    exit 1
+  fi
+done
+[[ -x "$PY" ]] || { echo "error: no repo venv at $PY" >&2; exit 1; }
+"$PY" "$REPO_ROOT/scripts/graft_bundle.py" check-python
+
+# The commit this release is, recorded before anything reads the tree
+# (review #9, #11, #26, #45).
+HEAD_AT_START="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+if [[ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]]; then
+  echo "error: the checkout has changes, untracked files included; a release is built from a commit:" >&2
+  git -C "$REPO_ROOT" status --porcelain | head -20 >&2
   exit 1
 fi
 
-DERIVED="$(mktemp -d -t graft-release)"
-trap 'rm -rf "$DERIVED"' EXIT
+WORK="$(mktemp -d -t graft-release)"
+trap 'rm -rf "$WORK"' EXIT
+DERIVED="$WORK/derived"
+STAGE="$WORK/stage"
+EXPORT="$WORK/export"
+mkdir "$EXPORT"
+git -C "$REPO_ROOT" archive --format=tar "$HEAD_AT_START" | tar -x -C "$EXPORT"
+echo "→ building commit $HEAD_AT_START, from an export of it"
+# The stage's downloads and builds are keyed by content hashes, so the
+# checkout's caches serve the export.
+export GRAFT_BUNDLE_CACHE="$REPO_ROOT/build/bundle-cache" GRAFT_BUNDLE_WORK="$REPO_ROOT/build/bundle-work"
 
 # The committed project is used as-is; regenerating would only churn its GUIDs.
-if [[ ! -d "$REPO_ROOT/Graft/Graft.xcodeproj" ]]; then
+if [[ ! -d "$EXPORT/Graft/Graft.xcodeproj" ]]; then
   echo "→ generating the Xcode project…"
-  (cd "$REPO_ROOT/Graft" && xcodegen generate --quiet)
+  (cd "$EXPORT/Graft" && xcodegen generate --quiet)
 fi
 
-echo "→ building Release…"
-# Two settings keep this machine's paths out of the public download:
+echo "→ building Release (arm64 and x86_64)…"
+# Two settings keep this machine's paths out of the public download (both
+# slices), which verify-bundle checks:
 # - Coverage off, explicitly. The scheme Xcode creates for this project turns
 #   it on even for a plain `build`, and then every function carries a
-#   profiling counter named after its source file's absolute path (zlib-
-#   compressed in __llvm_covmap/__llvm_prf_names, so `strings` misses it).
+#   profiling counter named after its source file's absolute path.
 # - Debug symbols stripped (`strip -S`, as an archive would): the debug map
 #   names every source and object file by absolute path. The symbol table
 #   stays, so crash logs still name functions.
+# - Swift packages at the versions the committed Package.resolved pins, never
+#   resolved again over the network (review 2.0, bundle #11).
 xcodebuild \
-  -project "$REPO_ROOT/Graft/Graft.xcodeproj" \
+  -project "$EXPORT/Graft/Graft.xcodeproj" \
   -scheme Graft \
   -configuration Release \
   -destination 'generic/platform=macOS' \
   -derivedDataPath "$DERIVED" \
+  -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
+  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
   ENABLE_CODE_COVERAGE=NO CLANG_COVERAGE_MAPPING=NO \
   DEPLOYMENT_POSTPROCESSING=YES STRIP_INSTALLED_PRODUCT=YES STRIP_STYLE=debugging \
   CODE_SIGN_IDENTITY=- \
-  build >"$DERIVED/build.log" 2>&1 || {
-    tail -40 "$DERIVED/build.log" >&2
+  build >"$WORK/build.log" 2>&1 || {
+    tail -40 "$WORK/build.log" >&2
     echo "error: build failed (full log above)" >&2
     exit 1
   }
@@ -68,29 +123,123 @@ if /usr/libexec/PlistBuddy -c "Print :GraftRepoPath" "$BUILT/Contents/Info.plist
   exit 1
 fi
 
+echo "→ staging the CLI, its Python, the tools and the licenses (outside the app)…"
+"$PY" "$EXPORT/scripts/graft_bundle.py" stage "$STAGE" >"$WORK/stage.log" 2>&1 || {
+    tail -40 "$WORK/stage.log" >&2
+    echo "error: staging failed (log tail above)" >&2
+    exit 1
+  }
+grep -E '^(libpython|thinned|staged )' "$WORK/stage.log" | sed 's/^/  /'
+
+echo "→ assembling…"
 mkdir -p "$OUT_DIR"
 APP="$OUT_DIR/Graft.app"
 ditto "$BUILT" "$APP"
+for dir in Resources Helpers Frameworks; do
+  ditto "$STAGE/$dir" "$APP/Contents/$dir"   # merges into the app's own Resources
+done
 
-sign() {
-  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$1"
-}
+# What gets signed is the stage's list plus the app's executable. Any other
+# Mach-O in the assembled app (code from the Xcode build, say) would go out
+# signed by nobody, so it stops the release here. iOS code (cyan's iOS
+# frameworks) is left as shipped: it goes into users' IPAs, not the Mac's.
+"$PY" - "$APP/Contents" "$STAGE/macho-list.txt" "$EXPORT/scripts" <<'EOF'
+import sys
+from pathlib import Path
+contents, listed, scripts = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+sys.path.insert(0, scripts)
+import graft_bundle
+found = {str(p.relative_to(contents)) for p in graft_bundle.signed_machos(contents)}
+expected = set(listed.read_text().split("\n")) - {""} | {"MacOS/Graft"}
+extra, missing = sorted(found - expected), sorted(expected - found)
+if extra or missing:
+    sys.exit(f"error: the app's Mach-O files differ from the signing list: extra {extra}, missing {missing}")
+print(f"  {len(found)} Mach-O files to sign: the stage's {len(expected) - 1} and MacOS/Graft")
+EOF
 
 echo "→ signing inside-out with: $IDENTITY"
-# Nested code first (deepest paths first), then the app itself.
-while IFS= read -r -d '' item; do
-  sign "$item"
-done < <(find "$APP/Contents" -depth \
-  \( -name '*.framework' -o -name '*.dylib' -o -name '*.appex' -o -name '*.xpc' -o -name '*.bundle' \) \
-  -print0)
-sign "$APP"
+# Nested code first, then the app. The listed files are plain Mach-O files,
+# none containing another, so they can be signed in parallel. No entitlements,
+# except for the files the stage lists in entitlements.txt (only ipatool:
+# allow-jit, for its Unicorn emulator, and disable-library-validation, for
+# the ad hoc signed Unicorn it downloads), each signed with its own plist
+# from bundle/entitlements/.
+SIGNED=$(grep -c . "$STAGE/macho-list.txt")
+cut -f1 "$STAGE/entitlements.txt" >"$WORK/entitled.txt"
+# UnfairPlay is signed on its own, below, with its identifier set.
+UNFAIRPLAY=Helpers/bin/unfairplay
+grep -vxF -e "$UNFAIRPLAY" -f "$WORK/entitled.txt" "$STAGE/macho-list.txt" >"$WORK/plain.txt" || true
+while IFS= read -r rel; do
+  printf '%s\0' "$APP/Contents/$rel"
+done <"$WORK/plain.txt" |
+  xargs -0 -n 8 -P 8 codesign --force --options runtime --timestamp --sign "$IDENTITY" \
+    >"$WORK/sign.log" 2>&1 || {
+    grep -v ': replacing existing signature$' "$WORK/sign.log" | tail -40 >&2
+    echo "error: signing the bundled code failed (log above)" >&2
+    exit 1
+  }
+while IFS=$'\t' read -r rel plist; do
+  [[ -n "$rel" ]] || continue
+  codesign --force --options runtime --timestamp --entitlements "$EXPORT/bundle/entitlements/$plist" \
+    --sign "$IDENTITY" "$APP/Contents/$rel" >>"$WORK/sign.log" 2>&1 || {
+    tail -20 "$WORK/sign.log" >&2
+    echo "error: signing $rel with bundle/entitlements/$plist failed" >&2
+    exit 1
+  }
+done <"$STAGE/entitlements.txt"
+# The enrollment's root step checks its copy of UnfairPlay against identifier
+# "unfairplay" (enrollment.UNFAIRPLAY_IDENTIFIER), so it is set here rather
+# than left to codesign's file-name default; verify-bundle checks the result.
+codesign --force --options runtime --timestamp --identifier unfairplay \
+  --sign "$IDENTITY" "$APP/Contents/$UNFAIRPLAY" >>"$WORK/sign.log" 2>&1 || {
+  tail -20 "$WORK/sign.log" >&2
+  echo "error: signing $UNFAIRPLAY failed" >&2
+  exit 1
+}
+codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
+SIGNED=$((SIGNED + 1))
 
-echo "→ verifying…"
-codesign --verify --deep --strict --verbose=2 "$APP"
+echo "→ verifying the seal…"
+if ! codesign --verify --deep --strict --verbose=2 "$APP"; then
+  echo "error: the signature does not verify; nothing inside the app has been run" >&2
+  exit 1
+fi
 codesign -dv --verbose=2 "$APP" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|Runtime Version|flags)=' || true
 
 ZIP="$OUT_DIR/Graft.zip"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
-echo "✓ $APP"
-echo "✓ $ZIP (not notarized)"
+cp "$APP/Contents/Resources/Licenses/components.json" "$OUT_DIR/components.json"
+
+echo "→ verify-bundle…"
+if ! "$PY" "$EXPORT/scripts/verify-bundle" "$APP"; then
+  rm -f "$ZIP"
+  echo "error: verify-bundle failed, so the zip was removed; the app is left at $APP to look at" >&2
+  exit 1
+fi
+
+VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")"
+SOURCES="$OUT_DIR/Graft-$VERSION-sources.tar.gz"
+echo "→ the source archive…"
+rm -f "$SOURCES"
+if ! "$PY" "$EXPORT/scripts/graft_bundle.py" sources "$OUT_DIR/components.json" "$SOURCES" \
+    --commit "$HEAD_AT_START" --repo "$REPO_ROOT"; then
+  rm -f "$ZIP"
+  echo "error: no source archive, so the zip was removed: the GPL download ships with its source" >&2
+  exit 1
+fi
+
+if [[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" != "$HEAD_AT_START" ]]; then
+  rm -f "$ZIP"
+  echo "error: HEAD moved during the release (it was $HEAD_AT_START); the build is of that commit, but" >&2
+  echo "       the checkout no longer is, so the zip was removed: build again" >&2
+  exit 1
+fi
+
+echo
+echo "✓ commit $HEAD_AT_START"
+echo "✓ $APP ($(du -sh "$APP" | cut -f1), $SIGNED Mach-O files signed)"
+echo "✓ $ZIP ($(ls -l "$ZIP" | awk '{printf "%.1f MB", $5 / 1000000}'), not notarized)"
+echo "✓ $SOURCES ($(ls -l "$SOURCES" | awk '{printf "%.1f MB", $5 / 1000000}'))"
+echo "✓ $OUT_DIR/components.json"
+echo "  $((SECONDS / 60))m $((SECONDS % 60))s"

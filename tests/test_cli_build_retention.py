@@ -8,6 +8,7 @@ nothing here reads the real `~/.cache/graft/` or `~/.Trash`.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -55,6 +56,18 @@ def _archive(cfg: Config, name: str) -> Path:
     cfg.built_dir.mkdir(parents=True, exist_ok=True)
     path = cfg.built_dir / name
     path.write_bytes(b"\x00" * 8)
+    return path
+
+
+def _shipped(cfg: Config, name: str) -> Path:
+    """An archive an earlier build delivered: it has a history row, so it
+    has a Re-install button and a keep slot (`plan_prune`'s `reinstallable`).
+    A bare `_archive` with no row is what a failed delivery leaves."""
+    path = _archive(cfg, name)
+    BuildLog(cfg.state_dir / "log.sqlite").record(
+        app="example", bundle_id="com.example.app", version="1.0", tweaks=[],
+        ipa_path=path, signing_team=None, udid=None, success=True,
+    )
     return path
 
 
@@ -111,7 +124,7 @@ def test_a_successful_build_prunes_older_archives(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path, archive_keep=2)
     trash = tmp_path / "Trash"
     for stamp in ("20260101T000000", "20260102T000000", "20260103T000000"):
-        _archive(cfg, f"example_1.0_{stamp}.ipa")
+        _shipped(cfg, f"example_1.0_{stamp}.ipa")
 
     _run_build(cfg, tmp_path, trash=trash)
 
@@ -208,7 +221,7 @@ def test_the_prune_is_visible_in_the_build_event_stream(
     cfg = _cfg(tmp_path, archive_keep=2)
     trash = tmp_path / "Trash"
     for stamp in ("20260101T000000", "20260102T000000"):
-        _archive(cfg, f"example_1.0_{stamp}.ipa")
+        _shipped(cfg, f"example_1.0_{stamp}.ipa")
 
     _run_build(cfg, tmp_path, trash=trash, emitter=JsonEmitter())
 
@@ -270,3 +283,137 @@ def test_a_retention_failure_does_not_fail_the_build(
             r[0] for r in conn.execute("SELECT success FROM builds").fetchall()
         ]
     assert successes == [1], "the build itself succeeded and must be logged that way"
+
+
+# --- the retention lock, across processes --------------------------------------
+#
+# A build shares `retention.lock` from the moment it archives its IPA until its
+# history row is written; a sweep holds it alone. So a sweep in another process
+# can never trash this build's archive while it is being delivered, or before
+# the row that names it exists — and this build's own sweep, which runs after
+# it has let go, skips rather than waits when another build is delivering.
+
+
+def test_a_build_holds_its_archive_until_its_history_row_is_written(tmp_path: Path) -> None:
+    """A sweep in another process, run at the moment the row is being written,
+    is refused and the archive is still there."""
+    from graft_ipa import cli as cli_mod
+
+    from .retention_procs import sweep_from_another_process
+
+    cfg = _cfg(tmp_path, archive_keep=0)
+    trash = tmp_path / "Trash"
+    seen: dict = {}
+    real_record = cli_mod._record_build_row
+
+    def record(log, **row):
+        seen["sweep"] = sweep_from_another_process(cfg, trash=trash, home=tmp_path)
+        seen["archive_there"] = Path(row["ipa_path"]).exists()
+        return real_record(log, **row)
+
+    with patch.object(cli_mod, "_record_build_row", record):
+        _run_build(cfg, tmp_path, trash=trash)
+
+    sweep = seen["sweep"]
+    assert sweep.returncode == 1, sweep.stdout + sweep.stderr
+    assert "refused: a build is delivering" in sweep.stdout, sweep.stdout
+    assert seen["archive_there"], "another process trashed the archive before its row was written"
+
+
+def test_a_sideload_install_runs_inside_the_archive_hold(tmp_path: Path) -> None:
+    """Stage 5 installs the archive itself, over `device_install` now rather
+    than ideviceinstaller. A sweep in another process while the IPA is going
+    to the phone is refused, and the archive being installed is still there."""
+    import dataclasses
+    import types
+
+    from graft_ipa import cli as cli_mod
+    from graft_ipa import installer
+
+    from .retention_procs import sweep_from_another_process
+
+    cfg = _cfg(tmp_path, archive_keep=0)
+    cfg.apps["example"] = dataclasses.replace(cfg.apps["example"], delivery="sideload")
+    trash = tmp_path / "Trash"
+    source = tmp_path / "in.ipa"
+    source.write_bytes(b"x")
+    tweaked = tmp_path / "tweaked.ipa"
+    tweaked.write_bytes(b"y")
+    seen: dict = {}
+
+    def zsign(_cfg, _tweaked, signed, **_):
+        signed.write_bytes(b"signed")
+        return types.SimpleNamespace(profile_notes=[], stdout="", stderr="",
+                                     team_id="TEAM", cert_subject="x", expiry="y")
+
+    def install_ipa(ipa, *, udid, on_progress=None):
+        seen["ipa"], seen["udid"] = ipa, udid
+        seen["sweep"] = sweep_from_another_process(cfg, trash=trash, home=tmp_path)
+        seen["archive_there"] = Path(ipa).exists()
+
+    with patch.object(cli_mod, "run_all_checks", return_value=[]), \
+         patch.object(cli_mod, "acquire_ipa") as acquire, \
+         patch.object(cli_mod, "run_cyan") as cyan, \
+         patch.object(cli_mod, "run_zsign", side_effect=zsign), \
+         patch.object(cli_mod, "select_device", return_value=("u1", "usb")), \
+         patch.object(installer.device_install, "install_ipa", side_effect=install_ipa):
+        acquire.return_value.path = source
+        acquire.return_value.version = "1.0"
+        cyan.return_value.output_ipa = tweaked
+        cyan.return_value.stdout = ""
+        cyan.return_value.stderr = ""
+        cli_mod._build_one(
+            cfg=cfg,
+            log=BuildLog(cfg.state_dir / "log.sqlite"),
+            app_name="example",
+            dry_run=False,
+            skip_install=False,
+            skip_decrypt_check=True,
+            verbose=False,
+            device=None,
+            emitter=None,
+            trash_dir=trash,
+        )
+
+    assert seen["udid"] == "u1"
+    assert Path(seen["ipa"]).parent == cfg.built_dir, "stage 5 installed something other than the archive"
+    sweep = seen["sweep"]
+    assert sweep.returncode == 1, sweep.stdout + sweep.stderr
+    assert "refused: a build is delivering" in sweep.stdout, sweep.stdout
+    assert seen["archive_there"], "another process trashed the archive mid-install"
+
+
+def test_a_builds_own_sweep_skips_when_another_build_is_delivering(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It does not wait for the other build, which may be minutes from done:
+    one line says so, and the next build's sweep cleans up."""
+    from graft_ipa import cli as cli_mod
+
+    from .retention_procs import held_by_another_process
+
+    monkeypatch.setattr(cli_mod, "_RETENTION_LOCK_TIMEOUT", 3.0)
+    cfg = _cfg(tmp_path, archive_keep=0)
+    trash = tmp_path / "Trash"
+    older = [_archive(cfg, f"example_1.0_{s}.ipa") for s in ("20260101T000000", "20260102T000000")]
+
+    with held_by_another_process(cfg, "sh", home=tmp_path):
+        started = time.monotonic()
+        _run_build(cfg, tmp_path, trash=trash, emitter=JsonEmitter())
+        took = time.monotonic() - started
+
+    assert took < 1.5, f"the build waited {took:.2f}s for another build's delivery"
+    assert all(p.exists() for p in older)
+    assert not trash.exists() or list(trash.iterdir()) == []
+    captured = capsys.readouterr()
+    events = [json.loads(line) for line in captured.out.splitlines() if line.strip().startswith("{")]
+    assert not [e for e in events if e["type"] in ("prune-end", "build-pruned")]
+    notes = [e["line"] for e in events if e["type"] == "log" and e["source"] == "warning"]
+    assert notes == ["another build is delivering; old archives are cleaned up next time"], notes
+    end = next(e for e in events if e["type"] == "build-end")
+    assert end["ok"] is True
+    assert [e["type"] for e in events][-1] == "build-end"
+
+    # Next time, nobody delivering: the older archives go.
+    _run_build(cfg, tmp_path, trash=trash)
+    assert not any(p.exists() for p in older)

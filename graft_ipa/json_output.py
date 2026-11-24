@@ -36,15 +36,38 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # --- App Store acquisition (`appstore.py`) ---
         #
         # What the App Store path needs and has, from `--appstore-status`,
-        # exactly once: `ipatool` {path, present, version, signed_in,
-        # warning, install} and `unfairplay` {path, present, version,
+        # exactly once: `ipatool` {path, source, present, version, signed_in,
+        # warning, install} and `unfairplay` {path, source, present, version,
         # enrolled, model_dir, install}, plus `setup_commands` — the Terminal
-        # commands for whatever is missing, because installing, signing in and
-        # enrolling are never done by this tool. `install` is the one command
+        # commands for whatever is missing (the app shows them only for a
+        # missing tool: it has buttons to sign in and enroll). `install` is the one command
         # that installs that tool (a string, for a Copy button), or null when
         # it needs none or none can work here (UnfairPlay on an Intel Mac).
-        # `signed_in` is a bool and nothing more: the account's email and name
-        # are never on the wire.
+        # `ipatool.email` is the signed-in Apple ID's email (the Settings pane
+        # shows it), or null; the account's name is never on the wire.
+        # `ipatool.legacy_signin` is true for a sign-in another ipatool made,
+        # which Graft's own can't read (`appstore_account.legacy_signin`);
+        # `ipatool.unknown_reason` says why a `signed_in` of null that isn't
+        # one is null: "no-verdict" (`auth info` gave none),
+        # "keychain-no-answer" (`security` couldn't say, and ipatool wasn't
+        # asked), "keychain-locked" (the login keychain is locked, so
+        # neither `security` nor ipatool was asked) or
+        # "graft-ipatool-signin" (the ipatool is any but Graft.app's own,
+        # and the sign-in is Graft.app's own ipatool's, which this one can't
+        # read without Keychain dialogs, so it wasn't asked;
+        # `appstore_account.graft_signin`), else null;
+        # `ipatool.unknown_message` is the CLI's own sentence for that reason,
+        # with what to do (`ipatool.UNKNOWN_MESSAGES`), for the app's account
+        # row, or null when `unknown_reason` is;
+        # `unfairplay.model_problem` says why a model that exists can't be
+        # used (not this user's, not readable), or is null; and
+        # `ipatool.note` and `unfairplay.note` say why the tool config.yaml
+        # names isn't the one that runs, with what to do, or are null: a
+        # configured path that isn't there any more, so Graft.app's own copy
+        # runs (`appstore.missing_path_note`), or for ipatool the 1.x default
+        # spelled out (`appstore.ipatool_setting_note`, which goes into
+        # `warning` instead when there is one). Each is also sent as a `log`
+        # warning before this event, and printed in Terminal.
         "appstore-status",
         # One app's App Store version against what is cached: `app`,
         # `bundle_id`, `store_version`, `cached_version`, `update_available`,
@@ -61,6 +84,112 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # `decrypted_pages`, `plaintext_verified`. Emitted only for a decrypt
         # that was accepted — verified, or `--allow-unverified`.
         "appstore-decrypted",
+        # A get or an encrypted drop the CLI refused to stage, and why, as
+        # data (C-UNVERIFIED): `app` and `reason`. Emitted just before the
+        # refusal is raised, so the exit status and stderr are what they
+        # always were. Reasons:
+        # - `"unverified"` (UnfairPlay decrypted it but `PlaintextVerified`
+        #   was false), which the GUI answers with "Use it anyway…" and a
+        #   re-run under `--allow-unverified`;
+        # - `"needs-license"` (the Apple ID doesn't own it) and `"paid"`
+        #   (`--appstore-claim` on an app that isn't free), both carrying
+        #   `price`, `formatted_price` and `track_id` from the iTunes lookup
+        #   (null when it failed), which the GUI answers with Get (free) or
+        #   Open in App Store;
+        # - `"unverified-helper"` (`--appstore-enroll-command` without
+        #   `--allow-unverified-helper`, when root couldn't check the
+        #   UnfairPlay it runs), carrying `kind` ("ad-hoc": Graft.app's
+        #   signature names no team; "not-bundled": this CLI isn't Graft.app's
+        #   own), `helper` (the UnfairPlay root would copy and run) and
+        #   `message` (why, as a sentence), which the GUI answers with a
+        #   confirmation and a re-run with the flag.
+        # Other App Store failures emit nothing here: the app has nothing to
+        # offer for them beyond the message. A failed read of Graft.app's own
+        # team is one of those: an error, never an unverified script.
+        "appstore-refused",
+        # --- App Store account, in the app (sub-project 4) ---
+        #
+        # `--appstore-login`, one event per step. `state` is "preparing"
+        # (ipatool said the first sign-in can take minutes), "waiting"
+        # (`elapsed`, whole seconds, while ipatool is silent), "needs-code"
+        # (send the 2FA code on stdin now), "verifying", "signed-in" (`email`)
+        # or "failed" (`reason`, one of appstore_login.REASON_*, `message`, a
+        # plain sentence, and `hint`, what to do next as a string, or null
+        # when there is nothing to add: "keychain-clear" says to unlock the
+        # login keychain, "bad-version" where a good ipatool goes;
+        # "unknown-prompt" when ipatool asked
+        # something none of 2.8.0's prompts, "ipatool-changed" when
+        # `--expect-ipatool PATH` named another ipatool, before stdin is
+        # read). Never the password or the code: the
+        # CLI holds them only in wipeable buffers and puts them nowhere but
+        # ipatool's prompt.
+        "appstore-login",
+        # `--appstore-logout` finished: `signed_out` (always true when emitted).
+        "appstore-logout",
+        # One installed app UnfairPlay's `setup --app` can enroll this Mac
+        # with: `path`, `name`, `bundle_id`, `opened` (it has been launched
+        # once, which UnfairPlay's README asks for).
+        "appstore-enroll-candidate",
+        # The candidate listing's sentinel: `count`. Zero is an answer ("install
+        # a free iPhone app from the Mac App Store first"), not silence.
+        "appstore-enroll-candidates-end",
+        # `--appstore-enroll-command`: `app` (resolved), `model_dir` (the
+        # user's own model folder, which the root script never names),
+        # `script` (the `/bin/sh` script the app runs as root behind the macOS
+        # administrator prompt; its stdout is the work folder root made),
+        # `helper` (the UnfairPlay it copies and runs), `verified` (whether
+        # that script checks its copy against Graft.app's team signature),
+        # and, when it doesn't, `unverified_kind` and `unverified_reason`
+        # (as `appstore-refused`'s `kind` and `message`; null when verified),
+        # `cancel_file` (a path that doesn't exist yet: the app creates it,
+        # O_CREAT|O_EXCL 0600, to stop the run before or during it, and
+        # removes it afterward; the script exits 67) and
+        # `time_limit_seconds` (root's whole run is stopped after that long;
+        # exit 68; 900, or more for an app over 6 GB). An unverified script is emitted only under
+        # `--allow-unverified-helper`. The CLI is the only place that builds
+        # it (`enrollment.root_script`).
+        "appstore-enroll-command",
+        # `--appstore-enroll-finish DIR` moved the model root's UnfairPlay made
+        # in DIR into the user's model folder, as the user: `model_dir`,
+        # `count` (files moved).
+        "appstore-enrolled",
+        # `--appstore-claim` got the free license: `app`, `bundle_id`,
+        # `already_owned`.
+        "appstore-claimed",
+        # --- App Store search (`appstore_search.py`, `--appstore-search`) ---
+        #
+        # One app the iTunes Search API found, in the store's order. Fields:
+        # - `track_id`, `bundle_id`, `name`, `developer`, `version`;
+        # - `price`: a number, 0 for free, or null when the listing gives none;
+        # - `formatted_price`: the store's own spelling ("Free", "$4.99"), or null;
+        # - `currency`;
+        # - `artwork_url`: the listing's largest icon, or null;
+        # - `icon_path`: a small copy of the icon that the CLI downloaded and
+        #   cached for the app to draw, since the app makes no connections of
+        #   its own. Null when the listing has none or it couldn't be fetched;
+        # - `configured_as`: the config.yaml app already using this bundle id,
+        #   or null.
+        "appstore-search-result",
+        # The sentinel, last on success: `term`, `country` (the store asked,
+        # upper-case), `count`, and `note`: how the store was chosen when
+        # there is something to say (a region with no store: "Searching the
+        # US store: your region has no App Store."), else null. A search that
+        # found nothing is this event alone, so "no results" never reads as
+        # "the search never ran".
+        "appstore-search-end",
+        # A search that got no usable answer, emitted just before the non-zero
+        # exit (13, ITunesError; 2 for "invalid-term"), so the status and
+        # stderr are what they always are. `term`, `note` (as on the
+        # sentinel) and `reason`:
+        # - "offline": itunes.apple.com couldn't be reached;
+        # - "rate-limited": Apple answered 403, 429 or 503, its per-IP limit;
+        # - "http": it answered with another error status;
+        # - "malformed": it answered with something that isn't a result list;
+        # - "invalid-term": the term isn't text (invalid UTF-8), so nothing
+        #   was asked.
+        # The app shows its own state for the first two
+        # (`CLIContract.AppStoreSearchFailure`).
+        "appstore-search-failed",
         # One app's resolved icon artwork: bundle_id, path (a string), source
         # (one of "ipa" / "app-store" / "device", or "unknown" for a cached
         # sidecar this project didn't stamp itself — see
@@ -176,6 +305,27 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # install this app cannot observe — the GUI renders off this name, not
         # off this comment.
         "handed-to-playcover",
+        # `--init --account free|paid` (`account_setup`), the setup the Mac app
+        # runs. One `init-step` per thing done, in order: `step` ("profile",
+        # "certificate", "keychain", "files" or "config") and `detail`, a
+        # sentence the app shows as it is ("would ..." under --dry-run). Then
+        # exactly one `init-result`:
+        #   - `account`, `config` (the path), `change` ("created", "upgraded",
+        #     "switched", "unchanged" or "replaced"), `dry_run` and `summary`
+        #     (a sentence);
+        #   - for a paid account, `team_id`, `profile_name`, `certificate` (the
+        #     .p12's common name), `device_count`, `devices` (the profile's
+        #     UDIDs) and `expires` (ISO 8601, UTC); null or empty on free;
+        #   - `pinned` (apps an upgrade gave `delivery: livecontainer`),
+        #     `sideloads` (apps still `delivery: sideload` after a switch to
+        #     free) and `steps` (a free Apple ID's steps on the device,
+        #     `config.FREE_DEVICE_STEPS`);
+        #   - `previous_team_id`: the team `signing:` named before a replace
+        #     (`--replace`), null for every other change.
+        # A refusal exits non-zero with its reason on stderr and no
+        # `init-result`. The password is never in either event.
+        "init-result",
+        "init-step",
         "ipa-provided",
         # Which LiveContainer the IPA was pushed into, when more than one is
         # installed. The count used to ride in the `stage` event's extra fields
@@ -221,11 +371,21 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # not a tool, or a builtin. The hint still says "install with: <it>"
         # for a reader that predates the field. `info: true` marks a row that
         # reports a fact rather than passing a test (a free Apple ID's
-        # account row); it is always `ok`.
+        # account row); it is always `ok`. A tool row that was found carries
+        # `source`: where `tools.resolve` found it ("bundled", "PATH", ...).
         "preflight-check",
         # `ok_count`, `fail_count`, and `account` (`"free"` or `"paid"`),
         # so the mode is known even for a config with no apps.
         "preflight-end",
+        # `--set-portal`'s answer (`setup_portal.set_portal`): `key_id`,
+        # `issuer_id`, `key_file` (where the .p8 was copied) and `devices`, how
+        # many iOS devices App Store Connect listed when the key was checked.
+        # Never anything from inside the key. A key that fails the check is a
+        # non-zero exit with nothing written, and no event.
+        "portal-set",
+        # `--clear-portal`'s: `removed`, whether there was a key to remove, and
+        # `key_file`, the .p8 it named (left on disk), or null.
+        "portal-cleared",
         "prune-end",
         "repo",
         "repo-added",
@@ -270,6 +430,13 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "tweak-attached",
         "tweak-deleted",
         "tweak-detached",
+        # `--settings`' answer, and the echo after `--set-settings`,
+        # `--set-portal` and `--clear-portal`: the `SETTINGS` keys, `paths`
+        # (on `--settings` only), `parse_error`, `paths_are_defaults`, and
+        # `app_store_connect` — null, or {key_id, issuer_id, key_file,
+        # key_file_exists}; never the key itself — and `graft_version`, this
+        # CLI's own version, which the pane shows so the app need not spawn
+        # `--version` for it.
         "settings",
         "settings-updated",
         "tweak-in-use",
@@ -309,7 +476,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
 
 # Events the GUI is not expected to decode, with the reason each is CLI-only.
 # An entry here is a claim that no user-visible state depends on the event —
-# not a licence to ignore one. `CLIContract.cliOnlyEvents` declares the same set
+# not a license to ignore one. `CLIContract.cliOnlyEvents` declares the same set
 # on the Swift side and the contract test checks the two agree, so this cannot
 # become a place to park an event the GUI simply has not got to.
 CLI_ONLY_EVENTS: dict[str, str] = {
@@ -336,7 +503,7 @@ GUI_EVENTS: frozenset[str] = EVENT_TYPES - frozenset(CLI_ONLY_EVENTS)
 # ---------------------------------------------------------------------------
 #
 # The `stage` event carries a `name`, and that name is a second vocabulary
-# hiding inside the first. `EVENT_TYPES` proves the GUI will recognise the
+# hiding inside the first. `EVENT_TYPES` proves the GUI will recognize the
 # *event*; it says nothing about the string inside it, and the GUI reads one of
 # those strings for meaning rather than for display.
 #
@@ -368,7 +535,7 @@ STAGE_NAMES: frozenset[str] = frozenset(
         "archive",
         # Stage 3 — inject the tweaks with cyan.
         "cyan",
-        # Stage 5 (sideload delivery) — ideviceinstaller.
+        # Stage 5 (sideload delivery) — install over usbmux (`device_install`).
         "install",
         # Stage 5 (livecontainer delivery) — push the IPA over usbmux,
         # which reaches a Wi-Fi-paired device as readily as a cabled one.
@@ -409,8 +576,10 @@ CYAN_OPTION_FIELDS: frozenset[str] = frozenset(
 APP_OPTION_FIELDS: frozenset[str] = CYAN_OPTION_FIELDS | frozenset(
     # Stored at the app's top level, not under `cyan:`. `lc_bundle_id` is the
     # app's LiveContainer pin, set by `--lc-bundle-id` and cleared by
-    # `--no-lc-bundle-id`; either one reports it changed.
-    {"preferred_version", "delivery", "lc_bundle_id"}
+    # `--no-lc-bundle-id`; either one reports it changed. `auto_profile` is
+    # `--auto-profile` / `--no-auto-profile` (C-AUTOPROFILE). `store_country`
+    # is `--store-country`: the App Store the app's lookups ask.
+    {"preferred_version", "delivery", "lc_bundle_id", "auto_profile", "store_country"}
 )
 
 

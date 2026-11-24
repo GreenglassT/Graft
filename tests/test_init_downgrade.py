@@ -25,7 +25,13 @@ import yaml
 from rich.console import Console
 
 from graft_ipa import init_flow, preflight
-from graft_ipa.config import add_signing_section, load_config, remove_signing_section
+from graft_ipa.config import (
+    add_app,
+    add_signing_section,
+    load_config,
+    remove_signing_section,
+    write_default_config,
+)
 from graft_ipa.errors import ConfigError
 
 PAID_QUESTION = "Do you have a paid Apple Developer Program membership?"
@@ -137,3 +143,16 @@ def test_a_free_config_has_no_section_to_remove(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError):
         remove_signing_section(path)
+
+
+def test_a_preview_of_the_switch_names_the_sideload_apps_and_writes_nothing(tmp_path: Path) -> None:
+    """`--init --account free --dry-run`: the same answer as the switch, from
+    the same code, with config.yaml untouched."""
+    path = tmp_path / "config.yaml"
+    write_default_config(path, team_id="ABCDE12345")
+    add_app(path, "side", {"bundle_id": "com.example.side", "delivery": "sideload"})
+    add_app(path, "plain", {"bundle_id": "com.example.plain"})
+    before = path.read_text()
+
+    assert remove_signing_section(path, write=False) == ["side"]
+    assert path.read_text() == before

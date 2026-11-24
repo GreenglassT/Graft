@@ -93,7 +93,7 @@ def test_after_a_clean_the_users_same_named_file_is_refused(tmp_path, monkeypatc
     lc_manage.run_clean(cfg, udid=None, events=Recorder().events)
 
     assert device.removed == [(PRIMARY, "example.ipa")]
-    # Their own example.ipa, put there afterwards, is not the one Graft pushed.
+    # Their own example.ipa, put there afterward, is not the one Graft pushed.
     assert log.pushed_by_instance("u1") == {}
 
 
@@ -174,6 +174,146 @@ def test_a_stranger_of_another_size_is_not_even_read(tmp_path, monkeypatch) -> N
     assert read == [], "read a file no archive could match"
 
 
+# --- re-check #13: an archive is known by its end, never read whole --------------
+#
+# `get_file_contents` of the phone's whole file, on the early check and again on
+# the push: 2 GB of a game in graft's memory, and on pymobiledevice3's `data +=
+# chunk` reads several times that (6 GB measured for a 256 MB file).
+
+#: Many times what may be read of it.
+BIG = 16 * lc_runner.ARCHIVE_TAIL_BYTES
+
+
+def _zip(folder: Path, name: str, *, binary: bytes, plist: bytes = b"<plist/>") -> Path:
+    """An IPA's shape: a big executable first, small files after it, stored
+    so the file is as big as what is in it."""
+    import zipfile
+
+    folder.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(folder / name, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("Payload/Example.app/Example", binary)
+        z.writestr("Payload/Example.app/Info.plist", plist)
+    return folder / name
+
+
+def _push_or_check(how: str, new: Path, archives: list[Path]) -> None:
+    if how == "push":
+        lc_runner.push_ipa_to_livecontainer(new, "u1", inner_filename="example.ipa",
+                                            archives=archives)
+    else:
+        assert lc_runner.check_push_target(
+            "u1", inner_filename="example.ipa", lc_bundle_id=None, team=None,
+            free_account=True, ours={}, archives=archives,
+        ) == PRIMARY
+
+
+def test_the_end_that_is_read_fits_in_one_afc_read() -> None:
+    """The tests below scale with the constant; this holds the constant."""
+    from pymobiledevice3.services import afc
+
+    assert 0 < lc_runner.ARCHIVE_TAIL_BYTES <= afc.MAXIMUM_READ_SIZE
+
+
+@pytest.mark.parametrize("how", ["push", "early check"])
+def test_graft_s_own_big_ipa_is_known_without_reading_all_of_it(tmp_path, monkeypatch, how):
+    from .test_lc_discovery import _HouseArrest
+
+    old = _zip(tmp_path / "built", "example_1.0_a.ipa", binary=b"\0" * BIG)
+    new = _ipa(tmp_path, b"the build from today", "example_1.1_b.ipa")
+    written = fake_device(monkeypatch, [PRIMARY], docs={PRIMARY: ["example.ipa"]},
+                          contents={(PRIMARY, "example.ipa"): old.read_bytes()})
+
+    _push_or_check(how, new, [old, new])
+
+    if how == "push":
+        assert written[(PRIMARY, "Documents/example.ipa")] == b"the build from today"
+    assert 0 < _HouseArrest.bytes_read <= lc_runner.ARCHIVE_TAIL_BYTES
+
+
+@pytest.mark.parametrize("how", ["push", "early check"])
+def test_a_big_same_sized_stranger_is_refused_without_reading_all_of_it(
+    tmp_path, monkeypatch, how
+) -> None:
+    """The user's own build of the app: the same executable, a different
+    Info.plist of the same length. Its beginning is ours byte for byte; its
+    end, the ZIP's central directory with every member's CRC-32, is not."""
+    from .test_lc_discovery import _HouseArrest
+
+    old = _zip(tmp_path / "built", "example_1.0_a.ipa", binary=b"\0" * BIG)
+    theirs = _zip(tmp_path / "theirs", "example.ipa", binary=b"\0" * BIG, plist=b"<their/>")
+    assert theirs.stat().st_size == old.stat().st_size
+    assert theirs.read_bytes()[:BIG // 2] == old.read_bytes()[:BIG // 2]
+    written = fake_device(monkeypatch, [PRIMARY], docs={PRIMARY: ["example.ipa"]},
+                          contents={(PRIMARY, "example.ipa"): theirs.read_bytes()})
+
+    with pytest.raises(LiveContainerError) as exc:
+        _push_or_check(how, _ipa(tmp_path, b"new", "example_1.1_b.ipa"), [old])
+
+    assert "did not push" in exc.value.message
+    assert written == {}
+    assert 0 < _HouseArrest.bytes_read <= lc_runner.ARCHIVE_TAIL_BYTES
+
+
+@pytest.fixture
+def no_fseek(monkeypatch):
+    """pymobiledevice3 10.4.0's AFC, the declared floor: no `fseek` method
+    (combined fix check #5)."""
+    from .test_lc_discovery import _HouseArrest
+
+    monkeypatch.delattr(_HouseArrest, "fseek")
+    assert not hasattr(_HouseArrest, "fseek")
+
+
+@pytest.mark.parametrize("how", ["push", "early check"])
+def test_without_fseek_graft_s_own_ipa_is_still_known_by_reading_forward(
+    tmp_path, monkeypatch, how, no_fseek
+):
+    from .test_lc_discovery import _HouseArrest
+
+    old = _zip(tmp_path / "built", "example_1.0_a.ipa", binary=b"\0" * BIG)
+    new = _ipa(tmp_path, b"the build from today", "example_1.1_b.ipa")
+    written = fake_device(monkeypatch, [PRIMARY], docs={PRIMARY: ["example.ipa"]},
+                          contents={(PRIMARY, "example.ipa"): old.read_bytes()})
+
+    _push_or_check(how, new, [old, new])
+
+    if how == "push":
+        assert written[(PRIMARY, "Documents/example.ipa")] == b"the build from today"
+    assert _HouseArrest.bytes_read == old.stat().st_size, "read forward to the end, once"
+
+
+@pytest.mark.parametrize("how", ["push", "early check"])
+def test_without_fseek_a_same_sized_stranger_is_still_refused(tmp_path, monkeypatch, how, no_fseek):
+    old = _zip(tmp_path / "built", "example_1.0_a.ipa", binary=b"\0" * BIG)
+    theirs = _zip(tmp_path / "theirs", "example.ipa", binary=b"\0" * BIG, plist=b"<their/>")
+    written = fake_device(monkeypatch, [PRIMARY], docs={PRIMARY: ["example.ipa"]},
+                          contents={(PRIMARY, "example.ipa"): theirs.read_bytes()})
+
+    with pytest.raises(LiveContainerError) as exc:
+        _push_or_check(how, _ipa(tmp_path, b"new", "example_1.1_b.ipa"), [old])
+    assert "did not push" in exc.value.message
+    assert written == {}
+
+
+@pytest.mark.parametrize("how", ["push", "early check"])
+def test_without_fseek_a_file_too_far_to_read_forward_is_refused_unread(
+    tmp_path, monkeypatch, how, no_fseek
+):
+    """Past ARCHIVE_SKIP_LIMIT nothing is read: it can't be told from a
+    stranger's, so it is not overwritten."""
+    from .test_lc_discovery import _HouseArrest
+
+    monkeypatch.setattr(lc_runner, "ARCHIVE_SKIP_LIMIT", BIG // 4)
+    old = _zip(tmp_path / "built", "example_1.0_a.ipa", binary=b"\0" * BIG)
+    written = fake_device(monkeypatch, [PRIMARY], docs={PRIMARY: ["example.ipa"]},
+                          contents={(PRIMARY, "example.ipa"): old.read_bytes()})
+
+    with pytest.raises(LiveContainerError) as exc:
+        _push_or_check(how, _ipa(tmp_path, b"new", "example_1.1_b.ipa"), [old])
+    assert "did not push" in exc.value.message
+    assert written == {} and _HouseArrest.bytes_read == 0
+
+
 def test_the_build_passes_this_app_s_archives_to_the_push(tmp_path: Path) -> None:
     cfg = _stub_config(tmp_path)
     cfg.built_dir.mkdir(parents=True)
@@ -242,7 +382,7 @@ def test_an_unreachable_phone_does_not_stop_the_build_early(tmp_path, monkeypatc
     be by the end of cyan, and the push checks again."""
     import pymobiledevice3.lockdown as lockdown_mod
 
-    async def unreachable(*, serial):
+    async def unreachable(*, serial, autopair):
         raise ConnectionError("not yet")
 
     monkeypatch.setattr(lockdown_mod, "create_using_usbmux", unreachable)

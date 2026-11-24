@@ -124,7 +124,7 @@ final class DeviceDeliveryStore {
         } catch {
             // Cancellation is not a failure worth reporting: `runOnce` reports
             // the SIGTERM'd child as a non-zero exit, and this load runs from a
-            // `.task(id:)` that is cancelled the moment the user selects
+            // `.task(id:)` that is canceled the moment the user selects
             // another phone. Recording `.failed` there would leave "couldn't
             // read" waiting on a pane nobody had a problem with.
             guard !Task.isCancelled else { return }

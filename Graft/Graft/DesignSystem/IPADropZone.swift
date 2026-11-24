@@ -94,7 +94,7 @@ struct IPADropZone: View {
             case .success(let urls):
                 if let url = urls.first { dispatch(url: url) }
             case .failure:
-                break  // user cancelled or system error; nothing to surface
+                break  // user canceled or system error; nothing to surface
             }
         }
     }

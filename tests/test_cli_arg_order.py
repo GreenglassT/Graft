@@ -9,8 +9,8 @@ name, leaving `dry_run` False. It ran a real build and a real signed install of
 example, then failed on an app called "--dry-run". The one flag whose entire
 purpose is not touching the device was the flag the device got.
 
-These assert on the parsed parameters rather than on behaviour, because the
-behaviour under test is "does not install", and a test that has to reach the
+These assert on the parsed parameters rather than on behavior, because the
+behavior under test is "does not install", and a test that has to reach the
 install path to prove an install didn't happen is a test one bad refactor away
 from installing.
 """
@@ -27,7 +27,7 @@ def _params(argv: list[str]) -> dict:
 
     Click 8.4 hands a variadic argument back as a tuple and 8.5 as a list.
     What these tests pin is which tokens became app names and in what order —
-    not the container — so it is normalised here once rather than in every
+    not the container — so it is normalized here once rather than in every
     assertion. `main` itself reads `locals()`, where Typer has already made it
     a list on both versions.
     """

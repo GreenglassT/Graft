@@ -18,7 +18,13 @@ from typer.testing import CliRunner
 from graft_ipa import appstore, itunes
 from graft_ipa import cli as cli_mod
 from graft_ipa.config import add_app, load_config
-from tests.appstore_fakes import FakeTools, make_ipa
+from tests.appstore_fakes import FakeTools, itunes_offline, make_ipa
+
+
+@pytest.fixture(autouse=True)
+def _no_price_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A license refusal looks the price up; never on the network here."""
+    monkeypatch.setattr(itunes, "lookup_by_bundle_id", itunes_offline)
 
 
 @pytest.fixture
@@ -72,7 +78,7 @@ def test_status_for_a_person_is_not_json(config: Path, fakes: FakeTools) -> None
     assert result.exit_code == 0, result.output
     assert '{"type"' not in result.stdout
     assert "NOT signed in" in result.stdout
-    assert "auth login" in result.stdout
+    assert "--appstore-login" in result.stdout
 
 
 # --- --appstore-check --------------------------------------------------------
@@ -82,7 +88,9 @@ def test_status_for_a_person_is_not_json(config: Path, fakes: FakeTools) -> None
 def store(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         itunes, "lookup_by_bundle_id",
-        lambda bundle_id: itunes.ITunesApp(track_id=1, bundle_id=bundle_id, name="x", version="9.0"),
+        lambda bundle_id, country=None: itunes.ITunesApp(
+            track_id=1, bundle_id=bundle_id, name="x", version="9.0"
+        ),
     )
 
 
@@ -162,6 +170,53 @@ def test_a_failed_get_exits_20_with_the_hint_and_stages_nothing(
     assert list((cache_dir / appstore.TMP_DIRNAME).iterdir()) == []
 
 
+def test_the_unverified_refusal_reaches_the_event_stream(
+    config: Path, cache_dir: Path, fakes: FakeTools, tmp_path: Path
+) -> None:
+    """Both ways in: a get, and a drop of an encrypted IPA. The event is what
+    the app keys "Use it anyway…" on (C-UNVERIFIED)."""
+    fakes.set(plaintext_verified=False)
+    drop = make_ipa(tmp_path / "Downloads" / "Example.ipa", encrypted=True)
+
+    for args in (
+        ["--json", "--appstore-get", "--app", "example"],
+        ["--json", "--provide-ipa", str(drop), "--app", "example"],
+    ):
+        result = _run(args)
+        assert result.exit_code == 20, result.output
+        refused = [e for e in _events(result) if e["type"] == "appstore-refused"]
+        assert refused == [{"type": "appstore-refused", "app": "example", "reason": "unverified"}]
+    assert _staged(cache_dir) == []
+
+
+def test_other_get_failures_are_not_the_unverified_refusal(
+    config: Path, fakes: FakeTools
+) -> None:
+    fakes.set(download_error="license is required")
+
+    result = _run(["--json", "--appstore-get", "--app", "example"])
+
+    assert result.exit_code == 20
+    # A missing license is a refusal of its own ("needs-license"), never the
+    # one "Use it anyway…" answers.
+    reasons = [e["reason"] for e in _events(result) if e["type"] == "appstore-refused"]
+    assert reasons == [appstore.REFUSED_NEEDS_LICENSE]
+
+
+def test_the_refusal_reason_is_the_word_the_app_reads() -> None:
+    import re
+
+    from tests.cli_ast import contract_swift_source
+
+    match = re.search(
+        r"enum AppStoreRefusal \{.*?static let unverified = \"([^\"\\]*)\"",
+        contract_swift_source(),
+        re.S,
+    )
+    assert match, "CLIContract.AppStoreRefusal.unverified is gone from CLIContract.swift"
+    assert appstore.REFUSED_UNVERIFIED == match.group(1)
+
+
 def test_unverified_is_refused_and_then_accepted_on_request(
     config: Path, cache_dir: Path, fakes: FakeTools
 ) -> None:
@@ -210,7 +265,7 @@ def test_an_encrypted_drop_without_enrollment_is_refused_and_not_cached(
     result = _run(["--json", "--provide-ipa", str(drop), "--app", "example"])
 
     assert result.exit_code == 20
-    assert "setup --app" in result.stderr
+    assert "--appstore-enroll-command" in "".join(result.stderr.split())
     assert _staged(cache_dir) == []
 
 
@@ -237,3 +292,111 @@ def test_a_drop_for_the_wrong_app_fails_before_anything_is_decrypted(
 
     assert result.exit_code == 14
     assert fakes.calls("unfairplay") == []
+
+
+# --- --appstore-login / --appstore-logout -------------------------------------
+
+import subprocess  # noqa: E402
+import sys  # noqa: E402
+
+from tests.appstore_fakes import FAKE_EMAIL  # noqa: E402
+from tests.conftest import REPO_ROOT  # noqa: E402
+
+
+def _login(stdin: bytes, *args: str) -> subprocess.CompletedProcess[str]:
+    """The real CLI, as a child: it reads the Apple ID and password from its
+    own stdin descriptor, which CliRunner doesn't give it."""
+    return subprocess.run(
+        [sys.executable, "-m", "graft_ipa", "--json", "--appstore-login", *args],
+        input=stdin.decode(), capture_output=True, text=True, cwd=REPO_ROOT, timeout=60,
+    )
+
+
+def test_login_reads_the_apple_id_and_password_from_stdin(config: Path, fakes: FakeTools) -> None:
+    fakes.set(login_two_factor=False)
+    proc = _login(f"{FAKE_EMAIL}\nExample-Passw0rd\n".encode())
+    assert proc.returncode == 0, proc.stderr
+    events = [json.loads(line) for line in proc.stdout.splitlines()]
+    assert events[-1] == {"type": "appstore-login", "state": "signed-in", "email": FAKE_EMAIL}
+
+
+def test_login_with_nothing_on_stdin_says_so(config: Path, fakes: FakeTools) -> None:
+    proc = _login(b"")
+    assert proc.returncode == 20
+    events = [json.loads(line) for line in proc.stdout.splitlines()]
+    assert events[-1]["state"] == "failed"
+    assert "no Apple ID" in " ".join(proc.stderr.split())
+    assert fakes.login_runs() == ([], [])
+
+
+def test_login_refuses_an_ipatool_other_than_the_one_expected(config: Path, fakes: FakeTools, tmp_path: Path) -> None:
+    """`--expect-ipatool`: the sign-in sheet's ipatool, or nothing read and
+    nothing started (the fix re-check's problem 10)."""
+    expected = tmp_path / "the-one-the-sheet-named" / "ipatool"
+    proc = _login(f"{FAKE_EMAIL}\nExample-Passw0rd\n".encode(), "--expect-ipatool", str(expected))
+    assert proc.returncode == 20, proc.stderr
+    (event,) = [json.loads(line) for line in proc.stdout.splitlines()]
+    assert (event["state"], event["reason"]) == ("failed", "ipatool-changed")
+    assert str(expected) in event["message"] and str(fakes.ipatool) in event["message"]
+    assert fakes.calls("ipatool") == [], "not even `--version`"
+
+
+def test_login_with_the_expected_ipatool_signs_in(config: Path, fakes: FakeTools) -> None:
+    fakes.set(login_two_factor=False)
+    proc = _login(f"{FAKE_EMAIL}\nExample-Passw0rd\n".encode(), "--expect-ipatool", str(fakes.ipatool))
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout.splitlines()[-1])["state"] == "signed-in"
+
+
+def test_expect_ipatool_belongs_to_appstore_login_only(config: Path, tmp_path: Path) -> None:
+    from graft_ipa.errors import ConfigError
+
+    result = _run(["--appstore-status", "--expect-ipatool", str(tmp_path / "ipatool")])
+    assert result.exit_code == ConfigError.exit_code, result.output
+    assert "--expect-ipatool" in " ".join(result.output.split())
+
+
+def test_there_is_no_email_option(config: Path) -> None:
+    """Decision 3: the Apple ID is never an argument, Graft's or ipatool's,
+    where `ps` would show it."""
+    result = _run(["--json", "--appstore-login", "--email", "someone@example.invalid"])
+    assert result.exit_code == 2
+    assert "No such option" in " ".join(result.output.split())
+
+
+def test_logout_revokes_and_forgets_what_revoke_removed(config: Path, fakes: FakeTools) -> None:
+    """`auth revoke` removes `account` and `kbsync-v1`, and leaves
+    `anisette-v4`, which stays Graft's on the record (the 2.0 review's #15)."""
+    import json
+
+    from graft_ipa import appstore_account
+
+    appstore_account.marker_path().parent.mkdir(parents=True, exist_ok=True)
+    appstore_account.marker_path().write_text(json.dumps({
+        "format": 2, "ipatool_source": "bundled", "signed_in_at": "2026-11-22T00:00:00+00:00",
+        "bundled_items": {"account": "20261122000000Z", "anisette-v4": "20261122000007Z",
+                          "kbsync-v1": "20261122000014Z"},
+    }))
+    result = _run(["--json", "--appstore-logout"])
+    assert result.exit_code == 0, result.output
+    assert _events(result) == [{"type": "appstore-logout", "signed_out": True}]
+    assert [c["argv"] for c in fakes.calls("ipatool")] == [
+        ["auth", "revoke", "--format", "json", "--non-interactive"]
+    ]
+    assert appstore_account.vouched() == {"anisette-v4": "20261122000007Z"}
+
+
+def test_logout_with_nothing_signed_in_is_still_signed_out(config: Path, fakes: FakeTools) -> None:
+    fakes.set(revoke_error=(
+        "failed to remove account from keychain: failed to remove item: "
+        "The specified item could not be found in the keychain."
+    ))
+    result = _run(["--json", "--appstore-logout"])
+    assert result.exit_code == 0, result.output
+
+
+def test_a_logout_that_fails_says_so(config: Path, fakes: FakeTools) -> None:
+    fakes.set(revoke_error="failed to remove account from keychain: User interaction is not allowed.")
+    result = _run(["--json", "--appstore-logout"])
+    assert result.exit_code == 20
+    assert "couldn't sign out" in " ".join(result.output.split())

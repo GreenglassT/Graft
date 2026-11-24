@@ -1,14 +1,11 @@
-"""Wrap ideviceinstaller for IPA installation (USB or Wi-Fi)."""
+"""Install IPAs on a device (USB or Wi-Fi) through `device_install`."""
 
 from __future__ import annotations
 
-import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import install_hints
-from .child_env import child_env
+from . import device_install
 from .errors import InstallError
 from .preflight import list_connected_devices_with_transport
 
@@ -52,44 +49,99 @@ def install(
     *,
     dry_run: bool = False,
 ) -> InstallResult:
-    if shutil.which("ideviceinstaller") is None:
-        raise InstallError(
-            "ideviceinstaller not found in PATH",
-            hint=install_hints.with_prerequisites(
-                "brew install ideviceinstaller",
-                macports="sudo port install ideviceinstaller",
-            ),
-        )
+    """Install `ipa` on `udid` (USB or Wi-Fi; usbmux reaches both).
 
-    cmd = ["ideviceinstaller"]
-    if udid:
-        cmd += ["-u", udid]
-        if transport == "network":
-            cmd += ["--network"]
-    cmd += ["install", str(ipa)]
-
+    `transport` is accepted for the callers' sake and no longer changes
+    anything: there is no `--network` switch to pass.
+    """
     if dry_run:
-        return InstallResult(udid=udid, stdout=" ".join(cmd), stderr="")
-
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=child_env())
-    except FileNotFoundError as e:
-        raise InstallError("ideviceinstaller not found in PATH") from e
-
-    combined = (proc.stdout or "") + (proc.stderr or "")
-    ok = proc.returncode == 0 and (
-        "Install: Complete" in combined or ("Installing" in combined and "ERROR" not in combined)
-    )
-    if not ok:
-        raise InstallError(
-            f"ideviceinstaller exited with code {proc.returncode}",
-            hint=_install_hint(combined),
+        return InstallResult(
+            udid=udid, stdout=f"would install {ipa.name} on {udid or 'the default device'}", stderr="",
         )
+    if udid is None:
+        udid, _ = select_device(None)
+    try:
+        device_install.install_ipa(ipa, udid=udid)
+    except device_install.DeviceInstallError as e:
+        raise InstallError("installing on the device failed", hint=_install_hint(e.output)) from e
+    return InstallResult(udid=udid, stdout="Install: Complete", stderr="")
 
-    return InstallResult(udid=udid, stdout=proc.stdout, stderr=proc.stderr)
+
+def connection_hint(output: str) -> str | None:
+    """What to do about a failure to reach or pair with the phone, named in
+    `output` by its pymobiledevice3 exception (`<ExceptionName>: …`), or None
+    when `output` names none of them.
+
+    Matched by name rather than by class: `output` is text by the time it
+    gets here (`DeviceInstallError`, or an error's message), and the names are
+    the same in every pymobiledevice3 release graft supports.
+    """
+    if "PasswordRequiredError" in output:
+        return "the device is locked or hasn't trusted this Mac — unlock it, tap Trust if asked, and re-run."
+    # Before the generic pairing case: both names end in "PairingError", or
+    # nearly, and each has a remedy of its own.
+    if "PairingDialogResponsePendingError" in output:
+        return (
+            "the phone is still asking whether to trust this Mac — unlock it, tap Trust "
+            "on the 'Trust This Computer?' prompt, and re-run."
+        )
+    if "UserDeniedPairingError" in output:
+        return (
+            "the phone was told not to trust this Mac — unplug it and plug it back in, "
+            "then re-run and tap Trust on the prompt."
+        )
+    if "NotPairedError" in output or "PairingError" in output:
+        return "this Mac isn't trusted by the device — unlock it, tap Trust on the prompt, and re-run."
+    if "DeviceNotFoundError" in output or "NoDeviceConnectedError" in output:
+        return "the device is not connected — plug it in by USB (or keep it on the same Wi-Fi) and re-run."
+    # The phone went away mid-transfer: a cable pulled, a Wi-Fi-synced phone
+    # asleep or off the network. pymobiledevice3 raises the first; a socket
+    # that dies under asyncio can surface as the bare OSErrors.
+    if any(name in output for name in (
+        "ConnectionTerminatedError", "ConnectionResetError", "ConnectionAbortedError",
+        "BrokenPipeError",
+    )):
+        return (
+            "the connection to the phone dropped — check the cable (or that the phone is "
+            "awake and on the same Wi-Fi), keep it unlocked, and re-run."
+        )
+    if "PhoneWentSilentError" in output:
+        return (
+            "the phone stopped answering mid-transfer with the connection still open, "
+            "which is how a locked phone or a Wi-Fi-synced one gone to sleep looks — "
+            "wake and unlock it (USB is steadier than Wi-Fi), and re-run; anything left "
+            "staged on the phone is removed by the next install."
+        )
+    if "ConnectionFailedToUsbmuxdError" in output:
+        return (
+            "macOS's usbmuxd, which every connection to an iPhone goes through, didn't "
+            "answer — unplug the phone and plug it back in, and re-run; if it persists, "
+            "restart the Mac."
+        )
+    if "ConnectionFailedError" in output:
+        return (
+            "the phone refused the connection, which is how a Wi-Fi-synced phone that "
+            "has gone to sleep answers — wake and unlock it (or plug it in by USB), and re-run."
+        )
+    if "StartServiceError" in output:
+        return (
+            "the phone wouldn't start the service the install needs — unlock it and "
+            "re-run; if it persists, restart the phone."
+        )
+    return None
 
 
 def _install_hint(output: str) -> str:
+    connection = connection_hint(output)
+    if connection is not None:
+        return connection
+    # Before the generic codes below: this reason may arrive wrapped in one.
+    if "InvalidCompanionAppBundleIdentifier" in output:
+        return (
+            "InvalidCompanionAppBundleIdentifier — the IPA has an Apple Watch app that "
+            "still names the old bundle id. Keep the bundle id, or let Graft remove the "
+            "Watch app (it does when it renames)."
+        )
     if "ApplicationVerificationFailed" in output:
         return (
             "ApplicationVerificationFailed — the device couldn't verify the signature. "
@@ -104,11 +156,19 @@ def _install_hint(output: str) -> str:
         )
     if "DeviceLocked" in output:
         return "the iPhone is locked — unlock it and re-run."
-    if "Could not connect to lockdownd" in output:
-        return (
-            "lockdownd connection refused — disconnect/reconnect the cable, ensure the "
-            "device is paired (idevicepair pair), and retry."
-        )
     if "PackageInspectionFailed" in output:
         return "PackageInspectionFailed — the IPA is malformed. Try re-signing."
+    if _names_no_reason(output, "AppInstallError"):
+        # The install stream ended without "Complete" and without a reason.
+        return (
+            "the install stopped without the phone saying why — keep it unlocked and "
+            "connected, and re-run."
+        )
     return output.strip() or "re-run with --verbose for full output"
+
+
+def _names_no_reason(output: str, name: str) -> bool:
+    """`output` is `name` alone, or with only pymobiledevice3's stock text for it
+    (11.x fills an empty message from the class docstring; 10.x leaves it empty)."""
+    head, _, rest = output.strip().partition(":")
+    return head == name and rest.strip() in ("", "Installing, upgrading or removing the app failed.")

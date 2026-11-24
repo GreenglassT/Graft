@@ -13,12 +13,13 @@ repository, so without it this whole module skips.
 from __future__ import annotations
 
 import re
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 import pytest
+
+from .toolchain import needs_toolchain, working_toolchain
 
 TWEAKS_SRC = Path(__file__).resolve().parent.parent / "tweaks-src"
 
@@ -39,7 +40,16 @@ def test_the_discovery_finds_something() -> None:
     assert _suites(), f"no tweak test suites found under {TWEAKS_SRC}"
 
 
-@pytest.mark.skipif(shutil.which("clang") is None, reason="needs clang")
+def test_no_developer_dir_means_skip_not_fail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """/usr/bin/clang and /usr/bin/make are xcrun shims on every Mac, so a
+    `which()` check never skipped, and on a Mac without the tools the case
+    failed with "xcrun: error: missing DEVELOPER_DIR path" where it meant to
+    skip (review #34). The guard asks for a toolchain that runs."""
+    monkeypatch.setenv("DEVELOPER_DIR", "/nonexistent-dev")
+    assert working_toolchain.__wrapped__() is False
+
+
+@needs_toolchain
 @pytest.mark.parametrize("makefile", _suites(), ids=lambda p: p.parent.parent.name)
 def test_a_tweaks_own_tests_pass(makefile: Path) -> None:
     # A private BIN, because the Makefile's default is the fixed shared path

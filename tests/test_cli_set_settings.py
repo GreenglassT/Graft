@@ -39,8 +39,8 @@ def test_writes_a_top_level_setting(temp_config_env: Path):
 
 
 def test_writes_a_nested_signing_setting(temp_config_env: Path):
-    assert set_settings(temp_config_env, signing_team_id="ABC123") == ["signing_team_id"]
-    assert _raw(temp_config_env)["signing"]["team_id"] == "ABC123"
+    assert set_settings(temp_config_env, signing_team_id="ABCDE12345") == ["signing_team_id"]
+    assert _raw(temp_config_env)["signing"]["team_id"] == "ABCDE12345"
 
 
 def test_is_a_patch_not_a_replace(temp_config_env: Path):
@@ -65,7 +65,7 @@ def test_nothing_to_do_writes_no_file(temp_config_env: Path):
 
 
 def test_changed_names_only_what_was_asked_for(temp_config_env: Path):
-    changed = set_settings(temp_config_env, archive_keep=3, signing_team_id="Z9")
+    changed = set_settings(temp_config_env, archive_keep=3, signing_team_id="ZZZZZ99999")
     assert changed == ["archive_keep", "signing_team_id"]
 
 
@@ -171,8 +171,11 @@ def test_the_verb_emits_what_changed_and_the_state_that_produced(temp_config_env
     assert events[0]["changed"] == ["archive_keep"]
     assert events[1]["archive_keep"] == 6, "the reported state predates the write"
     # The same shape `--settings` emits, less `paths`: a write only lands in a
-    # config that parsed (C-SETTINGS).
-    assert set(events[1]) == {"type", "parse_error", "paths_are_defaults", *SETTINGS}
+    # config that parsed (C-SETTINGS). `app_store_connect` included, or the
+    # pane would show the key as not set up after every save.
+    assert set(events[1]) == {
+        "type", "parse_error", "paths_are_defaults", "app_store_connect", "graft_version", *SETTINGS,
+    }
     assert (events[1]["parse_error"], events[1]["paths_are_defaults"]) == (None, False)
 
 
@@ -196,7 +199,7 @@ def test_each_cli_option_reaches_its_own_config_key(temp_config_env: Path):
         archive_keep=9,
         signing_cert="/certs/mine.p12",
         signing_profile="/profiles/mine.mobileprovision",
-        signing_team_id="TEAMX",
+        signing_team_id="TEAMX12345",
         json_mode=False,
     )
 
@@ -205,7 +208,7 @@ def test_each_cli_option_reaches_its_own_config_key(temp_config_env: Path):
     assert raw["archive_keep"] == 9
     assert raw["signing"]["cert"] == "/certs/mine.p12"
     assert raw["signing"]["profile"] == "/profiles/mine.mobileprovision"
-    assert raw["signing"]["team_id"] == "TEAMX"
+    assert raw["signing"]["team_id"] == "TEAMX12345"
 
 
 def test_writing_one_signing_field_preserves_its_siblings(temp_config_env: Path):
@@ -216,10 +219,10 @@ def test_writing_one_signing_field_preserves_its_siblings(temp_config_env: Path)
     before = _raw(temp_config_env)["signing"]
     assert len(before) >= 3, "premise: there are siblings to lose"
 
-    set_settings(temp_config_env, signing_team_id="ONLY-THIS")
+    set_settings(temp_config_env, signing_team_id="ONLYTHIS12")
 
     after = _raw(temp_config_env)["signing"]
-    assert after["team_id"] == "ONLY-THIS"
+    assert after["team_id"] == "ONLYTHIS12"
     for key, value in before.items():
         if key != "team_id":
             assert after[key] == value, f"writing team_id lost signing.{key}"
@@ -357,8 +360,8 @@ def test_a_text_setting_is_not_path_expanded(temp_config_env: Path):
     an environment variable *name*, which would have been silently turned into
     a path under $HOME.
     """
-    set_settings(temp_config_env, signing_team_id="~TEAM")
-    assert _raw(temp_config_env)["signing"]["team_id"] == "~TEAM"
+    set_settings(temp_config_env, default_device_udid="~UDID")
+    assert _raw(temp_config_env)["default_device_udid"] == "~UDID"
 
 
 def test_options_not_given_are_skipped_not_written_as_none(temp_config_env: Path):
@@ -378,12 +381,12 @@ def test_options_not_given_are_skipped_not_written_as_none(temp_config_env: Path
         archive_keep=None,
         signing_cert=None,
         signing_profile=None,
-        signing_team_id="ONLY-TEAM",
+        signing_team_id="ONLYTEAM12",
         json_mode=False,
     )
 
     after = _raw(temp_config_env)
-    assert after["signing"]["team_id"] == "ONLY-TEAM"
+    assert after["signing"]["team_id"] == "ONLYTEAM12"
     assert after["signing"]["cert"] == before["signing"]["cert"]
     assert after["signing"]["profile"] == before["signing"]["profile"]
     assert "None" not in str(after), "a skipped option was written as the string None"
@@ -401,3 +404,24 @@ def test_a_call_with_every_option_none_writes_nothing(temp_config_env: Path):
         signing_profile=None, signing_team_id=None, json_mode=False,
     )
     assert temp_config_env.read_bytes() == before
+
+
+# --- the team ID is checked as one read off a profile is (2.0 review SEC-4) ---
+
+
+@pytest.mark.parametrize("team", [
+    "ABCDE12345\ndelete-keychain login.keychain",
+    'ABCDE"1234',
+    "abcde12345",
+    "ABCDE1234",
+    "A" * 4100 + " show-keychain-info /nowhere.keychain",
+])
+def test_a_team_id_apple_would_never_issue_is_refused(temp_config_env: Path, team: str):
+    """Settings' Team ID and `--set-settings --signing-team-id` reach the
+    same `security -i` line as a team off a profile (`--set-p12-password`
+    turns it into the account), so they get the same check."""
+    before = temp_config_env.read_bytes()
+    with pytest.raises(ConfigError, match="isn't an Apple team ID") as err:
+        set_settings(temp_config_env, signing_team_id=team)
+    assert temp_config_env.read_bytes() == before
+    assert "show-keychain-info" not in err.value.message, "a long value is not repeated back"

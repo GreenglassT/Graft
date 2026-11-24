@@ -28,7 +28,7 @@ from dataclasses import dataclass
 
 from pymobiledevice3.lockdown import create_using_usbmux
 
-from .device_session import closing_best_effort
+from .device_session import PAIR_TIMEOUT_SECONDS, closing_best_effort
 
 _DISK = "com.apple.disk_usage"
 _BATTERY = "com.apple.mobile.battery"
@@ -61,7 +61,7 @@ def read_device_info(udid: str) -> DeviceInfoRecord | None:
 
 
 async def _read_async(udid: str) -> DeviceInfoRecord:
-    lockdown = await create_using_usbmux(serial=udid)
+    lockdown = await create_using_usbmux(serial=udid, pair_timeout=PAIR_TIMEOUT_SECONDS)
     # What a bare close cost here specifically: the record is built before the
     # teardown runs, so a Wi-Fi phone dropping off the network between the last
     # domain read and `close()` replaced the pending return, the broad catch in

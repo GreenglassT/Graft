@@ -5,7 +5,7 @@ private typealias Flag = CLIContract.Flag
 
 /// LiveContainer itself, per device: what is installed, and the things the
 /// device pane can do about it — install/update, put the signing certificate
-/// on the device and take it off again, clean up afterwards.
+/// on the device and take it off again, clean up afterward.
 ///
 /// Everything it shows is the CLI's answer (`graft_ipa/lc_manage.py`): which
 /// instances exist, who manages them, whether an update is available, and
@@ -21,7 +21,7 @@ private typealias Flag = CLIContract.Flag
 final class LiveContainerStore {
     private(set) var status: [String: LCStatusRecord] = [:]
     /// Devices a load has *finished* for, whatever it found — but not one a
-    /// cancelled or superseded load was for: that load found nothing out.
+    /// canceled or superseded load was for: that load found nothing out.
     private(set) var hasLoaded: Set<String> = []
     private(set) var loading: Set<String> = []
     var loadErrors: [String: String] = [:]
@@ -79,9 +79,13 @@ final class LiveContainerStore {
     }
 
     let runner: CLIRunner
+    /// Holds sudden and automatic termination off while an install or
+    /// another change to the device runs (whole-diff review, app-3).
+    private let hold: TerminationHold
 
-    init(runner: CLIRunner) {
+    init(runner: CLIRunner, hold: TerminationHold = .shared) {
         self.runner = runner
+        self.hold = hold
     }
 
     /// Whether the Install / Update button belongs on screen for `udid`.
@@ -139,7 +143,7 @@ final class LiveContainerStore {
         // A newer load for this device owns the outcome now.
         guard loadGeneration[udid] == generation else { return }
         loading.remove(udid)
-        // Cancelled — the `.task(id:)` moved to another device. Not a failure:
+        // Canceled — the `.task(id:)` moved to another device. Not a failure:
         // the SIGTERMed CLI arrives as `CLIError.exited`, not as a
         // `CancellationError`, so only the task's own flag can tell, and
         // recording it would leave an error banner on a pane nobody had a
@@ -168,7 +172,7 @@ final class LiveContainerStore {
     /// Cancel the running action. CLIRunner SIGTERMs the CLI, which the
     /// `--lc-*` verbs turn into a clean exit — the throwaway keychain comes
     /// off the search list on the way out. Without this a hung
-    /// `ideviceinstaller` greyed out every LiveContainer button until the app
+    /// `ideviceinstaller` grayed out every LiveContainer button until the app
     /// was restarted.
     func stop() { actionTask?.cancel() }
 
@@ -227,6 +231,8 @@ final class LiveContainerStore {
 
     private func perform(_ action: Action, udid: String, args: [String], failing: String) async {
         guard !isRunning else { return }
+        hold.begin(TerminationHold.liveContainer)
+        defer { hold.end(TerminationHold.liveContainer) }
         run = Run(udid: udid, action: action)
         do {
             let result = try await runner.stream(arguments: args) { [weak self] event in

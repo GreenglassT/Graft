@@ -21,7 +21,7 @@ def test_a_close_that_fails_does_not_replace_the_answer() -> None:
     """The whole reason this is not `contextlib.aclosing`.
 
     Every caller computes its result inside the block and returns it; the close
-    runs afterwards. A phone that drops off the network at `wait_closed()` must
+    runs afterward. A phone that drops off the network at `wait_closed()` must
     cost the session — which is gone regardless, that is what the failure means
     — and not the answer.
     """

@@ -1,0 +1,2035 @@
+#!/usr/bin/env python3
+"""Acceptance checks on a sealed Graft.app: the last step of scripts/graft-release.
+
+    .venv/bin/python scripts/verify-bundle <path/to/Graft.app>
+    .venv/bin/python scripts/verify-bundle --zip <path/to/Graft.zip>
+
+The first form runs the app's bundled CLI, Python and tools in a sandbox:
+PATH=/usr/bin:/bin:/usr/sbin:/sbin, a temporary HOME and XDG directories, the
+keychain switched off (GRAFT_NO_KEYCHAIN=1), and usbmuxd pointed at a socket
+nothing listens on. No real config, keychain or device is touched. Every
+check is printed; the exit status is 1 if any failed.
+
+Nothing inside the app runs until `codesign --verify --deep --strict` has
+passed: running code from an app whose seal is broken makes macOS put
+"“Graft” is damaged" on screen and block until someone answers it. An app
+carrying a quarantine attribute is refused for the same reason; check a
+downloaded copy with --zip.
+
+--zip checks a zip the way a user receives it. It is unpacked with ditto,
+Graft.app gets the quarantine attribute a browser sets, and Gatekeeper
+assesses it (spctl). The runtime checks run against that copy only if
+Gatekeeper accepts it. A build that isn't notarized is always rejected, and
+running a quarantined executable Gatekeeper rejects puts a blocking dialog on
+screen, so a rejection is reported and nothing from the copy is run.
+
+Run it with the repo's venv Python: it reads bundle/pins.toml and uses
+graft_ipa.macho from this checkout.
+"""
+
+from __future__ import annotations
+
+import concurrent.futures
+import ctypes
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+try:
+    import tomllib
+except ImportError:  # Python < 3.11: not the repo venv
+    sys.exit("verify-bundle: run it with the repo venv: .venv/bin/python scripts/verify-bundle ...")
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO))
+from graft_ipa import macho  # noqa: E402
+
+SANDBOX_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def private_socket(root: Path) -> Path:
+    """Where no usbmuxd listens: a socket path in a fresh 0700 folder of our
+    own (fix-check #8: a fixed /tmp name is one another account can bind
+    first). Under `root` when that keeps it inside AF_UNIX's 104 bytes (a
+    longer path is an error, not "no device"), else in a private folder in /tmp."""
+    folder = root / "usbmuxd"
+    if len(os.fsencode(folder / "u.sock")) >= 100:
+        folder = Path(tempfile.mkdtemp(prefix="gvb-", dir="/tmp"))
+        import atexit
+        atexit.register(shutil.rmtree, folder, True)
+    else:
+        folder.mkdir(mode=0o700, parents=True)
+    folder.chmod(0o700)
+    return folder / "u.sock"
+QUARANTINE = "com.apple.quarantine"
+#: A developer directory that isn't there: the xcrun shims fail at once.
+NO_DEVELOPER_DIR = "/nonexistent-dev"
+#: cyan's helpers, built from source in place of its prebuilt ones, where cyan runs them.
+CYAN_TOOLS = "Resources/GraftPython/lib/python3.13/site-packages/cyan/tools/Darwin/arm64"
+CYAN_HELPERS = ("ldid", "insert_dylib", "lipo", "install_name_tool", "otool")
+#: cyan's iOS frameworks, which go in prebuilt, as cyan's archive carries them.
+CYAN_EXTRAS = "Resources/GraftPython/lib/python3.13/site-packages/cyan/extras"
+#: As scripts/graft_bundle.py has it: the pins the stage compiles.
+BUILT_FROM_SOURCE = {"openssl", "libplist", "ldid", "cctools", "insert_dylib", "ipatool", "unfairplay"}
+#: The throwaway signing identity's team, and its .p12's password.
+FIXTURE_TEAM = "ABCDE12345"
+FIXTURE_PASSWORD = "verify-bundle-p12"
+FIXTURE_PASSWORD_ENV = "GRAFT_VERIFY_BUNDLE_P12_PW"
+#: What the bundled CLI imports.
+IMPORTS = "import graft_ipa, cryptography, pymobiledevice3, paramiko, yaml, rich"
+TIMEOUT = 180
+
+
+class Report:
+    def __init__(self) -> None:
+        self.results: list[tuple[str, bool]] = []
+
+    def check(self, name: str, ok: bool, detail: str = "", *, output: str = "") -> bool:
+        ok = bool(ok)
+        self.results.append((name, ok))
+        print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f" — {detail}" if detail else ""), flush=True)
+        if not ok and output.strip():
+            print("      " + output.strip()[-2000:].replace("\n", "\n      "), flush=True)
+        return ok
+
+    def summary(self) -> int:
+        failed = [n for n, ok in self.results if not ok]
+        print(f"\nverify-bundle: {len(self.results) - len(failed)} passed, {len(failed)} failed")
+        for n in failed:
+            print(f"  failed: {n}")
+        return 1 if failed or not self.results else 0
+
+
+def run(argv: list, *, env: dict | None = None, cwd: Path | None = None,
+        stdin: str = "", timeout: float = TIMEOUT) -> subprocess.CompletedProcess:
+    argv = [str(a) for a in argv]
+    try:
+        return subprocess.run(argv, input=stdin, capture_output=True, text=True,
+                              env=env, cwd=cwd, timeout=timeout)
+    except subprocess.TimeoutExpired as e:
+        def text(b):
+            return b.decode(errors="replace") if isinstance(b, bytes) else (b or "")
+        return subprocess.CompletedProcess(argv, 124, text(e.stdout),
+                                           text(e.stderr) + f"\n(timed out after {timeout:.0f}s)")
+
+
+def both(r: subprocess.CompletedProcess) -> str:
+    return f"{r.stdout}\n{r.stderr}"
+
+
+_libc = ctypes.CDLL(None, use_errno=True)
+_libc.getxattr.restype = ctypes.c_ssize_t
+_libc.getxattr.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
+                           ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int]
+XATTR_NOFOLLOW = 0x0001
+
+
+def has_xattr(path: Path, name: str) -> bool:
+    return _libc.getxattr(os.fsencode(path), name.encode(), None, 0, 0, XATTR_NOFOLLOW) >= 0
+
+
+def quarantined(app: Path) -> list[Path]:
+    """The app and everything in it that carries a quarantine attribute."""
+    found = [app] if has_xattr(app, QUARANTINE) else []
+    for root, dirs, files in os.walk(app):
+        for n in dirs + files:
+            if has_xattr(Path(root) / n, QUARANTINE):
+                found.append(Path(root) / n)
+    return found
+
+
+def mach_o_files(root: Path) -> list[Path]:
+    """Every Mach-O under `root`. A file that isn't one is passed over; a
+    Mach-O that can't be read (a truncated header, bad load commands)
+    raises, so no check passes over it (review 2.0, bundle #4):
+    check_mach_o_files stops verify_app at one before the others run."""
+    found = []
+    for p in sorted(root.rglob("*")):
+        if p.is_symlink() or not p.is_file():
+            continue
+        try:
+            macho.load_commands(p)
+        except macho.NotMachO:
+            continue
+        found.append(p)
+    return found
+
+
+def unreadable_mach_o_files(root: Path) -> list[str]:
+    """Each file under `root` that is a Mach-O but can't be read, with why."""
+    bad = []
+    for p in sorted(root.rglob("*")):
+        if p.is_symlink() or not p.is_file():
+            continue
+        try:
+            macho.load_commands(p)
+        except macho.NotMachO:
+            continue
+        except macho.MachOError as e:
+            bad.append(f"{p.relative_to(root)}: {e}")
+    return bad
+
+
+def check_mach_o_files(app: Path, report: Report) -> bool:
+    """Whether every Mach-O in the app can be read: the static checks see
+    only those that can."""
+    bad = unreadable_mach_o_files(app / "Contents")
+    return report.check("every Mach-O file in the app can be read", not bad,
+                        f"{len(bad)} can't" if bad else "", output="\n".join(bad[:40]))
+
+
+def json_lines(text: str) -> list[dict]:
+    out = []
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                pass
+    return out
+
+
+def pins() -> dict[str, dict]:
+    return tomllib.loads((REPO / "bundle" / "pins.toml").read_text())
+
+
+def pyproject_version() -> str:
+    return tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["version"]
+
+
+def app_short_version(app: Path) -> str:
+    import plistlib
+    return str(plistlib.loads((app / "Contents" / "Info.plist").read_bytes()).get("CFBundleShortVersionString", ""))
+
+
+def versions_agree(app: str, cli: str) -> bool:
+    """Review #32: the app's "2.0" is the CLI's 2.0.x (the source archive is
+    named after the app's). Each number the app gives must be the CLI's."""
+    a, c = app.split("."), cli.split(".")
+    return bool(app) and len(a) <= len(c) and a == c[:len(a)]
+
+
+# ---------------------------------------------------------------- static checks
+
+
+def signature_of(path: Path) -> dict[str, str | list[str]]:
+    """What `codesign -d` says about one file: its Authority chain, team,
+    timestamp and CodeDirectory flags."""
+    r = run(["codesign", "-d", "--verbose=4", "--entitlements", "-", "--xml", path], timeout=60)
+    info: dict = {"authority": [], "ok": r.returncode == 0, "raw": r.stderr}
+    try:
+        info["entitlements"] = _entitlements(r.stdout) if r.returncode == 0 else None
+    except Exception:  # an entitlements blob codesign printed but plistlib can't read
+        info["entitlements"] = None
+    # Review #56: -d shows a signature even when the code no longer matches
+    # it, and the app's seal hashes Resources' Mach-O files as data only.
+    v = run(["codesign", "--verify", "--strict", path], timeout=60)
+    info["valid"], info["verify"] = v.returncode == 0, v.stderr.strip()
+    for line in r.stderr.splitlines():
+        key, _, value = line.partition("=")
+        if key == "Authority":
+            info["authority"].append(value)
+        elif key in ("TeamIdentifier", "Timestamp", "Signed Time"):
+            info[key] = value
+        elif key == "CodeDirectory v":
+            m = re.search(r"flags=0x[0-9a-f]+\(([^)]*)\)", value)
+            info["flags"] = m.group(1) if m else ""
+    return info
+
+
+def check_signatures(app: Path, report: Report) -> None:
+    """Every Mach-O carries the app's Developer ID signature, with the
+    hardened runtime and a secure timestamp: what notarization requires."""
+    main = signature_of(app)
+    team = main.get("TeamIdentifier", "")
+    report.check("the app is signed with a Developer ID Application identity",
+                 main["ok"] and any(a.startswith("Developer ID Application:") for a in main["authority"])
+                 and re.fullmatch(r"[A-Z0-9]{10}", team or ""),
+                 f"team {team or 'none'}", output=main["raw"])
+    # iOS code (cyan's iOS frameworks) ships unsigned by us: check_ios_code.
+    files = [f for f in mach_o_files(app / "Contents") if not macho.is_ios(f)]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        sigs = dict(zip(files, pool.map(signature_of, files), strict=True))
+    bad = []
+    for f, s in sigs.items():
+        problems = []
+        if not s["ok"]:
+            problems.append("unsigned")
+        else:
+            if not any(a.startswith("Developer ID Application:") for a in s["authority"]):
+                problems.append("not Developer ID")
+            if s.get("TeamIdentifier") != team:
+                problems.append(f"team {s.get('TeamIdentifier')}")
+            if "runtime" not in s.get("flags", ""):
+                problems.append("no hardened runtime")
+            if "Timestamp" not in s:
+                problems.append("no secure timestamp")
+            if not s.get("valid"):
+                problems.append(f"doesn't verify ({s.get('verify', '')[-120:]})")
+        if problems:
+            bad.append(f"{f.relative_to(app)}: {', '.join(problems)}")
+    report.check(f"all {len(files)} Mach-O files: Developer ID, team {team}, hardened runtime, timestamp, "
+                 "each signature valid (codesign --verify --strict)",
+                 files and not bad, f"{len(bad)} not" if bad else "", output="\n".join(bad[:40]))
+    wrong = entitlement_problems({str(f.relative_to(app / "Contents")): s.get("entitlements")
+                                  for f, s in sigs.items()})
+    report.check("only ipatool has entitlements, exactly allow-jit and disable-library-validation; nothing "
+                 "else has any", not wrong, f"{len(wrong)} wrong" if wrong else "", output="\n".join(wrong[:40]))
+
+
+#: codesign's exit status when the code is properly signed but doesn't
+#: satisfy the -R requirement (man codesign, EXIT STATUS).
+REQUIREMENT_UNSATISFIED = 3
+
+
+def requirement_problems(own: subprocess.CompletedProcess, other: subprocess.CompletedProcess) -> list[str]:
+    """What is wrong with root's check of its UnfairPlay copy, given codesign's
+    answers for the app's own team (`own`) and for another (`other`)."""
+    problems = []
+    if own.returncode != 0:
+        problems.append(f"the requirement for the app's own team refuses it (exit {own.returncode}): "
+                        f"{own.stderr.strip()[-400:]}")
+    if other.returncode != REQUIREMENT_UNSATISFIED:
+        problems.append(f"the requirement for another team doesn't refuse it as unsatisfied (exit "
+                        f"{other.returncode}, wanted {REQUIREMENT_UNSATISFIED}): {other.stderr.strip()[-400:]}")
+    return problems
+
+
+def check_unfairplay_requirement(app: Path, report: Report) -> None:
+    """Review #29: the requirement the root step checks its copy of UnfairPlay
+    against, for this app's own team read as the root step reads it
+    (`enrollment.app_team`), accepts the bundled Helpers/bin/unfairplay, and
+    the same requirement for another team refuses it. A wrong signing
+    identifier would make every enrollment stop at that check. Read-only:
+    codesign --verify -R runs nothing from the app."""
+    from graft_ipa import enrollment
+    from graft_ipa.errors import AppStoreError
+
+    name = "root's check of its UnfairPlay copy accepts the bundled one for the app's team, and not another's"
+    helper = app / "Contents" / "Helpers" / "bin" / "unfairplay"
+    try:
+        team = enrollment.app_team(app)
+        developer_id = team is not enrollment.AD_HOC and enrollment.app_is_developer_id(app)
+    except AppStoreError as e:
+        report.check(name, False, "the app's team or certificate can't be read", output=e.message)
+        return
+    if team is enrollment.AD_HOC:
+        report.check(name, False, "the app's signature names no team")
+        return
+    # Review 2.0, bundle #10: the root step's requirement for a Developer ID
+    # app carries Apple's Developer ID markers; a release must be one.
+    if not developer_id:
+        report.check(name, False, "the app's certificate isn't read as Developer ID, so root's requirement "
+                                  "would lack Apple's Developer ID markers")
+        return
+    other_team = FIXTURE_TEAM if team != FIXTURE_TEAM else "ZYXWV98765"
+    own = run(["codesign", "--verify", "--strict", "-R", "=" + enrollment.requirement(team, developer_id=True),
+               helper], timeout=60)
+    other = run(["codesign", "--verify", "--strict", "-R",
+                 "=" + enrollment.requirement(other_team, developer_id=True), helper], timeout=60)
+    problems = requirement_problems(own, other)
+    report.check(name, not problems, f"team {team}, identifier \"{enrollment.UNFAIRPLAY_IDENTIFIER}\"",
+                 output="\n".join(problems))
+
+
+def pinned_go(work: Path) -> Path:
+    """The pinned Go toolchain (bundle/pins.toml's, from the stage's cache,
+    checked against its SHA-256), unpacked once into `work/go-toolchain`."""
+    dest = work / "go-toolchain"
+    if not (dest / "go" / "bin" / "go").is_file():
+        gb = _stage_module()
+        gb.extract(gb.fetch(gb.load_pins(REPO / "bundle" / "pins.toml")["go"]), dest)
+    return dest / "go"
+
+
+def go_version_m(binary: Path, work: Path) -> subprocess.CompletedProcess:
+    """A Go binary's build info, read by the pinned Go's `go version -m`,
+    which reads the file and runs nothing of it."""
+    go = pinned_go(work)
+    (work / "go-home").mkdir(parents=True, exist_ok=True)
+    env = {"PATH": SANDBOX_PATH, "HOME": str(work / "go-home"), "GOTOOLCHAIN": "local", "GOENV": "off", "GOFLAGS": ""}
+    return run([go / "bin" / "go", "version", "-m", binary], env=env, timeout=60)
+
+
+def check_unfairplay_build(app: Path, report: Report, work: Path) -> None:
+    """UnfairPlay runs as root, so it is built from its pinned source (owner,
+    2026-11-23). The binary in the app must say so itself: its Go build info
+    names the pinned Go (upstream's prebuilt says go1.26.0), the pinned module
+    at its tag and commit, unmodified (vcs.modified=false: the pinned archive
+    is that commit's tree), and upstream's settings."""
+    gb = _stage_module()
+    pins = gb.load_pins(REPO / "bundle" / "pins.toml")
+    r = go_version_m(app / "Contents" / "Helpers" / "bin" / "unfairplay", work)
+    problems = (gb.unfairplay_build_problems(r.stdout, pins["unfairplay"], pins["go"]) if r.returncode == 0
+                else [f"go version -m can't read it (exit {r.returncode}): {r.stderr.strip()[-400:]}"])
+    info = gb.go_build_info(r.stdout) if r.returncode == 0 else {}
+    report.check("the bundled unfairplay is the stage's build of the pinned commit, unmodified, with the pinned Go "
+                 "(its Go build info)", not problems,
+                 f"{info.get('go')}, {info.get('mod')}, {info.get('vcs.revision', '')[:12]}" if not problems else "",
+                 output="\n".join(problems))
+
+
+def check_go_modules(app: Path, report: Report, work: Path) -> None:
+    """Release reviewer: every Go module compiled into a bundled Go program,
+    read from the binary's own build info, not from a list, must have its
+    license notice in Licenses/<tool>-modules/ and its source in the vendored
+    modules the source archive carries (graft_bundle.built_sources: the
+    stage's cached builds' vendor.tar.gz, which `graft_bundle.py sources`
+    archives after this)."""
+    gb = _stage_module()
+    archived = {name: path for path, name in gb.built_sources(gb.load_pins(REPO / "bundle" / "pins.toml"))}
+    lic = app / "Contents" / "Resources" / "Licenses"
+    problems, counted = [], 0
+    for tool in gb.GO_TOOLS:
+        r = go_version_m(app / "Contents" / "Helpers" / "bin" / tool, work)
+        modules = gb.go_deps(r.stdout) if r.returncode == 0 else []
+        vendor = archived.get(f"{tool}/vendor.tar.gz")
+        if not modules or vendor is None:
+            problems.append(f"{tool}: " + ("the source archive carries no vendored modules for it" if modules else
+                                           f"no Go modules read from its build info (exit {r.returncode}): "
+                                           f"{r.stderr.strip()[-300:]}"))
+            continue
+        counted += len(modules)
+        problems += [f"{tool}: {p}" for p in gb.go_module_problems(modules, vendor, lic / f"{tool}-modules")]
+    report.check("every Go module in ipatool and unfairplay, by their build info, has its notice in Licenses/ and its "
+                 "source in the source archive's vendored modules", not problems,
+                 f"{counted} modules" if not problems else f"{len(problems)} wrong", output="\n".join(problems))
+
+
+def _stage_module():
+    """scripts/graft_bundle.py, for what the stage records (CYAN_FRAMEWORKS)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("graft_bundle_for_verify", REPO / "scripts" / "graft_bundle.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def ios_code_problems(contents: Path, ios: list[Path], expected: dict[str, str]) -> list[str]:
+    """Each iOS Mach-O must be one `expected` names (path under Contents ->
+    SHA-256), byte for byte; its framework must carry no _CodeSignature/; and
+    every expected one must be there."""
+    import hashlib
+    problems = []
+    for f in ios:
+        rel = str(f.relative_to(contents))
+        sha = hashlib.sha256(f.read_bytes()).hexdigest()
+        if rel not in expected:
+            problems.append(f"{rel}: iOS code nothing accounts for")
+        elif sha != expected[rel]:
+            problems.append(f"{rel}: not the bytes cyan ships (SHA-256 {sha})")
+        if (f.parent / "_CodeSignature").exists():
+            problems.append(f"{f.parent.relative_to(contents)}: has a _CodeSignature/")
+    problems += [f"{rel}: missing" for rel in sorted(set(expected) - {str(f.relative_to(contents)) for f in ios})]
+    return problems
+
+
+def check_ios_code(app: Path, report: Report) -> None:
+    """Review #6/#34: cyan's iOS frameworks go into users' IPAs as cyan's
+    archive carries them, never signed with the release Developer ID."""
+    contents = app / "Contents"
+    gb = _stage_module()
+    expected = {f"{CYAN_EXTRAS}/{name}/{name.removesuffix('.framework')}": fw.sha256
+                for name, fw in gb.CYAN_FRAMEWORKS.items()}
+    # PlayCover's Preferences stub, built at release: its hash is the stage's record.
+    try:
+        entries = json.loads((contents / "Resources" / "Licenses" / "components.json").read_text())
+    except (OSError, ValueError):
+        entries = []
+    stub = next((e for e in entries if e.get("name") == gb.STUB_COMPONENT), None)
+    if stub:
+        expected[f"{gb.STUB_IN_APP}/Preferences"] = stub.get("sha256", "")
+    ios = [f for f in mach_o_files(contents) if macho.is_ios(f)]
+    problems = ios_code_problems(contents, ios, expected)
+    report.check("iOS code is cyan's frameworks and PlayCover's stub, byte for byte, unsigned by us", not problems,
+                 f"{len(ios)} files" if not problems else f"{len(problems)} wrong", output="\n".join(problems))
+
+
+#: Every entitlement in the bundle, by Mach-O (path under Contents): ipatool's
+#: two, and nothing anywhere else. Its Unicorn emulator needs MAP_JIT memory
+#: for its code translator (allow-jit), and the Unicorn it downloads on first
+#: use is ad hoc signed, which library validation would refuse
+#: (disable-library-validation). Never allow-dyld-environment-variables, so
+#: DYLD_INSERT_LIBRARIES stays blocked; every other binary keeps library
+#: validation.
+EXPECTED_ENTITLEMENTS = {"Helpers/bin/ipatool": {"com.apple.security.cs.allow-jit": True,
+                                                 "com.apple.security.cs.disable-library-validation": True}}
+
+
+def entitlement_problems(entitlements: dict[str, dict | None]) -> list[str]:
+    problems = []
+    for rel, ents in sorted(entitlements.items()):
+        want = EXPECTED_ENTITLEMENTS.get(rel, {})
+        if ents is None:
+            problems.append(f"{rel}: its entitlements can't be read")
+        elif ents != want:
+            problems.append(f"{rel}: {ents or 'none'}, not {want or 'none'}")
+    for rel in sorted(set(EXPECTED_ENTITLEMENTS) - set(entitlements)):
+        problems.append(f"{rel}: missing")
+    return problems
+
+
+#: The app's own executable, relative to the app. It is universal so that on
+#: an Intel Mac it opens and shows its own "needs Apple silicon, use Graft
+#: 1.1" screen; an arm64-only one gets macOS's "can't be opened" instead.
+#: Everything it runs (Python, the tools, OpenSSL, the launchers) is arm64 only.
+MAIN_EXECUTABLE = "Contents/MacOS/Graft"
+MAIN_ARCHS = ("arm64", "x86_64")
+BUNDLED_ARCHS = ("arm64",)
+
+
+def arch_problems(archs: dict[str, list[str]]) -> tuple[list[str], list[str]]:
+    """(problems with the main executable, problems with every other Mach-O),
+    from each Mach-O's architectures (`lipo -archs`) by its path in the app."""
+    main, others = [], []
+    if MAIN_EXECUTABLE not in archs:
+        main.append(f"{MAIN_EXECUTABLE}: not found")
+    for rel, got in sorted(archs.items()):
+        want = MAIN_ARCHS if rel == MAIN_EXECUTABLE else BUNDLED_ARCHS
+        if sorted(got) != sorted(want):
+            (main if rel == MAIN_EXECUTABLE else others).append(
+                f"{rel}: {' '.join(got) or 'no architectures'}, not {' and '.join(want)}")
+    return main, others
+
+
+def check_architectures(app: Path, report: Report) -> None:
+    files = mach_o_files(app / "Contents")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        answers = list(pool.map(lambda f: run(["lipo", "-archs", f], timeout=60), files))
+    archs = {str(f.relative_to(app)): r.stdout.split() if r.returncode == 0 else []
+             for f, r in zip(files, answers, strict=True)}
+    main, others = arch_problems(archs)
+    report.check("the app's executable is universal (arm64 and x86_64), for the Intel screen", not main,
+                 " ".join(archs.get(MAIN_EXECUTABLE, [])), output="\n".join(main))
+    report.check("every other Mach-O file is arm64 only", not others,
+                 f"{len(others)} not" if others else f"{len(archs) - 1} files", output="\n".join(others[:40]))
+
+
+def minos_problems(versions: dict[str, list], limit: tuple[int, int, int]) -> list[str]:
+    """Each Mach-O (path -> macho.build_versions) whose macOS slices need a
+    newer macOS than `limit`, or say nothing. iOS slices are not the Mac's."""
+    problems = []
+    for rel, slices in sorted(versions.items()):
+        for platform, minos in slices:
+            if platform in macho.DEVICE_PLATFORMS:
+                continue
+            if minos is None:
+                problems.append(f"{rel}: no minimum macOS in its load commands")
+            elif minos > limit:
+                problems.append(f"{rel}: needs macOS {'.'.join(map(str, minos))}")
+    return problems
+
+
+def check_minimum_macos(app: Path, report: Report) -> None:
+    """Review #14/#36: everything the app runs must load on the macOS its
+    Info.plist promises, LSMinimumSystemVersion, which must be exactly the
+    stage's MACOS_MIN (14.0). The runtime checks run on the release Mac's
+    newer macOS and can't see it."""
+    import plistlib
+    floor = _stage_module().MACOS_MIN
+    want = plistlib.loads((app / "Contents" / "Info.plist").read_bytes()).get("LSMinimumSystemVersion", "")
+    if want != floor:
+        report.check(f"LSMinimumSystemVersion is {floor}, the macOS the stage builds for", False, repr(want))
+        return
+    limit = tuple([*map(int, want.split(".")), 0, 0][:3])
+    files = mach_o_files(app / "Contents")
+    problems = minos_problems({str(f.relative_to(app)): macho.build_versions(f) for f in files}, limit)
+    report.check(f"every macOS Mach-O loads on macOS {want} (LSMinimumSystemVersion)", not problems,
+                 f"{len(files)} files" if not problems else f"{len(problems)} don't", output="\n".join(problems))
+
+
+def check_components(app: Path, report: Report) -> None:
+    path = app / "Contents" / "Resources" / "Licenses" / "components.json"
+    try:
+        entries = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        report.check("Licenses/components.json lists every pinned artifact", False, str(e))
+        return
+    # A pin that builds several binaries (cctools) is listed once per binary,
+    # each with the pin's URL and SHA-256.
+    listed = {(e.get("source_url"), e.get("sha256")) for e in entries if e.get("kind") != "python-package"}
+    missing = [n for n, p in pins().items() if (p["url"], p["sha256"].lower()) not in listed]
+    packages = [e for e in entries if e.get("kind") == "python-package"]
+    report.check("Licenses/components.json lists every pinned artifact by its SHA-256", not missing,
+                 f"{len(entries)} entries, {len(packages)} Python packages" if not missing
+                 else f"missing {missing}")
+    built = {e.get("name") for e in entries if e.get("kind") == "built-from-source"}
+    want = [*CYAN_HELPERS, "libplist", "ipatool", "unfairplay"]
+    absent = [n for n in want if n not in built]
+    report.check("components.json lists cyan's five helpers, libplist, ipatool and unfairplay as built from source",
+                 not absent,
+                 ", ".join(want) if not absent else f"missing {absent}")
+
+
+def check_package_licences(app: Path, report: Report) -> None:
+    """Each Python package components.json names has its license text in
+    Licenses/python-packages/<name>-<version>/: its own, or upstream's."""
+    lic = app / "Contents" / "Resources" / "Licenses"
+    try:
+        entries = json.loads((lic / "components.json").read_text())
+    except (OSError, ValueError) as e:
+        report.check("every Python package in components.json has a license file in Licenses/", False, str(e))
+        return
+    packages = [e for e in entries if e.get("kind") == "python-package"]
+    bare = [f"{e['name']} {e['version']}" for e in packages
+            if not [f for f in (lic / "python-packages" / f"{e['name']}-{e['version']}").glob("**/*") if f.is_file()]]
+    report.check("every Python package in components.json has a license file in Licenses/", not bare,
+                 f"{len(packages)} packages" if not bare else f"{len(bare)} without: {', '.join(bare)}")
+
+
+#: Words a license or notice text contains; a file with none of them (a
+#: pointer such as "see AUTHORS") doesn't count as one (review #53).
+_LICENCE_WORDS = re.compile(rb"permission|license|licence|copyright|public domain|unlicense|warranty", re.I)
+
+
+def is_licence_text(data: bytes) -> bool:
+    return len(data) >= 100 and bool(_LICENCE_WORDS.search(data))
+
+
+def licence_file_problems(lic: Path, entries: list[dict]) -> list[str]:
+    """Every component but license texts themselves must name its license
+    files in components.json; each must be in Licenses/, and at least one
+    must hold license text (review #53: not only Python packages, and not
+    any file at all)."""
+    problems = []
+    for e in entries:
+        if e.get("kind") == "licence-text":
+            continue
+        label = f"{e.get('name')} {e.get('version')}"
+        files = e.get("licence_files") or []
+        if not files:
+            problems.append(f"{label}: no license files")
+            continue
+        missing = [f for f in files if not (lic / f).is_file()]
+        if missing:
+            problems.append(f"{label}: {', '.join(missing[:3])} missing")
+        elif not any(is_licence_text((lic / f).read_bytes()) for f in files):
+            problems.append(f"{label}: none of {', '.join(files[:3])} holds license text")
+    return problems
+
+
+def check_licence_files(app: Path, report: Report) -> None:
+    lic = app / "Contents" / "Resources" / "Licenses"
+    try:
+        entries = json.loads((lic / "components.json").read_text())
+    except (OSError, ValueError) as e:
+        report.check("every component's license files are in Licenses/ and hold license text", False, str(e))
+        return
+    problems = licence_file_problems(lic, entries)
+    report.check("every component's license files are in Licenses/ and hold license text", not problems,
+                 f"{len(entries)} components" if not problems else f"{len(problems)} wrong",
+                 output="\n".join(problems[:40]))
+
+
+def static_licence_problems(lic: Path, libraries: list[str]) -> list[str]:
+    """Each static library python3.13 contains (`libraries`, as the stage
+    detects them) must have its `python-<library>-LICENSE.txt`."""
+    return [f"python3.13 contains {lib}, but Licenses/python-{lib}-LICENSE.txt is missing"
+            for lib in libraries if not (lic / f"python-{lib}-LICENSE.txt").is_file()]
+
+
+def rust_crate_licence_problems(contents: Path, gb) -> list[str]:
+    """Each bundled wheel whose CycloneDX SBOM lists Rust crates (pydantic_core,
+    qh3, cryptography) must have its crates' licenses in
+    Licenses/rust-crates/<package>/."""
+    lic = contents / "Resources" / "Licenses" / "rust-crates"
+    problems = []
+    for dist, meta in gb._installed_dists(contents):
+        sboms = sorted((dist / "sboms").glob("*.json")) if (dist / "sboms").is_dir() else []
+        if not any(str(c.get("purl", "")).startswith("pkg:cargo/")
+                   for sbom in sboms for c in json.loads(sbom.read_text()).get("components", [])):
+            continue
+        folder = lic / gb._norm(meta["Name"])
+        if not folder.is_dir() or not any(folder.iterdir()):
+            problems.append(f"{meta['Name']} {meta['Version']} links Rust crates, but Licenses/rust-crates/"
+                            f"{gb._norm(meta['Name'])}/ is missing or empty")
+    return problems
+
+
+def check_static_and_rust_licences(app: Path, report: Report) -> None:
+    """Combined fix check #8: the stage's python_static_licences and
+    rust_crate_licences calls could be deleted with every other check green,
+    since python and those wheels still had a license file of their own."""
+    gb = _stage_module()
+    contents = app / "Contents"
+    gp = contents / "Resources" / "GraftPython"
+    try:
+        libraries = gb.python_static_libraries(gp)
+    except (OSError, subprocess.SubprocessError) as e:
+        report.check("python3.13's static libraries each have their license", False, str(e))
+        return
+    problems = static_licence_problems(contents / "Resources" / "Licenses", libraries)
+    report.check("python3.13's static libraries each have their license", not problems,
+                 ", ".join(libraries), output="\n".join(problems))
+    problems = rust_crate_licence_problems(contents, gb)
+    report.check("every wheel built from Rust crates has their licenses", not problems,
+                 output="\n".join(problems))
+
+
+def check_rust_crate_notices(app: Path, report: Report) -> None:
+    """RC audit #1: every crates.io crate a bundled binary names (the source
+    paths its Rust code keeps) has its license folder in Licenses/rust-crates/.
+    try12 shipped bcrypt's crates (its wheel has no SBOM) and the crates in
+    ipatool's embedded 1Password SDK core with no notice at all. Delta audit
+    #1: and every crate the names in that core show, at the version
+    bundle/ipatool-core-crates.lock pins (`graft_bundle.crate_notices_needed`):
+    try13 shipped 36 with none, or only another version's."""
+    gb = _stage_module()
+    contents = app / "Contents"
+    files = mach_o_files(contents)
+    needed = gb.crate_notices_needed(files)
+    problems = gb.crate_notice_problems(contents, files, needed=needed)
+    crates = len(set().union(*needed.values())) if needed else 0
+    report.check("every Rust crate a bundled binary holds has its license in Licenses/rust-crates/", not problems,
+                 f"{crates} crates in {len(needed)} of {len(files)} files" if not problems
+                 else f"{len(problems)} files without", output="\n".join(problems))
+
+
+def check_no_junk(app: Path, report: Report) -> None:
+    """RC audit #2, #7: nothing the stage prunes (graft_bundle.PRUNE) is in
+    GraftPython, and no Windows binary is anywhere in the app. try12 shipped
+    Wintun's four DLLs and about 38 MB of upstream tests, stubs and scripts."""
+    gb = _stage_module()
+    contents = app / "Contents"
+    gp = contents / "Resources" / "GraftPython"
+    found = sorted({str(p.relative_to(contents)) for pattern in gb.PRUNE for p in gp.glob(pattern)}
+                   | {str(p.relative_to(contents)) for p in gb.windows_binaries(contents)})
+    report.check("no Windows binaries, and nothing the stage prunes, ship in the app", not found,
+                 f"{len(found)} found" if found else "", output="\n".join(found[:40]))
+
+
+def check_framework_licences(app: Path, report: Report) -> None:
+    """Each framework in cyan/extras has its license text in
+    Licenses/cyan-extras/<name>-LICENSE and a components.json entry: an
+    artifact of that name whose source_url is its path in cyan's archive."""
+    name = "every framework in cyan/extras has a license file in Licenses/ and a components.json entry"
+    lic = app / "Contents" / "Resources" / "Licenses"
+    try:
+        entries = json.loads((lic / "components.json").read_text())
+    except (OSError, ValueError) as e:
+        report.check(name, False, str(e))
+        return
+    extras = app / "Contents" / CYAN_EXTRAS
+    frameworks = sorted(p.name for p in extras.iterdir()) if extras.is_dir() else []
+    listed = {e.get("name") for e in entries if e.get("kind") == "artifact"
+              and f"/cyan/extras/{e.get('name')}/" in (e.get("source_url") or "")}
+    problems = []
+    for fw in frameworks:
+        text = lic / "cyan-extras" / f"{fw.removesuffix('.framework')}-LICENSE"
+        if not text.is_file() or not text.stat().st_size:
+            problems.append(f"{fw}: no {text.relative_to(lic)}")
+        if fw not in listed:
+            problems.append(f"{fw}: not in components.json")
+    if not frameworks:
+        problems.append(f"no frameworks in {CYAN_EXTRAS}")
+    report.check(name, not problems, f"{len(frameworks)} frameworks" if not problems else f"{len(problems)} problems",
+                 output="\n".join(problems))
+
+
+SYSTEM_LIBS = ("/usr/lib/", "/System/")
+
+
+def link_problems(contents: Path, files: list[Path]) -> list[str]:
+    """Review #54: what each Mach-O links and searches, read from its load
+    commands. Absolute links and rpaths must be the system's; @loader_path
+    and @executable_path links must name a file in the app (each helper is
+    its own executable); an @rpath link must be reached by one of its rpaths."""
+    problems = []
+    for f in files:
+        rel = f.relative_to(contents)
+        here = str(f.parent)
+
+        def expand(s: str, here: str = here) -> Path:
+            return Path(s.replace("@loader_path", here, 1).replace("@executable_path", here, 1))
+
+        rpaths = macho.rpaths(f)
+        problems += [f"{rel}: rpath {r}" for r in rpaths if r.startswith("/") and not r.startswith(SYSTEM_LIBS)]
+        for name in macho.dylib_names(f):
+            if name.startswith(SYSTEM_LIBS):
+                continue
+            if name.startswith("/"):
+                problems.append(f"{rel}: links {name}")
+            elif name.startswith(("@loader_path/", "@executable_path/")):
+                if not expand(name).resolve().is_file():
+                    problems.append(f"{rel}: links {name}, which isn't there")
+            elif name.startswith("@rpath/"):
+                leaf = name.removeprefix("@rpath/")
+                if not any((expand(r) / leaf).resolve().is_file() for r in rpaths if not r.startswith("/")):
+                    problems.append(f"{rel}: links {name}, which no rpath reaches")
+            else:
+                problems.append(f"{rel}: links {name}, a relative path")
+    return problems
+
+
+def check_links(app: Path, report: Report) -> None:
+    contents = app / "Contents"
+    files = [f for f in mach_o_files(contents) if not macho.is_ios(f)]
+    problems = link_problems(contents, files)
+    report.check("every Mach-O links only the system's libraries and the app's own", not problems,
+                 f"{len(files)} files" if not problems else f"{len(problems)} wrong", output="\n".join(problems[:40]))
+
+
+def check_no_symlinks(app: Path, report: Report) -> None:
+    """The critic: an unarchiver that writes symlinks as files, or skips
+    them, breaks the seal, and nothing in the app needs one."""
+    links = sorted(str(p.relative_to(app)) for p in app.rglob("*") if p.is_symlink())
+    report.check("the app holds no symlinks", not links, f"{len(links)} found" if links else "",
+                 output="\n".join(links[:40]))
+
+
+def machine_needles(*paths: Path) -> set[bytes]:
+    """What names the release machine: `paths`, the account's real home folder
+    (from pwd, not $HOME, review #59), and its username, bare when it is long
+    enough not to turn up in random bytes."""
+    import pwd
+    me = pwd.getpwuid(os.getuid())
+    needles = {str(p).encode() for p in paths} | {f"/Users/{me.pw_name}/".encode()}
+    if len(Path(me.pw_dir).parts) >= 3:
+        needles.add(me.pw_dir.encode())
+    if len(me.pw_name) >= 5:
+        needles.add(me.pw_name.encode())
+    return needles
+
+
+#: A zlib stream's two-byte header: CMF 0x78 (deflate, 32K window) and an FLG
+#: that makes the pair a multiple of 31.
+_ZLIB_HEADERS = re.compile(rb"\x78[\x01\x5e\x9c\xda]")
+#: How much one candidate stream may inflate to before it's cut off: enough
+#: for any filename table, bounded against a crafted bomb.
+_ZLIB_LIMIT = 8 << 20
+
+
+def _inflated_streams(data: bytes):
+    """Every zlib stream in `data` that inflates, as its (bounded) plaintext.
+
+    1.0 and 1.1 leaked build paths only inside compressed coverage mappings,
+    where a plain byte search can't see them. Most candidate headers are
+    random bytes and fail within a few bytes."""
+    import zlib
+    view = memoryview(data)  # slices of a memoryview don't copy the file
+    for m in _ZLIB_HEADERS.finditer(data):
+        i = m.start()
+        if (data[i] * 256 + data[i + 1]) % 31:
+            continue
+        inflate = zlib.decompressobj()
+        try:
+            out = inflate.decompress(view[i:], _ZLIB_LIMIT)
+        except zlib.error:
+            continue
+        if out:
+            yield out
+
+
+def _names_the_machine(data: bytes, needles: set[bytes]) -> bool:
+    if any(n in data for n in needles):
+        return True
+    return any(any(n in out for n in needles) for out in _inflated_streams(data))
+
+
+def check_no_build_paths(app: Path, report: Report) -> None:
+    """The download is public: nothing in it may name the release machine's
+    home folder or this checkout, in plain bytes or inside a zlib stream.
+    graft_bundle.py checks the stage; this covers the whole app, the Xcode
+    build's part included."""
+    needles = machine_needles(REPO)
+    hits = [str(p.relative_to(app)) for p in sorted(app.rglob("*"))
+            if p.is_file() and not p.is_symlink() and _names_the_machine(p.read_bytes(), needles)]
+    report.check("no file names the release machine's home folder or checkout", not hits,
+                 f"{len(hits)} do" if hits else "", output="\n".join(hits[:20]))
+
+
+#: Section names a coverage or profiling build leaves in a Mach-O; their
+#: contents hold the source tree's paths.
+COVERAGE_SECTIONS = (b"__llvm_covmap", b"__llvm_covfun", b"__llvm_prf_")
+
+
+def check_no_coverage_sections(app: Path, report: Report) -> None:
+    """1.1 build 3 turned code coverage off in Release (ENABLE_CODE_COVERAGE=NO);
+    this keeps it off for every Mach-O the app ships."""
+    hits = [str(f.relative_to(app)) for f in mach_o_files(app / "Contents")
+            if any(name in f.read_bytes() for name in COVERAGE_SECTIONS)]
+    report.check("no Mach-O carries coverage or profiling sections", not hits,
+                 f"{len(hits)} do" if hits else "", output="\n".join(hits[:20]))
+
+
+#: What no helper may import: each runs a command line through /bin/sh.
+SHELL_IMPORTS = ("_system", "_popen")
+#: Imports audited and allowed, each tied to the exact artifact audited (its
+#: pin's SHA-256 in bundle/pins.toml), so a new pin has to be audited again.
+#:   zsign 1.1.3, `_popen`: SlotParseRequirements runs
+#:   `/usr/bin/csreq -r '/tmp/Requirements_<microseconds>.blob' -t`, a path zsign
+#:   makes itself, and only when it prints a bare Mach-O's signature (`zsign
+#:   <file>` with no signing options), which Graft never runs.
+SHELL_IMPORT_EXCEPTIONS = {
+    ("Helpers/bin/zsign", "_popen"): ("zsign", "2790ec58a55db5f4282843d0cdbb0b587d19b972331b5285aee2de67f4ab705e"),
+}
+
+
+def helper_files(contents: Path) -> list[Path]:
+    """The Mach-O files that are tools, not the Python runtime: cyan's helpers,
+    everything under Helpers/, and everything under Frameworks/."""
+    roots = (contents / CYAN_TOOLS, contents / "Helpers", contents / "Frameworks")
+    return [p for root in roots if root.is_dir() for p in mach_o_files(root)]
+
+
+def imported_symbols(path: Path) -> set[str] | None:
+    """A Mach-O's undefined symbols, every slice's; None if nm can't read it."""
+    r = run(["nm", "-u", "-j", path], timeout=60)
+    if r.returncode != 0:
+        return None
+    return {line.strip() for line in r.stdout.splitlines() if line.strip() and not line.endswith(":")}
+
+
+def shell_import_problems(imports: dict[str, set[str] | None], pinned: dict[str, dict]) -> list[str]:
+    """Each helper (by its path under Contents) importing system() or popen()
+    that SHELL_IMPORT_EXCEPTIONS doesn't allow for the pinned artifact."""
+    problems = []
+    for rel, symbols in sorted(imports.items()):
+        if symbols is None:
+            problems.append(f"{rel}: nm can't read its imports")
+            continue
+        for symbol in sorted(symbols & set(SHELL_IMPORTS)):
+            allowed = SHELL_IMPORT_EXCEPTIONS.get((rel, symbol))
+            if allowed and pinned.get(allowed[0], {}).get("sha256", "").lower() == allowed[1]:
+                continue
+            problems.append(f"{rel} imports {symbol}")
+    return problems
+
+
+def check_helper_imports(app: Path, report: Report) -> None:
+    """Review #2: a helper that runs a shell can be made to run anything a
+    file name says. cctools-port's install_name_tool did, through system()."""
+    contents = app / "Contents"
+    files = helper_files(contents)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        imports = dict(zip((str(f.relative_to(contents)) for f in files), pool.map(imported_symbols, files),
+                           strict=True))
+    problems = shell_import_problems(imports, pins())
+    report.check("no helper imports system() or popen() (cyan's tools, Helpers, Frameworks)",
+                 files and not problems, f"{len(files)} files" if not problems else f"{len(problems)} do",
+                 output="\n".join(problems))
+
+
+#: Unicorn (GPL-2.0) is not in Graft.app: ipatool downloads it on first use,
+#: as upstream does (the combined fix check's medium #2). ipatool's own
+#: binary names the library, since it downloads it; nothing else may, and no
+#: file of it, its license or its Python package may be anywhere in the app.
+UNICORN_NAMERS = ("Helpers/bin/ipatool",)
+_PYTHON_FILE = (".py", ".pyc")
+#: A Unicorn file's name: libunicorn.2.dylib, unicorn-COPYING, a unicorn
+#: package. Not gunicorn, which uvicorn's workers module names.
+_UNICORN_NAME = re.compile(r"(?<!g)unicorn", re.IGNORECASE)
+
+
+def unicorn_problems(contents: Path, machos: list[Path]) -> list[str]:
+    """Every file or folder named for Unicorn, anywhere in the app; and every
+    Mach-O but ipatool, and every Python file, that names libunicorn."""
+    problems = []
+    machos = set(machos)
+    for p in sorted(contents.rglob("*")):
+        rel = str(p.relative_to(contents))
+        if _UNICORN_NAME.search(p.name):
+            problems.append(f"{rel}: Unicorn is in the app")
+            continue
+        if p.is_symlink() or not p.is_file() or not (p in machos or p.suffix in _PYTHON_FILE):
+            continue
+        if rel not in UNICORN_NAMERS and b"libunicorn" in p.read_bytes():
+            problems.append(f"{rel} names Unicorn")
+    return problems
+
+
+def check_no_unicorn_in_the_app(app: Path, report: Report) -> None:
+    contents = app / "Contents"
+    problems = unicorn_problems(contents, mach_o_files(contents))
+    report.check("no Unicorn anywhere in the app (ipatool downloads its own), and nothing but ipatool names it",
+                 not problems, f"{len(problems)} wrong" if problems else "", output="\n".join(problems))
+
+
+# --------------------------------------------------------------- runtime checks
+
+
+class Sandbox:
+    """A temporary HOME with nothing of the release machine's in reach."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        self.home = root / "home"
+        for d in (".config", ".cache", ".local/share", ".local/state", "tmp", "bin", "work", "fixtures"):
+            (self.home / d).mkdir(parents=True, exist_ok=True)
+        self.work = self.home / "work"
+        self.fixtures = self.home / "fixtures"
+        user = os.environ.get("USER", "nobody")
+        self.env = {
+            "HOME": str(self.home), "USER": user, "LOGNAME": user, "PATH": SANDBOX_PATH,
+            "TMPDIR": f"{self.home}/tmp/", "LANG": "en_US.UTF-8",
+            "XDG_CONFIG_HOME": str(self.home / ".config"), "XDG_CACHE_HOME": str(self.home / ".cache"),
+            "XDG_DATA_HOME": str(self.home / ".local/share"), "XDG_STATE_HOME": str(self.home / ".local/state"),
+            "GRAFT_NO_KEYCHAIN": "1", "USBMUXD_SOCKET_ADDRESS": str(private_socket(root)),
+            # Review #47: the release Mac has Xcode, so /usr/bin's xcrun shims
+            # would quietly work here. With this, anything the bundle runs that
+            # needs the developer tools fails, as on a Mac without them.
+            "DEVELOPER_DIR": NO_DEVELOPER_DIR,
+        }
+
+    def run(self, argv: list, *, stdin: str = "", extra: dict | None = None) -> subprocess.CompletedProcess:
+        return run(argv, env={**self.env, **(extra or {})}, cwd=self.work, stdin=stdin)
+
+
+#: Made by the bundled Python's cryptography, in the sandbox: a throwaway CA
+#: and the leaf it issues (zsign builds its CMS signature with the leaf's
+#: issuer, so the .p12 carries the CA), a profile signed as Apple's are
+#: (PKCS#7 over the plist), and an IPA around `argv[4]`.
+FIXTURES = r'''
+import datetime, plistlib, sys, uuid, zipfile
+from pathlib import Path
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import pkcs7, pkcs12
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+out, team, password, binary = Path(sys.argv[1]), sys.argv[2], sys.argv[3].encode(), Path(sys.argv[4])
+
+def name(cn, ou=None):
+    attrs = [x509.NameAttribute(NameOID.COMMON_NAME, cn)]
+    if ou:
+        attrs.append(x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, ou))
+    return x509.Name(attrs + [x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Verify Bundle"),
+                              x509.NameAttribute(NameOID.COUNTRY_NAME, "US")])
+
+def usage(**on):
+    keys = ("digital_signature", "content_commitment", "key_encipherment", "data_encipherment",
+            "key_agreement", "key_cert_sign", "crl_sign", "encipher_only", "decipher_only")
+    return x509.KeyUsage(**{k: on.get(k, False) for k in keys})
+
+now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+def cert(subject, issuer, public, signer, ca):
+    b = (x509.CertificateBuilder().subject_name(subject).issuer_name(issuer).public_key(public)
+         .serial_number(x509.random_serial_number())
+         .not_valid_before(now - datetime.timedelta(days=1)).not_valid_after(now + datetime.timedelta(days=7))
+         .add_extension(x509.BasicConstraints(ca=ca, path_length=0 if ca else None), critical=True))
+    if ca:
+        b = b.add_extension(usage(key_cert_sign=True, crl_sign=True), critical=True)
+    else:
+        b = (b.add_extension(usage(digital_signature=True), critical=True)
+              .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CODE_SIGNING]), critical=False))
+    return b.sign(signer, hashes.SHA256())
+
+ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+ca = cert(name("Verify Bundle Test CA"), name("Verify Bundle Test CA"), ca_key.public_key(), ca_key, True)
+key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+leaf = cert(name(f"Apple Development: Verify Bundle ({team})", team), ca.subject, key.public_key(), ca_key, False)
+(out / "identity.p12").write_bytes(pkcs12.serialize_key_and_certificates(
+    b"verify-bundle", key, leaf, [ca], serialization.BestAvailableEncryption(password)))
+
+bundle_id = "com.example.verifybundle"
+naive = now.replace(tzinfo=None)
+profile = plistlib.dumps({
+    "AppIDName": "Verify Bundle", "ApplicationIdentifierPrefix": [team], "CreationDate": naive,
+    "DeveloperCertificates": [leaf.public_bytes(serialization.Encoding.DER)],
+    "Entitlements": {"application-identifier": f"{team}.{bundle_id}",
+                     "com.apple.developer.team-identifier": team, "get-task-allow": True,
+                     "keychain-access-groups": [f"{team}.*"]},
+    "ExpirationDate": naive + datetime.timedelta(days=7), "Name": "Verify Bundle",
+    "Platform": ["iOS"], "TeamIdentifier": [team], "TeamName": "Verify Bundle", "TimeToLive": 7,
+    "UUID": str(uuid.uuid4()).upper(), "Version": 1,
+})
+(out / "verify.mobileprovision").write_bytes(
+    pkcs7.PKCS7SignatureBuilder().set_data(profile).add_signer(leaf, key, hashes.SHA256())
+    .sign(serialization.Encoding.DER, []))
+
+info = plistlib.dumps({"CFBundleExecutable": "X", "CFBundleIdentifier": bundle_id, "CFBundleName": "X",
+                       "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.0",
+                       "CFBundleVersion": "1", "MinimumOSVersion": "15.0"})
+with zipfile.ZipFile(out / "in.ipa", "w", zipfile.ZIP_DEFLATED) as z:
+    z.writestr("Payload/X.app/Info.plist", info)
+    exe = zipfile.ZipInfo("Payload/X.app/X")
+    exe.external_attr = 0o100755 << 16
+    z.writestr(exe, binary.read_bytes(), zipfile.ZIP_DEFLATED)
+print(leaf.subject.rfc4514_string())
+'''
+
+#: Load every compiled extension module, so library validation gets its say
+#: on each one under the hardened runtime.
+EXTENSIONS = r'''
+import importlib, os, sys, sysconfig
+roots = [sysconfig.get_paths()["purelib"], os.path.join(sysconfig.get_paths()["platstdlib"], "lib-dynload")]
+mods = set()
+for root in roots:
+    for d, _, files in os.walk(root):
+        for f in files:
+            if f.endswith(".so"):
+                rel = os.path.relpath(os.path.join(d, f), root)
+                mods.add(rel.split(".")[0].replace(os.sep, "."))
+loaded, failed = 0, []
+for m in sorted(mods):
+    try:
+        importlib.import_module(m)
+        loaded += 1
+    except ImportError as e:
+        # A shared library that isn't a Python module (pycryptodome loads its
+        # own with ctypes) was still loaded: dlopen, which is what library
+        # validation can refuse, succeeded before the init lookup failed.
+        if "does not define module export function" in str(e):
+            loaded += 1
+        else:
+            failed.append(f"{m}: {e}")
+    except Exception as e:
+        failed.append(f"{m}: {type(e).__name__}: {e}")
+print(f"{loaded} of {len(mods)} loaded")
+for f in failed:
+    print(f)
+sys.exit(1 if failed else 0)
+'''
+
+
+def make_fixtures(sb: Sandbox, py: Path, report: Report) -> bool:
+    """The throwaway identity, profile and IPA zsign signs with. The IPA's
+    executable is a fresh clang build: the linker gives it the code signature
+    load command zsign replaces."""
+    src = sb.fixtures / "x.c"
+    src.write_text("int main(void) { return 0; }\n")
+    exe = sb.fixtures / "X"
+    r = run(["clang", "-arch", "arm64", "-o", exe, src])
+    if not report.check("fixture: a test executable (clang)", r.returncode == 0, output=both(r)):
+        return False
+    r = sb.run([py, "-I", "-B", "-c", FIXTURES, sb.fixtures, FIXTURE_TEAM, FIXTURE_PASSWORD, exe])
+    return report.check("fixtures from the bundled Python's cryptography: CA, .p12, signed profile, IPA",
+                        r.returncode == 0, r.stdout.strip(), output=both(r))
+
+
+def check_preflight(report: Report, label: str, r: subprocess.CompletedProcess, tools: list[str]) -> None:
+    rows = {o["name"]: o for o in json_lines(r.stdout) if o.get("type") == "preflight-check"}
+    end = [o for o in json_lines(r.stdout) if o.get("type") == "preflight-end"]
+    report.check(f"--check --json ({label}) emits its rows and preflight-end",
+                 rows and len(end) == 1 and r.returncode in (0, 3), f"exit {r.returncode}, {len(rows)} rows",
+                 output=both(r))
+    for tool in tools:
+        row = rows.get(tool, {})
+        report.check(f"--check ({label}): {tool} is the bundled one", row.get("ok") and row.get("source") == "bundled",
+                     f"{row.get('source')}: {row.get('detail')}", output=json.dumps(row))
+    unwanted = [n for n in rows if n in ("otool", "ideviceinstaller")]
+    report.check(f"--check ({label}): no otool or ideviceinstaller row", not unwanted, ", ".join(unwanted))
+    # The sandbox has no device, so the device rows fail; nothing else may.
+    failing = [n for n, o in rows.items() if not o.get("ok") and "device" not in n]
+    report.check(f"--check ({label}): every non-device row passes", not failing, ", ".join(failing),
+                 output="\n".join(json.dumps(rows[n]) for n in failing))
+
+
+def _entitlements(text: str) -> dict:
+    """An entitlements plist as ldid -e or codesign --xml prints it; {} for none."""
+    import plistlib
+    text = text.strip()
+    return plistlib.loads(text.encode()) if text else {}
+
+
+def check_cyan_helpers(app: Path, sb: Sandbox, report: Report) -> None:
+    """cyan's helpers, built from source, run from the sealed app: ldid on the
+    bundled libcrypto and libplist, otool on the universal executable."""
+    contents = app / "Contents"
+    tools = contents / CYAN_TOOLS
+    # Review #50: an executable with entitlements, so that reading nothing
+    # can't pass (the bundled zsign has none).
+    f = sb.fixtures / "ldid-e"
+    f.mkdir()
+    (f / "main.c").write_text("int main(void) { return 0; }\n")
+    (f / "ents.plist").write_text('<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>'
+                                  f'<key>{INJECT_ENTITLEMENT}</key><true/></dict></plist>\n')
+    entitled = f / "entitled"
+    made = run(["clang", "-arch", "arm64", "-o", entitled, f / "main.c"])
+    if made.returncode == 0:
+        made = run(["codesign", "--force", "--sign", "-", "--entitlements", f / "ents.plist", entitled])
+    r = sb.run([tools / "ldid", "-e", entitled])
+    c = run(["codesign", "-d", "--entitlements", "-", "--xml", entitled])
+    try:
+        read = _entitlements(r.stdout) if r.returncode == 0 else None
+        same = made.returncode == 0 and read == _entitlements(c.stdout) == {INJECT_ENTITLEMENT: True}
+    except Exception as e:  # a plist neither tool should print
+        same, read = False, None
+        r.stderr += f"\n{type(e).__name__}: {e}"
+    report.check("cyan's ldid -e reads an entitled executable's entitlements as codesign does", same,
+                 f"exit {r.returncode}, {len(read or {})} entitlement(s)", output=both(made) + both(r))
+    r = sb.run([tools / "otool", "-L", contents / "MacOS" / "Graft"])
+    report.check("cyan's otool -L reads both slices of the app's executable",
+                 r.returncode == 0 and "(architecture arm64)" in r.stdout and "(architecture x86_64)" in r.stdout
+                 and "/usr/lib/libSystem.B.dylib" in r.stdout, f"exit {r.returncode}", output=both(r))
+
+
+#: An entitlement only the inject fixture's executable carries.
+INJECT_ENTITLEMENT = "com.example.verifybundle.inject"
+
+
+def make_inject_fixtures(sb: Sandbox, report: Report) -> tuple[Path, Path] | None:
+    """An IPA whose executable is signed with an entitlement and has room
+    for more load commands, as an app's has; and a universal tweak dylib
+    linking a stand-in for CydiaSubstrate by its usual absolute path. That
+    is what cyan rewrites, injects, re-signs and thins.
+
+    The executable is arm64 only, as an iOS app's is: `ldid -e` on a
+    universal one prints one plist per slice, which cyan then can't hand
+    back to `ldid -S`, whichever ldid it has."""
+    f = sb.fixtures / "inject"
+    f.mkdir()
+    (f / "substrate.c").write_text("void verify_bundle_hook(void) {}\n")
+    (f / "tweak.c").write_text("extern void verify_bundle_hook(void);\n"
+                               "__attribute__((constructor)) static void init(void) { verify_bundle_hook(); }\n")
+    (f / "main.c").write_text("int main(void) { return 0; }\n")
+    (f / "ents.plist").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        f'<plist version="1.0"><dict><key>{INJECT_ENTITLEMENT}</key><true/></dict></plist>\n')
+    tweak, exe = f / "VerifyTweak.dylib", f / "X"
+    both_archs = ["-arch", "arm64", "-arch", "x86_64"]
+    steps = [
+        ["clang", *both_archs, "-dynamiclib", "-install_name",
+         "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", "-o", f / "CydiaSubstrate", f / "substrate.c"],
+        ["clang", *both_archs, "-dynamiclib", "-o", tweak, f / "tweak.c", f / "CydiaSubstrate"],
+        ["clang", "-arch", "arm64", "-Wl,-headerpad_max_install_names", "-o", exe, f / "main.c"],
+        ["codesign", "--force", "--sign", "-", "--entitlements", f / "ents.plist", exe],
+    ]
+    for step in steps:
+        r = run(step)
+        if r.returncode != 0:
+            report.check("fixture: an entitled executable and a universal tweak (clang, codesign -s -)", False,
+                         output=both(r))
+            return None
+    import plistlib
+    import zipfile
+    ipa = f / "in.ipa"
+    with zipfile.ZipFile(ipa, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("Payload/X.app/Info.plist", plistlib.dumps({
+            "CFBundleExecutable": "X", "CFBundleIdentifier": "com.example.verifybundle.inject",
+            "CFBundleName": "X", "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.0",
+            "CFBundleVersion": "1", "MinimumOSVersion": "15.0"}))
+        info = zipfile.ZipInfo("Payload/X.app/X")
+        info.external_attr = 0o100755 << 16
+        z.writestr(info, exe.read_bytes(), zipfile.ZIP_DEFLATED)
+    report.check("fixture: an entitled executable and a universal tweak (clang, codesign -s -)", True)
+    return ipa, tweak
+
+
+def check_cyan_inject(app: Path, sb: Sandbox, report: Report) -> None:
+    """cyan injects a tweak with every one of its helpers: ldid -e and -R,
+    install_name_tool -add_rpath and -change (after otool -L), insert_dylib,
+    ldid -S to put the entitlements back, then lipo -thin (-q)."""
+    made = make_inject_fixtures(sb, report)
+    if made is None:
+        return
+    ipa, tweak = made
+    out = sb.work / "injected.ipa"
+    r = sb.run([app / "Contents" / "Helpers" / "bin" / "cyan", "-i", ipa, "-o", out, "-f", tweak, "-q"])
+    if not report.check("cyan injects a tweak into an IPA (-f, -q)", r.returncode == 0 and out.is_file(),
+                        f"exit {r.returncode}", output=both(r)):
+        return
+    import zipfile
+    unpacked = sb.work / "injected"
+    with zipfile.ZipFile(out) as z:
+        z.extractall(unpacked)
+    bundle = unpacked / "Payload" / "X.app"
+    exe, injected = bundle / "X", bundle / "Frameworks" / "VerifyTweak.dylib"
+    problems = []
+    try:
+        weak = [lc.lc_str(8) for cmds in macho.load_commands(exe) for lc in cmds
+                if lc.cmd == macho.LC_LOAD_WEAK_DYLIB]
+        if "@rpath/VerifyTweak.dylib" not in weak:
+            problems.append(f"insert_dylib: X weak-links {weak}, not @rpath/VerifyTweak.dylib")
+        if "@executable_path/Frameworks" not in macho.rpaths(exe):
+            problems.append(f"install_name_tool -add_rpath: X's rpaths are {macho.rpaths(exe)}")
+        links = macho.dylib_names(injected)
+        if "@rpath/CydiaSubstrate.framework/CydiaSubstrate" not in links or any(n.startswith("/Library/") for n in links):
+            problems.append(f"otool -L / install_name_tool -change: the tweak links {links}")
+    except (OSError, macho.MachOError) as e:
+        problems.append(f"reading the output: {e}")
+    if not (bundle / "Frameworks" / "CydiaSubstrate.framework" / "CydiaSubstrate").is_file():
+        problems.append("CydiaSubstrate.framework wasn't added to Frameworks")
+    archs = run(["lipo", "-archs", injected]).stdout.split()
+    if archs != ["arm64"]:
+        problems.append(f"lipo -thin: the tweak is {archs}")
+    c = run(["codesign", "-d", "--entitlements", "-", "--xml", exe])
+    try:
+        ents = _entitlements(c.stdout) if c.returncode == 0 else {}
+    except Exception:
+        ents = {}
+    if not ents.get(INJECT_ENTITLEMENT):
+        problems.append(f"ldid -e/-S: X's entitlements afterward are {ents or 'none'} ({c.stderr.strip()})")
+    report.check("cyan's injected IPA: weak dylib, rpath, rewritten dependency, entitlements kept, thinned",
+                 not problems, f"{len(problems)} wrong" if problems else "", output="\n".join(problems) + "\n" + both(r))
+
+
+#: File names that run `touch PWNED` if anything puts them into a shell
+#: command line unquoted (review #2): a tweak in a .deb, and an app's
+#: CFBundleExecutable.
+HOSTILE_TWEAK = "Fx;touch PWNED;.dylib"
+HOSTILE_EXECUTABLE = "X;touch PWNED #"
+PWNED = "PWNED"
+
+
+def ar_archive(members: list[tuple[str, bytes]]) -> bytes:
+    """A BSD/GNU `ar` archive (what a .deb is), short member names only."""
+    out = [b"!<arch>\n"]
+    for name, data in members:
+        if len(name) > 15:
+            raise ValueError(f"ar member name too long: {name}")
+        out.append(f"{name + '/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}{len(data):<10}`\n".encode())
+        out.append(data + (b"\n" if len(data) % 2 else b""))
+    return b"".join(out)
+
+
+def tar_gz(members: list[tuple[str, bytes, int]]) -> bytes:
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data, mode in members:
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(data), mode
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def make_deb(path: Path, files: dict[str, bytes]) -> Path:
+    """A .deb whose data.tar.gz holds `files` (path in the archive -> bytes)."""
+    control = b"Package: com.example.verifybundle\nVersion: 1.0\nArchitecture: iphoneos-arm\n"
+    path.write_bytes(ar_archive([
+        ("debian-binary", b"2.0\n"),
+        ("control.tar.gz", tar_gz([("./control", control, 0o644)])),
+        ("data.tar.gz", tar_gz([(f"./{name}", data, 0o755) for name, data in files.items()])),
+    ]))
+    return path
+
+
+def ipa_of(path: Path, executable: str, binary: bytes, bundle_id: str) -> Path:
+    import plistlib
+    import zipfile
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("Payload/X.app/Info.plist", plistlib.dumps({
+            "CFBundleExecutable": executable, "CFBundleIdentifier": bundle_id, "CFBundleName": "X",
+            "CFBundlePackageType": "APPL", "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1",
+            "MinimumOSVersion": "15.0"}))
+        info = zipfile.ZipInfo(f"Payload/X.app/{executable}")
+        info.external_attr = 0o100755 << 16
+        z.writestr(info, binary, zipfile.ZIP_DEFLATED)
+    return path
+
+
+def pwned_files(*roots: Path) -> list[Path]:
+    return sorted(p for root in roots if root.exists() for p in root.rglob(f"*{PWNED}*")
+                  if p.name == PWNED or p.name.startswith(f"{PWNED} "))
+
+
+def check_cyan_hostile_names(app: Path, sb: Sandbox, report: Report) -> None:
+    """Review #2, through the bundled cyan: a .deb holding `Fx;touch PWNED;.dylib`
+    and an IPA whose executable is `X;touch PWNED #` inject without running
+    anything. NO_CODESIGN is not set: the helper alone must be safe."""
+    f = sb.fixtures / "hostile"
+    f.mkdir()
+    (f / "substrate.c").write_text("void verify_bundle_hook(void) {}\n")
+    (f / "tweak.c").write_text("extern void verify_bundle_hook(void);\n"
+                               "__attribute__((constructor)) static void init(void) { verify_bundle_hook(); }\n")
+    (f / "main.c").write_text("int main(void) { return 0; }\n")
+    substrate, tweak, exe = f / "CydiaSubstrate", f / "tweak.dylib", f / "main"
+    ents = f / "ents.plist"
+    ents.write_text('<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict>'
+                    f'<key>{INJECT_ENTITLEMENT}</key><true/></dict></plist>\n')
+    for step in (
+        ["clang", "-arch", "arm64", "-dynamiclib", "-install_name",
+         "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate", "-o", substrate, f / "substrate.c"],
+        ["clang", "-arch", "arm64", "-dynamiclib", "-Wl,-headerpad_max_install_names", "-o", tweak,
+         f / "tweak.c", substrate],
+        ["clang", "-arch", "arm64", "-Wl,-headerpad_max_install_names", "-o", exe, f / "main.c"],
+        ["codesign", "--force", "--sign", "-", "--entitlements", ents, exe],
+    ):
+        r = run(step)
+        if r.returncode != 0:
+            report.check("fixture: a tweak, a stand-in CydiaSubstrate and an entitled executable", False,
+                         output=both(r))
+            return
+    deb = make_deb(f / "hostile.deb", {f"Library/MobileSubstrate/DynamicLibraries/{HOSTILE_TWEAK}": tweak.read_bytes()})
+    benign = ipa_of(f / "benign.ipa", "X", exe.read_bytes(), "com.example.verifybundle.hostile")
+    evil = ipa_of(f / "evil-exe.ipa", HOSTILE_EXECUTABLE, exe.read_bytes(), "com.example.verifybundle.hostile")
+    cyan = app / "Contents" / "Helpers" / "bin" / "cyan"
+    runs = {
+        "a tweak named Fx;touch PWNED;.dylib, from a .deb": (benign, deb, "X", HOSTILE_TWEAK),
+        "an app whose executable is X;touch PWNED #": (evil, tweak, HOSTILE_EXECUTABLE, "tweak.dylib"),
+    }
+    for i, (what, (ipa, add, exe_name, injected)) in enumerate(runs.items()):
+        cwd = sb.work / f"hostile-{i}"
+        cwd.mkdir()
+        out = sb.work / f"hostile-{i}.ipa"
+        r = run([cyan, "-i", ipa, "-o", out, "-f", add], env=sb.env, cwd=cwd)
+        problems = [f"ran a shell: {p.relative_to(sb.root)}" for p in pwned_files(sb.root)]
+        if r.returncode != 0 or not out.is_file():
+            problems.append(f"cyan exit {r.returncode}, output {'present' if out.is_file() else 'missing'}")
+        else:
+            import zipfile
+            unpacked = sb.work / f"hostile-{i}"
+            with zipfile.ZipFile(out) as z:
+                z.extractall(unpacked)
+            bundle = unpacked / "Payload" / "X.app"
+            try:
+                weak = [lc.lc_str(8) for cmds in macho.load_commands(bundle / exe_name) for lc in cmds
+                        if lc.cmd == macho.LC_LOAD_WEAK_DYLIB]
+                if f"@rpath/{injected}" not in weak:
+                    problems.append(f"{exe_name} weak-links {weak}, not @rpath/{injected}")
+                if "@executable_path/Frameworks" not in macho.rpaths(bundle / exe_name):
+                    problems.append(f"{exe_name}'s rpaths are {macho.rpaths(bundle / exe_name)}")
+                links = macho.dylib_names(bundle / "Frameworks" / injected)
+                if "@rpath/CydiaSubstrate.framework/CydiaSubstrate" not in links:
+                    problems.append(f"{injected} links {links}: its CydiaSubstrate link wasn't rewritten")
+            except (OSError, macho.MachOError) as e:
+                problems.append(f"reading the output: {e}")
+        report.check(f"cyan injects {what}, and no shell runs", not problems,
+                     f"{len(problems)} wrong" if problems else "", output="\n".join(problems) + "\n" + both(r))
+        for p in pwned_files(sb.root):
+            p.unlink()
+
+
+#: An ad hoc signed library, as the Unicorn ipatool downloads is: one
+#: function that maps MAP_JIT memory, writes `mov x0, #41; add x0, x0, #1;
+#: ret` into it and runs it, as Unicorn's code translator does.
+JIT_LIBRARY = r'''
+#include <errno.h>
+#include <libkern/OSCacheControl.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <string.h>
+#include <sys/mman.h>
+
+int graft_jit_42(void) {
+    void *page = mmap(NULL, 16384, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    if (page == MAP_FAILED) return -errno;
+    const uint32_t code[] = {0xd2800520, 0x91000400, 0xd65f03c0};
+    pthread_jit_write_protect_np(0);
+    memcpy(page, code, sizeof code);
+    pthread_jit_write_protect_np(1);
+    sys_icache_invalidate(page, sizeof code);
+    int result = ((int (*)(void))page)();
+    munmap(page, 16384);
+    return result;
+}
+'''
+
+#: dlopens the library argv[1] names, as ipatool's purego does, and runs its
+#: JIT code: exits 0 only for 42; 10 when the load is refused, 12 when the
+#: JIT memory is.
+JIT_LOADER = r'''
+#include <dlfcn.h>
+#include <stdio.h>
+
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    void *h = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+    if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 10; }
+    int (*jit)(void) = (int (*)(void))dlsym(h, "graft_jit_42");
+    if (!jit) { fprintf(stderr, "dlsym: %s\n", dlerror()); return 11; }
+    int result = jit();
+    printf("jit=%d\n", result);
+    if (result < 0) { fprintf(stderr, "MAP_JIT refused: errno %d\n", -result); return 12; }
+    return result == 42 ? 0 : 13;
+}
+'''
+
+#: The three loaders the harness signs: as ipatool is, and each with one of
+#: ipatool's two entitlements taken away.
+JIT_VARIANTS = {
+    "as ipatool": ("com.apple.security.cs.allow-jit", "com.apple.security.cs.disable-library-validation"),
+    "without disable-library-validation": ("com.apple.security.cs.allow-jit",),
+    "without allow-jit": ("com.apple.security.cs.disable-library-validation",),
+}
+
+
+def jit_harness_problems(results: dict[str, subprocess.CompletedProcess]) -> list[str]:
+    """What's wrong with the harness's three runs (`JIT_VARIANTS`): signed
+    as ipatool it loads the ad hoc library and runs JIT code; without
+    disable-library-validation the load is refused for its Team ID; without
+    allow-jit the JIT memory is refused."""
+    problems = []
+    ok = results["as ipatool"]
+    if ok.returncode != 0 or "jit=42" not in ok.stdout:
+        problems.append(f"as ipatool: exit {ok.returncode}, not 0 with jit=42")
+    no_dlv = results["without disable-library-validation"]
+    if no_dlv.returncode != 10 or "Team ID" not in no_dlv.stderr:
+        problems.append(f"without disable-library-validation: exit {no_dlv.returncode}, not a load refused "
+                        "for its Team ID")
+    no_jit = results["without allow-jit"]
+    if no_jit.returncode != 12:
+        problems.append(f"without allow-jit: exit {no_jit.returncode}, not the JIT memory refused")
+    return problems
+
+
+#: PlayCover's prep, through the bundled Python: a tweak linking the iOS
+#: private Preferences framework gets the prebuilt stub and is retargeted by
+#: the bundled install_name_tool, with no Xcode at all (decision 9).
+PLAYCOVER = r'''
+import subprocess, sys
+from pathlib import Path
+from graft_ipa import macho, playcover
+fw = Path(sys.argv[1])
+fixed = playcover.prepare_frameworks_dir(fw)
+dylib = fw / "libverify.dylib"
+links = macho.dylib_names(dylib)
+problems = []
+if fixed != ["libverify.dylib → bundled Preferences.framework"]:
+    problems.append(f"fixed {fixed}")
+if not (fw / "Preferences.framework" / "Preferences").is_file():
+    problems.append("no Preferences.framework stub")
+if "@rpath/Preferences.framework/Preferences" not in links or any(n.startswith("/System/") for n in links):
+    problems.append(f"links {links}")
+if "@loader_path" not in macho.rpaths(dylib):
+    problems.append(f"rpaths {macho.rpaths(dylib)}")
+r = subprocess.run(["/usr/bin/codesign", "--verify", str(dylib)], capture_output=True, text=True)
+if r.returncode:
+    problems.append(f"codesign --verify: {r.stderr.strip()}")
+print("\n".join(problems) or "ok")
+sys.exit(1 if problems else 0)
+'''
+
+
+def check_playcover(app: Path, sb: Sandbox, report: Report) -> None:
+    name = f"a PlayCover build's prep runs with no Xcode (DEVELOPER_DIR={NO_DEVELOPER_DIR})"
+    f = sb.fixtures / "playcover"
+    fw = f / "Frameworks"
+    fw.mkdir(parents=True)
+    (f / "prefs.c").write_text("void verify_bundle_prefs(void) {}\n")
+    (f / "tweak.c").write_text("extern void verify_bundle_prefs(void);\n"
+                               "__attribute__((constructor)) static void init(void) { verify_bundle_prefs(); }\n")
+    for step in (
+        ["clang", "-arch", "arm64", "-dynamiclib", "-install_name",
+         "/System/Library/PrivateFrameworks/Preferences.framework/Preferences", "-o", f / "Preferences", f / "prefs.c"],
+        ["clang", "-arch", "arm64", "-dynamiclib", "-Wl,-headerpad_max_install_names", "-o", fw / "libverify.dylib",
+         f / "tweak.c", f / "Preferences"],
+    ):
+        r = run(step)
+        if r.returncode != 0:
+            report.check(name, False, "fixture", output=both(r))
+            return
+    py = app / "Contents" / "Resources" / "GraftPython" / "bin" / "python3.13"
+    r = sb.run([py, "-I", "-B", "-c", PLAYCOVER, fw])
+    report.check(name, r.returncode == 0 and r.stdout.strip() == "ok", r.stdout.strip()[-200:], output=both(r))
+
+
+def check_jit_harness(app: Path, sb: Sandbox, report: Report) -> None:
+    """Review #4, under option (a): signed as ipatool is (the release
+    identity, the hardened runtime, ipatool.plist's allow-jit and
+    disable-library-validation), a loader dlopens an ad hoc signed library,
+    built here with clang as the downloaded Unicorn is ad hoc signed, and
+    runs JIT code from it. Two controls: without disable-library-validation
+    the load is refused (different Team IDs), and without allow-jit MAP_JIT
+    is. Nothing is downloaded. Needs GRAFT_SIGN_IDENTITY, as graft-release
+    has it; the loaders are signed without a timestamp."""
+    import plistlib
+
+    name = "a loader signed like ipatool runs JIT code from an ad hoc signed library; the controls fail"
+    identity = os.environ.get("GRAFT_SIGN_IDENTITY")
+    if not identity:
+        report.check(name, False, "set GRAFT_SIGN_IDENTITY to the release identity, as graft-release does")
+        return
+    f = sb.fixtures / "jit"
+    f.mkdir()
+    (f / "jit.c").write_text(JIT_LIBRARY)
+    (f / "loader.c").write_text(JIT_LOADER)
+    shipped = plistlib.loads((REPO / "bundle" / "entitlements" / "ipatool.plist").read_bytes())
+    if set(shipped) != set(JIT_VARIANTS["as ipatool"]):
+        report.check(name, False, f"bundle/entitlements/ipatool.plist grants {sorted(shipped)}")
+        return
+    lib = f / "libjit.dylib"
+    steps = [["clang", "-arch", "arm64", f"-mmacosx-version-min={_stage_module().MACOS_MIN}", "-Wall", "-Werror", "-dynamiclib",
+              "-o", lib, f / "jit.c"],
+             ["codesign", "--force", "--sign", "-", lib],
+             ["clang", "-arch", "arm64", f"-mmacosx-version-min={_stage_module().MACOS_MIN}", "-Wall", "-Werror", "-o", f / "loader",
+              f / "loader.c"]]
+    for label, keys in JIT_VARIANTS.items():
+        exe, plist = f / f"loader {label}", f / f"{label}.plist"
+        plist.write_bytes(plistlib.dumps({k: True for k in keys}))
+        steps += [["cp", f / "loader", exe],
+                  ["codesign", "--force", "--options", "runtime", "--timestamp=none", "--entitlements", plist,
+                   "--sign", identity, exe]]
+    for step in steps:
+        r = run(step)
+        if r.returncode != 0:
+            report.check(name, False, f"{step[0]} failed", output=both(r))
+            return
+    results = {label: sb.run([f / f"loader {label}", lib]) for label in JIT_VARIANTS}
+    problems = jit_harness_problems(results)
+    report.check(name, not problems, "; ".join(f"{label}: exit {r.returncode}" for label, r in results.items()),
+                 output="\n".join(problems + [f"{label}: {both(r).strip()}" for label, r in results.items()]))
+
+
+# ----------------------------------------------- offline builds (review #10, #57)
+
+BUILD_APP = "verify"
+BUILD_BUNDLE_ID = "com.example.verifybundle"
+
+
+def build_config(sb: Sandbox, *, paid: bool) -> str:
+    """A config with one app, built from the IPA staged in the sandbox's
+    cache with the inject fixture's tweak; paid signs with the fixture
+    identity and profile (zsign), free leaves it for LiveContainer."""
+    f = sb.fixtures
+    signing = (f"signing:\n  cert: {f / 'identity.p12'}\n  cert_password_env: {FIXTURE_PASSWORD_ENV}\n"
+               f"  profile: {f / 'verify.mobileprovision'}\n  team_id: {FIXTURE_TEAM}\n") if paid else ""
+    return (f"cache_dir: {sb.home / '.cache/graft/ipas'}\ntweaks_dir: {sb.home / '.config/graft/tweaks'}\n{signing}"
+            f"apps:\n  {BUILD_APP}:\n    bundle_id: {BUILD_BUNDLE_ID}\n    preferred_version: latest\n"
+            f"    delivery: {'sideload' if paid else 'livecontainer'}\n    tweaks: [VerifyTweak.dylib]\n"
+            "    cyan:\n      keep_bundle_id: true\n")
+
+
+def stage_build_inputs(sb: Sandbox) -> bool:
+    """The inject fixture's entitled executable as an IPA with the profile's
+    bundle id, staged in the cache; its tweak in tweaks_dir."""
+    inject = sb.fixtures / "inject"
+    exe, tweak = inject / "X", inject / "VerifyTweak.dylib"
+    if not exe.is_file() or not tweak.is_file():
+        return False
+    cache = sb.home / ".cache" / "graft" / "ipas"
+    tweaks = sb.home / ".config" / "graft" / "tweaks"
+    cache.mkdir(parents=True, exist_ok=True)
+    tweaks.mkdir(parents=True, exist_ok=True)
+    ipa_of(cache / f"{BUILD_BUNDLE_ID}_1.0.ipa", "X", exe.read_bytes(), BUILD_BUNDLE_ID)  # the canonical name
+    # arm64 only, as an iOS tweak is: the inject fixture's is universal to
+    # exercise cyan's thinning, and zsign signs a universal dylib's slices in a
+    # way codesign rejects ("main executable failed strict validation").
+    return run(["lipo", tweak, "-thin", "arm64", "-output", tweaks / "VerifyTweak.dylib"]).returncode == 0
+
+
+def hostile_env(sb: Sandbox) -> tuple[dict[str, str], Path]:
+    """A login shell's environment at its worst (decision 8): Homebrew-like
+    folders first on PATH, with a zip, unzip, tar, codesign,
+    install_name_tool and security there that leave a mark and fail; junk
+    OpenSSL and CA settings; PYTHON* set. Returns it and the mark."""
+    root = sb.root / "hostile"
+    trap, junk = root / "brew" / "bin", root / "junk"
+    trap.mkdir(parents=True)
+    junk.mkdir()
+    mark = root / "TRAPPED"
+    for tool in ("zip", "unzip", "tar", "codesign", "install_name_tool", "security", "lipo", "otool", "python3",
+                 "openssl"):
+        (trap / tool).write_text(f"#!/bin/sh\necho {tool} >> '{mark}'\nexit 1\n")
+        (trap / tool).chmod(0o755)
+    (junk / "openssl.cnf").write_text("this is not an OpenSSL config [[[\n.include /nonexistent\n")
+    (junk / "sitecustomize.py").write_text(f"open({str(mark)!r}, 'a').write('python\\n')\n")
+    # CA overrides that name nothing usable, which the bundle must drop: a
+    # missing file, a folder where a file goes, a file where a folder goes.
+    # A real CA file is kept (check_ca_overrides).
+    env = {**sb.env, "PATH": f"{trap}:/opt/homebrew/bin:/usr/local/bin:{SANDBOX_PATH}",
+           "OPENSSL_CONF": str(junk / "openssl.cnf"), "OPENSSL_ENGINES": str(junk),
+           "SSL_CERT_FILE": str(junk / "missing-ca.pem"), "SSL_CERT_DIR": str(junk / "openssl.cnf"),
+           "REQUESTS_CA_BUNDLE": str(junk / "missing-ca.pem"), "CURL_CA_BUNDLE": str(junk),
+           "PYTHONPATH": str(junk), "PYTHONHOME": str(junk), "PYTHONSTARTUP": str(junk / "sitecustomize.py"),
+           "PYTHONEXECUTABLE": "/tmp/Elsewhere.app/Contents/Resources/x", "__PYVENV_LAUNCHER__": "/tmp/Elsewhere.app/x",
+           "HTTPS_PROXY": "http://127.0.0.1:9"}
+    return env, mark
+
+
+def clear_built(sb: Sandbox) -> set[Path]:
+    """Empty the built folder: two builds in one second share a file name."""
+    built = sb.home / ".cache" / "graft" / "built"
+    for f in built.glob("*.ipa") if built.is_dir() else []:
+        f.unlink()
+    return set()
+
+
+def built_ipa(sb: Sandbox, before: set[Path]) -> Path | None:
+    new = sorted(set((sb.home / ".cache" / "graft" / "built").glob(f"{BUILD_APP}_*.ipa")) - before)
+    return new[-1] if len(new) == 1 else None
+
+
+def zsign_output_problems(ipa: Path, work: Path) -> list[str]:
+    """Review #57: the paid build's signature, validated (codesign --verify
+    checks the code hashes; only the designated requirement can fail, the
+    CA being a test one) and by the fixture identity, on the app, the
+    injected tweak and the framework cyan added."""
+    import zipfile
+    unpacked = work / "unpacked"
+    shutil.rmtree(unpacked, ignore_errors=True)
+    with zipfile.ZipFile(ipa) as z:
+        z.extractall(unpacked)
+    bundle = unpacked / "Payload" / "X.app"
+    problems = []
+    for code in (bundle, bundle / "Frameworks" / "VerifyTweak.dylib", bundle / "Frameworks" / "CydiaSubstrate.framework"):
+        d = run(["codesign", "-dv", "--verbose=2", code])
+        if f"Authority=Apple Development: Verify Bundle ({FIXTURE_TEAM})" not in d.stderr:
+            problems.append(f"{code.relative_to(unpacked)}: not signed by the fixture identity: {d.stderr.strip()[-200:]}")
+        v = run(["codesign", "--verify", "--verbose=2", code])
+        text = both(v)
+        if v.returncode != 0 and not ("valid on disk" in text and "designated Requirement" in text):
+            problems.append(f"{code.relative_to(unpacked)}: codesign --verify: {text.strip()[-300:]}")
+    if not (bundle / "embedded.mobileprovision").is_file():
+        problems.append("no embedded.mobileprovision")
+    return problems
+
+
+def check_offline_builds(app: Path, sb: Sandbox, report: Report) -> None:
+    """Review #10: a paid --skip-install build, cyan then zsign, and a free one,
+    through the sealed CLI with no network, device or keychain. Then
+    decision 8: --check and the paid build again in a hostile login-shell
+    environment, which must change nothing."""
+    graft = app / "Contents" / "Helpers" / "graft"
+    config = sb.home / ".config" / "graft" / "config.yaml"
+    if not stage_build_inputs(sb) or not (sb.fixtures / "identity.p12").is_file():
+        report.check("offline builds: fixtures", False, "the inject and signing fixtures weren't made")
+        return
+    free = config.read_text() if config.is_file() else ""
+    password = {FIXTURE_PASSWORD_ENV: FIXTURE_PASSWORD}
+    results = {}
+    try:
+        for label, paid in (("free", False), ("paid", True)):
+            config.write_text(build_config(sb, paid=paid))
+            before = clear_built(sb)
+            r = sb.run([graft, BUILD_APP, "--skip-install", "--json"], extra=password)
+            ipa = built_ipa(sb, before)
+            ok = r.returncode == 0 and ipa is not None
+            problems = zsign_output_problems(ipa, sb.work) if ok and paid else []
+            if ok and not paid:
+                import zipfile
+                with zipfile.ZipFile(ipa) as z:
+                    if "Payload/X.app/Frameworks/VerifyTweak.dylib" not in z.namelist():
+                        problems.append("the tweak isn't in the archive")
+            results[label] = (r, ipa)
+            report.check(f"an offline {label} --skip-install build ({'cyan, then zsign' if paid else 'cyan'})",
+                         ok and not problems, ipa.name if ipa else f"exit {r.returncode}",
+                         output="\n".join(problems) + "\n" + both(r))
+        clean_check = sb.run([graft, "--check", "--json"], extra=password)
+        env, mark = hostile_env(sb)
+        hostile_check = run([graft, "--check", "--json"], env={**env, **password}, cwd=sb.work)
+        rows = {label: {o["name"]: o.get("ok") for o in json_lines(r.stdout) if o.get("type") == "preflight-check"}
+                for label, r in (("clean", clean_check), ("hostile", hostile_check))}
+        before = clear_built(sb)
+        hostile_build = run([graft, BUILD_APP, "--skip-install", "--json"], env={**env, **password}, cwd=sb.work)
+        ipa = built_ipa(sb, before)
+        problems = [] if rows["clean"] and rows["clean"] == rows["hostile"] else [f"--check rows {rows}"]
+        if hostile_build.returncode != 0 or ipa is None:
+            problems.append(f"the paid build: exit {hostile_build.returncode}")
+        else:
+            problems += zsign_output_problems(ipa, sb.work)
+        if mark.exists():
+            problems.append(f"ran from the hostile PATH or PYTHON*: {mark.read_text().split()}")
+        report.check("--check and a paid build behave the same in a hostile login-shell environment", not problems,
+                     f"{len(rows['hostile'])} rows" if not problems else f"{len(problems)} wrong",
+                     output="\n".join(problems) + "\n" + both(hostile_build)[-1500:])
+    finally:
+        config.write_text(free)
+
+
+#: Run by the bundled Python with CA overrides set: what the CLI's own
+#: process keeps (tame_bundled_process, as `python -m graft_ipa` runs it
+#: first) and what a child of it gets (child_env).
+CA_PROBE = r'''
+import json, os
+from graft_ipa import child_env
+child = child_env.child_env()
+child_env.tame_bundled_process()
+print(json.dumps({"process": {k: os.environ.get(k) for k in child_env.TLS_OVERRIDES},
+                  "child": {k: child.get(k) for k in child_env.TLS_OVERRIDES}}))
+'''
+
+
+def ca_override_problems(seen: dict, given: dict[str, str], kept: set[str]) -> list[str]:
+    """What's wrong with `seen` (CA_PROBE's answer) when `given` was set and
+    only the names in `kept` should have survived, unchanged."""
+    problems = []
+    for where in ("process", "child"):
+        got = seen.get(where) or {}
+        for name, value in given.items():
+            want = value if name in kept else None
+            if got.get(name) != want:
+                problems.append(f"{where}: {name}={got.get(name)!r}, want {want!r}")
+    return problems
+
+
+def check_ca_overrides(app: Path, sb: Sandbox, report: Report) -> None:
+    """Combined fix check #13: a CA bundle the user exported for a
+    TLS-inspecting proxy is kept when it names a real file (or SSL_CERT_DIR
+    a real folder); junk is dropped; OPENSSL_* always is."""
+    py = app / "Contents" / "Resources" / "GraftPython" / "bin" / "python3.13"
+    root = sb.root / "ca-overrides"
+    certs = root / "certs"
+    certs.mkdir(parents=True, exist_ok=True)
+    real = root / "corp-ca.pem"
+    real.write_bytes(Path("/private/etc/ssl/cert.pem").read_bytes())
+    given = {"REQUESTS_CA_BUNDLE": str(real), "SSL_CERT_DIR": str(certs),
+             "SSL_CERT_FILE": str(root / "missing.pem"), "CURL_CA_BUNDLE": str(certs),
+             "OPENSSL_CONF": str(real), "OPENSSL_ENGINES": str(certs)}
+    r = sb.run([py, "-I", "-B", "-c", CA_PROBE], extra=given)
+    try:
+        seen = json.loads(r.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        seen = {}
+    problems = ca_override_problems(seen, given, {"REQUESTS_CA_BUNDLE", "SSL_CERT_DIR"}) if seen else ["no answer"]
+    report.check("a CA file or folder the user exported is kept; junk CA settings and OPENSSL_* are dropped",
+                 r.returncode == 0 and not problems, f"{len(problems)} wrong" if problems else "",
+                 output="\n".join(problems) + "\n" + both(r))
+
+
+def check_unfairplay_offline(app: Path, sb: Sandbox, report: Report) -> None:
+    """The critic: the bundled unfairplay, signed with the hardened runtime,
+    must still run. `doctor` with no input only inspects this Mac
+    (fairplayd, /private/var/db/fpsd, ioreg) and contacts nothing; it must
+    report the same as the stage's own build of it (build_unfairplay's, from
+    the cache the release staged from), as the Go linker left it, ad hoc
+    signed, copied out first."""
+    gb = _stage_module()
+    pins = gb.load_pins(REPO / "bundle" / "pins.toml")
+    stage = sb.root / "unfairplay-stage" / "unfairplay"
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(gb.build_unfairplay(pins["unfairplay"], pins["go"]) / "unfairplay", stage)
+    answers = {}
+    for label, exe in (("bundled", app / "Contents" / "Helpers" / "bin" / "unfairplay"), ("stage", stage)):
+        r = sb.run([exe, "doctor"])
+        try:
+            report_json = json.loads(r.stdout)
+            report_json.pop("created_at", None)
+        except ValueError:
+            report_json = None
+        answers[label] = (r.returncode, report_json, both(r))
+    same = answers["bundled"][:2] == answers["stage"][:2] and answers["bundled"][1] is not None
+    report.check("unfairplay doctor (offline) reports as the stage's own build does, before the release signed it",
+                 same, f"exit {answers['bundled'][0]} and {answers['stage'][0]}",
+                 output="\n".join(f"{k}: {v[2][-600:]}" for k, v in answers.items()))
+
+
+def runtime_checks(app: Path, sb: Sandbox, report: Report) -> None:
+    contents = app / "Contents"
+    graft = contents / "Helpers" / "graft"
+    bindir = contents / "Helpers" / "bin"
+    py = contents / "Resources" / "GraftPython" / "bin" / "python3.13"
+    pinned = pins()
+    want = f"graft {pyproject_version()}"
+
+    r = sb.run([graft, "--version"])
+    report.check("Helpers/graft --version", r.returncode == 0 and r.stdout.strip() == want,
+                 r.stdout.strip() or f"exit {r.returncode}", output=both(r))
+    app_version = app_short_version(app)
+    report.check("the app's version is the CLI's (CFBundleShortVersionString against pyproject)",
+                 versions_agree(app_version, pyproject_version()), f"{app_version} and {pyproject_version()}")
+    r = sb.run([graft, "--describe"])
+    try:
+        contract = json.loads(r.stdout)
+    except ValueError:
+        contract = None
+    report.check("--describe is valid JSON", r.returncode == 0 and isinstance(contract, dict)
+                 and contract.get("type") == "cli-contract", output=both(r))
+
+    config = sb.home / ".config" / "graft" / "config.yaml"
+    # As a new user starts: no config, and no `graft` on the bare PATH a
+    # Dock-launched app gets. The app's setup runs Helpers/graft by its path.
+    fresh = not config.exists() and shutil.which("graft", path=sb.env["PATH"]) is None
+    r = sb.run([graft, "--json", "--init", "--account", "free"])
+    done = next((o for o in json_lines(r.stdout) if o.get("type") == "init-result"), {})
+    report.check("--init --account free (the app's first-run setup) writes a free config, "
+                 "from no config and no graft on PATH",
+                 fresh and r.returncode == 0 and config.is_file() and done.get("account") == "free"
+                 and len(done.get("steps") or []) == 3,
+                 f"exit {r.returncode}" if fresh else "not a fresh start", output=both(r))
+    check_preflight(report, "free", sb.run([graft, "--check", "--json"]), ["cyan"])
+
+    if make_fixtures(sb, py, report) and config.is_file():
+        f = sb.fixtures
+        free = config.read_text()
+        r = sb.run([graft, "--json", "--init", "--account", "paid", "--p12", f / "identity.p12",
+                    "--profile", f / "verify.mobileprovision", "--dry-run"],
+                   stdin=FIXTURE_PASSWORD + "\n")
+        review = next((o for o in json_lines(r.stdout) if o.get("type") == "init-result"), {})
+        report.check("--init --account paid --dry-run reads the .p12 and profile (the app's review)",
+                     r.returncode == 0 and review.get("team_id") == FIXTURE_TEAM
+                     and review.get("dry_run") is True and FIXTURE_PASSWORD not in r.stdout + r.stderr,
+                     f"exit {r.returncode}", output=both(r))
+        config.write_text(f"signing:\n  cert: {f / 'identity.p12'}\n  cert_password_env: {FIXTURE_PASSWORD_ENV}\n"
+                          f"  profile: {f / 'verify.mobileprovision'}\n  team_id: {FIXTURE_TEAM}\n" + free)
+        check_preflight(report, "paid", sb.run([graft, "--check", "--json"],
+                                               extra={FIXTURE_PASSWORD_ENV: FIXTURE_PASSWORD}), ["cyan", "zsign"])
+        config.write_text(free)
+        out = sb.work / "zsigned.ipa"
+        r = sb.run([bindir / "zsign", "-q", "-k", f / "identity.p12", "-p", FIXTURE_PASSWORD,
+                    "-m", f / "verify.mobileprovision", "-t", sb.home / "tmp", "-o", out, f / "in.ipa"])
+        signed = sb.work / "zsigned"
+        authority = ""
+        if r.returncode == 0 and out.is_file():
+            run(["ditto", "-x", "-k", out, signed])
+            d = run(["codesign", "-d", "--verbose=2", signed / "Payload" / "X.app" / "X"])
+            authority = next((ln for ln in d.stderr.splitlines() if ln.startswith("Authority=")), "")
+        report.check("zsign signs an IPA with a .p12 and profile (bundled OpenSSL)",
+                     r.returncode == 0 and f"Verify Bundle ({FIXTURE_TEAM})" in authority
+                     and (signed / "Payload/X.app/embedded.mobileprovision").is_file(),
+                     authority or f"exit {r.returncode}", output=both(r))
+
+    r = sb.run([graft, "--appstore-status", "--json"])
+    status = next((o for o in json_lines(r.stdout) if o.get("type") == "appstore-status"), {})
+    for tool in ("ipatool", "unfairplay"):
+        row = status.get(tool) or {}
+        report.check(f"--appstore-status: {tool} {pinned[tool]['version']} is the bundled one",
+                     row.get("source") == "bundled" and row.get("present") is True
+                     and str(row.get("version", "")).lstrip("v") == pinned[tool]["version"],
+                     f"{row.get('source')} {row.get('version')}", output=both(r))
+
+    r = sb.run([py, "-I", "-B", "-c", IMPORTS])
+    report.check("the embedded Python (-I -B) imports what the CLI needs", r.returncode == 0,
+                 IMPORTS.removeprefix("import "), output=both(r))
+    # Review #3: frida asks are frida-ios-dump's venv's (graft_ipa/frida_probe.py).
+    site = contents / "Resources" / "GraftPython" / "lib" / "python3.13" / "site-packages"
+    frida = sorted(str(p.relative_to(contents)) for p in site.glob("[Ff]rida*"))
+    report.check("the embedded Python has no frida", not frida, ", ".join(frida))
+    r = sb.run([py, "-I", "-B", "-c", EXTENSIONS])
+    report.check("every compiled extension module loads", r.returncode == 0,
+                 r.stdout.splitlines()[0] if r.stdout else "", output=both(r))
+    r = sb.run([bindir / "cyan", "--help"])
+    report.check("Helpers/bin/cyan --help", r.returncode == 0 and "cyan" in r.stdout, output=both(r))
+    check_cyan_helpers(app, sb, report)
+    check_cyan_inject(app, sb, report)
+    check_cyan_hostile_names(app, sb, report)
+    check_offline_builds(app, sb, report)
+    check_ca_overrides(app, sb, report)
+    check_unfairplay_offline(app, sb, report)
+    check_playcover(app, sb, report)
+    check_jit_harness(app, sb, report)
+    r = sb.run([bindir / "zsign", "-v"])
+    report.check(f"zsign -v is {pinned['zsign']['version']}", r.returncode == 0
+                 and pinned["zsign"]["version"] in r.stdout, r.stdout.strip(), output=both(r))
+
+    link = sb.home / "bin" / "graft"
+    link.symlink_to(graft)
+    r = sb.run([link, "--version"])
+    report.check("graft --version through a symlink (as ~/.local/bin/graft is)",
+                 r.returncode == 0 and r.stdout.strip() == want, r.stdout.strip(), output=both(r))
+
+
+def verify_app(app: Path, report: Report, work: Path, *, gatekeeper_accepted: bool = False) -> None:
+    app = app.resolve()
+    if not report.check(f"{app.name} is an app bundle", (app / "Contents" / "Info.plist").is_file(), str(app)):
+        return
+    if not gatekeeper_accepted:
+        marked = quarantined(app)
+        if not report.check("no quarantine attribute (a downloaded copy goes through --zip)", not marked,
+                            f"{len(marked)} quarantined, e.g. {marked[0]}" if marked else ""):
+            return
+    r = run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", app])
+    if not report.check("codesign --verify --deep --strict", r.returncode == 0, output=both(r)):
+        print("verify-bundle: the seal is broken, so nothing inside the app is run")
+        return
+    if not check_mach_o_files(app, report):
+        print("verify-bundle: a Mach-O in the app can't be read, so no check can vouch for it, and nothing is run")
+        return
+    check_signatures(app, report)
+    check_unfairplay_requirement(app, report)
+    check_unfairplay_build(app, report, work)
+    check_go_modules(app, report, work)
+    check_ios_code(app, report)
+    check_architectures(app, report)
+    check_minimum_macos(app, report)
+    check_components(app, report)
+    check_package_licences(app, report)
+    check_framework_licences(app, report)
+    check_licence_files(app, report)
+    check_static_and_rust_licences(app, report)
+    check_rust_crate_notices(app, report)
+    check_no_junk(app, report)
+    check_no_build_paths(app, report)
+    check_no_coverage_sections(app, report)
+    check_no_symlinks(app, report)
+    check_links(app, report)
+    check_helper_imports(app, report)
+    check_no_unicorn_in_the_app(app, report)
+
+    sb = Sandbox(work / "sandbox")
+    marker = sb.root / "marker"
+    marker.touch()
+    start = marker.stat().st_mtime_ns
+    time.sleep(0.05)
+    runtime_checks(app, sb, report)
+
+    written = []
+    for root, dirs, files in os.walk(app):
+        for n in dirs + files:
+            p = Path(root) / n
+            if p.lstat().st_mtime_ns > start:
+                written.append(str(p.relative_to(app)))
+    report.check("nothing in the app was written while it ran", not written,
+                 f"{len(written)} changed" if written else "", output="\n".join(written[:40]))
+    r = run(["codesign", "--verify", "--deep", "--strict", app])
+    report.check("the signature still verifies afterward", r.returncode == 0, output=both(r))
+
+
+def verify_zip(zip_path: Path, report: Report, work: Path) -> None:
+    """The zip as a user gets it: a copy quarantined as a browser download,
+    unpacked by ditto, which carries the quarantine onto every file as
+    Archive Utility does (review #52), then assessed by Gatekeeper, whose
+    verdict must say notarized (#55)."""
+    downloaded = work / zip_path.name
+    shutil.copy2(zip_path, downloaded)
+    value = f"0081;{int(time.time()):x};Safari;"
+    r = run(["xattr", "-w", QUARANTINE, value, downloaded])
+    if not report.check("the zip quarantined as a browser download", r.returncode == 0
+                        and has_xattr(downloaded, QUARANTINE), value, output=both(r)):
+        return
+    unpacked = work / "unzipped"
+    unpacked.mkdir()
+    r = run(["ditto", "-x", "-k", downloaded, unpacked])
+    if not report.check("ditto -x -k unpacks the zip", r.returncode == 0, str(zip_path), output=both(r)):
+        return
+    apps = sorted(p.name for p in unpacked.iterdir())
+    if not report.check("the zip holds Graft.app and nothing else", apps == ["Graft.app"], ", ".join(apps)):
+        return
+    app = unpacked / "Graft.app"
+    items = [app, *app.rglob("*")]
+    marked = quarantined(app)
+    if not report.check("every unpacked file carries the quarantine", len(marked) == len(items),
+                        f"{len(marked)} of {len(items)}"):
+        return
+    # Combined fix check #7: spctl looks a notarized but unstapled app's ticket
+    # up online and says "Notarized Developer ID" all the same, so the zip
+    # notarytool was sent, before `stapler staple`, passed. stapler writes the
+    # ticket into the bundle as Contents/CodeResources; without it a first
+    # launch offline is refused.
+    ticket = app / "Contents" / "CodeResources"
+    stapled = ticket.is_file() and not ticket.is_symlink() and ticket.stat().st_size > 0
+    if not report.check("the app carries its stapled notarization ticket (Contents/CodeResources)", stapled,
+                        "" if stapled else "re-zip after `xcrun stapler staple Graft.app`"):
+        return
+    r = run(["spctl", "-a", "-vv", "-t", "exec", app])
+    verdict = both(r).strip()
+    source = (re.search(r"^source=(.+)$", verdict, re.M) or [None, ""])[1].strip()
+    accepted = r.returncode == 0 and source == "Notarized Developer ID"
+    report.check("Gatekeeper accepts the quarantined copy as notarized (spctl -a -vv -t exec)", accepted,
+                 verdict.replace("\n", "; "))
+    if not accepted:
+        print("verify-bundle: Gatekeeper didn't accept the quarantined copy as notarized, so nothing in it was "
+              "run. The runtime checks need a notarized, stapled zip.")
+        return
+    verify_app(app, report, work, gatekeeper_accepted=True)
+
+
+def main(argv: list[str]) -> int:
+    if len(argv) == 1 and not argv[0].startswith("-"):
+        mode, target = "app", Path(argv[0])
+    elif len(argv) == 2 and argv[0] == "--zip":
+        mode, target = "zip", Path(argv[1])
+    else:
+        print("usage: verify-bundle <Graft.app> | verify-bundle --zip <Graft.zip>", file=sys.stderr)
+        return 2
+    if not target.exists():
+        print(f"verify-bundle: {target} does not exist", file=sys.stderr)
+        return 2
+    report = Report()
+    work = Path(tempfile.mkdtemp(prefix="graft-verify-"))
+    try:
+        if mode == "zip":
+            verify_zip(target.resolve(), report, work)
+        else:
+            verify_app(target, report, work)
+        status = report.summary()
+    finally:
+        # Only checks' scratch files are in here (sandbox HOME, fixtures, unzipped copy).
+        shutil.rmtree(work, ignore_errors=True)
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

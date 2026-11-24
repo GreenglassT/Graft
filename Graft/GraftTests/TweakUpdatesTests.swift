@@ -158,7 +158,7 @@ extension TweakUpdatesTests {
     /// follows the swap.
     ///
     /// A runner that answers only the update makes these fail on the reload —
-    /// real behaviour, correctly reported, but not what they are asking about.
+    /// real behavior, correctly reported, but not what they are asking about.
     private func stub(
         check: String = "", updated: String, library: [String] = []
     ) throws -> (CLIRunner, () -> Void) {
@@ -252,7 +252,7 @@ extension TweakUpdatesTests {
         XCTAssertNil(sut.lastError, "a no-op update was reported as a failure")
     }
 
-    /// The swap already landed on disk, so a reload that fails afterwards must
+    /// The swap already landed on disk, so a reload that fails afterward must
     /// report a stale *list* — not discard the result and claim the update
     /// failed. Same rule as `CLIStore.mutate`.
     @MainActor

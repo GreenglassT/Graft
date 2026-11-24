@@ -303,11 +303,12 @@ def test_add_app_manual_via_typer_with_no_delivery_flag_defaults_sideload(
         (["--preferred-version", "1.2.3"], "--preferred-version"),
         (["--compression-level", "9"], "--compression-level"),
         (["--keep-bundle-id"], "--keep-bundle-id"),
-        # A `--no-` negation is the same option, so it's reported under the
-        # canonical positive name.
-        (["--no-keep-bundle-id"], "--keep-bundle-id"),
+        # A `--no-` negation sets the same option, but it is named as typed
+        # (`_NEGATED_FLAGS`): naming the positive form accused the user of a
+        # flag they never passed (review #11).
+        (["--no-keep-bundle-id"], "--no-keep-bundle-id"),
         (["--strip-extensions"], "--strip-extensions"),
-        (["--no-strip-extensions"], "--strip-extensions"),
+        (["--no-strip-extensions"], "--no-strip-extensions"),
         (["--strip-supported-devices"], "--strip-supported-devices"),
     ],
 )

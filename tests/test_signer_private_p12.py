@@ -21,13 +21,22 @@ from unittest.mock import patch
 import pytest
 from rich.console import Console
 
-from graft_ipa import init_flow, signer
+from graft_ipa import init_flow, signer, tools
 from graft_ipa.errors import SigningError
 
 from .test_lc_sign import _make_p12
 from .test_signer import make_cfg
+from .tool_fakes import fake_path
 
 REAL = "the-users-real-p12-password"
+
+
+@pytest.fixture(autouse=True)
+def _zsign_on_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A zsign to find, whatever this Mac has: `run_zsign` refuses before it
+    resolves a profile when there is none. `subprocess.run` is faked in every
+    test that gets that far, so it is never run."""
+    monkeypatch.setattr(tools, "which", fake_path(tmp_path / "path-bin"))
 
 
 def _cfg(tmp_path: Path):
@@ -174,8 +183,13 @@ def test_a_gui_stop_while_zsign_runs_still_removes_the_copy(tmp_path: Path) -> N
     scratch.mkdir()
     script = tmp_path / "child.py"
     script.write_text(_STOPPED_CHILD)
+    # A zsign to find (never run: the child fakes `subprocess.run`).
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "zsign").write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "zsign").chmod(0o755)
     env = {
-        "PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(scratch),
+        "PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path), "TMPDIR": str(scratch),
         "TEST_P12_PASS": REAL, "GRAFT_NO_KEYCHAIN": "1",
     }
     proc = subprocess.run(

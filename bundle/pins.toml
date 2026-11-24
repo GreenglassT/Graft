@@ -1,0 +1,126 @@
+# Every artifact the release bundles, by exact URL and SHA-256.
+# scripts/graft_bundle.py refuses anything whose hash differs. `version` is
+# what Resources/Licenses/components.json reports (cyan's is its commit).
+
+[python]
+version = "3.13.18+20261026"
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18+20261026-aarch64-apple-darwin-install_only.tar.gz"
+sha256 = "e5af2fde6a937a0e0c795a0c595c4efb70578d57463a2657c819992b9b9acbac"
+license = "PSF-2.0"
+
+# ipatool is built here from its v2.8.0 source (commit 72c47d5, the tag's),
+# with [go], unpatched. The Unicorn its App Store emulator runs on is not
+# bundled: ipatool downloads it from PyPI on first use, checked against the
+# SHA-256s its own source pins, as upstream does.
+[ipatool]
+version = "2.8.0"
+url = "https://github.com/majd/ipatool/archive/72c47d538b726df397fbf17bb3af809d69ef51b7.tar.gz"
+sha256 = "b1dc7eeda70ec53e6da6c4d64d97423808d2991ff9c416be1b7a9998984aaa59"
+# ipatool's own code is MIT; the binary also holds its Go modules' code:
+# golang-lru (MPL-2.0), retry.v1 (LGPL-3.0, with a static-linking
+# exception), mpb (the Unlicense), xi2/xz (public domain), and BSD-3-Clause,
+# MIT and Apache-2.0 modules (review #7, #10, RC audit #6). And the Rust
+# crates in its 1Password SDK core (bundle/ipatool-core-crates.lock): ring's
+# ISC, ICU4X's Unicode-3.0, nom-supreme's MPL-2.0, and the rest MIT,
+# Apache-2.0 or BSD-3-Clause (RC audit #1).
+license = "MIT AND BSD-3-Clause AND Apache-2.0 AND ISC AND Unicode-3.0 AND MPL-2.0 AND LGPL-3.0-only WITH LGPL-3.0-linking-exception AND Unlicense AND LicenseRef-public-domain"
+
+# The Go toolchain ipatool and UnfairPlay are compiled with (ipatool's go.mod's
+# `go 1.26.5`; UnfairPlay's asks for 1.26.0 or later); the Go standard
+# library each links is BSD-3-Clause. The modules each needs come from
+# proxy.golang.org, checked against its go.sum, and go into the source
+# archive as `go mod vendor` wrote them.
+[go]
+version = "1.26.5"
+url = "https://go.dev/dl/go1.26.5.darwin-arm64.tar.gz"
+sha256 = "efb87ff28af9a188d0536ef5d42e63dd52ba8263cd7344a993cc48dd11dedb6a"
+license = "BSD-3-Clause"
+
+# UnfairPlay is built here from its v0.4.0 source (commit d750308, the tag's),
+# with [go] and the flags of upstream's release workflow, unpatched, in place
+# of the prebuilt release binary. It runs as root in Set Up Decryption. Its own
+# code is MIT, with Apache-2.0 code adapted from DarkPhoenix (its NOTICE); the
+# binary also holds cobra (Apache-2.0), pflag and plist (BSD-3-Clause).
+[unfairplay]
+version = "0.4.0"
+url = "https://github.com/DrWhax/unfairplay/archive/d7503082a59e3dcfdd3ea7a70434dcecaaaf07df.tar.gz"
+sha256 = "0bbaacd1ef45887fa29c20a46dfdef2ca015b792769962b9ae31193ba40a32b4"
+license = "MIT AND Apache-2.0 AND BSD-3-Clause"
+
+[zsign]
+version = "1.1.3"
+url = "https://github.com/zhlynn/zsign/releases/download/v1.1.3/zsign-macos-arm64.tar.gz"
+sha256 = "2790ec58a55db5f4282843d0cdbb0b587d19b972331b5285aee2de67f4ab705e"
+license = "MIT"
+
+[openssl]
+version = "3.5.9"
+url = "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz"
+sha256 = "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
+license = "Apache-2.0"
+
+[cyan]
+version = "04a40f2aa65ec9cb36127f74d52ae4ef71377c50"
+url = "https://github.com/asdfzxcvbn/pyzule-rw/archive/04a40f2aa65ec9cb36127f74d52ae4ef71377c50.zip"
+sha256 = "18ae976100c518c4b80ed485d13a4b515ca7bf5d47cc818df47efd12d5929b05"
+license = "Unlicense"
+
+# ---- Built from source: cyan's helpers, in place of the prebuilt copies its
+# archive carries. Each is compiled for arm64, macOS 14.0 (MACOS_MIN), outside any .app.
+#
+# The three `archive/<commit>.tar.gz` URLs are tarballs GitHub generates on
+# request, not files anyone uploaded. If GitHub ever changes how it makes
+# them, the bytes (and so the hash) change while the commit doesn't, and the
+# stage stops on the mismatch. That is meant: check the new tarball's tree
+# against the commit, then re-pin it here.
+
+[libplist]
+version = "2.8.0"
+url = "https://github.com/libimobiledevice/libplist/releases/download/2.8.0/libplist-2.8.0.tar.bz2"
+sha256 = "b1f59f7634c58b2481325a23ff4e3bf51574a42d868cbe466d2b39b04550752a"
+license = "LGPL-2.1-or-later"
+
+# Tag v2.1.5-procursus7.
+[ldid]
+version = "2.1.5-procursus7"
+url = "https://github.com/ProcursusTeam/ldid/archive/aaf8f23d7975ecdb8e77e3a8f22253e0a2352cef.tar.gz"
+sha256 = "c066008dca240784bbd052acee4273cb3d27637bbd5fa3c2803cf6a381acd77b"
+license = "AGPL-3.0"
+
+# Apple's cctools 986, ported (branch 986-ld64-711). Commit e101a69 of
+# 2026-04-03: every later commit on the branch is under two weeks old, and
+# none of them touches libstuff, libmacho, misc/lipo.c,
+# misc/install_name_tool.c or otool/, only ld64, ar/ranlib and the generated
+# autotools files. `builds`: the three binaries taken from it.
+[cctools]
+version = "986 (cctools-port e101a6940dcb5988808a16626bc43851f00dc05f)"
+url = "https://github.com/tpoechtrager/cctools-port/archive/e101a6940dcb5988808a16626bc43851f00dc05f.tar.gz"
+sha256 = "463491676234c782b4d568da192b8d922c4008f1f5f90320b3a6f0e66453e279"
+license = "APSL-2.0"
+builds = ["lipo", "otool", "install_name_tool"]
+
+# eb72781 plus its LICENSE file (the only change).
+[insert_dylib]
+version = "ce8b08ccc71bf3dd832b5b0c3296284dd2940f86"
+url = "https://github.com/Tyilo/insert_dylib/archive/ce8b08ccc71bf3dd832b5b0c3296284dd2940f86.tar.gz"
+sha256 = "a707aa5332378faedcbbbb4e695b6ff1d5565db9a21d125fbb23ea093de3ce14"
+license = "MIT"
+
+# ---- License texts only: nothing from these is in the app.
+
+# The licenses of what python-build-standalone links into python3.13
+# (bzip2, libffi, mpdecimal, liblzma, expat, sqlite, libuuid, OpenSSL): its
+# repository's LICENSE.<library>.txt files at the release tag [python] is.
+[python-build-standalone]
+version = "20261026"
+url = "https://github.com/astral-sh/python-build-standalone/archive/refs/tags/20261026.tar.gz"
+sha256 = "68de4af184e78f6338a91ddb48570da92cbdc24138ff44527d58a1e23a4e86e9"
+license = "MPL-2.0"
+
+# HACL*, built into CPython's hashlib (MIT): its license is each source
+# file's header, here from CPython's own tree at the tag [python] builds.
+[hacl]
+version = "CPython 3.13.18"
+url = "https://raw.githubusercontent.com/python/cpython/v3.13.18/Modules/_hacl/Hacl_Hash_SHA2.c"
+sha256 = "30638efb75c8b185bb09c3df6977e3f3c5d21a1e696218cf7ade6bc4d5201b31"
+license = "MIT"

@@ -125,7 +125,7 @@ struct DeviceDecryptSection: View {
     /// **Required, not defaulted — the same call `DeviceDetailView.
     /// onSelectApp` made, for the same reason.** Once a dump lands on a
     /// staged, unconfigured bundle id, the button below renders in full:
-    /// enabled, labelled, with a `.help` string promising what a press does.
+    /// enabled, labeled, with a `.help` string promising what a press does.
     /// A caller that forgot to wire this would get exactly that button,
     /// silently doing nothing — the defect `onSelectApp` was made required
     /// to close (see `DeviceDetailView`'s own doc on that parameter), and the
@@ -215,7 +215,7 @@ struct DeviceDecryptSection: View {
         + "frida-server. To get an IPA without one, use Get latest from App Store on an app."
     /// Refuse the partial dump. Off by default, because dropping extensions no
     /// tool can decrypt is what makes a one-click dump possible at all — and
-    /// what went is always named afterwards.
+    /// what went is always named afterward.
     @State private var keepExtensions = false
     /// Show the backend's own output while it runs.
     ///
@@ -467,7 +467,7 @@ struct DeviceDecryptSection: View {
     /// The branch that used to head this list — "pick which phone to dump
     /// from" — is gone with the picker that made it necessary. There is always
     /// a phone to probe here, so there is never a blank card with every control
-    /// greyed out and no stated reason, which is the failure the branch existed
+    /// grayed out and no stated reason, which is the failure the branch existed
     /// to prevent.
     @ViewBuilder
     private var readinessChecks: some View {
@@ -551,7 +551,7 @@ struct DeviceDecryptSection: View {
                 return [BackendLine(text: "\(backend.name): \(note)", isNote: false)]
             case (nil, nil):
                 // Unusable with nothing said about why — still worth a line:
-                // the button it explains is greyed out.
+                // the button it explains is grayed out.
                 return backend.usable ? [] : [BackendLine(text: "\(backend.name): unavailable", isNote: false)]
             }
         }
@@ -559,9 +559,13 @@ struct DeviceDecryptSection: View {
 
     /// The one flag worth a control, and deliberately not a third.
     ///
-    /// `--decrypt-mode` is omitted: `build_command` drops it on bagbak 4.x, and
-    /// 4.x is the major that can talk to a 16.x frida-server, so a mode control
-    /// would be a switch that changes nothing on the setup this actually runs on.
+    /// `--decrypt-mode` is omitted, and the CLI now refuses any mode but `all`
+    /// for a dump it stages. `main` writes bare binaries with no `Payload`, so
+    /// the dump fails at reading its Info.plist with nothing staged; under
+    /// Automatic a failed bagbak falls back to frida-ios-dump, which has no
+    /// mode and dumps the whole app anyway; and bagbak 4.x, the major that
+    /// talks to a 16.x frida-server, drops the mode altogether. A Dump picker
+    /// shipped briefly and offered only choices that could not produce an app.
     ///
     /// The "keep every extension" checkbox that used to stand beside this
     /// picker is not duplicated here. It exists once, in `decryptAction`, next
@@ -673,7 +677,7 @@ struct DeviceDecryptSection: View {
     /// What the dump decided for the user, while it decides it.
     ///
     /// A minute of silence followed by a different tool's output is how
-    /// automatic behaviour becomes inexplicable behaviour. These wrap rather
+    /// automatic behavior becomes inexplicable behavior. These wrap rather
     /// than truncate — there are never more than a couple, and each one is a
     /// whole sentence whose second half is the part that matters ("…and no tool
     /// can decrypt them — dropping them and keeping the rest").

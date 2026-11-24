@@ -157,7 +157,7 @@ def variant_of(filename: str) -> str | None:
 def get_packages(package_id: str) -> list[Package]:
     """Every published build of `package_id`: all versions, all architectures.
 
-    Canister answers a package id with the whole catalogue of it — about seventy
+    Canister answers a package id with the whole catalog of it — about seventy
     rows for a long-lived tweak — in no order a caller may rely on. Callers that
     want "the" package go through `get_package`, which chooses.
     """

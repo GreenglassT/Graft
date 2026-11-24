@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from graft_ipa import ipatool
+from graft_ipa import ipatool, tools
 from graft_ipa.errors import AppStoreError
 from tests.appstore_fakes import FAKE_EMAIL, FAKE_NAME, FakeTools
 
@@ -36,14 +36,82 @@ def test_a_present_binary_is_present(fakes: FakeTools, tmp_path: Path) -> None:
     assert ipatool.present(not_executable) is False
 
 
-def test_signed_in_is_a_bool_and_nothing_about_the_account(fakes: FakeTools) -> None:
-    """The spec's rule: `signed_in: true/false` only. The fake's `auth info`
-    prints an email and a name exactly as the real one does, and neither may
-    come back out of this module in any form."""
-    answer = ipatool.signed_in(fakes.ipatool)
+def test_the_account_carries_the_email_and_never_the_name(fakes: FakeTools) -> None:
+    """Since 2.0 Settings shows who is signed in. The name is still never kept."""
+    answer = ipatool.account(fakes.ipatool)
 
-    assert answer is True
-    assert FAKE_EMAIL not in repr(answer) and FAKE_NAME not in repr(answer)
+    assert answer == ipatool.Account(signed_in=True, email=FAKE_EMAIL)
+    assert FAKE_NAME not in repr(answer)
+    assert ipatool.signed_in(fakes.ipatool) is True
+
+
+def test_a_signed_out_account_has_no_email(fakes: FakeTools) -> None:
+    fakes.set(signed_in=False)
+    assert ipatool.account(fakes.ipatool) == ipatool.Account(signed_in=False)
+
+
+def _item_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    from graft_ipa import keychain
+    from tests.keychain_fakes import FakeSecurity
+
+    monkeypatch.setattr(
+        keychain, "_run", FakeSecurity({("ipatool-auth.service", "account"): "someone else's"})
+    )
+
+
+#: K1: what ipatool said after Deny was pressed on the Keychain dialog.
+DENIED = "failed to get account: failed to get item: The specified item could not be found in the keyring"
+
+
+def test_not_found_with_the_item_there_is_a_refusal_not_signed_out(
+    fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision 10: a denied Keychain dialog is never "not signed in"."""
+    from graft_ipa import appstore_account, tools
+
+    _item_there(monkeypatch)
+    monkeypatch.setattr(tools, "bundled_tools_dir", lambda: fakes.root)
+    appstore_account.mark_signed_in("bundled")
+    fakes.set(signed_in=False, auth_raw='{"level":"error","success":false,"error":"' + DENIED + '"}')
+    assert ipatool.account(fakes.ipatool) == ipatool.Account(signed_in=None, refused=True)
+    assert not appstore_account.marker_path().exists(), "the next sign-in clears the items first"
+
+
+def test_a_download_refused_by_the_keychain_never_says_not_found(
+    fakes: FakeTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from graft_ipa import tools
+
+    _item_there(monkeypatch)
+    monkeypatch.setattr(tools, "bundled_tools_dir", lambda: fakes.root)
+    err = _download_error(fakes, tmp_path, DENIED)
+    assert err.message == ipatool.KEYCHAIN_REFUSED
+    assert "could not be found" not in err.message
+    assert "dialog was denied" in err.hint
+    assert ipatool.LOGIN_COMMAND in err.hint
+
+
+def test_a_refusal_of_any_other_ipatool_names_it_and_says_signing_in_saves_over(
+    fakes: FakeTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """signin-B (the try14 delta audit): a configured or PATH ipatool refused
+    an item isn't "Graft's ipatool", and its sign-in deletes nothing first
+    (`appstore_account.needs_clearing`), so it saves over that item and macOS
+    may ask. As status says (`appstore.status`, its `elif legacy:` branch)."""
+    _item_there(monkeypatch)
+    err = _download_error(fakes, tmp_path, DENIED)
+    assert err.message == (
+        f"macOS's Keychain didn't let the ipatool at {fakes.ipatool} read the App Store "
+        "sign-in in your login keychain"
+    )
+    assert "Graft's ipatool" not in err.message + err.hint
+    assert "Graft 1.x" not in err.hint
+    assert "replaces it" not in err.hint
+    assert "dialog was denied" in err.hint
+    assert "saves over it" in err.hint
+    assert "may ask for your login keychain password" in err.hint
+    assert ipatool.LOGIN_COMMAND in err.hint
+    assert isinstance(err, ipatool.KeychainRefusal) and err.refused
 
 
 def test_signed_out_is_false(fakes: FakeTools) -> None:
@@ -74,9 +142,9 @@ def test_download_runs_the_spec_command_and_returns_the_file(
 
 
 def test_never_asks_ipatool_to_purchase(fakes: FakeTools, tmp_path: Path) -> None:
-    """`--purchase` would spend the account's "Get" on the user's behalf, and
-    fails for US accounts anyway (majd/ipatool#666). Owning the app is the
-    user's step."""
+    """`download` never takes `--purchase`: getting a license is
+    `--appstore-claim`'s job, which checks the price first. Never a side
+    effect of a download."""
     out = tmp_path / "out"
     out.mkdir()
     ipatool.download(fakes.ipatool, "com.x", out)
@@ -100,14 +168,15 @@ def test_not_signed_in_hints_the_login_command(fakes: FakeTools, tmp_path: Path)
     )
 
     assert err.message.startswith("ipatool is not signed in")
-    assert ipatool.login_command(fakes.ipatool) in err.hint
+    assert ipatool.LOGIN_COMMAND in err.hint
+    assert "Settings › App Store" in err.hint
 
 
 def test_an_expired_token_hints_the_login_command_too(fakes: FakeTools, tmp_path: Path) -> None:
     err = _download_error(fakes, tmp_path, "password token is expired")
 
     assert err.message.startswith("ipatool is not signed in")
-    assert ipatool.login_command(fakes.ipatool) in err.hint
+    assert ipatool.LOGIN_COMMAND in err.hint
 
 
 def test_not_owned_says_to_tap_get_on_a_device(fakes: FakeTools, tmp_path: Path) -> None:
@@ -118,7 +187,7 @@ def test_not_owned_says_to_tap_get_on_a_device(fakes: FakeTools, tmp_path: Path)
         "(ipatool: license is required)"
     )
     assert "tap Get" in err.hint
-    assert "ipatool auth login" not in err.hint
+    assert ipatool.LOGIN_COMMAND not in err.hint
 
 
 def test_2_8_1_is_told_to_pin_2_8_0(fakes: FakeTools, tmp_path: Path) -> None:
@@ -132,15 +201,36 @@ def test_2_8_1_is_told_to_pin_2_8_0(fakes: FakeTools, tmp_path: Path) -> None:
     assert "#672" in err.hint
 
 
-def test_the_storefront_failure_is_recognised_on_its_own(
-    fakes: FakeTools, tmp_path: Path
+GENERIC_HINT = "that is ipatool's own error — running the same download in Terminal may say more"
+
+
+@pytest.mark.parametrize("version", ["2.8.0", "9.9.9-dev"])
+def test_a_storefront_failure_from_a_good_ipatool_gets_the_generic_hint(
+    fakes: FakeTools, tmp_path: Path, monkeypatch, version: str
 ) -> None:
-    """A version the banner reports oddly (a dev build, a fork) still gets the
-    one hint that fixes this error."""
-    fakes.set(ipatool_version="9.9.9-dev")
+    """get-2: "storefront" alone used to mean 2.8.1's bug, and got "install
+    ipatool 2.8.0 to <path>": with Graft.app's own ipatool, a path inside
+    Graft.app, which breaks its seal, and for a 2.8.0 nothing to fix. Only a
+    known-bad version gets install advice."""
+    monkeypatch.setattr(tools, "bundled_tools_dir", lambda: fakes.root)
+    fakes.set(ipatool_version=version)
     err = _download_error(fakes, tmp_path, "available storefronts request failed")
 
-    assert "install ipatool 2.8.0" in err.hint
+    assert err.hint == GENERIC_HINT
+    assert "install" not in err.hint.lower() and "Graft.app" not in err.hint
+    assert "available storefronts request failed" in err.message
+
+
+def test_a_known_bad_bundled_ipatool_s_storefront_failure_isn_t_told_to_install_into_graft_app(
+    fakes: FakeTools, tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(tools, "bundled_tools_dir", lambda: fakes.root)
+    fakes.set(ipatool_version="2.8.1")
+    err = _download_error(fakes, tmp_path, "available storefronts request failed")
+
+    assert err.hint == ipatool.bad_version_hint("2.8.1", path=fakes.ipatool, source=tools.SOURCE_BUNDLED)
+    assert ipatool.OVERRIDE_PATH in err.hint
+    assert str(fakes.root) not in err.hint
 
 
 def test_an_unrecognised_error_is_passed_through_verbatim(
@@ -150,7 +240,7 @@ def test_an_unrecognised_error_is_passed_through_verbatim(
 
     assert err.message == "ipatool couldn't download com.example.app: something new and strange"
     assert "tap Get" not in err.hint
-    assert ipatool.login_command(fakes.ipatool) not in err.hint
+    assert ipatool.LOGIN_COMMAND not in err.hint
 
 
 def test_an_output_outside_the_directory_it_was_given_is_refused(
@@ -179,3 +269,71 @@ def test_a_missing_binary_is_an_install_hint(tmp_path: Path) -> None:
 
     assert e.value.message == f"ipatool not found at {tmp_path / 'nope'}"
     assert "2.8.0" in e.value.hint
+
+
+# --- Unicorn: downloaded by ipatool on first use (the combined fix check's medium #2) ---
+
+#: What ipatool 2.8.0 says when its first Unicorn download fails offline,
+#: built from its own source's words: pkg/appstore wraps the Store
+#: framework's error (internal/store/backend.go:221, "open Store framework"),
+#: which wraps the engine's (internal/sap/unicorn/engine.go:96, "load
+#: Unicorn"), the library's (library_unix.go:19, "load Unicorn library") and
+#: the download's (cache.go:132, "download Unicorn 2.1.4"), around Go's own
+#: dial error.
+OFFLINE_UNICORN = (
+    "failed to send http request: open Store framework: load Unicorn: load Unicorn library: "
+    'download Unicorn 2.1.4: Get "https://files.pythonhosted.org/packages/6c/ae/'
+    '4943c6f8524d729ec7d5e69df6407ea05d710fe77471d91cecf3fc64eb57/'
+    'unicorn-2.1.4-cp37-abi3-macosx_11_0_arm64.whl": dial tcp: lookup files.pythonhosted.org: '
+    "no such host"
+)
+
+
+def test_the_unicorn_words_are_ipatools_own() -> None:
+    """The phrases matched are in the pinned source's error strings."""
+    assert all(words in OFFLINE_UNICORN for words in ipatool.UNICORN_FAILURES)
+
+
+def test_an_offline_first_get_says_ipatool_must_download_unicorn_first(fakes: FakeTools, tmp_path: Path) -> None:
+    fakes.set(download_error=OFFLINE_UNICORN)
+    (tmp_path / "out").mkdir()
+    with pytest.raises(AppStoreError) as e:
+        ipatool.download(fakes.ipatool, "com.example.app", tmp_path / "out")
+    assert e.value.message == (
+        "ipatool needs to download its App Store emulator (Unicorn, from PyPI) the first time; "
+        "connect to the internet and try again."
+    )
+    assert e.value.hint == f"ipatool said: {OFFLINE_UNICORN}"
+
+
+def test_an_offline_first_claim_says_the_same(fakes: FakeTools) -> None:
+    fakes.set(purchase_error=OFFLINE_UNICORN.replace("failed to send http request", "failed to purchase item"))
+    with pytest.raises(AppStoreError) as e:
+        ipatool.purchase(fakes.ipatool, "com.example.app")
+    assert e.value.message == ipatool.UNICORN_FIRST_USE
+
+
+def test_a_failure_that_isnt_unicorns_keeps_its_own_words(fakes: FakeTools, tmp_path: Path) -> None:
+    fakes.set(download_error="failed to send http request: dial tcp: lookup p25-buy.itunes.apple.com: no such host")
+    (tmp_path / "out").mkdir()
+    with pytest.raises(AppStoreError) as e:
+        ipatool.download(fakes.ipatool, "com.example.app", tmp_path / "out")
+    assert "Unicorn" not in e.value.message
+
+
+def test_graft_names_no_unicorn_to_any_ipatool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graft.app bundles no Unicorn and its ipatool is unpatched: nothing
+    sets IPATOOL_UNICORN_LIBRARY, in the app's ipatool or another."""
+    monkeypatch.delenv("IPATOOL_UNICORN_LIBRARY", raising=False)
+    contents = tmp_path / "Graft.app" / "Contents"
+    fakes = FakeTools(contents / "Helpers" / "bin")
+    assert ipatool.version(fakes.ipatool) == "2.8.0"
+    assert ipatool.signed_in(fakes.ipatool) is True
+    assert [c["unicorn"] for c in fakes.calls("ipatool")] == [None, None]
+
+
+def test_the_terminal_sign_in_line_is_graft_s_and_names_no_account() -> None:
+    """Since 2.0 Graft signs in (`appstore_login`), and asks for the Apple ID:
+    nothing of the account is ever on a command line (decision 3)."""
+    assert ipatool.LOGIN_COMMAND == "graft --appstore-login"
+    assert "@" not in ipatool.LOGIN_HINT and "EMAIL" not in ipatool.LOGIN_HINT

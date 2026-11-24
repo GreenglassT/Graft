@@ -81,7 +81,7 @@ def test_a_dry_run_honours_the_pin(tmp_path, monkeypatch) -> None:
 def test_a_dry_run_with_a_silent_phone_names_the_pin(tmp_path, monkeypatch) -> None:
     import pymobiledevice3.lockdown as lockdown_mod
 
-    async def unreachable(*, serial):
+    async def unreachable(*, serial, autopair):
         raise ConnectionError("no phone")
 
     monkeypatch.setattr(lockdown_mod, "create_using_usbmux", unreachable)

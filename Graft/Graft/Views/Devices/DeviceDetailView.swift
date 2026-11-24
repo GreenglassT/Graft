@@ -87,7 +87,7 @@ struct DeviceDetailView: View {
     /// of resetting to "never asked" each time this view is rebuilt; the
     /// previous join stays on screen for the ~0.25s a reload takes rather than
     /// every row reverting to its pre-feature shape; and it sits declared and
-    /// initialised beside its siblings — `deviceInfoStore`,
+    /// initialized beside its siblings — `deviceInfoStore`,
     /// `deviceDeliveryStore`, `deviceAppsStore` — in `ContentView`, rather
     /// than being the one device-pane store singled out for a different home.
     /// Read by `InstalledAppsSection` below to decide which row is
@@ -95,6 +95,10 @@ struct DeviceDetailView: View {
     /// channel.
     let staged: StagedIPAStore
     let liveContainer: LiveContainerStore
+    /// Only for "Add as app"'s sheet, which takes it whatever it was opened
+    /// from (`AddAppSheet.appStore`). A prefilled sheet has nothing to stage
+    /// through it: its IPA is already in the cache.
+    let appStore: AppStoreStore
     /// Select the app that already claims a row's bundle id, by config key —
     /// forwarded to `InstalledAppsSection`'s `onSelectApp`.
     ///
@@ -268,6 +272,7 @@ struct DeviceDetailView: View {
         deviceApps: DeviceAppsStore,
         staged: StagedIPAStore,
         liveContainer: LiveContainerStore,
+        appStore: AppStoreStore,
         onSelectApp: @escaping (String) -> Void,
         vitalsPollInterval: UInt64 = DeviceDetailView.defaultVitalsPollInterval
     ) {
@@ -280,6 +285,7 @@ struct DeviceDetailView: View {
         self.deviceApps = deviceApps
         self.staged = staged
         self.liveContainer = liveContainer
+        self.appStore = appStore
         self.onSelectApp = onSelectApp
         self.vitalsPollInterval = vitalsPollInterval
     }
@@ -507,31 +513,31 @@ struct DeviceDetailView: View {
         // `AddAppSheet.Prefill` for what it fills and `addingApp`'s own doc
         // for why this is `.sheet(item:)`.
         //
-        // `onAdded:` is spelled out as a labelled argument rather than a
-        // trailing closure, and that is not just style: it does not compile
-        // the other way. `AddAppSheet` has no custom initialiser, so its
-        // synthesised one is `store:onAdded:prefill:`, in the order its
-        // stored properties are declared — `onAdded` *before* `prefill`.
-        // Writing `AddAppSheet(store: config, prefill: prefill) { added in
-        // … }` gives the call the argument list `store:prefill:_:`: `store`
-        // and `prefill` are matched to their own labels, `onAdded` is
-        // skipped for its default in between, and nothing re-associates an
-        // argument already bound to a later label back onto an earlier,
-        // still-unmentioned parameter — so the trailing closure has nothing
-        // left to attach to. `SidebarView`'s own `AddAppSheet(store: store)
-        // { newName in … }` compiles as a trailing closure only because it
-        // never names `prefill:` at all, so nothing has been matched past
-        // `onAdded` for the closure to be appended after. Confirmed by
-        // trying the trailing form here: `swiftc` rejects it with "incorrect
-        // argument label in call (have 'store:prefill:_:', expected
-        // 'store:onAdded:prefill:')" — and a minimal struct reproducing this
-        // exact shape (a function-typed defaulted parameter declared before
-        // a later, explicitly-labelled one) fails identically, while the
-        // same struct with the function-typed parameter moved to the true
-        // last position compiles clean, confirming the position, not the
-        // type, is what matters.
+        // `onAdded:` is spelled out as a labeled argument rather than a
+        // trailing closure, and that is not just style: it does not compile the
+        // other way. `AddAppSheet` has no custom initialiser, so its synthesised
+        // one is `store:appStore:onAdded:prefill:`, in the order its stored
+        // properties are declared — `onAdded` *before* `prefill`. Writing
+        // `AddAppSheet(store: config, appStore: appStore, prefill: prefill) {
+        // added in … }` gives the call the argument list
+        // `store:appStore:prefill:_:`: the first three are matched to their own
+        // labels, `onAdded` is skipped for its default in between, and nothing
+        // re-associates an argument already bound to a later label back onto an
+        // earlier, still-unmentioned parameter — so the trailing closure has
+        // nothing left to attach to. `SidebarView`'s own `AddAppSheet(store:
+        // store, appStore: appStore) { newName in … }` compiles as a trailing
+        // closure only because it never names `prefill:` at all, so nothing has
+        // been matched past `onAdded` for the closure to be appended after.
+        // Confirmed by trying the trailing form here, before `appStore:` joined
+        // the list: `swiftc` rejected it with "incorrect argument label in call
+        // (have 'store:prefill:_:', expected 'store:onAdded:prefill:')" — and a
+        // minimal struct reproducing this exact shape (a function-typed
+        // defaulted parameter declared before a later, explicitly-labeled one)
+        // fails identically, while the same struct with the function-typed
+        // parameter moved to the true last position compiles clean, confirming
+        // the position, not the type, is what matters.
         .sheet(item: $addingApp) { prefill in
-            AddAppSheet(store: config, onAdded: { added in
+            AddAppSheet(store: config, appStore: appStore, onAdded: { added in
                 // `added` is the CLI's own answer — the key `add_app_manual`
                 // actually wrote, which `addAndReload` reads back off the
                 // `app-added` event rather than echoing the `--name` this
@@ -609,7 +615,7 @@ struct DeviceDetailView: View {
             // sequentially after `vitals`, this local disk listing would sit
             // gated behind a hang it has nothing to do with, and if the user
             // switches phones before that hang resolves, this task is
-            // cancelled and the cache never gets read at all for this pane.
+            // canceled and the cache never gets read at all for this pane.
             // Starting it concurrently means it finishes on its own ~0.25s,
             // independent of whatever the phone does.
             async let stagedLoad: Void = staged.load()
@@ -688,7 +694,7 @@ struct DeviceDetailView: View {
                 // `ContentView`'s poll gets this check for free by sleeping
                 // last; this one has to write it out.
                 //
-                // It is not what stops a cancelled task from spawning a
+                // It is not what stops a canceled task from spawning a
                 // subprocess — `CLIRunner` already does that, and would whether
                 // this guard existed or not: `ProcessHandle.adopt` returns
                 // false once cancellation has arrived, `launch` throws
@@ -741,7 +747,7 @@ struct DeviceDetailView: View {
     /// interval — alt-tabbing certainly, and whatever else moves key status
     /// about — produced a poll that never read at all, indefinitely and
     /// silently. Sleeping the remainder makes a restart free: the reading still
-    /// arrives one interval after the last one, whoever cancelled what in
+    /// arrives one interval after the last one, whoever canceled what in
     /// between.
     ///
     /// It also retires a cost the first version of this poll wrote down as
@@ -809,7 +815,7 @@ struct DeviceDetailView: View {
         // still in flight. `store.load()` is the one that throws, and it throws
         // exactly when a phone has dropped off the bus, which is the moment the
         // vitals and delivery states this pane can still show are worth most.
-        // Cancelling them to report the listing's failure would trade three
+        // Canceling them to report the listing's failure would trade three
         // answers for one error.
         async let listing = store.load()
         async let vitals: Void = deviceInfo.load(udid: device.udid)

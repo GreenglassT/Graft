@@ -25,7 +25,7 @@ every extension carries its own profile and its own entitlements.
 
 The signing identity is the config's `.p12`, imported into a throwaway
 keychain (`TempKeychain`) so `codesign` never raises a prompt, and whose
-addition to the user's keychain search list is reverted exactly afterwards —
+addition to the user's keychain search list is reverted exactly afterward —
 on failure too. Every subprocess goes through `Runner`, which is the seam the
 tests replace: nothing under test touches a real keychain.
 
@@ -166,9 +166,10 @@ def build_entitlements(
 class Runner:
     """Every external command this feature runs, in one replaceable place.
 
-    `codesign`, `security` and `ideviceinstaller` all act on things a test must
-    never touch — the user's keychain search list, a real signing identity, a
-    phone — so nothing in `lc_sign` or `lc_manage` calls `subprocess` directly.
+    `codesign` and `security` both act on things a test must never touch — the
+    user's keychain search list, a real signing identity — so nothing in
+    `lc_sign` or `lc_manage` calls `subprocess` directly. (Installing on the
+    phone is in-process now, through `device_install`.)
     Tests pass a fake that records argv and answers from fixtures.
     """
 
@@ -186,13 +187,6 @@ class Runner:
             )
         return proc
 
-    def spawn(self, cmd: list[str]) -> subprocess.Popen[str]:
-        """Start `cmd` without waiting — for an install that may block on the
-        device until the user closes the app being replaced."""
-        return subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=child_env()
-        )
-
 
 # ---------- identity and keychain ----------
 
@@ -205,10 +199,9 @@ def p12_identity(p12: Path, password: str) -> str:
     refuses an ambiguous name.
     """
     from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.serialization import pkcs12
 
     try:
-        _, cert, _ = pkcs12.load_key_and_certificates(p12.read_bytes(), password.encode())
+        _, cert, _ = p12_mod.load_key_and_certificates(p12.read_bytes(), password.encode())
     except ValueError as e:
         raise SigningError(
             f"could not read {p12}: {e}",

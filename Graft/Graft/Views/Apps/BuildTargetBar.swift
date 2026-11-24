@@ -163,7 +163,7 @@ enum BuildTarget: Equatable {
     /// rather than muted — and the one place that decision is written.
     ///
     /// `tint` and `sentence` both read it instead of switching separately: a
-    /// colour and a wording that disagree about whether something is wrong is
+    /// color and a wording that disagree about whether something is wrong is
     /// worse than either being wrong alone. `DeliveryKind.needsAttention`
     /// records what the other direction cost — there, the wording *was* the
     /// decision until a fourth state needed words and nearly badged them all.
@@ -172,7 +172,7 @@ enum BuildTarget: Equatable {
     /// normally nothing to fix — it is what the user asked for — but a **dry
     /// run still resolves a device**, so a dry run against an empty bench is a
     /// build that is already certain to die in `select_device`. Reassuring the
-    /// user in muted grey that "this build won't be sent to a device" is, for
+    /// user in muted gray that "this build won't be sent to a device" is, for
     /// that run, a lie of omission about a failure that has already been
     /// decided. The usual argument for silence — a false alarm costs more than
     /// a silence, because it is the one that sends someone looking for a cable
@@ -359,7 +359,7 @@ struct BuildTargetBar: View {
     /// dry run with no phone, or with an absent `--device`, dies in
     /// `select_device` every time. This used to be recorded here as a known
     /// omission and defended with "a false alarm on a status line costs more
-    /// than a silence". That defence is about *speculative* device problems;
+    /// than a silence". That defense is about *speculative* device problems;
     /// this one is certain, and a muted "this build won't be sent to a device"
     /// over a build that is already guaranteed to fail is not a silence but a
     /// reassurance. So the ordering is unchanged — `notDelivering` still wins —
@@ -548,7 +548,7 @@ struct BuildTargetBar: View {
             let reason = option.suppressesDelivery ?? option.defaultLabel
             // Gated on `needsAttention`, the same property `tint` and `symbol`
             // read, rather than on the two facts it is made of — so the amber
-            // sentence, the amber colour and the warning glyph are one decision
+            // sentence, the amber color and the warning glyph are one decision
             // taken once. `needsAttention` is true here only when the clause is
             // non-nil, which is what makes the `else` below unreachable for a
             // build that is going to fail.
@@ -632,7 +632,7 @@ struct BuildTargetBar: View {
     /// install.
     ///
     /// Derived from `BuildTarget.needsAttention` rather than switching a second
-    /// time, so the colour cannot disagree with the wording `sentence` picked
+    /// time, so the color cannot disagree with the wording `sentence` picked
     /// from the same property — one list of which states are amber, read twice,
     /// rather than two lists that agree until they don't. The exhaustiveness
     /// lives there; the only thing left here is

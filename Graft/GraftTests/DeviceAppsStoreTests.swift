@@ -712,7 +712,7 @@ extension DecryptReviewFixTests {
 ///
 /// A dump now changes tack on its own — different tool, dropped extensions —
 /// and a minute of silence followed by a different tool's output is how
-/// automatic behaviour becomes inexplicable behaviour.
+/// automatic behavior becomes inexplicable behavior.
 @MainActor
 final class DecryptNoteTests: XCTestCase {
 

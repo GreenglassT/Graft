@@ -18,6 +18,87 @@ struct BuildsView: View {
     @State private var handoffComplaint: String?
     @State private var reinstallTarget: BuildRecord?
     @State private var logTarget: BuildRecord?
+    /// The dry run's answer while "Clean up old builds…" asks to confirm it.
+    @State private var pendingPrune: PruneSummary?
+    @State private var checkingPrune = false
+    @State private var pruneCheckError: String?
+
+    /// The confirmation "Clean up old builds…" shows, from the dry run.
+    ///
+    /// It states the keep count — config.yaml's `archive_keep`, the number
+    /// each build already prunes to — and exactly how many archives would go,
+    /// because that is a number the CLI just counted rather than a guess.
+    /// Zero is its own answer with nothing to confirm. `archive_keep: 0` says
+    /// so in its own words: on demand it keeps none at all, where after a
+    /// build it spares the one just made.
+    static func pruneConfirmation(_ preview: PruneSummary) -> (title: String, message: String, canConfirm: Bool) {
+        guard preview.removed > 0 else {
+            return (
+                "Nothing to clean up",
+                "Every app version has \(preview.keep) or fewer archived builds.",
+                false
+            )
+        }
+        let size = fileSize(preview.bytesRemoved)
+        if preview.keep == 0 {
+            return (
+                "Clean up old builds?",
+                "Your setting keeps no archived builds, so this moves all \(preview.removed) "
+                    + "to the Trash (\(size)). Their Re-install stops working.",
+                true
+            )
+        }
+        return (
+            "Clean up old builds?",
+            "Graft keeps the newest \(pluralized(preview.keep, "build")) of each app version "
+                + "(Settings › Archived builds kept). This moves "
+                + "\(pluralized(preview.removed, "archived IPA")) to the Trash (\(size)).",
+            true
+        )
+    }
+
+    /// Whether "Clean up old builds…" can be pressed, and its tooltip.
+    ///
+    /// Not while a build runs in this app: a build archives its IPA first and
+    /// pushes or installs it after, and at `archive_keep: 0` a sweep in that
+    /// window would move the archive about to be delivered to the Trash. The
+    /// CLI's retention lock already makes a clean-up wait for any build that
+    /// is delivering, this app's or a Terminal one; this gate only says up
+    /// front which build it is waiting for, instead of a wait that ends in
+    /// "a build is delivering".
+    /// `working` is the button's own check or clean-up in flight.
+    static func cleanUpAvailability(buildingApp: String?, working: Bool) -> (enabled: Bool, help: String) {
+        if let buildingApp {
+            return (
+                false,
+                "\(buildingApp) is building — clean up when it finishes, so its archive "
+                    + "isn't moved to the Trash before it's delivered"
+            )
+        }
+        return (!working, "Move archived IPAs past Settings › Archived builds kept to the Trash")
+    }
+
+    /// The line under the header after a clean-up.
+    static func pruneResultLine(_ result: BuildsStore.PruneResult?) -> (text: String, failed: Bool)? {
+        switch result {
+        case nil:
+            return nil
+        case let .moved(count, bytes):
+            return (
+                "Moved \(pluralized(count, "archived IPA")) to the Trash (\(fileSize(bytes))). "
+                    + "Empty the Trash to free the space.",
+                false
+            )
+        case let .partly(moved, failures):
+            return (
+                "Moved \(moved) to the Trash. These could not be moved: "
+                    + failures.joined(separator: "; "),
+                true
+            )
+        case let .failed(message):
+            return (message, true)
+        }
+    }
 
     /// What a build row can do with its artifact.
     ///
@@ -67,7 +148,7 @@ struct BuildsView: View {
     /// **A disabled item carries its reason in its title.** A `.help` on a
     /// menu item is never shown — AppKit draws no tooltip inside an open menu —
     /// so `.paidOnly`, which explains itself only as a tooltip, left
-    /// "Re-install…" greyed out with nothing anywhere saying why.
+    /// "Re-install…" grayed out with nothing anywhere saying why.
     struct MenuItem: Equatable {
         let title: String
         let enabled: Bool
@@ -87,8 +168,8 @@ struct BuildsView: View {
         case .installToMac:
             return MenuItem(title: "Install to Mac…", enabled: true)
         case .none:
-            // Labelled for the target it *is*, so a failed Mac build never
-            // shows the phone verb even greyed out.
+            // Labeled for the target it *is*, so a failed Mac build never
+            // shows the phone verb even grayed out.
             let verb = build.isForThisMac ? "Install to Mac…" : "Re-install…"
             let why = build.success ? "archive not kept" : "build failed"
             return MenuItem(title: "\(verb) (\(why))", enabled: false)
@@ -117,6 +198,31 @@ struct BuildsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            header
+                .padding(.horizontal, Metrics.paneGutter).padding(.vertical, 10)
+            Divider().background(Palette.line)
+            if let line = Self.pruneResultLine(store.pruneResult) {
+                if line.failed {
+                    ErrorBanner(
+                        message: line.text, fit: .fullBleed(gutter: Metrics.paneGutter),
+                        onDismiss: { store.dismissPruneResult() }
+                    )
+                } else {
+                    Text(line.text)
+                        .font(AppFont.monoSmall)
+                        .foregroundStyle(Palette.success)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, Metrics.paneGutter).padding(.vertical, 8)
+                }
+            }
+            if let pruneCheckError {
+                ErrorBanner(
+                    message: pruneCheckError, fit: .fullBleed(gutter: Metrics.paneGutter),
+                    onDismiss: { self.pruneCheckError = nil }
+                )
+            }
             if store.builds.isEmpty {
                 Text("No builds yet.")
                     .font(AppFont.body)
@@ -138,6 +244,63 @@ struct BuildsView: View {
             BuildLogView(build: target, runner: store.runner, artwork: artwork) {
                 logTarget = nil
             }
+        }
+        // The value is passed to the button rather than re-read: dismissing
+        // clears the binding (`stopBuildConfirmation`'s trap).
+        .alert(
+            pendingPrune.map { Self.pruneConfirmation($0).title } ?? "",
+            isPresented: $pendingPrune.isPresent(),
+            presenting: pendingPrune
+        ) { preview in
+            if Self.pruneConfirmation(preview).canConfirm {
+                Button("Cancel", role: .cancel) {}
+                Button("Move to Trash", role: .destructive) {
+                    Task { await store.prune() }
+                }
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: { preview in
+            Text(Self.pruneConfirmation(preview).message)
+        }
+    }
+
+    /// The title row, with "Clean up old builds…".
+    private var header: some View {
+        let availability = Self.cleanUpAvailability(
+            buildingApp: config.buildingApp, working: checkingPrune || store.isPruning
+        )
+        return HStack {
+            SectionTitle(text: "Builds")
+            Spacer()
+            Button {
+                Task { await checkPrune() }
+            } label: {
+                if checkingPrune || store.isPruning {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(store.isPruning ? "Cleaning up…" : "Checking…")
+                    }
+                } else {
+                    Text("Clean up old builds…")
+                }
+            }
+            .controlSize(.small)
+            .disabled(!availability.enabled)
+            .help(availability.help)
+        }
+    }
+
+    /// Ask the CLI what a clean-up would move, then confirm that.
+    private func checkPrune() async {
+        checkingPrune = true
+        defer { checkingPrune = false }
+        pruneCheckError = nil
+        store.dismissPruneResult()
+        do {
+            pendingPrune = try await store.previewPrune()
+        } catch {
+            pruneCheckError = error.localizedDescription
         }
     }
 

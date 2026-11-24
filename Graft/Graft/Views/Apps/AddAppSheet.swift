@@ -2,8 +2,12 @@ import SwiftUI
 
 struct AddAppSheet: View {
     @Bindable var store: ConfigStore
+    /// `ContentView`'s, the store the app pane stages its drops through: a
+    /// manual add's IPA is staged there too (`add`).
+    let appStore: AppStoreStore
     /// Called with the new app's YAML slug right before the sheet dismisses,
-    /// so the caller can select the new row in the sidebar.
+    /// so the caller can select the new row in the sidebar — the pane where
+    /// an IPA chosen here finishes staging.
     var onAdded: ((String) -> Void)? = nil
     /// What a staged dump already told the device pane, if this sheet was
     /// opened from a row that had one. nil is the ordinary "+ Add App"
@@ -11,9 +15,13 @@ struct AddAppSheet: View {
     /// decrypt card. Wiring that button is Task 9 — this only says what the
     /// sheet shows once it has one.
     var prefill: Prefill? = nil
+    /// Where the mode picker starts for an unprefilled sheet: Search
+    /// (`defaultMode`). A prefilled sheet always opens Manual (`.onAppear`).
+    var initialMode: Mode = AddAppSheet.defaultMode
     @Environment(\.dismiss) private var dismiss
 
     enum Mode: String, CaseIterable, Identifiable {
+        case search = "Search"
         case url = "From App Store URL"
         case manual = "Manual"
         var id: String { rawValue }
@@ -54,7 +62,7 @@ struct AddAppSheet: View {
         /// without an opinion on the phone's app name; a bare
         /// `let installedName: String?` would have forced `installedName:
         /// nil` onto ~30 call sites testing `stagedLine`/`versionLine`/click
-        /// behaviour that have nothing to do with this field, for the same
+        /// behavior that have nothing to do with this field, for the same
         /// answer they would have gotten anyway. `installedVersion` earns
         /// its own required-ness by feeding `versionLine`, a sentence most
         /// of those same fixtures *do* mean to pin one way or the other; this
@@ -274,13 +282,19 @@ struct AddAppSheet: View {
         }
     }
 
-    @State private var mode: Mode = .url
+    @State private var mode: Mode = .search
     @State private var urlDelivery: DeliveryMode = AddAppSheet.defaultDelivery
     @State private var appStoreURL: String = ""
     @State private var manualName: String = ""
     @State private var manualBundleId: String = ""
     @State private var manualDisplayName: String = ""
     @State private var manualDelivery: DeliveryMode = AddAppSheet.defaultDelivery
+    @State private var searchTerm: String = ""
+    @State private var picked: AppStoreSearchPick?
+    @State private var searchDelivery: DeliveryMode = AddAppSheet.defaultDelivery
+    @State private var getAfterAdd: Bool = false
+    /// The App Store status didn't answer within `statusTimeout`.
+    @State private var statusTimedOut = false
     @State private var stagedIPAURL: URL?
     @State private var stagedIPASize: Int = 0
     @State private var isWorking: Bool = false
@@ -295,6 +309,9 @@ struct AddAppSheet: View {
     /// the mode the README recommends. It was Sideload, so the first app a new
     /// user added went the other way from the instructions they had just read.
     static let defaultDelivery: DeliveryMode = .livecontainer
+
+    /// Search first: finding the app by name needs no URL from a browser.
+    static let defaultMode: Mode = .search
 
     /// The delivery an add actually sends, for both add paths: on a free
     /// Apple ID always LiveContainer, whatever the picker or `lastDeliveryMode`
@@ -336,14 +353,20 @@ struct AddAppSheet: View {
         // nil, which tears this sheet's content down, so the next
         // presentation — same `prefill` or a different one — is a fresh
         // `AddAppSheet`, not a reused one. The one real difference is smaller
-        // than that: `mode` starts `.url`, so a prefilled sheet's first body
-        // evaluation would briefly build the URL form before `.onAppear` runs
+        // than that: `mode` starts `.search`, so a prefilled sheet's first body
+        // evaluation would briefly build the Search form before `.onAppear` runs
         // and switches it to `.manual` — a one-frame hitch an `init`-based
         // fill would not have had.
         .onAppear {
+            // A fresh search each time the sheet opens. The store outlives the
+            // sheet (`AppStoreStore.search`), and last time's results aren't
+            // this add's.
+            appStore.search.reset()
             guard let prefill else {
+                mode = initialMode
                 urlDelivery = lastDelivery
                 manualDelivery = lastDelivery
+                searchDelivery = lastDelivery
                 return
             }
             mode = .manual
@@ -359,6 +382,48 @@ struct AddAppSheet: View {
             // what replaced it and why.
             manualDisplayName = prefill.prefilledDisplayName
             manualDelivery = lastDelivery
+        }
+        // Kills a search still running when the sheet closes.
+        .onDisappear { appStore.search.reset() }
+        // Search offers Get right after the add. That needs to know whether
+        // ipatool and UnfairPlay are ready, which `--appstore-status` asks
+        // `ipatool auth info`, and that reads the keychain. So it runs only
+        // once a picked result could be got (`wantsStatus`): never when the
+        // sheet opens and never while typing. The sheet stays usable while it
+        // runs, and it gives up after `statusTimeout`.
+        .task(id: Self.wantsStatus(mode: mode, picked: picked?.result)) {
+            guard Self.wantsStatus(mode: mode, picked: picked?.result),
+                  !appStore.hasLoadedStatus, !appStore.isLoadingStatus else { return }
+            if await Self.loadStatus(appStore, timeout: Self.statusTimeout) {
+                statusTimedOut = true
+            }
+        }
+    }
+
+    /// Whether the sheet needs the App Store status now: Search, with a pick
+    /// it could offer Get for (`offersGet`).
+    static func wantsStatus(mode: Mode, picked: AppStoreSearchResult?) -> Bool {
+        mode == .search && picked.map(offersGet) == true
+    }
+
+    /// Long enough for `auth info`, which usually answers in well under a
+    /// second; short of its own 30 s, which would strand the offer on
+    /// "Checking…".
+    static let statusTimeout: Duration = .seconds(8)
+
+    /// Load the status, giving up after `timeout`. True when it gave up: the
+    /// load is canceled (its CLI killed), and a canceled load records
+    /// nothing, so Settings › App Store still loads it fresh.
+    static func loadStatus(_ appStore: AppStoreStore, timeout: Duration) async -> Bool {
+        await withTaskGroup(of: Bool.self) { group in
+            group.addTask { await appStore.loadStatus(); return false }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return !Task.isCancelled
+            }
+            let timedOut = await group.next() ?? false
+            group.cancelAll()
+            return timedOut
         }
     }
 
@@ -398,6 +463,8 @@ struct AddAppSheet: View {
     @ViewBuilder
     private var content: some View {
         switch mode {
+        case .search:
+            searchForm
         case .url:
             urlForm
         case .manual:
@@ -459,6 +526,90 @@ struct AddAppSheet: View {
             deliveryPicker(selection: $manualDelivery)
         }
     }
+
+    private var searchForm: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            AppStoreSearchForm(search: appStore.search, term: $searchTerm, picked: $picked, onSubmit: submit)
+            deliveryPicker(selection: $searchDelivery)
+            if let picked, Self.offersGet(picked.result) { getOfferRow }
+        }
+        .onChange(of: searchTerm) { old, term in
+            // A new term, not a new space: the pick stays (`sameSearch`).
+            if !Self.sameSearch(old, term) { picked = nil }
+            appStore.search.update(term: term)
+        }
+        .onChange(of: picked) { _, pick in
+            getAfterAdd = pick.map { Self.getsAfterAddingByDefault($0.result) } ?? false
+        }
+    }
+
+    /// Whether two field texts search the same term: they differ only in
+    /// leading or trailing whitespace, which `AppStoreSearchStore` trims.
+    static func sameSearch(_ a: String, _ b: String) -> Bool {
+        a.trimmingCharacters(in: .whitespacesAndNewlines) == b.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @ViewBuilder
+    private var getOfferRow: some View {
+        switch Self.getOffer(
+            status: appStore.status, hasLoaded: appStore.hasLoadedStatus, timedOut: statusTimedOut
+        ) {
+        case .ready:
+            Toggle(Self.getToggleLabel, isOn: $getAfterAdd)
+                .toggleStyle(.checkbox)
+                .font(AppFont.body)
+        case .notReady:
+            Text(Self.getNotReady)
+                .font(AppFont.monoSmall).foregroundStyle(Palette.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+        case .timedOut:
+            Text(Self.getTimedOut)
+                .font(AppFont.monoSmall).foregroundStyle(Palette.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+        case .checking:
+            Text(Self.getChecking).font(AppFont.monoSmall).foregroundStyle(Palette.textDim)
+        }
+    }
+
+    // MARK: - Search: getting the app straight away
+
+    /// Whether the sheet can offer "Get it after adding": only when a get could
+    /// run now (`AppStoreStatusRecord.canGet`).
+    enum GetOffer: Equatable {
+        case checking
+        case ready
+        case notReady
+        /// The status didn't answer in time (`statusTimeout`).
+        case timedOut
+    }
+
+    static func getOffer(
+        status: AppStoreStatusRecord?, hasLoaded: Bool, timedOut: Bool = false
+    ) -> GetOffer {
+        if let status { return status.canGet ? .ready : .notReady }
+        if hasLoaded { return .notReady }
+        return timedOut ? .timedOut : .checking
+    }
+
+    /// Whether a pick could be got from the App Store at all: not one already
+    /// added, and not one of Apple's own apps, which the CLI refuses
+    /// (`appstore.apples_own`).
+    static func offersGet(_ result: AppStoreSearchResult) -> Bool {
+        result.configuredAs == nil && !result.isApplesOwn
+    }
+
+    /// Checked for a free app. Unchecked for a paid one, which downloads only
+    /// if this Apple ID already bought it, and for one whose price the store
+    /// didn't give: "price unknown" is never "free".
+    static func getsAfterAddingByDefault(_ result: AppStoreSearchResult) -> Bool {
+        result.acquisition == .free && !result.isApplesOwn
+    }
+
+    static let getToggleLabel = "Get it from the App Store after adding"
+    static let getNotReady = "To download it from here, set up the App Store in Settings › App Store first."
+    static let getChecking = "Checking the App Store setup…"
+    static let getTimedOut = "Couldn't check the App Store setup in time. Once it's added, "
+        + "Get is on the app's pane."
 
     /// The two lines a prefilled add shows in place of the drop zone: what is
     /// staged and what it cost (`Palette.warn` when something was stripped,
@@ -528,7 +679,7 @@ struct AddAppSheet: View {
     }
 
     /// On a free Apple ID the picker shows LiveContainer and is disabled, with
-    /// the reason under it: Sideload stays on screen, greyed, so the user can
+    /// the reason under it: Sideload stays on screen, grayed, so the user can
     /// see the option exists and why it is not theirs, rather than wonder
     /// where it went.
     private func deliveryPicker(selection: Binding<DeliveryMode>) -> some View {
@@ -591,6 +742,8 @@ struct AddAppSheet: View {
 
     private var canSubmit: Bool {
         switch mode {
+        case .search:
+            return picked.map { $0.result.configuredAs == nil } ?? false
         case .url:
             return !appStoreURL.trimmingCharacters(in: .whitespaces).isEmpty
         case .manual:
@@ -599,63 +752,151 @@ struct AddAppSheet: View {
         }
     }
 
+    // MARK: - Adding
+
+    /// What one press of Add sends: the app, by App Store URL or by hand, and
+    /// for a manual add the IPA chosen for it, if any.
+    enum Request: Equatable {
+        /// `country` is the store the result came from (`AppStoreSearchPick.country`).
+        case search(
+            AppStoreSearchResult, country: String?, delivery: DeliveryMode, getAfterAdd: Bool
+        )
+        case url(String, delivery: DeliveryMode)
+        case manual(
+            name: String, bundleId: String, displayName: String?,
+            delivery: DeliveryMode, ipa: URL?
+        )
+    }
+
+    /// The request the form makes: its fields trimmed, and the delivery an
+    /// add actually sends (`delivery(chosen:account:)`).
+    private var request: Request? {
+        switch mode {
+        case .search:
+            guard let picked else { return nil }
+            return Self.searchRequest(
+                picked,
+                delivery: Self.delivery(chosen: searchDelivery, account: store.account),
+                getAfterAdd: getAfterAdd,
+                offer: Self.getOffer(status: appStore.status, hasLoaded: appStore.hasLoadedStatus)
+            )
+        case .url:
+            return .url(
+                appStoreURL, delivery: Self.delivery(chosen: urlDelivery, account: store.account)
+            )
+        case .manual:
+            let trimmedDisplay = manualDisplayName.trimmingCharacters(in: .whitespaces)
+            return .manual(
+                name: manualName.trimmingCharacters(in: .whitespaces),
+                bundleId: manualBundleId.trimmingCharacters(in: .whitespaces),
+                displayName: trimmedDisplay.isEmpty ? nil : trimmedDisplay,
+                delivery: Self.delivery(chosen: manualDelivery, account: store.account),
+                ipa: stagedIPAURL
+            )
+        }
+    }
+
+    /// What Add sends for a pick. The store is the one the pick's own list
+    /// came from (`AppStoreSearchPick.country`), never the search state on
+    /// screen at Add: a newer search may have replaced that since, and one
+    /// ending in no results used to drop the store. Get-after-add only when
+    /// the pick could be got and the App Store is ready.
+    static func searchRequest(
+        _ pick: AppStoreSearchPick, delivery: DeliveryMode, getAfterAdd: Bool, offer: GetOffer
+    ) -> Request {
+        .search(
+            pick.result, country: pick.country, delivery: delivery,
+            getAfterAdd: getAfterAdd && offersGet(pick.result) && offer == .ready
+        )
+    }
+
+    /// The picker state of the mode on screen: what `lastDeliveryMode`
+    /// remembers (see `submit`).
+    private var chosenDelivery: DeliveryMode {
+        switch mode {
+        case .search: return searchDelivery
+        case .url: return urlDelivery
+        case .manual: return manualDelivery
+        }
+    }
+
+    /// Add the app, then hand the IPA chosen for it to the app pane's own
+    /// staging. Returns the key the CLI settled on.
+    ///
+    /// The IPA goes through `AppStoreStore.startProvide`, the path a drop on
+    /// the app pane takes. The sheet used to stage it itself, with its own
+    /// copy of the refusal → "Use it anyway…" → retry, and that copy threw
+    /// the CLI's warning away: after it, the IPA was staged unverified with
+    /// nothing anywhere saying so. Through the store, a refusal is the pane's
+    /// banner and offer, and the warning stays under the pane's staged line,
+    /// exactly as for a drop.
+    ///
+    /// Started, not awaited. The sheet closes on the add, as it does with no
+    /// IPA, and `onAdded` selects the new app, so the pane the staging
+    /// reports to is the one on screen. A copy that fails still leaves the
+    /// app added, as it always did; that is now said on the app's pane, where
+    /// the IPA can be dropped again, rather than in a sheet whose only way
+    /// out was Cancel.
+    static func add(
+        _ request: Request, store: ConfigStore, appStore: AppStoreStore
+    ) async throws -> String? {
+        switch request {
+        case let .search(result, country, delivery, getAfterAdd):
+            // The entry `--add-app` writes from that store's URL: the store's
+            // name as the key and display name, its bundle id, the latest
+            // version, and the store itself (`store_country`), which later
+            // lookups ask. Sent through the manual path so the add needs no
+            // second lookup.
+            let added = try await store.addAppManual(
+                name: result.name, bundleId: result.bundleId,
+                displayName: result.name, delivery: delivery, storeCountry: country
+            )
+            if getAfterAdd, let added {
+                appStore.startGet(app: added)
+            }
+            return added
+        case let .url(url, delivery):
+            return try await store.addApp(appStoreURL: url, delivery: delivery)
+        case let .manual(name, bundleId, displayName, delivery, ipa):
+            let added = try await store.addAppManual(
+                name: name, bundleId: bundleId, displayName: displayName, delivery: delivery
+            )
+            if let ipa, let added {
+                appStore.startProvide(app: added, fileURL: ipa, config: store)
+            }
+            return added
+        }
+    }
+
     // MARK: - Submit
 
     private func submit() {
-        guard canSubmit, !isWorking else { return }
+        guard canSubmit, !isWorking, let request = self.request else { return }
         errorMessage = nil
         isWorking = true
         Task {
             defer { isWorking = false }
             let addedName: String?
             do {
-                switch mode {
-                case .url:
-                    addedName = try await store.addApp(
-                        appStoreURL: appStoreURL,
-                        delivery: Self.delivery(chosen: urlDelivery, account: store.account)
-                    )
-                case .manual:
-                    let trimmedDisplay = manualDisplayName
-                        .trimmingCharacters(in: .whitespaces)
-                    addedName = try await store.addAppManual(
-                        name: manualName.trimmingCharacters(in: .whitespaces),
-                        bundleId: manualBundleId.trimmingCharacters(in: .whitespaces),
-                        displayName: trimmedDisplay.isEmpty ? nil : trimmedDisplay,
-                        delivery: Self.delivery(chosen: manualDelivery, account: store.account)
-                    )
-                }
+                addedName = try await Self.add(request, store: store, appStore: appStore)
             } catch {
                 errorMessage = error.localizedDescription
                 return
-            }
-            // Manual mode + a staged IPA: now that the app exists with a real
-            // bundle_id in config, try to copy the IPA. A copy failure leaves
-            // the app in config (already created) — surface a clear message
-            // but don't roll back.
-            if mode == .manual, let stagedURL = stagedIPAURL, let name = addedName {
-                do {
-                    try await store.provideIPA(appName: name, fileURL: stagedURL)
-                } catch {
-                    errorMessage = "App added, but IPA copy failed: \(error.localizedDescription)"
-                    return
-                }
             }
             if let addedName {
                 onAdded?(addedName)
             }
             // Written only once the add has actually gone through — a
-            // cancelled sheet, or a manual add whose IPA copy failed after
-            // the app itself was created (the early `return` above), leaves
-            // this untouched, so neither can change what the next sheet
-            // defaults to.
+            // canceled sheet, or an add the CLI refused (the early `return`
+            // above), leaves this untouched, so neither can change what the
+            // next sheet defaults to.
             //
             // The picker's state, not what was sent. On a free Apple ID the two
             // differ: LiveContainer is sent whatever the picker holds, and the
             // disabled picker still holds the choice a paid account made, which
             // a free add must not overwrite. Writing `delivery(chosen:account:)`
             // here would.
-            lastDelivery = mode == .url ? urlDelivery : manualDelivery
+            lastDelivery = chosenDelivery
             dismiss()
         }
     }

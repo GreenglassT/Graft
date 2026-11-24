@@ -122,7 +122,7 @@ def test_a_missing_override_still_fails(tmp_path: Path) -> None:
 
 
 def test_without_an_app_the_global_wildcard_is_still_what_is_checked(tmp_path: Path) -> None:
-    """`--check` has no app in hand; its behaviour must not change."""
+    """`--check` has no app in hand; its behavior must not change."""
     cfg = _cfg(tmp_path)
 
     row = _row(preflight.check_signing_files(cfg), PROFILE_ROW)
@@ -234,13 +234,14 @@ def test_a_phone_the_config_never_names_still_fails_the_device_check(
 
     row = _row(results, DEVICE_ROW)
     assert row is not None and row.ok is False
-    assert "Apple Developer portal" in row.hint
+    # The list Save and test refreshes, not only the portal (review re-check #5).
+    assert "developer.apple.com" in row.hint and "Save and test" in row.hint
 
 
 def test_a_profile_that_lists_the_phone_in_another_case_still_matches(
     tmp_path: Path,
 ) -> None:
-    """ASC normalises UDIDs to lower case in places; config.yaml does not.
+    """ASC normalizes UDIDs to lower case in places; config.yaml does not.
 
     The membership test here was exact while the `configured`/`renewing` pair
     three lines below it, and `cache_problem` on both sides, are

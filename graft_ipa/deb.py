@@ -132,7 +132,7 @@ def control_fields(path: Path) -> dict[str, Any]:
     Returns `{}` for anything unreadable — a directory, a truncated download, a
     .deb whose control member uses a compression this interpreter lacks. The
     caller adds these keys to a record it would have emitted anyway, so an empty
-    dict degrades to exactly the old behaviour.
+    dict degrades to exactly the old behavior.
     """
     try:
         handle = path.open("rb")

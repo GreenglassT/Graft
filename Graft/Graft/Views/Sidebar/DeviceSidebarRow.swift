@@ -20,7 +20,7 @@ import SwiftUI
 /// truncated bundle id.
 struct DeviceSidebarRow: View {
     let device: DeviceRecord
-    /// Drives the quiet text's colour, which has to change on the selection
+    /// Drives the quiet text's color, which has to change on the selection
     /// fill rather than stay unreadable on it — `textDim` on `accentSelect` is
     /// 1.09:1. Same handling, and the same reason, as `AppSidebarRow`.
     let isSelected: Bool
@@ -133,7 +133,7 @@ struct UndescribableDeviceRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            // The generic silhouette, which is what an unrecognised product
+            // The generic silhouette, which is what an unrecognized product
             // type resolves to — and there is no product type here at all,
             // which is the same amount of knowledge. A plain body with no face
             // detail is truthful about what is not known; see

@@ -133,7 +133,7 @@ final class LiveContainerStoreTests: XCTestCase {
         return ["-c", "sleep \(seconds)" + (body.isEmpty ? "" : "; \(body)")]
     }
 
-    /// The `.task(id:)` is cancelled when the user picks another device; the
+    /// The `.task(id:)` is canceled when the user picks another device; the
     /// SIGTERMed CLI comes back as a non-zero exit, and that is not a failure.
     @MainActor
     func test_a_cancelled_load_records_nothing_and_a_new_one_proceeds() async throws {
@@ -143,7 +143,7 @@ final class LiveContainerStoreTests: XCTestCase {
         task.cancel()
         await task.value
 
-        XCTAssertNil(store.loadErrors[Self.ipad], "a cancelled load is not a failed one")
+        XCTAssertNil(store.loadErrors[Self.ipad], "a canceled load is not a failed one")
         XCTAssertFalse(store.hasLoaded.contains(Self.ipad))
         XCTAssertFalse(store.loading.contains(Self.ipad))
 
@@ -202,7 +202,7 @@ final class LiveContainerStoreTests: XCTestCase {
     /// Two clicks in one main-actor turn: the first task has not started, so
     /// `run` is not set yet and `isRunning` says no. Without a guard of its
     /// own, `launch` made a second task, `actionTask` pointed at it (it
-    /// returns at once, finding the first running), and Stop cancelled that
+    /// returns at once, finding the first running), and Stop canceled that
     /// one instead of the CLI that was actually running.
     @MainActor
     func test_a_double_click_starts_one_action_and_stop_cancels_that_one() async {

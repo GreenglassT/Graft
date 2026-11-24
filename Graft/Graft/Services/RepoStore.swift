@@ -55,7 +55,7 @@ final class RepoStore: CLIStore {
     }
 
     // add/remove go through `CLIStore.mutate` for the rule it encodes: the
-    // write already landed in config.yaml, so a failed refresh afterwards is
+    // write already landed in config.yaml, so a failed refresh afterward is
     // "it worked, the list is stale" and belongs in `lastError` — not a throw
     // that makes ReposView tell the user the repo wasn't added. They used to
     // rethrow, which is the exact bug `mutate` exists to prevent; ReposView

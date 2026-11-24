@@ -28,7 +28,7 @@ def test_the_argv_matches_bagbaks_real_interface(tmp_path: Path):
     machine — and started failing the moment one was installed whose argv it
     wasn't written for. A test that documents 5.x's interface has to say 5.
     """
-    cmd = build_command("com.x", tmp_path, udid="UDID-1", mode="all", major=5)
+    cmd = build_command("com.x", tmp_path, udid="UDID-1", major=5)
     assert cmd == ["bagbak", "-D", "UDID-1", "-o", str(tmp_path), "com.x", "all"]
 
 
@@ -121,7 +121,7 @@ def test_available_backends_reflects_what_is_installed(monkeypatch):
     assert decrypt_runner.available_backends() == [decrypt_runner.BAGBAK, decrypt_runner.FRIDA]
 
 
-def test_the_frida_dry_run_argv_uses_ssh_over_the_forwarded_port(monkeypatch, tmp_path: Path):
+def test_the_frida_dry_run_argv_uses_ssh_over_the_forwarded_port(monkeypatch, tmp_path: Path, fake_iproxy):
     """`dump.py -o <ipa> -H localhost -p <port> -u root -P … <bundle>` — the
     SSH form frida-ios-dump documents, over the port iproxy binds. The password
     is set in-process by its launcher, never shown (`test_frida_dump_password`).
@@ -146,7 +146,7 @@ def test_the_frida_dry_run_argv_uses_ssh_over_the_forwarded_port(monkeypatch, tm
     assert "alpine" not in argv
 
 
-def test_frida_ssh_creds_come_from_the_environment(monkeypatch, tmp_path: Path):
+def test_frida_ssh_creds_come_from_the_environment(monkeypatch, tmp_path: Path, fake_iproxy):
     """A device whose root password was changed (common, good practice) is
     otherwise unreachable; a key takes precedence over a password."""
     py = tmp_path / ".venv" / "bin" / "python"
@@ -254,13 +254,13 @@ def test_a_frida_backend_that_is_not_set_up_says_so(monkeypatch, tmp_path: Path)
 
 
 def _install_fake_frida(monkeypatch, *, frontmost: str | None, boom: bool = False):
-    """Seed sys.modules['frida'] for `frontmost_app`, which imports it internally.
+    """A frida for `frontmost_app`, at the seam it reaches frida through
+    (`_import_frida`, which asks frida-ios-dump's venv in real use).
 
     No real device: the fake answers `get_frontmost_application` with an object
     carrying `.identifier` (or None for the home screen), and raises on connect
     when `boom` is set — the unreachable-device case.
     """
-    import sys
     import types
 
     fake = types.ModuleType("frida")
@@ -280,7 +280,7 @@ def _install_fake_frida(monkeypatch, *, frontmost: str | None, boom: bool = Fals
 
     fake.get_usb_device = _connect
     fake.get_device = _connect
-    monkeypatch.setitem(sys.modules, "frida", fake)
+    monkeypatch.setattr(decrypt_runner, "_import_frida", lambda _need: fake)
 
 
 def test_frontmost_app_reports_the_bundle_id_on_screen(monkeypatch):

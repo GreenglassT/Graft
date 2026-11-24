@@ -53,7 +53,7 @@ def test_lc_clean_with_dry_run_is_refused_and_cleans_nothing(
     assert cleaned == [], "--lc-clean ran under --dry-run"
     said = _said(result)
     assert "--dry-run is not valid with --lc-clean" in said, said
-    assert "previews only a build and --prune-builds" in said, said
+    assert "previews only a build and --init, --prune-builds" in said, said
 
 
 def test_the_refusal_comes_before_the_config_is_even_read(
@@ -77,7 +77,7 @@ def test_the_refusal_comes_before_the_config_is_even_read(
 def test_the_verbs_that_preview_are_the_ones_whose_handlers_take_dry_run() -> None:
     """Pinned, so a verb gaining or losing a preview is a decision somebody
     makes here rather than something the gate notices for them."""
-    assert {v.flag for v in _verbs() if v.honours_dry_run} == {"--prune-builds"}
+    assert {v.flag for v in _verbs() if v.honours_dry_run} == {"--init", "--prune-builds"}
     for v in _verbs():
         assert v.honours_dry_run == ("dry_run" in inspect.signature(v.run).parameters)
 

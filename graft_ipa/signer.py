@@ -8,13 +8,12 @@ import re
 import shlex
 import subprocess
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import apple_portal, install_hints, keychain, mobileprovision, p12
-from .child_env import child_env
-from .child_env import which as child_which
+from . import apple_portal, install_hints, keychain, mobileprovision, p12, signing_cert, tools
+from .child_env import BUNDLED_OPENSSL_CONF, child_env
 from .config import AppConfig, Config
 from .errors import SigningError
 
@@ -49,13 +48,24 @@ def resolve_p12_password(cfg: Config) -> str | None:
 
 def _p12_password(cfg: Config) -> str | None:
     """`resolve_p12_password` past its guard."""
-    pw = os.environ.get(cfg.signing.cert_password_env)
-    if pw:
-        return pw
     # By `cfg.team_id`, the key `--set-p12-password` writes under: never a
     # placeholder or a padded spelling of it.
-    if cfg.team_id:
-        return keychain.read_p12_password(cfg.team_id)
+    return p12_password_for(cfg.signing.cert_password_env, cfg.team_id)
+
+
+def p12_password_for(env_name: str, team_id: str | None) -> str | None:
+    """The .p12 password a build uses: `$<env_name>` if it is set and not
+    empty, else the Keychain's `p12-<team_id>`, else None.
+
+    "" is a password: a .p12 exported with a blank one is stored that way.
+    The setup re-opens the .p12 it installed through this, so what it checks
+    is what every build will use (`account_setup`).
+    """
+    pw = os.environ.get(env_name) if env_name else None
+    if pw:
+        return pw
+    if team_id:
+        return keychain.read_p12_password(team_id)
     return None
 
 
@@ -91,9 +101,9 @@ class ResolvedProfile:
     unregistered_devices: tuple[str, ...] = ()
 
 
+# zsign's team line, for a certificate with no OU: the subject and expiry
+# are read from the certificate itself (`signing_cert`).
 _TEAM_RE = re.compile(r"TeamId(?:entifier)?[:\s]+([A-Z0-9]+)", re.IGNORECASE)
-_SUBJECT_RE = re.compile(r"Subject[:\s]+(.+)")
-_EXPIRY_RE = re.compile(r"(?:Expires?|ExpirationDate)[:\s]+([^\n]+)", re.IGNORECASE)
 
 
 # Where a signing profile comes from. `plan_profile_for_app` is the only place
@@ -197,9 +207,19 @@ def _plan_profile(cfg: Config, app: AppConfig | None) -> ProfilePlan:
 
 
 def _auto_profile_device_udids(cfg: Config, asc_cfg) -> list[str]:
-    return asc_cfg.device_udids or (
-        [cfg.default_device_udid] if cfg.default_device_udid else []
-    )
+    """`device_udids`, plus the default phone when it isn't one of them.
+
+    `device_udids` is a snapshot, refreshed only by Save and test (or
+    `--set-portal` / `--setup-portal`). The default phone counted only when
+    the list was empty, so a phone bought and made the default after the last
+    save was left out of every profile and failed pre-flight on every build.
+    It is the phone builds go to, so it is always in.
+    """
+    udids = list(asc_cfg.device_udids)
+    default = cfg.default_device_udid
+    if default and default.lower() not in {u.lower() for u in udids}:
+        udids.append(default)
+    return udids
 
 
 def auto_profile_device_udids(cfg: Config) -> list[str]:
@@ -272,6 +292,7 @@ def _provision_via_portal(
             device_udids=_auto_profile_device_udids(cfg, asc_cfg),
             cache_dir=asc_cfg.profile_cache_dir,
             exact=app.exact_app_id,
+            team_id=cfg.team_id,
         )
     except apple_portal.PortalError as e:
         raise SigningError(
@@ -295,16 +316,21 @@ def run_zsign(
     *,
     app: AppConfig | None = None,
     dry_run: bool = False,
+    before_signing: Callable[[Path], None] | None = None,
 ) -> SignResult:
+    """`before_signing` is handed the profile zsign will sign with, once it
+    is known and before zsign runs: the planned one on a dry run (which may
+    not exist yet, for an auto_profile app), the resolved one otherwise."""
     _signing_for(cfg, app)
     pw = _p12_password(cfg)
-    if not pw:
+    if pw is None:
         raise SigningError(
             f".p12 password not available (env {cfg.signing.cert_password_env} unset and not in Keychain)",
             hint=f"export {cfg.signing.cert_password_env}=<your .p12 password>  OR  graft --set-p12-password",
         )
     if not cfg.signing.cert.exists():
         raise SigningError(f"signing cert not found: {cfg.signing.cert}")
+    z = tools.resolve("zsign")
 
     # The dry-run branch returns BEFORE `resolve_profile_for_app` is reachable,
     # and that placement is the fix, not a detail. Resolving for real registers
@@ -322,10 +348,12 @@ def run_zsign(
         plan = _plan_profile(cfg, app)
         # Rendered, not made: a dry run writes no copy of the identity.
         cmd = _zsign_cmd(
-            input_ipa, output_ipa,
+            str(z.path or "zsign"), input_ipa, output_ipa,
             f"<a private copy of {cfg.signing.cert}>", "<its one-time password>",
             plan.require_local(),
         )
+        if before_signing is not None:
+            before_signing(plan.path)
         return SignResult(
             output_ipa=output_ipa,
             team_id=None,
@@ -335,7 +363,16 @@ def run_zsign(
             stderr="",
         )
 
+    # Before the profile is resolved: that can register a Bundle ID and spend
+    # a profile slot in the user's developer account, all for a build that
+    # could never have been signed.
+    if not z.found:
+        raise SigningError("zsign not found in PATH", hint=_zsign_install_hint())
+    zsign = str(z.path)
+
     resolved = _resolve_profile(cfg, app, password=pw)
+    if before_signing is not None:
+        before_signing(resolved.path)
     output_ipa.parent.mkdir(parents=True, exist_ok=True)
 
     # Never `-p <the user's password>`: a command line is readable by every
@@ -347,14 +384,11 @@ def run_zsign(
     from .lc_manage import exit_on_termination
 
     with exit_on_termination(), _private_identity(cfg, pw) as (identity, one_time):
-        cmd = _zsign_cmd(input_ipa, output_ipa, str(identity), one_time, resolved.path)
+        cmd = _zsign_cmd(zsign, input_ipa, output_ipa, str(identity), one_time, resolved.path)
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, env=child_env())
-        except FileNotFoundError as e:
-            raise SigningError(
-                "zsign not found in PATH",
-                hint=install_hints.with_prerequisites("brew install zsign"),
-            ) from e
+            proc = subprocess.run(cmd, capture_output=True, text=True, env=child_env(zsign_env(z)))
+        except FileNotFoundError as e:  # gone since it was resolved
+            raise SigningError("zsign not found in PATH", hint=_zsign_install_hint()) from e
 
     combined = (proc.stdout or "") + (proc.stderr or "")
     if proc.returncode != 0 or not output_ipa.exists():
@@ -362,21 +396,44 @@ def run_zsign(
             f"zsign exited with code {proc.returncode}",
             hint=_signing_hint(
                 combined, cfg.signing.cert_password_env, proc.returncode,
-                # The binary `subprocess` ran: found on the child's PATH, which
-                # is what `child_which` searches.
-                zsign=child_which("zsign"),
+                # The binary `subprocess` ran: the one `tools.resolve` found.
+                zsign=zsign,
             ),
         )
 
+    cert = signing_cert.read(cfg.signing.cert, pw)
     return SignResult(
         output_ipa=output_ipa,
-        team_id=_first_match(_TEAM_RE, combined),
-        cert_subject=_first_match(_SUBJECT_RE, combined),
-        expiry=_first_match(_EXPIRY_RE, combined),
+        team_id=cert.team_id or _first_match(_TEAM_RE, combined),
+        cert_subject=cert.subject,
+        expiry=cert.expiry,
         stdout=proc.stdout,
         stderr=proc.stderr,
         profile_notes=_provisioning_notes(resolved),
     )
+
+
+def zsign_env(resolved: tools.Resolved) -> dict[str, str]:
+    """What zsign's process needs on top of `child_env()`.
+
+    Graft.app's zsign is repointed at the OpenSSL bundled in
+    `Contents/Frameworks`, whose loadable providers (`legacy.dylib`) sit in
+    `Contents/Frameworks/ossl-modules`. OpenSSL looks for them where it was
+    configured to install them, a directory on the release machine, unless
+    `OPENSSL_MODULES` says otherwise.
+
+    That OpenSSL would also read the openssl.cnf in the directory it was
+    configured with, so it gets none (`child_env.BUNDLED_OPENSSL_CONF`).
+
+    Only for the bundled zsign, and the modules only when that folder is
+    there: a zsign from PATH or config.yaml brings its own OpenSSL and keeps
+    whatever the user's environment says.
+    """
+    if resolved.source != tools.SOURCE_BUNDLED or resolved.path is None:
+        return {}
+    # `<Contents>/Helpers/bin/zsign`: the bundled rung builds it that way.
+    modules = resolved.path.parent.parent.parent / "Frameworks" / "ossl-modules"
+    return {**BUNDLED_OPENSSL_CONF, **({"OPENSSL_MODULES": str(modules)} if modules.is_dir() else {})}
 
 
 def _provisioning_notes(resolved: ResolvedProfile) -> tuple[str, ...]:
@@ -427,11 +484,12 @@ def _private_identity(cfg: Config, password: str) -> Iterator[tuple[Path, str]]:
 
 
 def _zsign_cmd(
-    input_ipa: Path, output_ipa: Path, identity: str, password: str, profile: Path
+    zsign: str, input_ipa: Path, output_ipa: Path, identity: str, password: str, profile: Path
 ) -> list[str]:
-    """`identity` and `password` are the private copy's, never the user's."""
+    """`zsign` is the binary to run (`tools.resolve`). `identity` and
+    `password` are the private copy's, never the user's."""
     return [
-        "zsign",
+        zsign,
         "-k", identity,
         "-p", password,
         "-m", str(profile),
@@ -449,24 +507,33 @@ def _describe_plan(cfg: Config, plan: ProfilePlan) -> str:
     had to make it.
 
     "Exists" is not "will be reused". The real run replaces a cached profile
-    that is expired, unreadable, or missing a device, so this asks the same
-    offline question it does — `cache_problem`, against the same UDIDs — and
-    says so. It once printed "a real run reuses this file" for a profile that
-    did not list a newly connected iPad, which the real run then re-provisioned.
+    that is expired, unreadable, missing a device or from another team, so
+    this asks the same offline question pre-flight does — `cache_problem`,
+    against the same UDIDs and signing.team_id — and says so. It once printed
+    "a real run reuses this file" for a profile that did not list a newly
+    connected iPad, and later for one from the team the user had just left,
+    both of which the real run re-provisioned.
+
+    The certificate is the one question stage 4 asks that this can't: it
+    needs the .p12 opened, which a dry run does not do. So "reuses" comes with
+    that condition said out loud.
     """
     note = f"# signing profile: {plan.description} -> {plan.path}"
     if not plan.created_on_demand:
         return note
     if plan.path.exists():
         problem = mobileprovision.cache_problem(
-            plan.path, device_udids=auto_profile_device_udids(cfg)
+            plan.path, device_udids=auto_profile_device_udids(cfg), team_id=cfg.team_id
         )
         if problem is not None:
             return note + (
                 f" (a real run would try to re-provision: {problem} "
                 "— --dry-run does not contact Apple)"
             )
-        return note + " (already cached; a real run reuses this file)"
+        return note + (
+            " (already cached; a real run reuses this file if it lists the .p12's "
+            "certificate, which --dry-run does not open)"
+        )
     return note + (
         " (not cached yet; a real run would create it via App Store Connect "
         "— --dry-run does not contact Apple)"
@@ -503,6 +570,10 @@ def _quarantined(path: str | None) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return proc.returncode == 0
+
+
+def _zsign_install_hint() -> str:
+    return install_hints.with_prerequisites("brew install zsign")
 
 
 def _quarantine_hint(zsign: str) -> str:

@@ -193,7 +193,7 @@ def test_a_null_udid_row_is_not_matched_by_a_scoped_query(tmp_path) -> None:
     """`udid` is nullable — a push whose device wasn't recorded exists.
 
     SQL `= NULL` never matches, so such a row is invisible to a scoped query.
-    That is the right behaviour (we cannot claim it reached this phone), but it
+    That is the right behavior (we cannot claim it reached this phone), but it
     must be a decision rather than an accident, so it is pinned.
     """
     log = BuildLog(tmp_path / "log.db")

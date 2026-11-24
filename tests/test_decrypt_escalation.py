@@ -112,7 +112,7 @@ class TestWhichToolOpens:
 
     Three copies of this rule existed, and they disagreed where it hurt: with
     the phone's sshd stopped the probe ruled out frida-ios-dump and the pane
-    labelled every row "will be launched and dumped with bagbak", while the CLI
+    labeled every row "will be launched and dumped with bagbak", while the CLI
     ranked merely-*installed* backends and ran frida-ios-dump anyway — twenty
     seconds to fail with advice about installing an OpenSSH the phone had.
     """
@@ -189,7 +189,7 @@ class TestTheWholeLadder:
     def test_the_common_path_is_one_call(self, monkeypatch, attempts):
         self._drive(monkeypatch, attempts, [None])
         cli._decrypt_escalating(
-            CFG, "com.x", device=None, mode="all", backend=None, strip=None,
+            CFG, "com.x", device=None, backend=None, strip=None,
             verbose=False, emitter=None,
         )
         assert attempts == [(decrypt_runner.FRIDA, True)]
@@ -201,7 +201,7 @@ class TestTheWholeLadder:
         stated reason."""
         self._drive(monkeypatch, attempts, [still(extensions_only=False), None])
         cli._decrypt_escalating(
-            CFG, "com.x", device=None, mode="all", backend=None, strip=None,
+            CFG, "com.x", device=None, backend=None, strip=None,
             verbose=False, emitter=None,
         )
         assert attempts == [
@@ -216,7 +216,7 @@ class TestTheWholeLadder:
         self._drive(monkeypatch, attempts, [still(extensions_only=True, n=5)])
         with pytest.raises(decrypt_runner.StillEncryptedError):
             cli._decrypt_escalating(
-                CFG, "com.x", device=None, mode="all", backend=None, strip=None,
+                CFG, "com.x", device=None, backend=None, strip=None,
                 verbose=False, emitter=None,
             )
         assert len(attempts) == 1
@@ -228,7 +228,7 @@ class TestTheWholeLadder:
         ])
         with pytest.raises(decrypt_runner.DecryptError):
             cli._decrypt_escalating(
-                CFG, "com.x", device=None, mode="all", backend=None, strip=None,
+                CFG, "com.x", device=None, backend=None, strip=None,
                 verbose=False, emitter=None,
             )
         assert len(attempts) <= 2
@@ -252,7 +252,7 @@ class TestTheWholeLadder:
         monkeypatch.setattr(cli, "_do_decrypt", fake)
         for policy in (None, True, False):
             cli._decrypt_escalating(
-                CFG, "com.x", device=None, mode="all", backend=None, strip=policy,
+                CFG, "com.x", device=None, backend=None, strip=policy,
                 verbose=False, emitter=None,
             )
         assert forced == [False, True, False], (
@@ -264,7 +264,7 @@ class TestTheWholeLadder:
         """For the user who would rather have nothing than a partial app."""
         self._drive(monkeypatch, attempts, [None])
         cli._decrypt_escalating(
-            CFG, "com.x", device=None, mode="all", backend=None, strip=False,
+            CFG, "com.x", device=None, backend=None, strip=False,
             verbose=False, emitter=None,
         )
         assert attempts == [(decrypt_runner.FRIDA, False)]
@@ -275,7 +275,7 @@ class TestTheWholeLadder:
         self._drive(monkeypatch, attempts, [still(extensions_only=True), None])
         with pytest.raises(decrypt_runner.StillEncryptedError):
             cli._decrypt_escalating(
-                CFG, "com.x", device=None, mode="all", backend=None, strip=False,
+                CFG, "com.x", device=None, backend=None, strip=False,
                 verbose=False, emitter=None,
             )
         assert len(attempts) == 1
@@ -416,7 +416,7 @@ class TestAnAppThatWillNotRun:
         monkeypatch.setattr(cli, "_do_decrypt", fake)
         with pytest.raises(decrypt_runner.AppWillNotRunError):
             cli._decrypt_escalating(
-                CFG, "com.x", device=None, mode="all", backend=None, strip=None,
+                CFG, "com.x", device=None, backend=None, strip=None,
                 verbose=False, emitter=None,
             )
         assert len(attempts) == 1
@@ -652,7 +652,7 @@ class TestTheEssentialExtensionRefusal:
         cfg = SimpleNamespace(default_device_udid=None, cache_dir=tmp_path / "cache")
         with pytest.raises(decrypt_runner.StillEncryptedError) as e:
             cli._do_decrypt(
-                cfg, "com.example.vpn", device="U", mode="all",
+                cfg, "com.example.vpn", device="U",
                 backend=decrypt_runner.FRIDA, strip_encrypted_extensions=True,
                 strip_extensions_forced=False,
             )
@@ -664,7 +664,7 @@ class TestTheEssentialExtensionRefusal:
     ):
         cfg = SimpleNamespace(default_device_udid=None, cache_dir=tmp_path / "cache2")
         cli._do_decrypt(
-            cfg, "com.example.vpn", device="U", mode="all",
+            cfg, "com.example.vpn", device="U",
             backend=decrypt_runner.FRIDA, strip_encrypted_extensions=True,
             strip_extensions_forced=True,
         )
@@ -695,7 +695,7 @@ class TestTheEssentialExtensionRefusal:
         """
         cfg = SimpleNamespace(default_device_udid=None, cache_dir=tmp_path / "cache3")
         cli._do_decrypt(
-            cfg, "com.example.vpn", device="U", mode="all",
+            cfg, "com.example.vpn", device="U",
             backend=decrypt_runner.FRIDA, strip_encrypted_extensions=True,
             strip_extensions_forced=True,
         )
@@ -708,7 +708,7 @@ class TestTheEssentialExtensionRefusal:
             for b in ipa_inspect.list_macho_in_extract(d)
         ])
         cli._do_decrypt(
-            cfg, "com.example.vpn", device="U", mode="all",
+            cfg, "com.example.vpn", device="U",
             backend=decrypt_runner.FRIDA, strip_encrypted_extensions=True,
             strip_extensions_forced=True,
         )
@@ -772,7 +772,7 @@ class TestWhatTheSidecarRecords:
     ):
         cfg = SimpleNamespace(default_device_udid=None, cache_dir=tmp_path / "cache")
         cli._do_decrypt(
-            cfg, "com.example.books", device="U", mode="all",
+            cfg, "com.example.books", device="U",
             backend=decrypt_runner.FRIDA, strip_encrypted_extensions=True,
             strip_extensions_forced=False,
         )

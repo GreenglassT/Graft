@@ -113,7 +113,7 @@ def test_the_builds_listing_carries_the_target(tmp_path: Path) -> None:
     The GUI reads it to decide which action a row gets, and `_do_builds` builds
     its own dict per row rather than passing `recent()`'s through — so the field
     has to be added there by hand, and dropping that line is invisible to every
-    other test. Normalisation of old rows is `_target_of`'s job, tested against
+    other test. Normalization of old rows is `_target_of`'s job, tested against
     it directly."""
     state = tmp_path / "state"
     state.mkdir()

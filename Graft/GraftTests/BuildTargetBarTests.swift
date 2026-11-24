@@ -528,7 +528,7 @@ final class BuildTargetBarTests: XCTestCase {
     /// `:4973`) and gates nothing on `dry_run`, and `installer.select_device`
     /// raises "no iOS devices connected" on an empty list before any dry-run
     /// consideration. So this build is already guaranteed to fail, and the bar
-    /// used to answer it with a muted grey "Dry run — this build won't be sent
+    /// used to answer it with a muted gray "Dry run — this build won't be sent
     /// to a device."
     func test_a_dry_run_with_nothing_connected_is_not_reassuring() {
         let answer = BuildTargetBar.target(
@@ -544,7 +544,7 @@ final class BuildTargetBarTests: XCTestCase {
 
     /// The same defect through the other certain failure: the phone named in
     /// Build options is not on the bench, so `select_device` raises "requested
-    /// device … not connected" whatever the dry run intended to do afterwards.
+    /// device … not connected" whatever the dry run intended to do afterward.
     func test_a_dry_run_naming_an_absent_device_is_not_reassuring() throws {
         let present = try device(Self.deviceJSON(isDefault: true))
         let absent = "00008030-0000000000000004"

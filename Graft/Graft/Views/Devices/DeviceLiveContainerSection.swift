@@ -9,7 +9,7 @@ import SwiftUI
 /// keychain *pattern* into the signature as a literal — which switches off
 /// LiveContainer's keychain redirection, so no guest app can keep a login.
 /// The CLI's `--lc-install` signs it the way AltStore does; this section is
-/// the button for that, plus the steps LiveContainer itself needs afterwards.
+/// the button for that, plus the steps LiveContainer itself needs afterward.
 ///
 /// Like `DeviceDecryptSection`, it belongs to one device: `device.udid` is
 /// passed to every call and nothing here can name another. And like that
@@ -286,12 +286,12 @@ struct DeviceLiveContainerSection: View {
 
     /// What installing will and will not do to the copies already there —
     /// said before the button is pressed, because neither caveat is
-    /// recoverable afterwards.
+    /// recoverable afterward.
     ///
     /// An in-place upgrade keeps LiveContainer's data, guest apps included.
     /// But a copy installed elsewhere (by hand, by a script) signed its guest
     /// apps under that installer's certificate, and they need re-signing
-    /// under ours afterwards. And a wildcard-signed copy — the zsign one —
+    /// under ours afterward. And a wildcard-signed copy — the zsign one —
     /// cannot be upgraded in place at all (iOS refuses a changed
     /// application-identifier), so it has to be deleted first, and its data
     /// goes with it. That line names only the instances it applies to.
@@ -301,7 +301,7 @@ struct DeviceLiveContainerSection: View {
             notes.append(
                 "Installed outside Graft. Installing upgrades it in place and "
                 + "keeps its data, but apps signed under another certificate need "
-                + "re-signing afterwards (in LiveContainer: the app › Force Sign, or "
+                + "re-signing afterward (in LiveContainer: the app › Force Sign, or "
                 + "renew the certificate)."
             )
         }

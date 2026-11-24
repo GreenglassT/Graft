@@ -314,19 +314,119 @@ class TestReachingABuiltIPA:
     exactly the artifact `--for-playcover` exists to replace.
     """
 
-    def test_a_built_ipa_is_found_and_handed_over(self, tmp_path: Path) -> None:
+    @pytest.fixture(autouse=True)
+    def _handoffs(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        root = tmp_path / "tmpdir"
+        root.mkdir()
+        monkeypatch.setattr(cli_mod, "_handoff_root", lambda: root)
+        return root
+
+    def _hand_over(self, tmp_path: Path, path: Path, *, during=None):
         cache = tmp_path / "cache"
-        cache.mkdir(parents=True)
-        built = tmp_path / "built"
-        path = _ipa(built)  # only in built_dir, not staged
-        monkey = tmp_path / "no-playcover"
-        with patch.object(cli_mod, "PLAYCOVER_SETTINGS_DIR", monkey), \
+        cache.mkdir(parents=True, exist_ok=True)
+
+        def opened(argv, **_):
+            if during is not None:
+                during(Path(argv[-1]))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(cli_mod, "PLAYCOVER_SETTINGS_DIR", tmp_path / "no-playcover"), \
+                patch.object(cli_mod.subprocess, "run", side_effect=opened) as run:
+            cli_mod._do_install_to_mac(
+                _cfg(cache, path.parent), filename=path.name, emitter=None
+            )
+        return Path(run.call_args[0][0][-1])
+
+    def test_a_built_ipa_is_found_and_handed_over(self, tmp_path: Path, _handoffs: Path) -> None:
+        path = _ipa(tmp_path / "built")  # only in built_dir, not staged
+
+        handed = self._hand_over(tmp_path, path)
+
+        assert handed.name == path.name
+        assert _handoffs in handed.parents, "PlayCover got a private copy"
+        assert handed.read_bytes()[:2] == b"PK"
+
+    def test_a_sweep_after_the_handoff_cannot_take_the_file_playcover_reads(
+        self, tmp_path: Path
+    ) -> None:
+        """Review #10: `open` returns before PlayCover reads the file, so a
+        clean-up that moved the archive in that window left PlayCover a
+        missing file. It reads a copy no sweep looks at."""
+        path = _ipa(tmp_path / "built")
+
+        handed = self._hand_over(tmp_path, path)
+        path.unlink()  # what a sweep at archive_keep: 1 does to the archive
+
+        assert handed.is_file()
+
+    def test_the_copy_is_made_under_a_share_of_the_retention_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path = _ipa(tmp_path / "built")
+        cfg = _cfg(tmp_path / "cache", path.parent)
+        seen: list[bool] = []
+        real_copy = cli_mod.shutil.copyfile
+
+        def copying(src, dst):
+            sweep = cli_mod._RetentionLock(cfg)
+            seen.append(sweep.acquire(exclusive=True, wait=0))
+            sweep.release()
+            return real_copy(src, dst)
+
+        monkeypatch.setattr(cli_mod.shutil, "copyfile", copying)
+        self._hand_over(tmp_path, path)
+
+        assert seen == [False], "a sweep could take the lock while the archive was copied"
+        after = cli_mod._RetentionLock(cfg)
+        assert after.acquire(exclusive=True, wait=0), "the share outlived the copy"
+        after.release()
+
+    def test_the_archive_itself_is_left_as_it_was_built(self, tmp_path: Path) -> None:
+        """The account data comes out of the copy PlayCover gets; the archive
+        was rewritten in place before."""
+        path = _ipa(tmp_path / "built")
+        with zipfile.ZipFile(path, "a") as zf:
+            zf.writestr("iTunesMetadata.plist", plistlib.dumps({"appleId": "buyer@example.invalid"}))
+        before = path.read_bytes()
+
+        handed = self._hand_over(tmp_path, path)
+
+        assert path.read_bytes() == before
+        with zipfile.ZipFile(handed) as zf:
+            assert "iTunesMetadata.plist" not in zf.namelist()
+
+    def test_old_handoff_copies_are_cleared_and_recent_ones_kept(
+        self, tmp_path: Path, _handoffs: Path
+    ) -> None:
+        import os
+        import time
+
+        stale = _handoffs / "graft-playcover-old"
+        fresh = _handoffs / "graft-playcover-new"
+        for d in (stale, fresh):
+            d.mkdir()
+            (d / "x.ipa").write_bytes(b"x")
+        long_ago = time.time() - 2 * 24 * 3600
+        os.utime(stale, (long_ago, long_ago))
+
+        self._hand_over(tmp_path, _ipa(tmp_path / "built"))
+
+        assert not stale.exists()
+        assert fresh.exists(), "PlayCover may not have read a recent one yet"
+
+    def test_a_staged_dump_is_still_handed_over_where_it_is(
+        self, tmp_path: Path, _handoffs: Path
+    ) -> None:
+        """Only a built archive is at retention's mercy."""
+        staged = _ipa(tmp_path / "cache")
+        with patch.object(cli_mod, "PLAYCOVER_SETTINGS_DIR", tmp_path / "nope"), \
                 patch.object(cli_mod.subprocess, "run") as run:
             run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
             cli_mod._do_install_to_mac(
-                _cfg(cache, built), filename=path.name, emitter=None
+                _cfg(staged.parent, tmp_path / "built"), filename=staged.name, emitter=None
             )
-        assert run.call_args[0][0][-1] == str(path)
+        assert run.call_args[0][0][-1] == str(staged)
+        assert list(_handoffs.iterdir()) == []
 
     def test_the_cache_wins_when_both_hold_the_name(self, tmp_path: Path) -> None:
         """`cache_dir` is what the Cache pane lists, so a bare filename most

@@ -191,7 +191,7 @@ def statuses(
     of what is *missing* locally, not of how big the library is. It defaults to
     `canister_latest`, resolved *here* rather than as a default argument value,
     which would bind the function object at import and quietly ignore anything
-    that replaced it afterwards.
+    that replaced it afterward.
     """
     resolve = lookup if lookup is not None else canister_latest
     resolved: dict[str, Availability | None] = {}

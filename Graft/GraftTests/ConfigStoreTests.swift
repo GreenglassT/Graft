@@ -11,8 +11,7 @@ final class ConfigStoreTests: XCTestCase {
         """#
         let store = ConfigStore(
             runner: runner,
-            cliArgs: ["-c", script]
-        )
+            cliArgs: ["-c", script], notify: { _ in })
 
         let apps = try await store.loadApps()
         XCTAssertEqual(apps.count, 2)
@@ -31,7 +30,7 @@ final class ConfigStoreTests: XCTestCase {
         let reloadScript = #"""
         printf '{"type":"app","name":"bravo","bundle_id":"com.bravo.app","preferred_version":"latest","tweaks":[],"display_name":"Bravo","delivery":"sideload","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript], notify: { _ in })
         try await store.addApp(
             appStoreURL: "https://apps.apple.com/us/app/bravo/id100000001",
             delivery: .sideload,
@@ -50,7 +49,7 @@ final class ConfigStoreTests: XCTestCase {
         let reloadScript = #"""
         printf '{"type":"app","name":"customapp","bundle_id":"com.example.x","preferred_version":"latest","tweaks":[],"display_name":null,"delivery":"sideload","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript], notify: { _ in })
         try await store.addAppManual(
             name: "customapp",
             bundleId: "com.example.x",
@@ -67,7 +66,7 @@ final class ConfigStoreTests: XCTestCase {
         let script = #"""
         printf '{"type":"cached-ipa","app":"example","exists":true,"bundle_id":"com.example.app","version":"21.16.2","filename":"com.example.app_21.16.2.ipa","path":"/x/y.ipa","size_bytes":12345}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", "true"])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", "true"], notify: { _ in })
         let rec = try await store.cachedIPA(appName: "example", argsOverride: ["-c", script])
         XCTAssertNotNil(rec)
         XCTAssertEqual(rec?.exists, true)
@@ -81,7 +80,7 @@ final class ConfigStoreTests: XCTestCase {
         let script = #"""
         printf '{"type":"cached-ipa","app":"example","exists":false}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", "true"])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", "true"], notify: { _ in })
         let rec = try await store.cachedIPA(appName: "example", argsOverride: ["-c", script])
         XCTAssertNotNil(rec)
         XCTAssertFalse(rec?.exists ?? true)
@@ -93,7 +92,7 @@ final class ConfigStoreTests: XCTestCase {
         let script = #"""
         printf '{"type":"ipa-provided","app":"example","bundle_id":"com.example.app","version":"21.16.2","filename":"com.example.app_21.16.2.ipa","path":"/x/y.ipa","size_bytes":12345}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", "true"])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", "true"], notify: { _ in })
         let rec = try await store.provideIPA(
             appName: "example",
             fileURL: URL(fileURLWithPath: "/tmp/whatever.ipa"),
@@ -115,7 +114,7 @@ final class ConfigStoreTests: XCTestCase {
         let reloadScript = #"""
         printf '{"type":"app","name":"example","bundle_id":"com.x.example","preferred_version":"latest","tweaks":["a.deb","new.deb"],"display_name":null,"delivery":"sideload","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript], notify: { _ in })
         let rec = try await store.attachTweak(
             appName: "example", filename: "new.deb",
             argsOverride: ["-c", attachScript]
@@ -136,7 +135,7 @@ final class ConfigStoreTests: XCTestCase {
         let reloadScript = #"""
         printf '{"type":"app","name":"example","bundle_id":"com.x.example","preferred_version":"latest","tweaks":["a.deb"],"display_name":null,"delivery":"sideload","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript], notify: { _ in })
         let rec = try await store.detachTweak(
             appName: "example", filename: "old.deb",
             argsOverride: ["-c", detachScript]
@@ -197,7 +196,7 @@ final class ConfigStoreTests: XCTestCase {
         let reloadScript = #"""
         printf '{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":[],"display_name":null,"delivery":"livecontainer","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript], notify: { _ in })
 
         let removed = try await store.removeApp(
             appName: "delta",
@@ -217,7 +216,7 @@ final class ConfigStoreTests: XCTestCase {
         let reloadScript = #"""
         printf '{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"21.16.2","tweaks":[],"display_name":null,"delivery":"livecontainer","auto_profile":false,"compression_level":9,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript], notify: { _ in })
 
         let updated = try await store.updateAppOptions(
             appName: "example",
@@ -226,6 +225,31 @@ final class ConfigStoreTests: XCTestCase {
 
         XCTAssertEqual(updated?.changed, ["compression_level", "preferred_version"])
         XCTAssertEqual(store.apps.first?.preferredVersion, "21.16.2")
+    }
+
+    /// Fix-check #6/#26: turning on `auto_profile` for an app with its own
+    /// `profile:` saves, and the CLI warns that the line outranks it. That
+    /// warning comes back with the record, for the Edit sheet; a startup
+    /// notice does not.
+    @MainActor
+    func test_updateAppOptions_keeps_the_clis_warnings() async throws {
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let updateScript = #"""
+        printf '%s\n' '{"type":"log","source":"startup","line":"TB_SSH_PASS is set but no longer read; use GRAFT_SSH_PASS"}'
+        printf '%s\n' '{"type":"log","source":"warning","line":"example has its own profile: line, which outranks auto_profile"}'
+        printf '%s\n' '{"type":"app-updated","name":"example","changed":["auto_profile"]}'
+        """#
+        let reloadScript = #"""
+        printf '{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":[],"display_name":null,"delivery":"sideload","auto_profile":true,"compression_level":6,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true}\n'
+        """#
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript], notify: { _ in })
+
+        let updated = try await store.updateAppOptions(
+            appName: "example", autoProfile: true, argsOverride: ["-c", updateScript]
+        )
+
+        XCTAssertEqual(updated?.changed, ["auto_profile"])
+        XCTAssertEqual(updated?.warnings, ["example has its own profile: line, which outranks auto_profile"])
     }
 
     @MainActor
@@ -252,7 +276,7 @@ final class ConfigStoreTests: XCTestCase {
         // single, easily-distinguished argument so it can't be confused with
         // the update call's own arguments in the capture file.
         let runner = CLIRunner(executable: URL(fileURLWithPath: scriptPath))
-        let store = ConfigStore(runner: runner, cliArgs: ["--reload-marker"])
+        let store = ConfigStore(runner: runner, cliArgs: ["--reload-marker"], notify: { _ in })
 
         _ = try await store.updateAppOptions(appName: "example", compressionLevel: 9)
 
@@ -281,7 +305,7 @@ final class ConfigStoreTests: XCTestCase {
         let reloadScript = #"""
         printf '{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"21.16.2","tweaks":[],"display_name":null,"delivery":"livecontainer","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", reloadScript], notify: { _ in })
 
         do {
             _ = try await store.updateAppOptions(
@@ -305,7 +329,7 @@ final class ConfigStoreTests: XCTestCase {
         let failScript = #"""
         printf "app 'ghost' not found\n" >&2; exit 2
         """#
-        let store = ConfigStore(runner: runner)
+        let store = ConfigStore(runner: runner, notify: { _ in })
         do {
             _ = try await store.removeApp(appName: "ghost", argsOverride: ["-c", failScript])
             XCTFail("expected a throw")
@@ -614,10 +638,10 @@ final class ConfigStoreTests: XCTestCase {
         sleep 0.4
         printf '{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":[],"display_name":null,"delivery":"livecontainer","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}\n{"type":"delivery-state","app":"example","kind":"stale","summary":"Changed since the last delivery","reasons":["rebuilt since delivery"],"pushed_at":"2026-02-01T10:15:00"}\n'
         """#
-        let store = ConfigStore(runner: runner, cliArgs: ["-c", script])
+        let store = ConfigStore(runner: runner, cliArgs: ["-c", script], notify: { _ in })
 
         // Stands in for ReinstallSheet's `.task`: it starts the refresh and is
-        // then cancelled by the sheet being dismissed.
+        // then canceled by the sheet being dismissed.
         final class Handle: @unchecked Sendable { var task: Task<Void, Never>? }
         let handle = Handle()
         let sheetTask = Task { @MainActor in
@@ -654,8 +678,7 @@ final class ConfigStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: counter) }
         let store = ConfigStore(
             runner: shRunner(),
-            cliArgs: listings([["example", "delta"], ["delta"]], counter: counter)
-        )
+            cliArgs: listings([["example", "delta"], ["delta"]], counter: counter), notify: { _ in })
         _ = try await store.loadApps()
         store.noteBuildFailure(appName: "example", message: "cyan failed: no such file")
         XCTAssertNotNil(store.buildFailures["example"], "premise: there is a card to strand")
@@ -677,8 +700,7 @@ final class ConfigStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: counter) }
         let store = ConfigStore(
             runner: shRunner(),
-            cliArgs: listings([["example", "delta"], ["delta"]], counter: counter)
-        )
+            cliArgs: listings([["example", "delta"], ["delta"]], counter: counter), notify: { _ in })
         _ = try await store.loadApps()
         note(encrypted("example"), on: store)
         XCTAssertNotNil(store.encryptedBinaries["example"], "premise: there is a finding to strand")
@@ -708,8 +730,7 @@ final class ConfigStoreTests: XCTestCase {
             runner: shRunner(),
             cliArgs: listings(
                 [["example", "delta"], ["delta"], ["example", "delta"]], counter: counter
-            )
-        )
+            ), notify: { _ in })
         _ = try await store.loadApps()
         store.noteBuildFailure(appName: "example", message: "cyan failed: no such file")
         note(encrypted("example"), on: store)
@@ -737,8 +758,7 @@ final class ConfigStoreTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: counter) }
         let store = ConfigStore(
             runner: shRunner(),
-            cliArgs: listings([["example", "delta"]], counter: counter)
-        )
+            cliArgs: listings([["example", "delta"]], counter: counter), notify: { _ in })
         _ = try await store.loadApps()
         store.noteBuildFailure(appName: "example", message: "cyan failed")
         note(encrypted("delta"), on: store)
@@ -759,7 +779,7 @@ final class ConfigStoreTests: XCTestCase {
 
     /// One argv whose successive runs answer with successive `stages`, so a
     /// single store can watch an app disappear and come back under the same
-    /// key. The marker-file idiom `DeliveryStateTests` uses, generalised past
+    /// key. The marker-file idiom `DeliveryStateTests` uses, generalized past
     /// two answers; the last stage repeats for any run beyond it.
     private func listings(_ stages: [[String]], counter: URL) -> [String] {
         func listing(_ names: [String]) -> String {
@@ -893,7 +913,7 @@ final class ConfigStoreTests: XCTestCase {
     }
 
     /// A cancel must not outlive the build it stopped. Left standing, the next
-    /// build reports itself as cancelled the moment it ends — however it ended
+    /// build reports itself as canceled the moment it ends — however it ended
     /// — so a genuine failure would land with no card and no banner.
     @MainActor
     func test_the_next_build_is_not_inheriting_the_last_ones_cancel() {
@@ -952,7 +972,7 @@ final class ConfigStoreTests: XCTestCase {
     ///
     /// Driven one delivery mode at a time, because a build does `lc-push` OR
     /// `install` — never both. An earlier version of this test fed it both in
-    /// sequence, which no real build produces, and so asserted a behaviour the
+    /// sequence, which no real build produces, and so asserted a behavior the
     /// state machine has no reason to have.
     @MainActor
     func test_the_cancel_warning_names_the_livecontainer_risk() {
@@ -1219,7 +1239,7 @@ final class ConfigStoreTests: XCTestCase {
         // sleep. That matters twice: it cuts ~1.5s of wall clock to a few ms,
         // and it is stronger evidence — an emitted event proves the child
         // reached its own code, where a timer only assumed it. The distinction
-        // is load-bearing: cancelling before the child launches takes a
+        // is load-bearing: canceling before the child launches takes a
         // completely different path (`ProcessHandle.adopt` refuses and no
         // process is ever forked), which would prove nothing about the kill.
         let started = expectation(description: "subprocess is running")
@@ -1400,7 +1420,7 @@ final class ConfigStoreTests: XCTestCase {
 
     @MainActor
     private func makeStore() -> ConfigStore {
-        ConfigStore(runner: shRunner())
+        ConfigStore(runner: shRunner(), notify: { _ in })
     }
 }
 
@@ -1575,7 +1595,7 @@ extension ConfigStoreTests {
             case .inProgress, .delivered:
                 XCTAssertNotNil(
                     state.cancelAftermath,
-                    "\(state) warns about the device but says nothing afterwards"
+                    "\(state) warns about the device but says nothing afterward"
                 )
             }
         }
@@ -1660,7 +1680,7 @@ extension ConfigStoreTests {
 
 extension ConfigStoreTests {
     /// A `build-end` with `stopped: true` is a stop, whoever sent the signal:
-    /// no failure card, no "failed" banner, and the build reads as cancelled
+    /// no failure card, no "failed" banner, and the build reads as canceled
     /// so the pane drops whatever the stream still has queued.
     @MainActor
     func test_a_build_end_reporting_a_stop_writes_no_failure_and_no_banner() {
@@ -1688,7 +1708,7 @@ extension ConfigStoreTests {
     }
 
     /// A stop reported for a build that no longer holds the slot marks
-    /// nothing: the next build must not start life cancelled.
+    /// nothing: the next build must not start life canceled.
     @MainActor
     func test_a_late_stop_from_a_finished_build_cancels_nothing() {
         let store = makeStore()

@@ -56,8 +56,7 @@ final class AccessibilityTests: XCTestCase {
     private func configStore(tweaks: [String] = ["a.deb"]) -> ConfigStore {
         ConfigStore(
             runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")),
-            cliArgs: ["-c", "printf '\(Self.appLine(tweaks: tweaks))'"]
-        )
+            cliArgs: ["-c", "printf '\(Self.appLine(tweaks: tweaks))'"], notify: { _ in })
     }
 
     private func tweakLibrary() async -> TweaksStore {
@@ -85,7 +84,7 @@ final class AccessibilityTests: XCTestCase {
         try AccessibilityTree.requireServed()
         let store = configStore()
         let layout = laidOutForMeasurement(
-            ContentView(store: store, selection: .app("example")), width: 1100, height: 900
+            ContentView(store: store, selection: .app("example"), adminShell: NoAdminShell()), width: 1100, height: 900
         )
         // On screen: the Accessibility API lists only windows that are.
         layout.window.orderFront(nil)
@@ -103,13 +102,47 @@ final class AccessibilityTests: XCTestCase {
         XCTAssertEqual(unnamed, [])
     }
 
+    /// The URL form, opened explicitly: this was written for it, and a sheet
+    /// with no `initialMode` now opens on Search (covered below).
     func test_every_control_on_the_add_app_sheet_has_a_name() throws {
         try AccessibilityTree.requireServed()
-        let hosted = hosted(AddAppSheet(store: configStore()), width: 480)
+        let config = configStore()
+        let hosted = hosted(
+            AddAppSheet(store: config, appStore: AppStoreStore(runner: config.runner, shell: NoAdminShell()), initialMode: .url),
+            width: 480
+        )
         settle(hosted)
         let names = try controls(in: hosted.window).map(\.name)
         XCTAssertTrue(names.contains("Cancel"), "\(names)")
         XCTAssertTrue(names.contains("Add"), "\(names)")
+        XCTAssertTrue(
+            try AccessibilityTree.nodes(in: hosted.window).contains {
+                $0.role == kAXRadioButtonRole && $0.name == AddAppSheet.Mode.url.rawValue
+                    && ($0.value as? NSNumber)?.boolValue == true
+            },
+            "premise: the URL form"
+        )
+        let unnamed = try unnamedControls(in: hosted.window)
+        XCTAssertEqual(unnamed, [])
+    }
+
+    /// Search with results on screen: each row, the store picker, Try Again's
+    /// absence aside, every control is named.
+    func test_every_control_on_add_app_search_with_results_has_a_name() async throws {
+        try AccessibilityTree.requireServed()
+        let result = #"{"type":"appstore-search-result","track_id":100000001,"bundle_id":"com.example.app","name":"Example 1","developer":"Dev 1","version":"1.0","price":0,"formatted_price":"Free","currency":"USD","artwork_url":null,"icon_path":null,"configured_as":"example"}"#
+        let end = #"{"type":"appstore-search-end","term":"example","country":"US","count":1}"#
+        let cli = try ScriptCLI("printf '%s\\n' '\(result)' '\(end)'", test: self)
+        let config = ConfigStore(runner: cli.runner, notify: { _ in })
+        let appStore = AppStoreStore(runner: cli.runner, shell: NoAdminShell())
+        let hosted = hosted(AddAppSheet(store: config, appStore: appStore), width: 480)
+        settle(hosted)
+        appStore.search.update(term: "example")
+        await eventually({ appStore.search.state != .idle && !appStore.search.isSearching }, timeout: 10,
+                         "the search's results")
+        settle(hosted)
+        let names = try controls(in: hosted.window).map(\.name)
+        XCTAssertTrue(names.contains("Example 1, Dev 1, Free, Added"), "\(names)")
         let unnamed = try unnamedControls(in: hosted.window)
         XCTAssertEqual(unnamed, [])
     }
@@ -131,7 +164,10 @@ final class AccessibilityTests: XCTestCase {
         try AccessibilityTree.requireServed()
         for need in [SetupNeed.cli, .config(path: "/x/config.yaml")] {
             let hosted = hosted(
-                SetupView(need: need, isChecking: false, onCheckAgain: {}),
+                SetupView(need: need, isChecking: false, onCheckAgain: {},
+                          accountSetup: AccountSetupStore(
+                              runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/false"))
+                          )),
                 size: NSSize(width: 700, height: 900)
             )
             settle(hosted)

@@ -46,9 +46,13 @@ def test_add_app_url_writes_entry_and_emits_event(temp_config_env: Path) -> None
     assert bravo.bundle_id == "com.bravo.app"
     assert bravo.cyan.display_name == "Bravo"
     # An App Store URL identifies the app; it is not a download source, so
-    # nothing but the bundle id and the defaults reaches config.yaml.
+    # nothing but the bundle id, the store the URL names (tests/
+    # test_store_country.py) and the defaults reaches config.yaml.
     raw = yaml.safe_load(temp_config_env.read_text())["apps"]["bravo"]
-    assert set(raw) == {"bundle_id", "preferred_version", "delivery", "tweaks", "cyan"}
+    assert set(raw) == {
+        "bundle_id", "store_country", "preferred_version", "delivery", "tweaks", "cyan",
+    }
+    assert raw["store_country"] == "US"
 
 
 def test_add_app_url_dedupes_colliding_slug(temp_config_env: Path) -> None:

@@ -81,6 +81,6 @@ The settings file is rewritten on reinstall. Set both again after any
 ## Caveats
 
 Hooked is not the same as working: with the stub, the tweaks load and ElleKit
-swizzles real classes inside a stock macOS process, but each tweak's behaviour
+swizzles real classes inside a stock macOS process, but each tweak's behavior
 still has to be checked end to end. PlayCover itself can also crash
 intermittently while installing an IPA; retry before concluding anything.

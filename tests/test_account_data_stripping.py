@@ -2,7 +2,7 @@
 
 An App Store IPA carries `iTunesMetadata.plist` (the buyer's Apple ID email
 and account ids) and an `SC_Info/` directory in the app and in every extension
-(the FairPlay licence for that account). Only the UnfairPlay path ever dealt
+(the FairPlay license for that account). Only the UnfairPlay path ever dealt
 with them, and only by trusting UnfairPlay's `--strip-account-data`: an
 already-decrypted `--provide-ipa` drop was staged byte for byte, and a
 `--decrypt` dump kept every `SC_Info/`. Now every staging path removes both and
@@ -45,7 +45,7 @@ ACCOUNT_ENTRIES = {
 
 def account_ipa(path: Path, *, bundle_id: str = "com.example.app", version: str = "21.46.3",
                 cryptid: int | None = 0) -> Path:
-    """A decrypted IPA still carrying its buyer's metadata and licences."""
+    """A decrypted IPA still carrying its buyer's metadata and licenses."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("iTunesMetadata.plist", plistlib.dumps({
@@ -65,12 +65,12 @@ def account_ipa(path: Path, *, bundle_id: str = "com.example.app", version: str 
         exe.external_attr = (stat.S_IFREG | 0o755) << 16
         zf.writestr(exe, macho(cryptid) if cryptid is not None else b"\x00\x00")
         zf.writestr(zipfile.ZipInfo("Payload/App.app/SC_Info/"), b"")
-        zf.writestr("Payload/App.app/SC_Info/App.sinf", b"licence for " + FAKE_EMAIL.encode())
+        zf.writestr("Payload/App.app/SC_Info/App.sinf", b"license for " + FAKE_EMAIL.encode())
         zf.writestr("Payload/App.app/SC_Info/App.supp", b"supp")
         zf.writestr("Payload/App.app/PlugIns/Ext.appex/Info.plist", plistlib.dumps({
             "CFBundleIdentifier": f"{bundle_id}.ext",
         }))
-        zf.writestr("Payload/App.app/PlugIns/Ext.appex/SC_Info/Ext.sinf", b"ext licence")
+        zf.writestr("Payload/App.app/PlugIns/Ext.appex/SC_Info/Ext.sinf", b"ext license")
         zf.writestr("Payload/App.app/marker.txt", b"keep me")
     return path
 
@@ -197,7 +197,7 @@ def test_a_decrypt_dump_is_staged_without_its_licences(
     monkeypatch.setattr(cli_mod, "verify_decrypted", lambda _d: [])
     cache = tmp_path / "cache"
     cfg = SimpleNamespace(default_device_udid=None, cache_dir=cache)
-    cli_mod._do_decrypt(cfg, "com.example.app", device="U", mode="all",
+    cli_mod._do_decrypt(cfg, "com.example.app", device="U",
                         backend=decrypt_runner.FRIDA)
     (staged,) = cache.glob("*.ipa")
     assert_identifies_nobody(staged)
@@ -212,7 +212,7 @@ def test_a_build_heals_an_ipa_staged_before_this_rule(
 ) -> None:
     cfg = free_config
     staged = next(cfg.cache_dir.glob("*.ipa"))
-    account_ipa(staged, version="1.0", cryptid=None)
+    account_ipa(staged, version="1.0", cryptid=0)
     fake_device(monkeypatch, ["com.kdt.livecontainer.FGHIJ67890"])
 
     events = _build(cfg, tmp_path)

@@ -163,9 +163,8 @@ enum SourceWatch {
     static func recentlyAttempted(
         within window: TimeInterval = 180,
         now: Date = Date(),
-        marker: URL? = nil
+        marker url: URL
     ) -> Bool {
-        let url = marker ?? attemptMarker
         // `FileManager`, not `url.resourceValues`: a `URL` caches the resource
         // values it has already been asked for, so re-reading the same URL
         // instance after `recordAttempt` rewrote the file hands back the
@@ -188,8 +187,9 @@ enum SourceWatch {
         return abs(now.timeIntervalSince(stamped)) < window
     }
 
-    static func recordAttempt(marker: URL? = nil) {
-        let url = marker ?? attemptMarker
+    /// `marker` has no default: the real one is under the user's Caches
+    /// folder, and only `GraftApp` names it (`NoRealDefaultsTests`).
+    static func recordAttempt(marker url: URL) {
         try? FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true
         )
@@ -197,7 +197,7 @@ enum SourceWatch {
     }
 
     /// Forget the attempt, so the next stale source rebuilds immediately.
-    static func clearAttempt(marker: URL? = nil) {
-        try? FileManager.default.removeItem(at: marker ?? attemptMarker)
+    static func clearAttempt(marker: URL) {
+        try? FileManager.default.removeItem(at: marker)
     }
 }

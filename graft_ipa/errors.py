@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+
 
 class GraftError(Exception):
     """Base class for all graft errors. Carries an exit code + a hint."""
@@ -35,6 +37,24 @@ class Stopped(SystemExit):
     def __init__(self, signum: int) -> None:
         super().__init__(128 + signum)
         self.signum = signum
+
+
+#: What `open` fails with when macOS won't let Graft read a file: EPERM
+#: when its privacy controls refuse it (a file in Downloads, Desktop,
+#: Documents or iCloud Drive whose prompt was denied), EACCES for plain
+#: permissions.
+NOT_LET_READ = frozenset({errno.EPERM, errno.EACCES})
+
+
+def not_let_read_hint(shown: str) -> str:
+    """The hint for a file the user chose that macOS wouldn't let Graft
+    read (`NOT_LET_READ`): the app hands the CLI the file's path, and the
+    privacy prompt that raises is Graft's to allow (the whole-diff review's
+    app-2)."""
+    return (
+        f"macOS didn't let Graft read {shown}: allow Graft in System Settings › Privacy & Security "
+        "› Files and Folders, or move the file out of Downloads/Desktop/Documents and choose it again"
+    )
 
 
 class ConfigError(GraftError):
@@ -86,7 +106,7 @@ class SigningError(GraftError):
 
 
 class InstallError(GraftError):
-    """Raised when ideviceinstaller fails to install the IPA on the device."""
+    """Raised when installing the IPA on the device fails."""
 
     exit_code = 8
 
@@ -141,9 +161,9 @@ class AppStoreError(GraftError):
 
     Covers both of the user's own tools — ipatool (download) and UnfairPlay
     (decrypt) — because to the person reading the hint they are one step:
-    "get this app". Every raise carries a hint, and most hints are a Terminal
-    command, since signing in and enrolling are deliberately never done by
-    this tool (see `appstore.py`).
+    "get this app". Every raise carries a hint, and hints name the place in
+    Graft.app and the Terminal command, since both front-ends can sign in and
+    enroll (see `appstore.py`).
 
     20, not 18: another branch was adding error classes at the same time, and
     two branches each taking "the next free number" merge cleanly as text and
@@ -175,7 +195,7 @@ class AppStoreError(GraftError):
 # saying "success" to that is a lie it cannot detect any other way. Non-zero
 # does mean `set -o pipefail` treats `graft ... | head` as a failed
 # pipeline — but that is true of `git log | head` too, and is the shell
-# behaviour users of `pipefail` already expect.
+# behavior users of `pipefail` already expect.
 EXIT_BROKEN_PIPE = 141
 
 # Four error classes live beside the code that raises them; their codes live

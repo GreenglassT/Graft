@@ -10,9 +10,13 @@ all use.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
+from pymobiledevice3.exceptions import AfcException, ConnectionTerminatedError
 
 from graft_ipa import lc_discovery, lc_manage
+from graft_ipa.device_install import this_mac
 from graft_ipa.lc_runner import LiveContainerError
 
 TEAM = "ABCDE12345"
@@ -103,7 +107,7 @@ def test_two_primaries_need_lc_bundle_id_and_the_error_lists_them() -> None:
 
     assert a in exc.value.message and b in exc.value.message
     assert LC2 not in exc.value.message, "only the ambiguous ones"
-    assert "lc_bundle_id" in exc.value.hint
+    assert "--lc-bundle-id" in exc.value.hint
 
 
 def test_two_secondaries_and_no_primary_are_ambiguous() -> None:
@@ -111,7 +115,7 @@ def test_two_secondaries_and_no_primary_are_ambiguous() -> None:
         lc_discovery.choose([LC2, LC3])
 
     assert LC2 in exc.value.message and LC3 in exc.value.message
-    assert "lc_bundle_id" in exc.value.hint
+    assert "--lc-bundle-id" in exc.value.hint
 
 
 def test_a_lone_secondary_is_used() -> None:
@@ -139,7 +143,7 @@ def test_none_found_points_a_paid_account_at_lc_install() -> None:
     [
         "com.kdt.livecontainer",                        # bare upstream: a jailbreak, TrollStore
         PRIMARY,
-        f"com.kdt.LiveContainer.{TEAM}",                # a capitalised primary
+        f"com.kdt.LiveContainer.{TEAM}",                # a capitalized primary
         LC2,
         LC3.upper(),
         "com.kdt.livecontainer.ABCDE1234",              # a team id that is not ten characters
@@ -198,8 +202,19 @@ def test_bare_and_a_suffixed_primary_are_ambiguous_with_a_pin_to_copy() -> None:
         "2 LiveContainers are installed and Graft will not guess which to use: "
         f"com.kdt.livecontainer, {PRIMARY}"
     )
-    assert "lc_bundle_id: com.kdt.livecontainer" in exc.value.hint
+    # The paste-able line is the CLI's own verb, and the app's picker is named
+    # too: a zero-Terminal user never edits config.yaml by hand.
+    assert "graft --set-app-options --app <name> --lc-bundle-id com.kdt.livecontainer" in exc.value.hint
     assert PRIMARY in exc.value.hint
+    assert "Edit App › LiveContainer" in exc.value.hint
+    assert "config.yaml" not in exc.value.hint
+
+
+def test_a_bad_pin_names_the_apps_picker_too() -> None:
+    with pytest.raises(LiveContainerError) as exc:
+        lc_discovery.choose([PRIMARY], pinned="com.kdt.livecontainer.NOTHERE")
+    assert "--set-app-options --app <name> --lc-bundle-id" in exc.value.hint
+    assert "Edit App › LiveContainer" in exc.value.hint
 
 
 def test_the_configured_team_settles_bare_against_its_own_primary() -> None:
@@ -307,16 +322,121 @@ def test_a_configured_team_does_not_hide_a_primary_from_another_team() -> None:
 
 
 class _Lockdown:
+    #: A phone that already trusts this Mac: `open_lockdown` asks nothing.
+    paired = True
+
     async def close(self) -> None:
         pass
 
 
 class _HouseArrest:
+    """A LiveContainer's sandbox. `written` is every file the push left, by
+    (bundle id, path); `docs` the names that were there before."""
+
+    #: The phone goes away (a cable pulled) once this many bytes are written.
+    gone_after: ClassVar[int | None] = None
+    #: A write fails with the phone still there (a full disk).
+    write_fails: ClassVar[bool] = False
+    #: Every chunk written, in order, across sandboxes.
+    chunks: ClassVar[list[bytes]] = []
+    #: Every byte read off the phone, across sandboxes, however it was read:
+    #: a whole file read shows here as all of it.
+    bytes_read: ClassVar[int] = 0
+
     def __init__(self, bundle_id: str, written: dict, docs: dict,
                  contents: dict | None = None) -> None:
         self.bundle_id, self.written, self.docs = bundle_id, written, docs
         self.contents = contents or {}
         self.read: list[str] = []
+        self.gone = False
+        self._open: str | None = None
+        #: The file open for reading, and where in it the next read starts.
+        self._reading: list | None = None
+
+    def _check(self) -> None:
+        if self.gone:
+            raise ConnectionTerminatedError()
+
+    def _forget(self, path: str) -> None:
+        self.written.pop((self.bundle_id, path), None)
+        name = path.removeprefix("Documents/")
+        if name in self.docs.get(self.bundle_id, ()):
+            self.docs[self.bundle_id] = [n for n in self.docs[self.bundle_id] if n != name]
+
+    async def fopen(self, path: str, mode: str = "r") -> int:
+        self._check()
+        if mode == "r":
+            if not await self.exists(path):
+                raise AfcException(f"no such file: {path}", 8)
+            self._reading = [path, 0]
+            return 2
+        assert mode == "w"
+        self._forget(path)
+        self.written[(self.bundle_id, path)] = b""
+        self._open = path
+        return 1
+
+    async def fseek(self, handle: int, offset: int, whence: int = 0) -> None:
+        import os
+
+        self._check()
+        assert handle == 2 and self._reading is not None
+        base = {os.SEEK_SET: 0, os.SEEK_END: len(self._bytes(self._reading[0]))}[whence]
+        self._reading[1] = base + offset
+
+    async def fread(self, handle: int, size: int) -> bytes:
+        self._check()
+        assert handle == 2 and self._reading is not None
+        path, at = self._reading
+        data = self._bytes(path)[at:at + size]
+        self._reading[1] = at + len(data)
+        _HouseArrest.bytes_read += len(data)
+        return data
+
+    async def listdir(self, folder: str) -> list[str]:
+        self._check()
+        names = set(self.docs.get(self.bundle_id, ()))
+        names |= {p.removeprefix(f"{folder}/") for (b, p) in self.written
+                  if b == self.bundle_id and p.startswith(f"{folder}/")}
+        return sorted(names)
+
+    async def fwrite(self, handle: int, data: bytes, chunk_size: int = 0) -> None:
+        self._check()
+        key = (self.bundle_id, self._open)
+        have = self.written[key]
+        if _HouseArrest.write_fails:
+            raise AfcException("Failed to write to the file.", 1)
+        limit = _HouseArrest.gone_after
+        if limit is not None and len(have) + len(data) > limit:
+            self.written[key] = have + data[:limit - len(have)]
+            self.gone = True
+            raise ConnectionTerminatedError()
+        _HouseArrest.chunks.append(bytes(data))
+        self.written[key] = have + bytes(data)
+
+    async def fclose(self, handle: int) -> None:
+        self._check()
+        if handle == 2:
+            self._reading = None
+        else:
+            self._open = None
+
+    async def rm_single(self, path: str, force: bool = False) -> bool:
+        self._check()
+        self._forget(path)
+        return True
+
+    async def rename(self, source: str, target: str) -> None:
+        self._check()
+        if not await self.exists(source):
+            raise AfcException(f"no such file: {source}", 8)
+        if (self.bundle_id, source) in self.written:
+            moved = self.written.pop((self.bundle_id, source))
+        else:  # one that was there before: its bytes go with it
+            moved = self._bytes(source)
+            self._forget(source)
+        self._forget(target)
+        self.written[(self.bundle_id, target)] = moved
 
     async def exists(self, path: str) -> bool:
         name = path.removeprefix("Documents/")
@@ -332,10 +452,15 @@ class _HouseArrest:
 
     async def get_file_contents(self, path: str) -> bytes:
         self.read.append(path)
-        return self._bytes(path)
+        data = self._bytes(path)
+        _HouseArrest.bytes_read += len(data)
+        return data
 
     async def set_file_contents(self, path: str, data: bytes) -> None:
-        self.written[(self.bundle_id, path)] = data
+        # What pymobiledevice3's does: open the real name, write, close.
+        handle = await self.fopen(path, "w")
+        await self.fwrite(handle, data)
+        await self.fclose(handle)
 
     async def close(self) -> None:
         pass
@@ -369,8 +494,12 @@ def fake_device(
                        "CFBundleShortVersionString": "1.0"} for b in system},
     }
     by_type["Any"] = {**by_type["User"], **by_type["System"]}
+    _HouseArrest.gone_after = None
+    _HouseArrest.write_fails = False
+    _HouseArrest.chunks = []
+    _HouseArrest.bytes_read = 0
 
-    async def create_using_usbmux(*, serial: str):
+    async def create_using_usbmux(*, serial: str, autopair: bool):
         return _Lockdown()
 
     class InstallationProxy:
@@ -550,7 +679,7 @@ def test_a_dry_run_with_a_device_that_does_not_answer_names_no_bundle_id(
 
     from graft_ipa import lc_runner
 
-    async def unreachable(*, serial: str):
+    async def unreachable(*, serial: str, autopair: bool):
         raise ConnectionError("no such device")
 
     monkeypatch.setattr(lockdown_mod, "create_using_usbmux", unreachable)
@@ -603,7 +732,7 @@ def test_a_push_finds_a_livecontainer_registered_as_a_system_app(
 
 def test_the_push_lists_bundle_ids_only(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     """The push needs nothing but the ids, and a System listing with every
-    attribute is the size of the whole OS's app catalogue."""
+    attribute is the size of the whole OS's app catalog."""
     from graft_ipa.lc_runner import push_ipa_to_livecontainer
 
     lookups: list[dict] = []
@@ -632,7 +761,7 @@ def test_lc_status_sees_a_livecontainer_registered_as_a_system_app(
 def test_lc_status_asks_for_full_metadata_only_for_livecontainers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A System listing with every attribute is the whole OS's app catalogue —
+    """A System listing with every attribute is the whole OS's app catalog —
     entitlements and all — for a question about two or three apps. Every app's
     bundle id and type (AltStore is found by id, and `--lc-install` needs to
     see a User app), then everything about the LiveContainers alone."""
@@ -677,7 +806,10 @@ def test_the_check_finds_a_system_livecontainer_listing_each_device_once(
         "example": {"bundle_id": "com.example.app"},
         "other": {"bundle_id": "com.example.other", "lc_bundle_id": BARE},
     }}))
-    monkeypatch.setattr(preflight.shutil, "which", lambda tool: f"/opt/fake/bin/{tool}")
+    from graft_ipa import tools
+    from tests.tool_fakes import fake_path
+
+    monkeypatch.setattr(tools, "which", fake_path(tmp_path / "path-bin"))
     monkeypatch.setattr(preflight, "list_connected_devices", lambda: ["UDID1", "UDID2"])
     lookups: list[dict] = []
     fake_device(monkeypatch, ["com.example.app"], system=[BARE], lookups=lookups)
@@ -790,3 +922,221 @@ def test_lc_clean_with_nothing_recorded_needs_no_livecontainer(
 
     assert lc_manage.run_clean(_free_cfg(tmp_path), udid=None, events=rec.events) == []
     assert any("nothing removed" in e["line"] for e in rec.of("log"))
+
+
+# --- a push is streamed, and lands whole or not at all (review #13, #14) ----------
+
+
+def test_a_push_is_streamed_a_chunk_at_a_time(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Not `set_file_contents(ipa.read_bytes())`, which held the whole IPA in
+    memory: a game is gigabytes."""
+    from graft_ipa import device_install
+    from graft_ipa.lc_runner import push_ipa_to_livecontainer
+
+    written = fake_device(monkeypatch, [PRIMARY])
+    monkeypatch.setattr(device_install, "UPLOAD_CHUNK_BYTES", 4)
+    ipa = tmp_path / "example.ipa"
+    ipa.write_bytes(b"0123456789")
+    push_ipa_to_livecontainer(ipa, "UDID1", inner_filename="example.ipa", team=TEAM)
+    assert _HouseArrest.chunks == [b"0123", b"4567", b"89"]
+    assert written == {(PRIMARY, "Documents/example.ipa"): b"0123456789"}
+
+
+def test_a_push_cut_off_half_way_leaves_nothing_at_the_real_name(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """A truncated `<app>.ipa` at the real name had no delivery record and
+    matched no archive, so every later push refused it as the user's."""
+    from graft_ipa import device_install
+    from graft_ipa.lc_runner import push_ipa_to_livecontainer
+
+    written = fake_device(monkeypatch, [PRIMARY])
+    monkeypatch.setattr(device_install, "UPLOAD_CHUNK_BYTES", 4)
+    _HouseArrest.gone_after = 6  # the cable comes out mid-upload
+    ipa = tmp_path / "example.ipa"
+    ipa.write_bytes(b"0123456789")
+    with pytest.raises(LiveContainerError):
+        push_ipa_to_livecontainer(ipa, "UDID1", inner_filename="example.ipa", team=TEAM)
+    assert (PRIMARY, "Documents/example.ipa") not in written
+
+    # Plugged back in, the next push is not refused, and leaves no partial.
+    _HouseArrest.gone_after = None
+    push_ipa_to_livecontainer(ipa, "UDID1", inner_filename="example.ipa", team=TEAM, ours={})
+    assert written == {(PRIMARY, "Documents/example.ipa"): b"0123456789"}
+
+
+def test_a_failed_push_removes_its_partial_file_when_the_phone_is_still_there(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from graft_ipa.lc_runner import push_ipa_to_livecontainer
+
+    written = fake_device(monkeypatch, [PRIMARY])
+    _HouseArrest.write_fails = True
+    with pytest.raises(LiveContainerError):
+        push_ipa_to_livecontainer(_example_ipa(tmp_path), "UDID1", inner_filename="example.ipa",
+                                  team=TEAM)
+    assert written == {}
+
+
+def test_the_partial_name_is_hidden_and_not_an_ipa() -> None:
+    from graft_ipa.lc_runner import partial_path
+
+    partial = partial_path("Documents/example.ipa")
+    folder, _, name = partial.rpartition("/")
+    assert folder == "Documents" and name.startswith(".") and not name.endswith(".ipa")
+
+
+# --- the partials a dropped push left are swept (re-check D4) ---------------------
+#
+# A push whose connection drops cannot remove its partial, and nothing else did:
+# hidden, it is not in the Files app, and `--lc-clean` removed only recorded
+# pushes. Up to a whole IPA of the phone's storage, for good if the app was
+# never pushed under that name again.
+
+#: This Mac, as graft names it in what it leaves on a phone.
+HERE = this_mac()
+#: Another Mac paired with the same phone.
+ELSEWHERE = "0123456789ab" if HERE != "0123456789ab" else "ba9876543210"
+#: Above macOS's largest pid (99998): no process here ever has it.
+GONE_PID = 999_999
+
+#: Left by a push from this Mac whose graft has exited.
+ABANDONED = [
+    f".example.ipa.{HERE}-{GONE_PID}.graft-partial",
+    f".other app.ipa.{HERE}-{GONE_PID}.graft-partial",  # another app's
+]
+#: Everything else, which nothing may remove.
+NOT_ABANDONED = [
+    # A graft still running may be mid-push with it: another run or the
+    # app's (pid 1 stands in for one that can't be signaled).
+    f".example.ipa.{HERE}-1.graft-partial",
+    # Another Mac's, mid-push from there: its pid means nothing here.
+    f".example.ipa.{ELSEWHERE}-{GONE_PID}.graft-partial",
+    # The name before it named the Mac: whose, and whether live, unknown.
+    ".example.ipa.graft-partial",
+    # Not graft's names.
+    f"example.ipa.{HERE}-{GONE_PID}.graft-partial",
+    f".example.ipa.{HERE}-{GONE_PID}.graft-partial.bak",
+    f".{HERE}-{GONE_PID}.graft-partial",
+    "example.ipa",
+    "AppleDevelopment.p12",
+]
+
+
+def test_the_partial_is_named_for_this_mac_and_this_process() -> None:
+    import os
+    import re
+
+    from graft_ipa.lc_runner import is_abandoned_partial, partial_path
+
+    name = partial_path("Documents/example.ipa").rpartition("/")[2]
+    assert re.fullmatch(rf"\.example\.ipa\.{HERE}-{os.getpid()}\.graft-partial", name)
+    assert not is_abandoned_partial(name), "this push's own partial, as it writes it"
+
+
+@pytest.mark.parametrize("name", ABANDONED)
+def test_a_partial_this_mac_left_whose_graft_is_gone_is_abandoned(name: str) -> None:
+    from graft_ipa.lc_runner import is_abandoned_partial
+
+    assert is_abandoned_partial(name)
+
+
+@pytest.mark.parametrize("name", NOT_ABANDONED)
+def test_anything_else_is_not_abandoned(name: str) -> None:
+    from graft_ipa.lc_runner import is_abandoned_partial
+
+    assert not is_abandoned_partial(name)
+
+
+def test_a_push_first_removes_the_partials_pushes_from_this_mac_left(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from graft_ipa.lc_runner import push_ipa_to_livecontainer
+
+    keep = [n for n in NOT_ABANDONED if n != "example.ipa"]  # the push replaces that one
+    docs = {PRIMARY: [*ABANDONED, *keep]}
+    written = fake_device(monkeypatch, [PRIMARY], docs=docs)
+
+    push_ipa_to_livecontainer(_example_ipa(tmp_path), "UDID1", inner_filename="example.ipa",
+                              team=TEAM)
+
+    assert sorted(docs[PRIMARY]) == sorted(keep)
+    assert list(written) == [(PRIMARY, "Documents/example.ipa")]
+
+
+def test_the_sweep_comes_first_even_on_a_push_that_is_then_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from graft_ipa.lc_runner import push_ipa_to_livecontainer
+
+    docs = {PRIMARY: [*ABANDONED, "example.ipa"]}  # a same-named file of the user's
+    fake_device(monkeypatch, [PRIMARY], docs=docs)
+
+    with pytest.raises(LiveContainerError, match="did not push"):
+        push_ipa_to_livecontainer(_example_ipa(tmp_path), "UDID1", inner_filename="example.ipa",
+                                  team=TEAM)
+
+    assert docs[PRIMARY] == ["example.ipa"]
+
+
+def test_a_sweep_that_fails_does_not_stop_the_push(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    from graft_ipa.lc_runner import push_ipa_to_livecontainer
+
+    written = fake_device(monkeypatch, [PRIMARY], docs={PRIMARY: list(ABANDONED)})
+
+    async def unlistable(self, folder):
+        raise AfcException("Failed to list the folder.", 1)
+
+    monkeypatch.setattr(_HouseArrest, "listdir", unlistable)
+    push_ipa_to_livecontainer(_example_ipa(tmp_path), "UDID1", inner_filename="example.ipa",
+                              team=TEAM)
+    assert (PRIMARY, "Documents/example.ipa") in written
+
+
+def test_lc_clean_removes_the_partials_this_mac_left_in_every_livecontainer(tmp_path, monkeypatch):
+    """Recorded or not: the push that left it was cut off before its record
+    was written, and that may have been the first push into that container."""
+    from .test_lc_install import FakeDevice, Recorder
+
+    device = FakeDevice(
+        {PRIMARY: {}, LC2: {}, "com.example.app": {}},
+        docs={PRIMARY: [*ABANDONED, *NOT_ABANDONED], LC2: [ABANDONED[0]],
+              "com.example.app": [ABANDONED[0]]},
+    )
+    monkeypatch.setattr(lc_manage, "UsbmuxDevice", lambda: device)
+    rec = Recorder()
+
+    lc_manage.run_clean(_free_cfg(tmp_path), udid=None, events=rec.events)
+
+    assert sorted(device.removed) == sorted(
+        [(LC2, ABANDONED[0])] + [(PRIMARY, n) for n in ABANDONED]
+    )
+    lines = [e["line"] for e in rec.of("log")]
+    assert any(PRIMARY in line and "unfinished push" in line for line in lines)
+    assert not any("nothing removed" in line for line in lines)
+
+
+def test_lc_clean_counts_a_removed_partial_as_removed_not_kept(tmp_path, monkeypatch) -> None:
+    from .test_lc_install import FakeDevice, Recorder
+
+    device = FakeDevice({PRIMARY: {}}, docs={PRIMARY: ["example.ipa", ABANDONED[0], "mine.ipa"]})
+    rec = Recorder()
+
+    lc_manage.clean(udid="u1", device_ops=device, events=rec.events,
+                    pushed={PRIMARY: {"example.ipa"}})
+
+    assert sorted(device.removed) == sorted([(PRIMARY, "example.ipa"), (PRIMARY, ABANDONED[0])])
+    [cleaned] = rec.of("lc-cleaned")
+    assert cleaned["removed"] == ["example.ipa"] and cleaned["kept"] == 1
+
+
+def test_a_cert_only_clean_leaves_partials_alone(tmp_path, monkeypatch) -> None:
+    """Its contract: the recorded certificates and nothing else."""
+    from .test_lc_install import FakeDevice, Recorder
+
+    device = FakeDevice({PRIMARY: {}}, docs={PRIMARY: [*ABANDONED, "AppleDevelopment.p12"]})
+
+    lc_manage.clean(udid="u1", device_ops=device, events=Recorder().events, cert_only=True,
+                    pushed={}, certs={PRIMARY: {"AppleDevelopment.p12"}})
+
+    assert device.removed == [(PRIMARY, "AppleDevelopment.p12")]

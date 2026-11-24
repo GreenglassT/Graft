@@ -247,7 +247,7 @@ final class RebuildCoordinatorTests: XCTestCase {
     func test_a_fresh_build_shows_the_app_and_runs_nothing() {
         var ran = false
         let sut = coordinator(installer: { ran = true; return nil })
-        sut.startIfStale(isStale: { false }, recentlyAttempted: { false }, recordAttempt: {})
+        sut.startIfStale(isStale: { false }, recentlyAttempted: { false }, recordAttempt: {}, clearAttempt: {})
 
         XCTAssertEqual(sut.phase, .ready)
         XCTAssertFalse(ran)
@@ -259,14 +259,14 @@ final class RebuildCoordinatorTests: XCTestCase {
     func test_a_recent_attempt_stops_a_second_one_even_though_it_is_still_stale() {
         var ran = false
         let sut = coordinator(installer: { ran = true; return nil })
-        sut.startIfStale(isStale: { true }, recentlyAttempted: { true }, recordAttempt: {})
+        sut.startIfStale(isStale: { true }, recentlyAttempted: { true }, recordAttempt: {}, clearAttempt: {})
 
         XCTAssertEqual(sut.phase, .ready)
         XCTAssertFalse(ran, "a failing build relaunched the app in a loop")
     }
 
     /// Recorded first, so a crash *during* the build still counts as an
-    /// attempt rather than being retried on every launch afterwards.
+    /// attempt rather than being retried on every launch afterward.
     ///
     /// The previous version of this test could not fail: the installer runs in
     /// an unstructured Task, the body never awaited it, so `ranAfterRecording`
@@ -283,7 +283,7 @@ final class RebuildCoordinatorTests: XCTestCase {
             return nil
         })
         sut.startIfStale(isStale: { true }, recentlyAttempted: { false },
-                         recordAttempt: { recorded = true })
+                         recordAttempt: { recorded = true }, clearAttempt: {})
 
         XCTAssertTrue(recorded)
         await fulfillment(of: [observed], timeout: 2)
@@ -298,7 +298,7 @@ final class RebuildCoordinatorTests: XCTestCase {
         let sut = coordinator()
         for _ in 0..<3 {
             sut.startIfStale(isStale: { checks += 1; return false },
-                             recentlyAttempted: { false }, recordAttempt: {})
+                             recentlyAttempted: { false }, recordAttempt: {}, clearAttempt: {})
         }
         XCTAssertEqual(checks, 1, "reopening a window re-ran the staleness check")
     }
@@ -329,7 +329,7 @@ final class RebuildCoordinatorTests: XCTestCase {
     /// not leave the spinner up forever either.
     func test_a_relaunch_that_cannot_be_scheduled_is_reported() async {
         let sut = coordinator(installer: { nil }, relaunch: { false })
-        sut.startIfStale(isStale: { true }, recentlyAttempted: { false }, recordAttempt: {})
+        sut.startIfStale(isStale: { true }, recentlyAttempted: { false }, recordAttempt: {}, clearAttempt: {})
 
         try? await Task.sleep(for: .milliseconds(300))
         guard case let .failed(log) = sut.phase else {
@@ -341,7 +341,7 @@ final class RebuildCoordinatorTests: XCTestCase {
     func test_a_successful_rebuild_relaunches() async {
         let relaunched = expectation(description: "relaunched")
         let sut = coordinator(installer: { nil }, relaunch: { relaunched.fulfill(); return true })
-        sut.startIfStale(isStale: { true }, recentlyAttempted: { false }, recordAttempt: {})
+        sut.startIfStale(isStale: { true }, recentlyAttempted: { false }, recordAttempt: {}, clearAttempt: {})
 
         await fulfillment(of: [relaunched], timeout: 2)
         XCTAssertEqual(sut.phase, .rebuilding, "the window must not flash back before quitting")
@@ -353,7 +353,7 @@ final class RebuildCoordinatorTests: XCTestCase {
             installer: { "error: cannot find 'Thing' in scope" },
             relaunch: { relaunched = true; return true }
         )
-        sut.startIfStale(isStale: { true }, recentlyAttempted: { false }, recordAttempt: {})
+        sut.startIfStale(isStale: { true }, recentlyAttempted: { false }, recordAttempt: {}, clearAttempt: {})
 
         try? await Task.sleep(for: .milliseconds(200))
         XCTAssertEqual(sut.phase, .failed(log: "error: cannot find 'Thing' in scope"))
@@ -364,7 +364,7 @@ final class RebuildCoordinatorTests: XCTestCase {
     /// must not be the thing that stops the app opening.
     func test_the_previous_build_stays_usable_after_a_failure() async {
         let sut = coordinator(installer: { "boom" })
-        sut.startIfStale(isStale: { true }, recentlyAttempted: { false }, recordAttempt: {})
+        sut.startIfStale(isStale: { true }, recentlyAttempted: { false }, recordAttempt: {}, clearAttempt: {})
         try? await Task.sleep(for: .milliseconds(200))
 
         sut.dismissFailure()

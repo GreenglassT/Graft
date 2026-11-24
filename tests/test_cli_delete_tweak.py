@@ -386,7 +386,7 @@ def test_detach_by_bare_filename_removes_a_mis_cased_entry(
 def test_detach_removes_every_spelling_of_the_same_file(
     temp_config_env: Path,
 ) -> None:
-    """Deliberate behaviour change: filtering by identity rather than by
+    """Deliberate behavior change: filtering by identity rather than by
     string means a config that lists the same file twice under different
     spellings loses BOTH entries on one detach. That's the right outcome —
     leaving the duplicate behind would keep the delete guard tripping — but
@@ -456,7 +456,7 @@ def test_delete_tweak_subprocess_reports_in_use_via_exit_16(
     zero automated coverage before this — exit 16 was only ever verified by
     hand. Assert the GUI's actual subprocess contract: nonzero exit, the
     error on stderr, and — since the refusal became structured — a
-    `tweak-in-use` event on stdout that the GUI's parser recognises.
+    `tweak-in-use` event on stdout that the GUI's parser recognizes.
 
     That last assertion used to be `stdout == ""`, on the reasoning that the
     JSON-event parser must not choke. It still must not, but the way to

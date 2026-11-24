@@ -5,17 +5,15 @@ from __future__ import annotations
 import json
 import os
 import plistlib
-import re
 import shutil
 import stat
-import subprocess
 import zipfile
 from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .child_env import child_env
+from . import macho
 from .errors import IPAInspectionError
 
 IPA_ZIP_MAGIC = b"PK\x03\x04"
@@ -115,9 +113,6 @@ def read_info_plist(ipa: Path) -> IPAInfo:
     )
 
 
-CRYPTID_RE = re.compile(r"cryptid\s+(\d+)")
-
-
 def list_macho_in_extract(extract_dir: Path) -> list[Path]:
     """Find Mach-O binaries inside an extracted IPA directory.
 
@@ -127,6 +122,7 @@ def list_macho_in_extract(extract_dir: Path) -> list[Path]:
     macho_magics = {
         b"\xca\xfe\xba\xbe",  # fat
         b"\xbe\xba\xfe\xca",  # fat (swapped)
+        b"\xca\xfe\xba\xbf",  # fat64
         b"\xcf\xfa\xed\xfe",  # 64-bit
         b"\xfe\xed\xfa\xcf",  # 64-bit (swapped)
         b"\xce\xfa\xed\xfe",  # 32-bit
@@ -139,8 +135,8 @@ def list_macho_in_extract(extract_dir: Path) -> list[Path]:
     for p in payload.rglob("*"):
         # `is_file()` follows symlinks, and `extract_ipa` now materialises real
         # ones — so a framework's `Y -> Versions/A/Y` was counted as a second
-        # Mach-O, inflating the "(N binaries, cryptid 0)" line, running `otool`
-        # twice on one file, and handing `normalize_exec_bits` a link to chmod
+        # Mach-O, inflating the "(N binaries, cryptid 0)" line, reading one file
+        # twice, and handing `normalize_exec_bits` a link to chmod
         # *through*. The link's target is inside the bundle and gets walked on
         # its own account.
         if p.is_symlink() or not p.is_file():
@@ -180,10 +176,78 @@ def list_macho_in_extract(extract_dir: Path) -> list[Path]:
             with p.open("rb") as f:
                 head = f.read(4)
         except OSError:
+            # Listed, not skipped: a file that can't be read can't be shown
+            # to be no binary, and leaving it out read as "decrypted" for an
+            # app still at cryptid 1 (review #17). The reader then fails on
+            # it by name.
+            results.append(p)
             continue
         if head in macho_magics:
             results.append(p)
     return results
+
+
+#: Bundles the OS loads code from by `CFBundleExecutable`.
+_CODE_BUNDLES = (".app", ".appex", ".framework")
+
+
+def _declared_executables(extract_dir: Path) -> list[tuple[Path, str]]:
+    """`(bundle, CFBundleExecutable)` for every app, extension, framework and
+    Watch app under Payload whose Info.plist names one.
+
+    Read from Info.plist rather than recognized by name or magic, because the
+    listing passes over a name ending `.js`, and a binary the reader can't
+    take drops out of it: either way an encrypted binary went unchecked and
+    the IPA read as decrypted (review #17, re-check #9/#10). A bundle with no
+    readable Info.plist names nothing and is left to the listing.
+    """
+    payload = extract_dir / "Payload"
+    if not payload.is_dir():
+        return []
+    found: list[tuple[Path, str]] = []
+    bundles = sorted(
+        p for p in payload.rglob("*")
+        if p.suffix.lower() in _CODE_BUNDLES and not p.is_symlink() and p.is_dir()
+    )
+    for bundle in bundles:
+        try:
+            with (bundle / "Info.plist").open("rb") as f:
+                info = plistlib.load(f)
+        except Exception:  # no plist, no name to check by
+            continue
+        name = info.get("CFBundleExecutable") if isinstance(info, dict) else None
+        if isinstance(name, str) and name:
+            found.append((bundle, name))
+    return found
+
+
+def _executable_file(extract_dir: Path, bundle: Path, name: str) -> Path:
+    """The file `bundle`'s `CFBundleExecutable` names, followed through a link
+    that stays inside the extracted tree; raises if there is none."""
+    where = bundle.relative_to(extract_dir).as_posix()
+    if Path(name).name != name:
+        raise IPAInspectionError(
+            f"{where} names {name!r} as its executable, which is not a file name"
+        )
+    declared = bundle / name
+    if not declared.is_symlink():
+        if not declared.is_file():
+            raise IPAInspectionError(
+                f"{where} names {name} as its executable, but there is no such file"
+            )
+        return declared
+    root = Path(os.path.realpath(extract_dir))
+    target = Path(os.path.realpath(declared))
+    if not target.is_relative_to(root):
+        raise IPAInspectionError(
+            f"{where}'s executable {name} is a link to a file outside the app"
+        )
+    if not target.is_file():
+        raise IPAInspectionError(
+            f"{where} names {name} as its executable, but there is no such file"
+        )
+    # Spelled under `extract_dir`, as the listing spells everything else.
+    return extract_dir / target.relative_to(root)
 
 
 @dataclass
@@ -199,34 +263,69 @@ class CryptidResult:
 
 
 def check_cryptid(binary: Path) -> CryptidResult:
-    """Run otool -l on a Mach-O and parse all cryptid values from LC_ENCRYPTION_INFO."""
+    """Every `cryptid` in `binary`'s LC_ENCRYPTION_INFO(_64) commands, read
+    directly from its load commands (`macho`), with no `otool` and no Xcode
+    Command Line Tools."""
     try:
-        out = subprocess.run(
-            ["otool", "-l", str(binary)],
-            check=True,
-            capture_output=True,
-            text=True,
-            env=child_env(),
-        ).stdout
-    except FileNotFoundError as e:
-        raise IPAInspectionError(
-            "otool not found",
-            hint="otool ships with Xcode Command Line Tools — run `xcode-select --install`",
-        ) from e
-    except subprocess.CalledProcessError as e:
-        raise IPAInspectionError(
-            f"otool failed on {binary}: {e.stderr.strip() or e}"
-        ) from e
-    return CryptidResult(binary=binary, cryptids=[int(m) for m in CRYPTID_RE.findall(out)])
+        return CryptidResult(binary=binary, cryptids=macho.cryptids(binary))
+    except macho.MachOError as e:
+        raise _unreadable(binary, e) from e
+
+
+def _unreadable(binary: Path, e: macho.MachOError) -> IPAInspectionError:
+    return IPAInspectionError(f"couldn't read {binary.name}'s load commands: {e}")
 
 
 def verify_decrypted(extract_dir: Path) -> list[CryptidResult]:
     """Inspect every Mach-O binary in the extracted IPA. Returns the per-binary results.
 
     Caller decides what to do with cryptid != 0 (warn vs. abort).
+
+    `list_macho_in_extract` picks files by their first four bytes, and a Java
+    `.class` file starts `cafebabe` like a fat binary. A file the reader finds
+    is no Mach-O at all (`macho.NotMachO`) is left out: not failed, and not
+    counted in "(N binaries, cryptid 0)". Any other read failure is a real
+    Mach-O whose load commands are broken, and raises: it must never read as
+    decrypted. So does a file that can't be read at all.
+
+    Every bundle's executable — the app's, and each extension's, framework's
+    and Watch app's — is checked whatever its name, and must be among the
+    results: one that is missing, links out of the app, or is no Mach-O the
+    reader can take raises rather than drop out. Nothing that names itself
+    the code of a bundle can be passed over and read as decrypted.
     """
     binaries = list_macho_in_extract(extract_dir)
-    return [check_cryptid(b) for b in binaries]
+    seen = {os.path.realpath(b) for b in binaries}
+    required: dict[str, str] = {}  # realpath -> how an error names it
+    for bundle, name in _declared_executables(extract_dir):
+        binary = _executable_file(extract_dir, bundle, name)
+        real = os.path.realpath(binary)
+        required[real] = f"{bundle.relative_to(extract_dir).as_posix()}'s executable {name}"
+        if real not in seen:
+            seen.add(real)
+            binaries.append(binary)
+    results: list[CryptidResult] = []
+    passed_over: dict[str, str] = {}  # realpath -> why it was left out
+    for binary in binaries:
+        try:
+            cryptids = macho.cryptids(binary)
+        except macho.NotMachO as e:
+            passed_over[os.path.realpath(binary)] = f"it isn't a Mach-O file Graft can read ({e})"
+            continue
+        except macho.MachOError as e:
+            raise _unreadable(binary, e) from e
+        results.append(CryptidResult(binary=binary, cryptids=cryptids))
+    # The invariant, asked of the results rather than trusted to the loop: a
+    # bundle's executable that is not among them is an error, never an empty
+    # list that reads "0 binaries, cryptid 0".
+    checked = {os.path.realpath(r.binary) for r in results}
+    for real, what in required.items():
+        if real not in checked:
+            why = passed_over.get(real, "it was never read")
+            raise IPAInspectionError(
+                f"{what} couldn't be checked for encryption: {why}"
+            )
+    return results
 
 
 def extract_ipa(ipa: Path, target_dir: Path) -> Path:
@@ -281,7 +380,11 @@ def extract_ipa(ipa: Path, target_dir: Path) -> Path:
                     target.unlink()
                     target.symlink_to(link_to)
                 elif target.is_file() and not target.is_symlink():
-                    os.chmod(target, stat.S_IMODE(mode))
+                    # Plus owner-read, whatever the entry says: a binary stored
+                    # without it (the decimal-for-octal `0o100000 | 755`
+                    # slip is owner -wx) came out unreadable, and an unread
+                    # binary was never checked for encryption (review #17).
+                    os.chmod(target, stat.S_IMODE(mode) | stat.S_IRUSR)
     except zipfile.BadZipFile as e:
         raise IPAInspectionError(f"{ipa} is corrupt: {e}") from e
     return target_dir
@@ -365,7 +468,7 @@ ESSENTIAL_EXTENSION_POINTS = {
 #: loss and worth naming loudly, but refusing the dump over it would cost the
 #: one-click path for an app that remains useful.
 #: Extension points that carry a headline feature without being the whole app,
-#: mapped to what the user loses in words they will recognise.
+#: mapped to what the user loses in words they will recognize.
 #:
 #: A password manager without its credential provider still shows you your vault; it just
 #: cannot fill anything in. Refusing the dump over that would cost the one-click
@@ -471,7 +574,7 @@ def repack_ipa(extract_dir: Path, output_ipa: Path) -> Path:
 
 #: The two things in an App Store IPA that identify the Apple ID that bought
 #: it: `iTunesMetadata.plist` at the root (the account's email and ids), and an
-#: `SC_Info/` directory in the app and in each extension (the FairPlay licence
+#: `SC_Info/` directory in the app and in each extension (the FairPlay license
 #: issued to that account). Nothing a build or a device needs.
 ACCOUNT_METADATA = "itunesmetadata.plist"
 LICENSE_DIR = "sc_info"
@@ -501,7 +604,7 @@ def sealed_account_data(ipa: Path) -> set[str]:
     removing one of those breaks the seal and iOS refuses the install.
     Re-signing is a rebuild, so they stay. Read per bundle — the app and each
     extension seal their own `SC_Info/` — and only for a bundle that has a
-    CodeResources to read: a decrypted App Store IPA's licences were added
+    CodeResources to read: a decrypted App Store IPA's licenses were added
     after Apple signed it and are sealed by nothing. `iTunesMetadata.plist`
     sits outside every bundle and is never sealed.
     """

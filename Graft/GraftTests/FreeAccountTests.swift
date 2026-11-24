@@ -26,12 +26,57 @@ final class PaidOnlyGateTests: XCTestCase {
         XCTAssertNil(AppDetailView.buildRefusal(delivery: .sideload, account: nil))
     }
 
-    func test_a_free_account_has_no_profile_to_name() async throws {
-        let store = try await accountTestStore([accountTestAppLine()])
-        let app = try XCTUnwrap(store.apps.first)
+    private func app(delivery: DeliveryMode, autoProfile: Bool) throws -> AppRecord {
+        let line = accountTestAppLine(delivery: delivery)
+            .replacingOccurrences(of: #""auto_profile":false"#, with: #""auto_profile":\#(autoProfile)"#)
+        guard case let .app(record)? = line.buildEvents().first else {
+            throw XCTSkip("app fixture did not decode")
+        }
+        return record
+    }
+
+    func test_a_free_account_has_no_profile_to_name() throws {
+        let app = try app(delivery: .sideload, autoProfile: false)
         XCTAssertEqual(AppDetailView.profileValue(app, account: .free), "not used")
         XCTAssertEqual(AppDetailView.profileValue(app, account: .paid), "manual")
         XCTAssertEqual(AppDetailView.profileValue(app, account: nil), "manual")
+        XCTAssertEqual(AppDetailView.profileValue(try self.app(delivery: .sideload, autoProfile: true),
+                                                  account: .paid), "auto")
+    }
+
+    /// Review #22: a per-app `profile:` outranks auto_profile, so the cell
+    /// said "auto" for a build that signed with the hand-set file.
+    func test_a_profile_override_is_named_instead_of_auto() throws {
+        let line = accountTestAppLine(delivery: .sideload)
+            .replacingOccurrences(of: #""auto_profile":false"#,
+                                  with: #""auto_profile":true,"profile_override":"/Users/x/old.mobileprovision""#)
+        guard case let .app(app)? = line.buildEvents().first else {
+            return XCTFail("app fixture did not decode")
+        }
+        XCTAssertEqual(AppDetailView.profileValue(app, account: .paid), "old.mobileprovision")
+        XCTAssertEqual(AppDetailView.profileValue(app, account: .free), "not used")
+    }
+
+    func test_a_null_override_still_reads_auto() throws {
+        let line = accountTestAppLine(delivery: .sideload)
+            .replacingOccurrences(of: #""auto_profile":false"#,
+                                  with: #""auto_profile":true,"profile_override":null"#)
+        guard case let .app(app)? = line.buildEvents().first else {
+            return XCTFail("app fixture did not decode")
+        }
+        XCTAssertEqual(AppDetailView.profileValue(app, account: .paid), "auto")
+    }
+
+    /// A LiveContainer build is never signed, so on any account, and whatever
+    /// `auto_profile` says, there is no profile to name.
+    func test_a_livecontainer_app_has_no_profile_to_name() throws {
+        for autoProfile in [false, true] {
+            let app = try app(delivery: .livecontainer, autoProfile: autoProfile)
+            for account in [AccountMode.paid, .free, nil] {
+                XCTAssertEqual(AppDetailView.profileValue(app, account: account), "not used",
+                               "auto_profile \(autoProfile), account \(String(describing: account))")
+            }
+        }
     }
 
     private func phone() throws -> DeviceRecord {
@@ -221,8 +266,9 @@ final class FreeAccountViewTests: XCTestCase {
         let pane = AppDetailView(
             app: app, runner: accountTestShell, store: config, artwork: ArtworkStore(runner: accountTestShell),
             devices: DevicesStore(runner: accountTestShell), tweaksStore: TweaksStore(runner: accountTestShell),
-            staged: StagedIPAStore(runner: accountTestShell), appStore: AppStoreStore(runner: accountTestShell),
-            liveContainer: LiveContainerStore(runner: accountTestShell), showSettings: {}
+            staged: StagedIPAStore(runner: accountTestShell), appStore: AppStoreStore(runner: accountTestShell, shell: NoAdminShell()),
+            liveContainer: LiveContainerStore(runner: accountTestShell),
+            settings: SettingsStore(runner: accountTestShell), showSettings: {}
         )
         let box = hosted(pane, size: NSSize(width: 1000, height: 900))
         try await Task.sleep(nanoseconds: 500_000_000)
@@ -254,15 +300,22 @@ final class FreeAccountViewTests: XCTestCase {
 
     // MARK: Edit sheet
 
+    /// `keyPart` is the `settings` event's `app_store_connect`, as JSON text,
+    /// or nil for no settings read at all.
     private func editSheet(
-        delivery: DeliveryMode, account: AccountMode
+        delivery: DeliveryMode, account: AccountMode, keyPart: String? = nil
     ) async throws -> [AccessibilityTree.Node] {
         try AccessibilityTree.requireServed()
         let config = try await accountTestStore([accountEventLine(account.rawValue), accountTestAppLine(delivery: delivery)])
         let app = try XCTUnwrap(config.apps.first)
+        let settings = SettingsStore(runner: accountTestShell)
+        if let keyPart {
+            let line = #"{"type":"settings","default_device_udid":null,"archive_keep":2,"signing_cert":"/c","signing_profile":"/p","signing_team_id":"T","app_store_connect":\#(keyPart)}"#
+            _ = try await settings.loadSettings(argsOverride: ["-c", "printf '%s\\n' '\(line)'"])
+        }
         let box = hosted(EditAppSheet(
             app: app, store: config, liveContainer: LiveContainerStore(runner: accountTestShell),
-            devices: DevicesStore(runner: accountTestShell), onClose: {}
+            devices: DevicesStore(runner: accountTestShell), settings: settings, onClose: {}
         ), width: 460)
         settle(box)
         return try AccessibilityTree.nodes(in: box.window)
@@ -275,6 +328,48 @@ final class FreeAccountViewTests: XCTestCase {
                 && [DeliveryMode.sideload.displayName, DeliveryMode.livecontainer.displayName]
                     .contains(($0.value as? String) ?? "")
         }
+    }
+
+    private static let autoProfileToggle = "Create the provisioning profile automatically"
+
+    /// A Form toggle is an unnamed switch, its label a static text beside it,
+    /// so the toggle is found by position: the form's first switch, once its
+    /// label is known to be on the sheet.
+    private func autoProfileToggle(in nodes: [AccessibilityTree.Node]) -> AccessibilityTree.Node? {
+        guard texts(nodes).contains(Self.autoProfileToggle) else { return nil }
+        return nodes.first { $0.role == kAXCheckBoxRole }
+    }
+
+    /// A sideload app: on a LiveContainer one the delivery is the reason given.
+    func test_auto_provisioning_is_locked_on_a_free_account() async throws {
+        let nodes = try await editSheet(delivery: .sideload, account: .free, keyPart: "null")
+        let toggle = try XCTUnwrap(autoProfileToggle(in: nodes), "shown, not hidden")
+        XCTAssertEqual(toggle.enabled, false)
+        XCTAssertEqual(toggle.help, PaidOnly.autoProfile)
+    }
+
+    /// A paid account with a key, which would unlock it on a sideload app.
+    func test_auto_provisioning_is_locked_for_a_livecontainer_app() async throws {
+        let key = #"{"key_id":"K","issuer_id":"I","key_file":"/k.p8","key_file_exists":true}"#
+        let nodes = try await editSheet(delivery: .livecontainer, account: .paid, keyPart: key)
+        let toggle = try XCTUnwrap(autoProfileToggle(in: nodes), "shown, not hidden")
+        XCTAssertEqual(toggle.enabled, false)
+        XCTAssertEqual(toggle.help, EditAppSheet.autoProfileNotUsed)
+    }
+
+    func test_auto_provisioning_needs_a_key_to_turn_on() async throws {
+        let nodes = try await editSheet(delivery: .sideload, account: .paid, keyPart: "null")
+        let toggle = try XCTUnwrap(autoProfileToggle(in: nodes))
+        XCTAssertEqual(toggle.enabled, false)
+        XCTAssertTrue(texts(nodes).contains(EditAppSheet.autoProfileNeedsKey), "\(texts(nodes))")
+    }
+
+    func test_auto_provisioning_turns_on_with_a_key() async throws {
+        let key = #"{"key_id":"K","issuer_id":"I","key_file":"/k.p8","key_file_exists":true}"#
+        let nodes = try await editSheet(delivery: .sideload, account: .paid, keyPart: key)
+        let toggle = try XCTUnwrap(autoProfileToggle(in: nodes))
+        XCTAssertNotEqual(toggle.enabled, false)
+        XCTAssertFalse(texts(nodes).contains(EditAppSheet.autoProfileNeedsKey))
     }
 
     func test_the_edit_picker_is_locked_for_a_livecontainer_app_on_a_free_account() async throws {
@@ -376,15 +471,24 @@ final class FreeAccountViewTests: XCTestCase {
 
     // MARK: Settings
 
-    private func settingsPane(account: AccountMode) async throws -> [AccessibilityTree.Node] {
+    /// `reportsKey` false is a CLI from before `--set-portal`: no
+    /// `app_store_connect` on the event, so no key form (and two fewer text
+    /// fields) — which is what the signing-field counts below rely on.
+    private func settingsPane(
+        account: AccountMode, reportsKey: Bool = false, storedKey: Bool = false
+    ) async throws -> [AccessibilityTree.Node] {
         try AccessibilityTree.requireServed()
         let settings = SettingsStore(runner: accountTestShell)
-        let line = #"{"type":"settings","default_device_udid":null,"archive_keep":2,"signing_cert":null,"signing_profile":null,"signing_team_id":null}"#
+        let stored = storedKey
+            ? #"{"key_id":"ABCDE12345","issuer_id":"00000000-0000-0000-0000-000000000000","key_file":"/tmp/AuthKey_ABCDE12345.p8","key_file_exists":true}"#
+            : "null"
+        let key = reportsKey ? #","app_store_connect":\#(stored),"graft_version":"1.1.0""# : ""
+        let line = #"{"type":"settings","default_device_udid":null,"archive_keep":2,"signing_cert":null,"signing_profile":null,"signing_team_id":null\#(key)}"#
         _ = try await settings.loadSettings(argsOverride: ["-c", "printf '%s\\n' '\(line)'"])
         settings.reseedDraftIfIdle()
         let pane = SettingsView(
             store: settings, devicesStore: DevicesStore(runner: accountTestShell),
-            appStore: AppStoreStore(runner: accountTestShell), account: account
+            appStore: AppStoreStore(runner: accountTestShell, shell: NoAdminShell()), account: account
         )
         let box = hosted(pane, size: NSSize(width: 900, height: 1400))
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -400,6 +504,53 @@ final class FreeAccountViewTests: XCTestCase {
         let fields = nodes.filter { $0.role == kAXTextFieldRole }
         XCTAssertEqual(fields.count, 3, "the three signing fields are still shown")
         XCTAssertTrue(fields.allSatisfy { $0.enabled == false }, "\(fields.map(\.enabled))")
+    }
+
+    /// The App Store Connect key is paid-only like signing: shown, disabled,
+    /// with the reason, on a free Apple ID.
+    func test_the_app_store_connect_key_is_locked_on_a_free_account() async throws {
+        let nodes = try await settingsPane(account: .free, reportsKey: true)
+        XCTAssertTrue(texts(nodes).contains(PaidOnly.appStoreConnect), "\(texts(nodes))")
+        let fields = nodes.filter { $0.role == kAXTextFieldRole }
+        XCTAssertEqual(fields.count, 5, "three signing fields, Key ID and Issuer ID")
+        XCTAssertTrue(fields.allSatisfy { $0.enabled == false }, "\(fields.map(\.enabled))")
+        XCTAssertEqual(button("Choose…", in: nodes)?.enabled, false)
+    }
+
+    /// Setting a key is paid-only; removing one is not. The CLI deliberately
+    /// allows `--clear-portal` on a free config — a key left over from a paid
+    /// membership is the user's to take out — so Remove… stays enabled.
+    func test_a_free_account_can_still_remove_a_stored_key() async throws {
+        let nodes = try await settingsPane(account: .free, reportsKey: true, storedKey: true)
+        XCTAssertTrue(texts(nodes).contains(PaidOnly.appStoreConnect), "the form is still locked")
+        XCTAssertEqual(button("Save and test", in: nodes)?.enabled, false)
+        let remove = try XCTUnwrap(button("Remove…", in: nodes), "\(nodes.map(\.name))")
+        XCTAssertNotEqual(remove.enabled, false, "Remove… is locked on a free account")
+    }
+
+    func test_removing_is_offered_whatever_the_account() {
+        XCTAssertTrue(AppStoreConnectSection.offersRemove(saving: false))
+        XCTAssertFalse(AppStoreConnectSection.offersRemove(saving: true), "not mid-save")
+        XCTAssertTrue(AppStoreConnectSection.removeMessage(account: .free).contains("free Apple ID"))
+        XCTAssertEqual(AppStoreConnectSection.removeMessage(account: .paid), AppStoreConnectSection.removeMessage)
+        XCTAssertEqual(AppStoreConnectSection.removeMessage(account: nil), AppStoreConnectSection.removeMessage)
+    }
+
+    func test_the_app_store_connect_key_is_editable_on_a_paid_account() async throws {
+        let nodes = try await settingsPane(account: .paid, reportsKey: true)
+        XCTAssertFalse(texts(nodes).contains(PaidOnly.appStoreConnect))
+        XCTAssertTrue(texts(nodes).contains(AppStoreConnectSection.notSetLine), "\(texts(nodes))")
+        let fields = nodes.filter { $0.role == kAXTextFieldRole }
+        XCTAssertEqual(fields.count, 5)
+        XCTAssertTrue(fields.allSatisfy { $0.enabled != false })
+        XCTAssertNotEqual(button("Choose…", in: nodes)?.enabled, false)
+        XCTAssertEqual(button("Save and test", in: nodes)?.enabled, false, "nothing to send yet")
+    }
+
+    /// The CLI's version, from the `--settings` read the pane already makes.
+    func test_settings_shows_the_cli_version() async throws {
+        let nodes = try await settingsPane(account: .paid, reportsKey: true)
+        XCTAssertTrue(texts(nodes).contains { $0.hasSuffix("graft 1.1.0") }, "\(texts(nodes))")
     }
 
     func test_settings_shows_the_account_and_edits_signing_on_a_paid_account() async throws {
@@ -440,7 +591,7 @@ final class PaidAccountRefusalTests: XCTestCase {
 
     func test_a_refusal_reaches_the_banner_as_the_clis_sentence() async throws {
         let escaped = Self.stderr.replacingOccurrences(of: "'", with: "'\\''")
-        let store = ConfigStore(runner: accountTestShell, cliArgs: ["-c", "true"])
+        let store = ConfigStore(runner: accountTestShell, cliArgs: ["-c", "true"], notify: { _ in })
         do {
             try await store.addAppManual(
                 name: "x", bundleId: "com.example.x", displayName: nil, delivery: .sideload,

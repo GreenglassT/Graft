@@ -103,3 +103,26 @@ def test_the_readme_points_at_the_same_places() -> None:
 
     for url in URLS:
         assert url in text
+
+
+def test_the_certificate_step_says_what_ios_26_does_without_it() -> None:
+    """On iOS 26 a free Apple ID's LiveContainer opens nothing until its
+    certificate is imported from SideStore, and iloader does not do that step
+    although its README says it does. The step says both, in the words the
+    phone and LiveContainer use."""
+    step = config.FREE_DEVICE_STEPS[-1]
+
+    assert "open Settings and tap Import Certificate from SideStore" in step
+    assert "iloader doesn't do this for you" in step
+    assert '"JITLess mode is required since iOS 26"' in step
+
+
+def test_the_free_device_steps_send_nobody_to_terminal() -> None:
+    """The app's first-run done screen shows these as they are (F3 of the 2.0
+    review): no `graft` command, no Terminal, no shell quoting."""
+    import re
+
+    from graft_ipa.config import FREE_DEVICE_STEPS
+
+    for step in FREE_DEVICE_STEPS:
+        assert not re.search(r"\bgraft\s+--|terminal|`", step, re.IGNORECASE), step

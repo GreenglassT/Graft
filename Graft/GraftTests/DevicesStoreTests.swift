@@ -411,7 +411,7 @@ final class DevicesStoreTests: XCTestCase {
     // Refresh button that produced it — the list is an instruction, and leaving
     // it up tells the user to redo what they just did. It is wrong for the 5s
     // poll, which is not something anyone asked for: the escalated load fails
-    // or is cancelled, `pollAndEscalateIfChanged` swallows the throw, and a
+    // or is canceled, `pollAndEscalateIfChanged` swallows the throw, and a
     // locked phone's row *and its retry button* vanish with nothing said.
 
     /// The escalation simply failing.
@@ -454,12 +454,12 @@ final class DevicesStoreTests: XCTestCase {
     /// `ContentView`'s poll lives in `.task(id: controlActiveState)`, which is
     /// torn down the moment the window stops being frontmost — so this is an
     /// ordinary gesture, not an edge case. It has to be checked as
-    /// *cancellation* rather than inferred from the error: cancelling SIGTERMs
+    /// *cancellation* rather than inferred from the error: canceling SIGTERMs
     /// the child and `CLIRunner` reports that as an ordinary non-zero exit,
     /// indistinguishable here from a real failure.
     ///
     /// Asserted against a plain `load()` rather than through the poll, because
-    /// that is where the guard lives and because it covers the other cancelled
+    /// that is where the guard lives and because it covers the other canceled
     /// caller too — `ContentView`'s first unconditional listing.
     @MainActor
     func test_a_cancelled_scan_keeps_the_device_errors_it_could_not_recheck() async throws {

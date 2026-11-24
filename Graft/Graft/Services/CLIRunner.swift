@@ -42,12 +42,12 @@ enum ProcessEnvironment {
     /// Typer and Click rule their *usage* errors into a box the full width of
     /// the console, and read this variable in preference to `COLUMNS`. Pinned
     /// at 80 so widening the message console doesn't turn a flag the installed
-    /// CLI doesn't recognise — which is what a GUI/CLI version skew produces —
+    /// CLI doesn't recognize — which is what a GUI/CLI version skew produces —
     /// into a 512-column horizontal rule, which is the line `summary` would
     /// then quote into the banner as "the last thing it said".
     static let usagePanelColumns = 80
 
-    /// Variables that make Rich (and Typer, which wraps it) write colour
+    /// Variables that make Rich (and Typer, which wraps it) write color
     /// codes into a pipe. `FORCE_COLOR` is a common export — npm, jest and
     /// CI setups set it — and the login-shell merge used to hand it to the
     /// CLI: stderr then arrived as `\e[31merror:\e[0m …`, `CLIFailure.parse`
@@ -167,6 +167,36 @@ enum GraftExecutable {
     /// package name in pyproject.toml, which is what pipx knows it by.
     static let reinstallCommand = "pipx reinstall graft-ipa"
 
+    /// Whether the app runs its own CLI, `Contents/Helpers/graft`, rather than
+    /// looking for one.
+    ///
+    /// Release builds do: the CLI ships inside Graft.app, so the app and the
+    /// CLI it runs are the same version, and a pipx `graft` on PATH can
+    /// neither shadow it nor stand in for it. It is found from the path the
+    /// app was opened at, for as long as it runs (#17): a copy moved while
+    /// open says to reopen it (`BundledCLIFailure.moved`), and one replaced
+    /// in place while open runs the new copy's CLI until it is reopened. Debug builds — Xcode runs, and
+    /// the test suite, which points `TEST_RUNNER_PATH` at a worktree's venv —
+    /// keep the PATH lookup: there is no bundled CLI in a Debug build.
+    #if DEBUG
+    static let preferBundledDefault = false
+    #else
+    static let preferBundledDefault = true
+    #endif
+
+    /// Where Graft.app at `bundleURL` keeps its own CLI: the compiled
+    /// launcher that runs the embedded Python's `-m graft_ipa`.
+    static func bundled(in bundleURL: URL) -> URL {
+        bundleURL.appendingPathComponent("Contents/Helpers/graft")
+    }
+
+    /// `path` is an app's own CLI, so failing to start it means the app is
+    /// missing part of itself: nothing the user installs can fix that, and
+    /// neither "install the CLI" nor "reinstall it with pipx" is the remedy.
+    static func isBundled(_ path: String) -> Bool {
+        path.hasSuffix("/Contents/Helpers/graft")
+    }
+
     /// The first executable `graft` in `ProcessEnvironment.toolDirs`, then in
     /// `path` — the PATH the CLI itself will be given.
     ///
@@ -222,18 +252,31 @@ enum GraftExecutable {
         return (info.st_mode & S_IFMT) != S_IFREG
     }
 
-    /// What the app runs: `locate`'s answer, or, when there is none, where
-    /// pipx installs graft by default.
+    /// What the app runs.
     ///
-    /// That path does not exist, and that is the point: launching it fails,
-    /// and `CLIRunner.RunError` turns the failure into the install command.
-    /// The fallback this replaces was `/usr/bin/env` handed graft's own
-    /// arguments with no `graft` in front of them, so every pane said
-    /// "exit 1: usage: env [-0iv] …" and nothing about what was missing.
+    /// **`preferBundled` (release builds):** `bundled(in: bundleURL)`, always,
+    /// whether or not it is there. Its existence is the launch's business: a
+    /// missing one fails to start, and `SetupNeed.damagedApp` says the app is
+    /// damaged. Falling back to a `graft` on PATH instead would run a CLI of
+    /// some other version, and hide the damage until that one disagreed.
+    ///
+    /// **Otherwise (Debug):** `locate`'s answer, or, when there is none, where
+    /// pipx installs graft by default. That path does not exist, and that is
+    /// the point: launching it fails, and `CLIRunner.RunError` turns the
+    /// failure into the install command. The fallback this replaces was
+    /// `/usr/bin/env` handed graft's own arguments with no `graft` in front of
+    /// them, so every pane said "exit 1: usage: env [-0iv] …" and nothing
+    /// about what was missing.
     static func resolve(
-        home: String, path: String?, isExecutable: (String) -> Bool
+        home: String, path: String?,
+        bundleURL: URL = Bundle.main.bundleURL,
+        preferBundled: Bool = preferBundledDefault,
+        isExecutable: (String) -> Bool
     ) -> URL {
-        locate(home: home, path: path, isExecutable: isExecutable)
+        if preferBundled {
+            return bundled(in: bundleURL)
+        }
+        return locate(home: home, path: path, isExecutable: isExecutable)
             ?? URL(fileURLWithPath: home).appendingPathComponent(".local/bin/graft")
     }
 
@@ -282,7 +325,7 @@ enum GraftExecutable {
 ///
 /// The cost of getting it wrong runs the other way, and
 /// `test_a_healthy_run_does_not_spend_the_drain_grace` is what catches it — if
-/// a drainer ever stops signalling on EOF, every CLI call the app makes pays
+/// a drainer ever stops signaling on EOF, every CLI call the app makes pays
 /// this out instead, silently. Note the waits are sequential across both pipes,
 /// so that regression costs 2× this, measured at 1.04s.
 private let drainGrace: TimeInterval = 0.5
@@ -328,6 +371,11 @@ final class CLIRunner {
         var errorDescription: String? {
             switch self {
             case let .launchFailed(executable, underlying):
+                // The app's own CLI: no install or reinstall reaches it.
+                if GraftExecutable.isBundled(executable) {
+                    return "\(BundledCLIFailure.diagnose(executable: executable).message) "
+                        + "(\(executable) would not start: \(underlying.localizedDescription))"
+                }
                 // Something is there and would not start: installing again is
                 // the advice that loops ("already installed"). Say what is
                 // wrong with the file and how to rebuild it.
@@ -420,12 +468,21 @@ final class CLIRunner {
     /// a Python interpreter's startup, and it is what lets the setup screen's
     /// Check again find a CLI installed after the app opened.
     ///
+    /// A release build skips the lookup and runs its own
+    /// `Contents/Helpers/graft` (`GraftExecutable.resolve`), still in the
+    /// login shell's environment: the CLI's own tools and the user's settings
+    /// come from there.
+    ///
     /// Everything is a parameter so a test can stand in a fake shell answer, a
-    /// fake home and a fake filesystem; `GraftApp` passes none of them.
+    /// fake home and a fake filesystem. `shell` has no default: `.shared`
+    /// starts the user's own login shell, so `GraftApp` names it and a test
+    /// passes its own answer (`NoRealDefaultsTests`).
     static func forApp(
-        shell: ShellEnvironment = .shared,
+        shell: ShellEnvironment,
         process: [String: String] = ProcessInfo.processInfo.environment,
         home: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        bundleURL: URL = Bundle.main.bundleURL,
+        preferBundled: Bool = GraftExecutable.preferBundledDefault,
         isExecutable: @escaping @Sendable (String) -> Bool = GraftExecutable.isRunnableFile
     ) -> CLIRunner {
         CLIRunner(resolving: {
@@ -433,7 +490,8 @@ final class CLIRunner {
                 shell: await shell.value, process: process, home: home
             )
             let executable = GraftExecutable.resolve(
-                home: home, path: env["PATH"], isExecutable: isExecutable
+                home: home, path: env["PATH"], bundleURL: bundleURL,
+                preferBundled: preferBundled, isExecutable: isExecutable
             )
             return Target(executable: executable, environment: env)
         }, refresh: { shell.refresh() })
@@ -471,14 +529,14 @@ final class CLIRunner {
         drainToEOF(err.fileHandleForReading, into: errBox, done: errDone)
 
         return try await launch(
-            proc, out: out, err: err, inPipe: inPipe, stdin: stdin,
+            proc, out: out, err: err, inPipe: inPipe, stdin: stdin, input: nil,
             drained: [outDone, errDone]
         ) { status in
             RunResult(exitCode: status, stdout: outBox.string(), stderr: errBox.string())
         }
     }
 
-    /// The launch protocol both modes share: adopt the process so a cancelled
+    /// The launch protocol both modes share: adopt the process so a canceled
     /// Task can kill it, run it, feed it `stdin`, and resume only once every
     /// drainer has reached EOF — so the result is complete rather than
     /// whatever happened to have arrived when the child exited.
@@ -493,6 +551,7 @@ final class CLIRunner {
         err: Pipe,
         inPipe: Pipe?,
         stdin: String?,
+        input: ChildInput?,
         drained: [DispatchSemaphore],
         makeResult: @escaping @Sendable (Int32) -> RunResult
     ) async throws -> RunResult {
@@ -504,12 +563,15 @@ final class CLIRunner {
                     try? err.fileHandleForWriting.close()
                 }
                 guard handle.adopt(proc) else {
-                    // Cancelled during setup — never launch.
+                    // Canceled during setup — never launch.
+                    input?.close()
                     releaseDrainers()
                     cont.resume(throwing: CancellationError())
                     return
                 }
                 proc.terminationHandler = { p in
+                    // The child is gone: a line sent now is a `false`, not a write.
+                    input?.close()
                     handle.markFinished()
                     let status = p.terminationStatus
                     // Off the termination queue: waiting there would block
@@ -528,7 +590,7 @@ final class CLIRunner {
                     // `-test-iterations` — the child exits and the *caller*
                     // hangs.
                     //
-                    // A cancelled run has no use for the tail of the output
+                    // A canceled run has no use for the tail of the output
                     // anyway, so giving up on it is not a loss. The buffers are
                     // lock-protected (`DataBox`, `EventsBox`), so reading them while a
                     // drainer is still appending is safe — it just yields
@@ -545,7 +607,15 @@ final class CLIRunner {
                     // cancellation that arrived while this was starting was
                     // dropped on the floor until now. See `launched()`.
                     let killedAtLaunch = handle.launched()
-                    if let inPipe, let stdin, !killedAtLaunch {
+                    if let input, let inPipe {
+                        // A two-way exchange: the caller writes as the child asks.
+                        if killedAtLaunch {
+                            input.close()
+                            try? inPipe.fileHandleForWriting.close()
+                        } else {
+                            input.attach(inPipe.fileHandleForWriting)
+                        }
+                    } else if let inPipe, let stdin, !killedAtLaunch {
                         let writer = inPipe.fileHandleForWriting
                         // Append a newline so the CLI's `sys.stdin.readline()` returns —
                         // without it the subprocess hangs waiting for input.
@@ -557,10 +627,15 @@ final class CLIRunner {
                         // catchable from Swift — the app would crash rather
                         // than fail. Only reachable since `launched()` began
                         // killing here, so the fix that closed one hole opened
-                        // this one; `setP12Password` and `setSSHPassword` are
-                        // the callers that pass stdin.
-                        if let data = (stdin + "\n").data(using: .utf8) {
+                        // this one; `setP12Password`, `setSSHPassword` and
+                        // `AccountSetupStore` are the callers that pass stdin.
+                        if var data = (stdin + "\n").data(using: .utf8) {
                             writer.write(data)
+                            // The one buffer of the secret this method made (a
+                            // .p12 password: `AccountSetupStore`) is zeroed, not
+                            // left in freed memory. The caller's String is the
+                            // caller's to drop; Swift can't promise to wipe one.
+                            data.resetBytes(in: 0..<data.count)
                         }
                         try? writer.close()
                     } else if let inPipe {
@@ -570,6 +645,7 @@ final class CLIRunner {
                     // The child never started, so terminationHandler won't
                     // fire; resume the throw here.
                     handle.markFinished()
+                    input?.close()
                     releaseDrainers()
                     cont.resume(throwing: RunError.launchFailed(
                         executable: proc.executableURL?.path ?? "graft", underlying: error
@@ -701,8 +777,8 @@ enum CLIFailure {
     ///
     /// Terminal escape sequences are removed first. The environment filter
     /// (`ProcessEnvironment.colourVariables`) is what keeps Rich from
-    /// colouring a pipe; this is the backstop for whatever it misses — an
-    /// older app's CLI, a tool that colours regardless — because one escape in
+    /// coloring a pipe; this is the backstop for whatever it misses — an
+    /// older app's CLI, a tool that colors regardless — because one escape in
     /// front of `error:` is enough to lose the parse, and every surface built
     /// on these lines would otherwise paste `\e[31m` into a SwiftUI `Text`.
     static func stderrLines(_ stderr: String) -> [String] {
@@ -712,7 +788,7 @@ enum CLIFailure {
             .filter { !$0.isEmpty }
     }
 
-    /// `text` without ANSI/VT escape sequences: CSI (`ESC [ … final`, colours
+    /// `text` without ANSI/VT escape sequences: CSI (`ESC [ … final`, colors
     /// and cursor moves), OSC (`ESC ] … BEL` or `ESC ] … ESC \`, which is how
     /// Rich writes a hyperlink), and the two-byte `ESC <char>` forms. A lone
     /// ESC at the very end goes too. Everything else is kept byte for byte.
@@ -919,9 +995,10 @@ extension CLIRunner.RunResult {
 /// empty stderr and some threw a blank one.
 extension CLIRunner {
     /// Run a one-shot command and decode its stdout.
-    /// Throws `CLIError.exited` if the CLI exits non-zero.
-    func runEvents(_ args: [String], failing doing: String) async throws -> [BuildEvent] {
-        let result = try await runOnce(arguments: args)
+    /// Throws `CLIError.exited` if the CLI exits non-zero. `stdin` is written
+    /// as one line and closed (`runOnce`): a secret goes there, never in `args`.
+    func runEvents(_ args: [String], failing doing: String, stdin: String? = nil) async throws -> [BuildEvent] {
+        let result = try await runOnce(arguments: args, stdin: stdin)
         try Self.checkExit(result.exitCode, stderr: result.stderr, doing: doing)
         return result.stdout.buildEvents()
     }
@@ -957,17 +1034,53 @@ extension CLIRunner {
     /// are hops onto the MainActor and can land *after* this returns, so the
     /// result is still read from `result.events`, and a caller whose progress
     /// state must not outlive the call has to guard against a late one.
+    ///
+    /// `refusal` reads a *failed* run's events before its stderr becomes the
+    /// error: a refusal the CLI also reported as an event (C-UNVERIFIED's
+    /// `appstore-refused`) is thrown as the caller's own error, so a button
+    /// can be offered for it without matching the message. A successful run
+    /// never consults it.
+    ///
+    /// `input` keeps the child's stdin open for lines sent while it runs
+    /// (`ChildInput`: `--appstore-login`'s 2FA code). It isn't function-typed,
+    /// so an unlabeled trailing closure still binds to `onEvent`.
     func streamEvents(
         _ args: [String],
         failing doing: String,
+        refusal: Refusal = .none,
+        input: ChildInput? = nil,
         onEvent: @escaping @MainActor (BuildEvent) -> Void = { _ in }
     ) async throws -> [BuildEvent] {
         // Read `result.events` rather than the onEvent callback so we don't
         // race the trailing MainActor Tasks scheduled from terminationHandler.
-        let result = try await stream(arguments: args, onEvent: onEvent)
+        let result = try await stream(arguments: args, input: input, onEvent: onEvent)
         try Task.checkCancellation()
+        if result.exitCode != 0, let refused = refusal.error(result.events) { throw refused }
         try Self.checkExit(result.exitCode, stderr: result.stderr, doing: doing)
         return result.events
+    }
+
+    /// What `streamEvents` throws for a failed run whose events carry a
+    /// refusal, in place of its stderr: `error` reads the events, and nil
+    /// means the stderr stands.
+    ///
+    /// A type of its own, not a closure parameter, because of where it sits.
+    /// `onEvent` is `streamEvents`' trailing closure, and a defaulted
+    /// function-typed parameter in front of it is one an unlabeled trailing
+    /// closure binds to under forward-scan matching (SE-0286):
+    /// `streamEvents(args, failing: x) { event in … }` compiled only through
+    /// the deprecated backward scan, with a warning, and a Swift 6 build reads
+    /// that closure as the refusal. Forward scan skips a parameter that is not
+    /// function-like, so the trailing closure is always `onEvent`.
+    struct Refusal {
+        let error: ([BuildEvent]) -> Error?
+
+        init(_ error: @escaping ([BuildEvent]) -> Error?) {
+            self.error = error
+        }
+
+        /// Nothing in the events is a refusal: every failure is its stderr.
+        static var none: Refusal { Refusal { _ in nil } }
     }
 
     private static func checkExit(_ code: Int32, stderr: String, doing: String) throws {
@@ -1031,22 +1144,34 @@ extension CLIStore {
         succeeded: String,
         pick: (BuildEvent) -> T?
     ) async throws -> T? {
-        let record = try await runner.run(args, failing: doing, pick: pick)
+        try await mutateEvents(args, failing: doing, succeeded: succeeded).compactMap(pick).first
+    }
+
+    /// As `mutate`, handing back every event the call wrote, for a caller
+    /// that wants its warnings as well as its record.
+    func mutateEvents(
+        _ args: [String],
+        failing doing: String,
+        succeeded: String
+    ) async throws -> [BuildEvent] {
+        let events = try await runner.runEvents(args, failing: doing)
         do {
             try await reload()
         } catch {
             lastError = "\(succeeded), but couldn't refresh the list: "
                 + error.localizedDescription
         }
-        return record
+        return events
     }
 }
 
 extension CLIRunner {
     /// Run the command and call `onEvent` for each JSON-Lines event on stdout.
-    /// Returns when the subprocess exits.
+    /// Returns when the subprocess exits. With an `input`, the child's stdin
+    /// is a pipe the caller writes to as it runs (`ChildInput`).
     func stream(
         arguments: [String],
+        input: ChildInput? = nil,
         onEvent: @escaping @MainActor (BuildEvent) -> Void
     ) async throws -> RunResult {
         let target = await self.target()
@@ -1059,6 +1184,10 @@ extension CLIRunner {
         let err = Pipe()
         proc.standardOutput = out
         proc.standardError = err
+        // Only with an input: otherwise the child inherits the app's
+        // stdin (/dev/null for a GUI app), as it always has.
+        let inPipe: Pipe? = input == nil ? nil : Pipe()
+        if let inPipe { proc.standardInput = inPipe }
 
         // stdout gets its own loop rather than `drainToEOF` because it splits
         // and decodes as it goes — that incremental delivery is the whole
@@ -1096,7 +1225,7 @@ extension CLIRunner {
         drainToEOF(err.fileHandleForReading, into: stderrBox, done: errDone)
 
         return try await launch(
-            proc, out: out, err: err, inPipe: nil, stdin: nil,
+            proc, out: out, err: err, inPipe: inPipe, stdin: nil, input: input,
             drained: [outDone, errDone]
         ) { status in
             RunResult(
@@ -1131,12 +1260,12 @@ private func drainToEOF(_ handle: FileHandle, into box: DataBox, done: DispatchS
     }
 }
 
-/// Owns a spawned `Process` so a cancelled Task can actually stop it.
+/// Owns a spawned `Process` so a canceled Task can actually stop it.
 ///
 /// `Process` on its own isn't enough. A cancellation handler runs on an
 /// arbitrary thread and can arrive at any point: before `run()`, mid-flight,
 /// or after the child already exited and was reaped. Calling `terminate()` on
-/// a process that was never launched traps, and signalling a dead pid risks
+/// a process that was never launched traps, and signaling a dead pid risks
 /// hitting whatever the OS assigned that number next. This serializes those
 /// three states behind one lock so each case is handled explicitly.
 private final class ProcessHandle: @unchecked Sendable {
@@ -1151,9 +1280,9 @@ private final class ProcessHandle: @unchecked Sendable {
     /// then both see `cancelled && !finished` and the same non-nil `process`.
     /// That ran the whole of `stop()` twice — two descendant walks, two
     /// `terminate()`s, and two SIGKILL timers, doubling the exposure of the
-    /// escalation and signalling a pid Foundation may already have reaped.
+    /// escalation and signaling a pid Foundation may already have reaped.
     ///
-    /// **Set only when a stop actually signalled**, never merely when one was
+    /// **Set only when a stop actually signaled**, never merely when one was
     /// attempted. Setting it on the attempt reintroduces the leak this whole
     /// mechanism exists to prevent: in the launch window `cancel()` finds a
     /// non-nil `process` that is not yet running, `stop()` returns having done
@@ -1165,7 +1294,7 @@ private final class ProcessHandle: @unchecked Sendable {
 
     /// Take ownership just before launching. Returns false when cancellation
     /// already arrived, in which case the caller must not launch at all —
-    /// otherwise a Task cancelled during setup still spawns a subprocess that
+    /// otherwise a Task canceled during setup still spawns a subprocess that
     /// nobody is waiting on.
     func adopt(_ proc: Process) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -1206,7 +1335,7 @@ private final class ProcessHandle: @unchecked Sendable {
     /// test, the full sleep to the tenth of a second, under parallel load.
     ///
     /// **And it is covered, after two attempts that were not.** Racing it does
-    /// not work: cancelling the `Task` immediately lands *before* the body
+    /// not work: canceling the `Task` immediately lands *before* the body
     /// starts, so `adopt` refuses and nothing is forked — eight iterations
     /// spawning `sleep 30` finished in 0.001s and stayed green with this call
     /// deleted. That test was thrown away rather than kept.
@@ -1233,7 +1362,7 @@ private final class ProcessHandle: @unchecked Sendable {
         stopIssued = true
     }
 
-    /// Returns whether it actually signalled anything.
+    /// Returns whether it actually signaled anything.
     @discardableResult
     private static func stop(_ victim: Process?) -> Bool {
         guard let victim, victim.isRunning else { return false }
@@ -1245,7 +1374,7 @@ private final class ProcessHandle: @unchecked Sendable {
         for pid in orphans { kill(pid, SIGTERM) }
 
         // zsign and cyan spend long stretches in tight native loops and can be
-        // slow to notice a signal, and the whole point of cancelling is that
+        // slow to notice a signal, and the whole point of canceling is that
         // the work is no longer wanted. Escalate rather than leaving the CPU
         // spinning on output nobody will read. `isRunning` is re-checked under
         // Process's own bookkeeping, which holds the pid until the child is
@@ -1275,11 +1404,11 @@ private final class ProcessHandle: @unchecked Sendable {
 
     /// Every descendant of `pid`, deepest last.
     ///
-    /// **Signalling the child alone is not enough, and the failure is silent.**
+    /// **Signaling the child alone is not enough, and the failure is silent.**
     /// A `graft` invocation spawns `cyan` and `zsign`; terminating the
     /// CLI leaves those running, still working and still holding the write end
     /// of the pipe this runner is draining. No EOF arrives, so `stream` never
-    /// returns and the caller waits out work it already cancelled.
+    /// returns and the caller waits out work it already canceled.
     ///
     /// Measured directly: `/bin/sh -c 'printf …; sleep 30; …'` SIGTERMed at the
     /// shell leaves `sleep` alive and re-parented. That is exactly the shape of
@@ -1287,7 +1416,7 @@ private final class ProcessHandle: @unchecked Sendable {
     /// intermittent failure was the stream never returning inside 5s.
     ///
     /// Best effort by construction: a pid can exit between listing and
-    /// signalling, and `kill` on a dead pid is a harmless ESRCH. Nothing here
+    /// signaling, and `kill` on a dead pid is a harmless ESRCH. Nothing here
     /// waits on the result.
     ///
     /// **And best effort is not the same as complete.** A child that has not
@@ -1314,7 +1443,7 @@ private final class ProcessHandle: @unchecked Sendable {
 /// The processes under a pid, for stopping what a child started.
 enum ProcessTree {
     /// Every descendant of `pid`, deepest last. See `ProcessHandle` for why
-    /// this is best effort: a pid can exit between listing and signalling.
+    /// this is best effort: a pid can exit between listing and signaling.
     static func descendants(of pid: pid_t) -> [pid_t] {
         var found: [pid_t] = []
         var frontier = [pid]

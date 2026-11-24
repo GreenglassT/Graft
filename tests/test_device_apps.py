@@ -1,7 +1,7 @@
 """Classifying installed apps by whether they are worth decrypting, and
 decorating the listing with the phone's own home-screen icons.
 
-The one judgement here that a test can pin without a device is `_is_encrypted`,
+The one judgment here that a test can pin without a device is `_is_encrypted`,
 and it is the load-bearing one: an App Store app is FairPlay-encrypted and is
 what a dump tool targets, while a sideload is already decrypted and dumping it
 is a no-op. The signal was chosen from real `get_apps` output — the fields the
@@ -181,7 +181,7 @@ def test_a_placeholder_answer_is_never_cached(temp_config_env: Path) -> None:
     """The regression test for the finding behind `artwork._ABSENT_BUNDLE_ID`.
 
     Measured on a real device (iPhone 15 Pro, iOS 26.1): SpringBoard answers an
-    unrecognised bundle id with a generic placeholder PNG, not with empty data —
+    unrecognized bundle id with a generic placeholder PNG, not with empty data —
     Example (real, but LiveContainer-delivered and so not a top-level install)
     and two invented ids all came back byte-identical, 11,598 bytes, same
     SHA-256. `_looks_like_an_image` cannot catch that; the placeholder is a
@@ -189,7 +189,7 @@ def test_a_placeholder_answer_is_never_cached(temp_config_env: Path) -> None:
     cannot exist can.
 
     What is at stake is stickiness: caching the placeholder would stamp a
-    `source: "device"` sidecar over it and serve a grey square as that app's
+    `source: "device"` sidecar over it and serve a gray square as that app's
     icon forever, which is worse than the letter tile it replaced — that one at
     least names the app. So this asserts the absence *on disk* as well as in the
     returned dict.

@@ -138,7 +138,7 @@ final class SymbolsTests: XCTestCase {
     ///
     /// **It bans the three argument labels, not a literal shaped like a glyph
     /// name**, and that is the whole design of this scan. A flag has `--` in
-    /// front of it, so `CLIContractTests` can recognise one on sight; a symbol
+    /// front of it, so `CLIContractTests` can recognize one on sight; a symbol
     /// name is `"square"` or `"lock"` — indistinguishable from the ordinary
     /// strings these files are full of ("attached", "package", "failed"). The
     /// argument labels are the narrow gate every one of them has to pass
@@ -164,18 +164,7 @@ final class SymbolsTests: XCTestCase {
     /// nothing about `Services/` or `GraftApp.swift` that stops one being
     /// drawn there, and scanning everything costs a directory walk.
     func test_no_symbol_literal_escapes_the_vocabulary() throws {
-        let root = try SourceScan.appSources()
-        let files = try SourceScan.swiftSources(under: root)
-        XCTAssertFalse(files.isEmpty, "no Swift sources under \(root.path)")
-
-        var offenders: [String] = []
-        for file in files {
-            let shown = file.path.replacingOccurrences(of: root.path + "/", with: "")
-            guard !Self.vocabularyFiles.contains(shown) else { continue }
-            for line in try SourceScan.codeLines(of: file) where Self.symbolAPI.matches(line.text) {
-                offenders.append("\(shown):\(line.number)")
-            }
-        }
+        let offenders = try Self.offenders(of: Self.symbolAPI, under: SourceScan.appSources())
         XCTAssertTrue(
             offenders.isEmpty,
             """
@@ -228,18 +217,7 @@ final class SymbolsTests: XCTestCase {
     ///   the CLI reports; those are files, not names, and are none of this
     ///   scan's business.
     func test_no_asset_name_escapes_the_vocabulary() throws {
-        let root = try SourceScan.appSources()
-        let files = try SourceScan.swiftSources(under: root)
-        XCTAssertFalse(files.isEmpty, "no Swift sources under \(root.path)")
-
-        var offenders: [String] = []
-        for file in files {
-            let shown = file.path.replacingOccurrences(of: root.path + "/", with: "")
-            guard !Self.vocabularyFiles.contains(shown) else { continue }
-            for line in try SourceScan.codeLines(of: file) where Self.assetAPI.matches(line.text) {
-                offenders.append("\(shown):\(line.number)")
-            }
-        }
+        let offenders = try Self.offenders(of: Self.assetAPI, under: SourceScan.appSources())
         XCTAssertTrue(
             offenders.isEmpty,
             """
@@ -253,6 +231,64 @@ final class SymbolsTests: XCTestCase {
             loaded from a path rather than named.
             """
         )
+    }
+
+    /// The scan both tests above run: every line under `root` that `api`
+    /// matches, outside the two vocabulary files, as `<path below root>:<line>`.
+    ///
+    /// One function, taking its root, so a test can run it over a tree of its
+    /// own (review #32): the exemption is keyed on the path below the root,
+    /// and only a root reached through a symlink shows whether that path came
+    /// from `SourceScan.relativePath` or from stripping `root.path`.
+    static func offenders(of api: NSRegularExpression, under root: URL) throws -> [String] {
+        let files = try SourceScan.swiftSources(under: root)
+        XCTAssertFalse(files.isEmpty, "no Swift sources under \(root.path)")
+
+        var offenders: [String] = []
+        for file in files {
+            let shown = SourceScan.relativePath(of: file, under: root)
+            guard !vocabularyFiles.contains(shown) else { continue }
+            for line in try SourceScan.codeLines(of: file) where api.matches(line.text) {
+                offenders.append("\(shown):\(line.number)")
+            }
+        }
+        return offenders
+    }
+
+    /// Both scans, over a tree reached through a symlink, as a checkout under
+    /// `/tmp` is (review #32).
+    ///
+    /// `SourceScanPathTests` checks `SourceScan.relativePath` alone; nothing
+    /// checked that the scans call it. In a checkout with no symlink on its
+    /// path, stripping `root.path` (the expression still in `CLIContractTests`
+    /// for display) gives the same names, and every test passed; through a
+    /// symlink, the enumerator's resolved paths kept the link's spelling, the
+    /// two vocabulary files stopped matching their exemption, and both scans
+    /// reported them. Here each vocabulary file draws both ways, so neither
+    /// scan can pass by skipping it for its own reason, and one view per scan
+    /// is a real offender, so neither can pass by reporting nothing.
+    func test_both_scans_name_files_below_a_symlinked_root() throws {
+        let fm = FileManager.default
+        let scratch = fm.temporaryDirectory.appendingPathComponent("symbolscan-\(UUID().uuidString)")
+        let real = scratch.appendingPathComponent("real")
+        defer { try? fm.removeItem(at: scratch) }
+        let tree = [
+            Self.vocabularyFile: "Image(systemName: name)\nImage(name)\n",
+            Self.markVocabularyFile: "Image(systemName: name)\nImage(name)\n",
+            "Views/Row.swift": "Image(systemName: \"trash\")\nImage(\"debPackage\")\n",
+        ]
+        for (path, text) in tree {
+            let file = real.appendingPathComponent("Graft").appendingPathComponent(path)
+            try fm.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.write(to: file, atomically: true, encoding: .utf8)
+        }
+        let link = scratch.appendingPathComponent("link")
+        try fm.createSymbolicLink(at: link, withDestinationURL: real)
+        // The link in the middle, as `/tmp` is in `/tmp/…/Graft`.
+        let root = link.appendingPathComponent("Graft")
+
+        XCTAssertEqual(try Self.offenders(of: Self.symbolAPI, under: root), ["Views/Row.swift:1"])
+        XCTAssertEqual(try Self.offenders(of: Self.assetAPI, under: root), ["Views/Row.swift:2"])
     }
 
     /// Every way an image can be built from a *name*, minus the one way it
@@ -382,6 +418,27 @@ enum SourceScan {
             .sorted { $0.path < $1.path }
     }
 
+    /// `file`'s path below `root`, both compared as real paths.
+    ///
+    /// `root` comes from `#filePath`, which keeps whatever spelling the project
+    /// was opened through, while the enumerator hands back resolved URLs. So
+    /// under `/tmp` (really `/private/tmp`), or any symlinked component,
+    /// stripping `root.path` left `/privateDesignSystem/Symbols.swift`, and the
+    /// exemptions keyed on `DesignSystem/Symbols.swift` stopped matching.
+    /// `realpath(3)` rather than `resolvingSymlinksInPath()`, which strips a
+    /// leading `/private` and so resolves the wrong way here.
+    static func relativePath(of file: URL, under root: URL) -> String {
+        let base = realPath(root) + "/"
+        let path = realPath(file)
+        return path.hasPrefix(base) ? String(path.dropFirst(base.count)) : path
+    }
+
+    static func realPath(_ url: URL) -> String {
+        guard let resolved = realpath(url.path, nil) else { return url.standardizedFileURL.path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
     /// Source lines with `//` comments dropped, so a doc comment that explains
     /// why `systemName:` is banned is not itself an offender. Three files
     /// discuss it in prose — `Symbols.swift`, `Marks.swift` and
@@ -392,5 +449,54 @@ enum SourceScan {
             .enumerated()
             .map { (number: $0.offset + 1, text: $0.element) }
             .filter { !$0.text.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+    }
+}
+
+
+/// Review #35: the exemptions in `SymbolsTests` are keyed on paths below the
+/// app sources, and a checkout reached through a symlink (`/tmp` is one)
+/// made every file's path come out with the link's spelling left on it.
+final class SourceScanPathTests: XCTestCase {
+    func test_a_file_reached_through_a_symlinked_root_is_named_from_the_root() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sourcescan-\(UUID().uuidString)")
+        let real = scratch.appendingPathComponent("real")
+        let link = scratch.appendingPathComponent("link")
+        try FileManager.default.createDirectory(
+            at: real.appendingPathComponent("Graft/DesignSystem"), withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        try "let x = 1\n".write(
+            to: real.appendingPathComponent("Graft/DesignSystem/Symbols.swift"),
+            atomically: true, encoding: .utf8
+        )
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        // The link in the middle, as `/tmp` is in `/tmp/…/Graft`.
+        let root = link.appendingPathComponent("Graft")
+
+        let files = try SourceScan.swiftSources(under: root)
+
+        XCTAssertEqual(files.count, 1, "premise: the walk reaches the file")
+        XCTAssertNotEqual(files.first?.path.replacingOccurrences(of: root.path + "/", with: ""),
+                          "DesignSystem/Symbols.swift",
+                          "premise: the enumerator hands back the resolved spelling")
+        XCTAssertEqual(files.map { SourceScan.relativePath(of: $0, under: root) },
+                       ["DesignSystem/Symbols.swift"])
+    }
+
+    func test_the_temp_directory_s_own_symlink_does_not_leak_into_the_name() throws {
+        let scratch = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sourcescan-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let file = scratch.appendingPathComponent("Marks.swift")
+        try "let y = 2\n".write(to: file, atomically: true, encoding: .utf8)
+        // `/var` -> `/private/var`: the same mismatch `/tmp` makes.
+        let spelled = URL(fileURLWithPath: scratch.path.replacingOccurrences(of: "/private/var/", with: "/var/"))
+
+        XCTAssertEqual(SourceScan.relativePath(of: file, under: spelled), "Marks.swift")
+        XCTAssertEqual(SourceScan.relativePath(
+            of: URL(fileURLWithPath: SourceScan.realPath(file)), under: spelled
+        ), "Marks.swift")
     }
 }

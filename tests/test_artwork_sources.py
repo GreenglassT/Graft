@@ -145,7 +145,7 @@ def test_a_bare_string_declared_icon_is_not_iterated_char_by_char(tmp_path: Path
     single-character prefix set `{"A", "p", "I", "c", "o", "n", "6", "0",
     "x"}`, which matches nearly every PNG in the root — including the
     9,000-byte decoy here — and hands `max()` whichever one is biggest. The
-    correct behaviour is a clean miss.
+    correct behavior is a clean miss.
     """
     info = {
         "CFBundleIdentifier": "com.example.App",
@@ -323,7 +323,7 @@ def test_a_declared_icon_that_is_not_an_image_returns_none(tmp_path: Path) -> No
     declaring a legal prefix — so without the sniff the rung's docstring
     promise of a "PNG" is only ever true by the goodwill of an archive this
     project did not write, and the one it deliberately picks the *largest*
-    match from. `resolve` sniffs again afterwards, which makes this defence in
+    match from. `resolve` sniffs again afterward, which makes this defense in
     depth rather than the only guard; two of three rungs validating was the
     incoherent state.
     """

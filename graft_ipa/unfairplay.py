@@ -1,10 +1,14 @@
 """Decrypt an App Store IPA through the user's own UnfairPlay build.
 
-UnfairPlay (github.com/DrWhax/unfairplay, v0.4.0, built from source, no network
-code) decrypts a FairPlay-encrypted IPA offline with a model recovered once from
-this Mac's App Store enrollment. That enrollment — `sudo unfairplay setup` — is
-the user's to run, in Terminal, and this module never does: it only runs
-`--version` and `decrypt`, and reports whether a model exists.
+UnfairPlay (github.com/DrWhax/unfairplay, v0.4.0, no network code) decrypts
+a FairPlay-encrypted IPA offline, with a model recovered once from this
+Mac's App Store enrollment. That enrollment, `unfairplay setup` as root, is
+never run from here. The CLI only builds its script
+(`enrollment.enroll_command`); Graft.app runs it behind macOS's
+administrator prompt, or a Terminal user runs it with sudo, and the model is
+moved into place as the user (`enrollment.finish`). This module runs
+`--version` and `decrypt`, and says whether a model this user can use
+exists (`model_state`).
 
 The model decrypts **any** IPA personalized to the same Apple ID, including
 apps Apple does not allow on the Mac — which is the whole reason this path
@@ -20,17 +24,21 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import shlex
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from . import install_hints
+from . import install_hints, tools
 from .child_env import child_env
 from .errors import AppStoreError
+
+if TYPE_CHECKING:
+    from .config import AppStoreToolsConfig
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -54,19 +62,46 @@ def present(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
+def resolve_tool(cfg: AppStoreToolsConfig) -> tools.Resolved:
+    """The UnfairPlay to run (`tools.resolve`): the user's own choice, then
+    Graft.app's bundled copy, then the default build location, then PATH.
+
+    `path` is never None: when nothing is found it is `cfg.unfairplay`, the
+    place the build instructions put it.
+    """
+    explicit = "unfairplay" in cfg.explicit
+    return tools.resolve(
+        "unfairplay", configured=cfg.unfairplay if explicit else None, default=cfg.unfairplay
+    )
+
+
 #: What goes in the enrollment command's `--app` path: said in words, since
 #: which app it is is the user's choice.
 APP_PLACEHOLDER = "<an iPhone/iPad app from the Mac App Store, opened once>"
 
+#: How a Terminal user starts enrolling this Mac: it prints the script
+#: (`enrollment.enroll_command`) to run with `sudo /bin/sh`, after which
+#: `--appstore-enroll-finish` moves the model in. Graft never prints a
+#: command that runs anything of Graft.app's as root itself: UnfairPlay as
+#: root runs only inside that script, from root's own checked copy.
+ENROLL_COMMAND = f'graft --appstore-enroll-command --app "/Applications/{APP_PLACEHOLDER}.app"'
 
-def setup_command(path: Path) -> str:
-    """What to type in Terminal to enroll this Mac. Never run from here.
+#: The model decrypts only IPAs personalized to the Apple ID the Mac App
+#: Store installed the enrolling app with, and Graft downloads with the
+#: Apple ID signed in to Graft: the two must be the same.
+SAME_APPLE_ID = "use the same Apple ID in Graft as in the Mac App Store"
 
-    Needs root and an iPhone/iPad app installed on this Mac from the App Store
-    under the same Apple ID, and opened once; which app is the user's choice,
-    so the path names what it has to be rather than guessing one.
-    """
-    return f'sudo {shlex.quote(str(path))} setup --app "/Applications/{APP_PLACEHOLDER}.app"'
+#: The same steps in Terminal, set up for the first time or again.
+_ENROLL_IN_TERMINAL = (
+    f"in Terminal, `{ENROLL_COMMAND}`, then run the script it prints with `sudo /bin/sh` and "
+    "`graft --appstore-enroll-finish <the folder it prints>`"
+)
+#: Where to set up decryption, in Graft.app and in Terminal, on a Mac that
+#: isn't enrolled yet ...
+SET_UP_DECRYPTION = f"in Graft.app, Settings › App Store › Set Up Decryption…; {_ENROLL_IN_TERMINAL}"
+#: ... and on one that is, where Settings' button reads "Set Up Again…"
+#: (AppStoreSettingsSection): a decrypt only fails after enrollment.
+SET_UP_AGAIN = f"in Graft.app, Settings › App Store › Set Up Again…; {_ENROLL_IN_TERMINAL}"
 
 
 def build_steps(path: Path) -> list[str]:
@@ -106,12 +141,66 @@ def version(path: Path, *, run: Runner = subprocess.run) -> str | None:
     return match.group(1) if match else None
 
 
-def enrolled(model_dir: Path) -> bool:
-    """Whether `model_dir` holds a recovered enrollment model (`*.bin`)."""
+@dataclass(frozen=True)
+class ModelState:
+    """Whether a model this user can use exists in the model folder, and if
+    one exists but can't be used, why (`problem`)."""
+
+    enrolled: bool
+    problem: str | None = None
+
+
+def _owner(uid: int) -> str:
     try:
-        return any(p.suffix == ".bin" and p.is_file() for p in model_dir.iterdir())
-    except OSError:
-        return False
+        return pwd.getpwuid(uid).pw_name
+    except KeyError:
+        return f"user {uid}"
+
+
+_AGAIN = "set up decryption again (Graft: Settings › App Store), which saves a model that is yours"
+
+
+def model_state(model_dir: Path, *, uid: int | None = None) -> ModelState:
+    """A `*.bin` in `model_dir` that this user owns and can read.
+
+    UnfairPlay run as root with no `SUDO_UID` (the macOS administrator
+    prompt sets none: Task 0, S2.3) leaves its model root's, in a root-owned
+    folder, mode 0700 (S2.1). Graft's own enrollment never lets root write
+    here: root works in a folder of its own, and the model is moved in
+    afterward, as this user (`enrollment.finish`). A model someone else owns
+    is not enrolled: `unfairplay decrypt`, running as this user, couldn't
+    open it.
+    """
+    uid = os.getuid() if uid is None else uid
+    try:
+        models = [
+            p for p in model_dir.iterdir()
+            if p.suffix == ".bin" and p.is_file() and not p.is_symlink()
+        ]
+    except FileNotFoundError:
+        return ModelState(False)
+    except PermissionError:
+        return ModelState(False, f"you can't open {model_dir}: {_AGAIN}")
+    except OSError as e:
+        return ModelState(False, f"couldn't read {model_dir}: {e.strerror}")
+    if not models:
+        return ModelState(False)
+    folder_owner = model_dir.stat().st_uid
+    if folder_owner != uid:
+        return ModelState(False, f"{model_dir} belongs to {_owner(folder_owner)}, not you: {_AGAIN}")
+    for model in models:
+        if model.stat().st_uid == uid and os.access(model, os.R_OK):
+            return ModelState(True)
+    return ModelState(
+        False,
+        f"the model in {model_dir} belongs to {_owner(models[0].stat().st_uid)} or you "
+        f"can't read it: {_AGAIN}",
+    )
+
+
+def enrolled(model_dir: Path) -> bool:
+    """Whether `model_dir` holds a model this user can use (`model_state`)."""
+    return model_state(model_dir).enrolled
 
 
 def _report_json(stdout: str) -> dict[str, Any] | None:
@@ -166,7 +255,7 @@ def decrypt(
     `--report` sends the private report where the caller asked — a temp dir it
     is about to delete. Without it the report lands *beside the input*, which
     for a dropped IPA is the user's own folder. A build that ignores the flag
-    would still do that, so the default sibling is removed afterwards — but
+    would still do that, so the default sibling is removed afterward — but
     only if this run created it.
     """
     if not present(path):
@@ -198,8 +287,11 @@ def decrypt(
         raise AppStoreError(
             f"UnfairPlay couldn't decrypt {input_ipa.name}: {reason}",
             hint=(
-                "the IPA must be personalized to the same Apple ID this Mac "
-                "enrolled with — `unfairplay doctor` in Terminal can say more"
+                "this Mac's decryption works only for apps downloaded with the Apple ID "
+                "that installed the Mac App Store app it was set up with, so "
+                f"{SAME_APPLE_ID}, or set decryption up again with an app installed from "
+                "the Mac App Store under the same Apple ID that Graft signs in with "
+                f"({SET_UP_AGAIN}). `unfairplay doctor` in Terminal can say more"
             ),
         )
     parsed = _report_json(proc.stdout)

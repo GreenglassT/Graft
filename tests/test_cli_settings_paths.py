@@ -93,9 +93,12 @@ def test_the_configs_own_directories_win(
 
 def test_the_settings_themselves_are_unchanged(temp_config_env: Path) -> None:
     """Additive: the five settings are still top-level, and beside them only
-    `paths` and the two fields that say whether the file parsed."""
+    `paths`, the two fields that say whether the file parsed, and the App
+    Store Connect key's description (`app_store_connect`)."""
     event = _settings_event(temp_config_env)
-    assert set(event) == {"type", "paths", "parse_error", "paths_are_defaults", *SETTINGS}
+    assert set(event) == {
+        "type", "paths", "parse_error", "paths_are_defaults", "app_store_connect", "graft_version", *SETTINGS,
+    }
 
 
 def test_paths_are_reported_for_a_config_too_broken_to_load(temp_config_env: Path) -> None:
@@ -130,7 +133,11 @@ def test_paths_are_reported_for_a_config_that_does_not_parse(
 
     assert [e["type"] for e in events] == ["settings"], "carried by the event, not a log line"
     (event,) = events
-    assert set(event) == {"type", "paths", "parse_error", "paths_are_defaults", *SETTINGS}
+    # No `app_store_connect`: a present null would say "no key set", which an
+    # unreadable config does not; absent says this run cannot tell.
+    assert set(event) == {
+        "type", "paths", "parse_error", "paths_are_defaults", "graft_version", *SETTINGS,
+    }
     assert all(event[key] is None for key in SETTINGS)
     assert "failed to parse" in event["parse_error"]
     assert "\n" not in event["parse_error"], "one line"

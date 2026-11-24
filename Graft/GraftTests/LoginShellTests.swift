@@ -166,7 +166,7 @@ final class LoginShellTests: XCTestCase {
         export GRAFT_EXAMPLE_FROM_RC=yes
         export UNFAIRPLAY_MODEL_DIR=/x/models
         """)
-        let env = await LoginShell.resolve(shell: shell, timeout: 10)
+        let env = await LoginShell.resolve(shell: shell, timeout: 10, run: LoginShell.runProcess)
         XCTAssertEqual(env?["GRAFT_EXAMPLE_FROM_RC"], "yes")
         XCTAssertEqual(env?["UNFAIRPLAY_MODEL_DIR"], "/x/models")
     }
@@ -174,7 +174,7 @@ final class LoginShellTests: XCTestCase {
     func test_a_shell_that_hangs_is_abandoned_at_the_timeout() async throws {
         let shell = try fakeShell(prelude: "sleep 30")
         let started = Date()
-        let env = await LoginShell.resolve(shell: shell, timeout: 0.5)
+        let env = await LoginShell.resolve(shell: shell, timeout: 0.5, run: LoginShell.runProcess)
         XCTAssertNil(env)
         XCTAssertLessThan(Date().timeIntervalSince(started), 5, "bounded by the timeout, not the sleep")
     }
@@ -189,13 +189,13 @@ final class LoginShellTests: XCTestCase {
         export GRAFT_EXAMPLE_AGENT=started
         """)
         let started = Date()
-        let env = await LoginShell.resolve(shell: shell, timeout: 8)
+        let env = await LoginShell.resolve(shell: shell, timeout: 8, run: LoginShell.runProcess)
         XCTAssertEqual(env?["GRAFT_EXAMPLE_AGENT"], "started")
         XCTAssertLessThan(Date().timeIntervalSince(started), 4)
     }
 
     func test_a_shell_that_cannot_be_started_is_no_answer() async {
-        let env = await LoginShell.resolve(shell: scratch.appendingPathComponent("absent").path)
+        let env = await LoginShell.resolve(shell: scratch.appendingPathComponent("absent").path, run: LoginShell.runProcess)
         XCTAssertNil(env)
     }
 
@@ -207,7 +207,7 @@ final class LoginShellTests: XCTestCase {
         /usr/bin/head -c 33554432 /dev/zero
         export GRAFT_EXAMPLE_AFTER_NOISE=yes
         """)
-        let env = await LoginShell.resolve(shell: shell, timeout: 10)
+        let env = await LoginShell.resolve(shell: shell, timeout: 10, run: LoginShell.runProcess)
         XCTAssertEqual(env?["GRAFT_EXAMPLE_AFTER_NOISE"], "yes")
     }
 
@@ -252,8 +252,7 @@ final class LoginShellTests: XCTestCase {
         ])
         defer { Self.sh("/usr/bin/pkill -9 -f \(tag)") }
         let env = await LoginShell.resolve(
-            shell: "/bin/zsh", timeout: 1, environment: Self.bareEnvironment(home: home)
-        )
+            shell: "/bin/zsh", timeout: 1, environment: Self.bareEnvironment(home: home), run: LoginShell.runProcess)
         XCTAssertNil(env)
         try await Task.sleep(nanoseconds: 1_500_000_000)
         let survivors = Self.sh("/usr/bin/pgrep -f \(tag)")
@@ -275,7 +274,7 @@ final class LoginShellTests: XCTestCase {
             Self.sh("/usr/bin/pkill -9 -f \(orphan)")
             Self.sh("/usr/bin/pkill -9 -f \(own)")
         }
-        let env = await LoginShell.resolve(shell: shell, timeout: 0.5)
+        let env = await LoginShell.resolve(shell: shell, timeout: 0.5, run: LoginShell.runProcess)
         XCTAssertNil(env)
         try await Task.sleep(nanoseconds: 1_500_000_000)
         XCTAssertEqual(Self.sh("/usr/bin/pgrep -f \(orphan)"), "", "the group kill missed the orphan")
@@ -297,7 +296,7 @@ final class LoginShellTests: XCTestCase {
         sleep 30
         """)
         defer { Self.sh("/usr/bin/pkill -9 -f \(tag)") }
-        let env = await LoginShell.resolve(shell: shell, timeout: 0.5)
+        let env = await LoginShell.resolve(shell: shell, timeout: 0.5, run: LoginShell.runProcess)
         XCTAssertNil(env)
         let deadline = Date().addingTimeInterval(6)
         while !FileManager.default.fileExists(atPath: verdict.path), Date() < deadline {
@@ -374,8 +373,7 @@ final class LoginShellTests: XCTestCase {
             XCTAssertTrue(FileManager.default.isExecutableFile(atPath: c.shell), "\(c.shell) is part of macOS")
             let home = try fakeHome(c.files)
             let env = await LoginShell.resolve(
-                shell: c.shell, timeout: 10, environment: Self.bareEnvironment(home: home)
-            )
+                shell: c.shell, timeout: 10, environment: Self.bareEnvironment(home: home), run: LoginShell.runProcess)
             XCTAssertNotNil(env, "\(c.shell) gave no answer")
             for (name, value) in c.expected {
                 XCTAssertEqual(env?[name], value, "\(c.shell): \(name)")
@@ -395,7 +393,7 @@ final class LoginShellTests: XCTestCase {
             func next() -> Int { lock.withLock { n += 1; return n } }
         }
         let count = Count()
-        let shell = ShellEnvironment { ["ANSWER": String(count.next())] }
+        let shell = ShellEnvironment(minimumInterval: 0) { ["ANSWER": String(count.next())] }
         let first = await shell.value
         XCTAssertEqual(first?["ANSWER"], "1")
         let again = await shell.value
@@ -415,7 +413,7 @@ final class LoginShellTests: XCTestCase {
             func next() -> [String: String]? { lock.withLock { queue.removeFirst() } }
         }
         let answers = Answers()
-        let shell = ShellEnvironment { answers.next() }
+        let shell = ShellEnvironment(minimumInterval: 0) { answers.next() }
         let first = await shell.value
         XCTAssertEqual(first?["PATH"], "/first")
 
@@ -430,10 +428,54 @@ final class LoginShellTests: XCTestCase {
 
     /// Nil to begin with stays nil: there is nothing to keep.
     func test_a_shell_that_never_answered_still_reads_as_no_answer() async {
-        let shell = ShellEnvironment { nil }
+        let shell = ShellEnvironment(minimumInterval: 0) { nil }
         shell.refresh()
         let value = await shell.value
         XCTAssertNil(value)
+    }
+
+    /// Whole-diff review, app-1: each ask runs the user's startup files, so
+    /// a refresh sooner than `minimumInterval` after the last ask (launch
+    /// included) asks nothing and keeps that answer; one after it asks.
+    func test_the_shell_is_asked_again_at_most_once_per_interval() async {
+        final class Count: @unchecked Sendable {
+            private var n = 0
+            private let lock = NSLock()
+            func next() -> Int { lock.withLock { n += 1; return n } }
+            var asked: Int { lock.withLock { n } }
+        }
+        final class Clock: @unchecked Sendable {
+            private var t = Date(timeIntervalSinceReferenceDate: 0)
+            private let lock = NSLock()
+            var now: Date { lock.withLock { t } }
+            func advance(_ seconds: TimeInterval) { lock.withLock { t += seconds } }
+        }
+        let count = Count()
+        let clock = Clock()
+        let shell = ShellEnvironment(minimumInterval: 10, now: { clock.now }) {
+            ["ANSWER": String(count.next())]
+        }
+        let launch = await shell.value
+        XCTAssertEqual(launch?["ANSWER"], "1")
+
+        clock.advance(9.9)
+        XCTAssertFalse(shell.refresh(), "within the interval of launch")
+        let kept = await shell.value
+        XCTAssertEqual(kept?["ANSWER"], "1")
+        XCTAssertEqual(count.asked, 1, "the shell wasn't run")
+
+        clock.advance(0.1)
+        XCTAssertTrue(shell.refresh())
+        let asked = await shell.value
+        XCTAssertEqual(asked?["ANSWER"], "2")
+
+        XCTAssertFalse(shell.refresh(), "within the interval of that ask")
+        clock.advance(5)
+        XCTAssertFalse(shell.refresh())
+        let still = await shell.value
+        XCTAssertEqual(still?["ANSWER"], "2")
+        XCTAssertEqual(count.asked, 2)
+        XCTAssertEqual(ShellEnvironment.minimumRefreshInterval, 10)
     }
 
     /// The whole Check again path: graft is only on a PATH the user added to
@@ -453,12 +495,12 @@ final class LoginShellTests: XCTestCase {
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: graft.path)
 
         let answers = Answers()
-        let shell = ShellEnvironment { answers.lock.withLock { ["PATH": answers.path] } }
+        let shell = ShellEnvironment(minimumInterval: 0) { answers.lock.withLock { ["PATH": answers.path] } }
         let runner = CLIRunner.forApp(
             shell: shell, process: ["PATH": "/usr/bin:/bin"],
             home: scratch.appendingPathComponent("home").path, isExecutable: scratchOnly()
         )
-        let store = await ConfigStore(runner: runner)
+        let store = await ConfigStore(runner: runner, notify: { _ in })
         _ = await store.checkSetup()
         let first = await store.setupNeed
         XCTAssertEqual(first, .cli, "premise: not on any PATH the shell reported")

@@ -31,6 +31,98 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(SetupNeed(error: error), .cli)
     }
 
+    /// A release build's own CLI that would not start: never the install
+    /// step, whose pipx command cannot reach inside the app.
+    func test_a_bundled_cli_that_cannot_be_started_is_a_damaged_app() throws {
+        let bundle = try fakeBundle(helpers: true)
+        let error = CLIRunner.RunError.launchFailed(
+            executable: bundle.appendingPathComponent("Contents/Helpers/graft").path,
+            underlying: CocoaError(.fileNoSuchFile)
+        )
+        XCTAssertEqual(SetupNeed(error: error), .damagedApp(.damaged))
+        XCTAssertEqual(SetupNeed.damagedApp().step, 1, "the same rank as .cli")
+        XCTAssertEqual(
+            SetupNeed.damagedAppMessage,
+            "Graft.app is damaged: part of it is missing. "
+                + "Download Graft again from GitHub Releases (github.com/GreenglassT/Graft/releases) "
+                + "or graftipa.com and replace this copy."
+        )
+    }
+
+    /// A Graft.app-shaped folder: `Contents/Info.plist`, and `Contents/Helpers`
+    /// when asked, with no launcher in it. Not named `.app`, and nothing in it
+    /// runs.
+    private func fakeBundle(helpers: Bool) throws -> URL {
+        let bundle = try scratchDir().appendingPathComponent("FakeBundle")
+        let contents = bundle.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+        try Data("<plist/>".utf8).write(to: contents.appendingPathComponent("Info.plist"))
+        if helpers {
+            try FileManager.default.createDirectory(
+                at: contents.appendingPathComponent("Helpers"), withIntermediateDirectories: true
+            )
+        }
+        return bundle
+    }
+
+    /// #16 and #17: which of the three a missing launcher is, read off the
+    /// bundle around it, through a real launch failure.
+    func test_a_missing_bundled_cli_is_told_apart_by_its_bundle() async throws {
+        let release = try fakeBundle(helpers: true)
+        let plain = try fakeBundle(helpers: false)
+        let moved = try scratchDir().appendingPathComponent("Gone")
+        for (bundle, expected) in [
+            (release, BundledCLIFailure.damaged), (plain, .builtWithoutCLI), (moved, .moved),
+        ] {
+            let graft = bundle.appendingPathComponent("Contents/Helpers/graft")
+            let found = await need(launching: graft)
+            XCTAssertEqual(found, .damagedApp(expected), bundle.lastPathComponent)
+        }
+    }
+
+    /// #18: the launcher is there and runs, but the Python it starts is not.
+    /// It exits 126 and says so first on stderr, and that is a damaged app,
+    /// not the alert "exit 126" would otherwise be.
+    func test_the_launchers_damaged_exit_is_a_damaged_app() {
+        let stderr = "graft: Graft.app is damaged: Contents/Resources/GraftPython/bin/python3.13 is missing\n"
+        XCTAssertEqual(
+            SetupNeed(error: CLIError.exited(doing: "Load apps", code: 126, stderr: stderr)),
+            .damagedApp(.damaged)
+        )
+        XCTAssertNil(
+            SetupNeed(error: CLIError.exited(doing: "Load apps", code: 126, stderr: "zsh: permission denied\n")),
+            "126 alone is any command that can't be executed"
+        )
+        XCTAssertNil(
+            SetupNeed(error: CLIError.exited(doing: "Load apps", code: 1, stderr: stderr)),
+            "the sentence alone, under another status, is not the launcher's"
+        )
+        XCTAssertNil(
+            SetupNeed(error: CLIError.exited(
+                doing: "Load apps", code: 126, stderr: "error: failed\n  hint: \(stderr)"
+            )),
+            "the sentence first, not anywhere"
+        )
+    }
+
+    /// #16 and #17 on screen: a plain Release build and a moved app each say
+    /// what they are, not "download Graft again".
+    func test_the_damaged_app_screen_says_when_it_is_a_plain_build_or_a_moved_app() throws {
+        for failure in [BundledCLIFailure.builtWithoutCLI, .moved] {
+            let pane = hosted(
+                SetupView(need: .damagedApp(failure), isChecking: false, onCheckAgain: {}, isRelease: true),
+                size: NSSize(width: 800, height: 600)
+            )
+            settle(pane)
+            let shown = Self.strings(try AccessibilityTree.nodes(in: pane.window))
+            XCTAssertTrue(shown.contains { $0.contains(failure.message) }, "\(failure): \(shown)")
+            XCTAssertTrue(shown.contains { $0.contains(failure.stepTitle) }, "\(failure): \(shown)")
+            XCTAssertFalse(shown.contains { $0.contains("Download Graft again") }, "\(failure): \(shown)")
+        }
+        XCTAssertTrue(BundledCLIFailure.builtWithoutCLIMessage.contains("scripts/graft-release"))
+        XCTAssertTrue(BundledCLIFailure.movedMessage.contains("Quit Graft and open it again"))
+    }
+
     func test_a_missing_config_is_the_config_step_and_carries_the_path() {
         let error = CLIError.exited(doing: "Load apps", code: 2, stderr: Self.missingConfig)
         XCTAssertEqual(
@@ -78,8 +170,7 @@ final class SetupTests: XCTestCase {
     private func store(executable: String = "/bin/sh", script: String) -> ConfigStore {
         ConfigStore(
             runner: CLIRunner(executable: URL(fileURLWithPath: executable)),
-            cliArgs: ["-c", script]
-        )
+            cliArgs: ["-c", script], notify: { _ in })
     }
 
     private static let oneApp = #"""
@@ -143,7 +234,7 @@ final class SetupTests: XCTestCase {
 
     private func hostedContent(_ store: ConfigStore) async -> Hosted {
         let layout = laidOutForMeasurement(
-            ContentView(store: store), width: Metrics.windowMinWidth, height: Metrics.windowMinHeight
+            ContentView(store: store, adminShell: NoAdminShell()), width: Metrics.windowMinWidth, height: Metrics.windowMinHeight
         )
         let deadline = Date().addingTimeInterval(5)
         while store.setupNeed == nil && store.apps.isEmpty && Date() < deadline {
@@ -277,6 +368,59 @@ final class SetupTests: XCTestCase {
             XCTAssertEqual(broken.errno, errno, url.lastPathComponent)
             XCTAssertTrue(broken.reason.contains(words), "\(url.lastPathComponent): \(broken.reason)")
         }
+    }
+
+    /// A bundled launcher that is there and still will not start — here, not
+    /// executable — is the app's damage too. `diagnose` would call it a
+    /// broken pipx install and offer `pipx reinstall`, which cannot fix it.
+    func test_a_bundled_cli_that_is_there_but_broken_is_still_a_damaged_app() async throws {
+        // Not named `.app`, and never executable: nothing here may run from
+        // inside something macOS would assess as an unsealed app bundle.
+        let helpers = try fakeBundle(helpers: true).appendingPathComponent("Contents/Helpers")
+        let graft = try executable(helpers, "graft", "#!/bin/sh\n", mode: 0o644)
+        let found = await need(launching: graft)
+        XCTAssertEqual(found, .damagedApp(.damaged))
+    }
+
+    /// The setup screen for it: one step, the message, and nothing to type
+    /// in Terminal.
+    func test_the_damaged_app_screen_is_one_step_with_no_terminal_commands() throws {
+        let pane = hosted(
+            SetupView(need: .damagedApp(), isChecking: false, onCheckAgain: {}),
+            size: NSSize(width: 800, height: 600)
+        )
+        settle(pane)
+        let nodes = try AccessibilityTree.nodes(in: pane.window)
+        let shown = Self.strings(nodes)
+        XCTAssertTrue(shown.contains { $0.contains(SetupNeed.damagedAppMessage) }, "\(shown)")
+        XCTAssertTrue(shown.contains { $0.contains(SetupView.stepOneTitle(for: .damagedApp())) }, "\(shown)")
+        for absent in ["Create your config", "Install the tools", "Install the command-line tool",
+                       "Step 1 of", "pipx", "brew", "Terminal"] {
+            XCTAssertFalse(shown.contains { $0.contains(absent) }, "\(absent) in \(shown)")
+        }
+        let copies = nodes.filter { $0.role == kAXButtonRole && $0.name.hasPrefix("Copy") }
+        XCTAssertEqual(copies.map(\.name), [], "no Terminal command to copy")
+    }
+
+    /// Every label and value on screen. The step header is one combined
+    /// element, so its title is part of a longer label rather than a text.
+    private static func strings(_ nodes: [AccessibilityTree.Node]) -> [String] {
+        nodes.flatMap { [$0.name, ($0.value as? String) ?? ""] }.filter { !$0.isEmpty }
+    }
+
+    /// The control for the test above: the install step does show its
+    /// commands, so "no Copy buttons" is measuring the damaged screen.
+    func test_the_install_step_shows_terminal_commands() throws {
+        let pane = hosted(
+            SetupView(need: .cli, isChecking: false, onCheckAgain: {}),
+            size: NSSize(width: 800, height: 600)
+        )
+        settle(pane)
+        let nodes = try AccessibilityTree.nodes(in: pane.window)
+        XCTAssertTrue(nodes.contains { $0.role == kAXButtonRole && $0.name.hasPrefix("Copy") })
+        let shown = Self.strings(nodes)
+        XCTAssertTrue(shown.contains { $0.contains("Step 1 of 3") }, "\(shown)")
+        XCTAssertTrue(shown.contains { $0.contains("pipx") }, "\(shown)")
     }
 
     /// Nothing at the path is still the plain install step.
@@ -477,7 +621,7 @@ final class SetupTests: XCTestCase {
     /// for — the measurement harness's window is not. (`GraftTests.Hosted`:
     /// this class's own `Hosted` shadows the harness's.)
     private func frontWindow(_ store: ConfigStore) -> GraftTests.Hosted {
-        hosted(ContentView(store: store), size: NSSize(width: 1100, height: 760))
+        hosted(ContentView(store: store, adminShell: NoAdminShell()), size: NSSize(width: 1100, height: 760))
     }
 
     /// Wait, suspended, until `done` holds or five seconds pass. Suspended
@@ -498,7 +642,7 @@ final class SetupTests: XCTestCase {
     func test_check_again_moves_the_window_on_to_step_three() async throws {
         try AccessibilityTree.requireServed()
         let flag = try scratchDir().appendingPathComponent("config-exists")
-        let store = ConfigStore(runner: CLIRunner(executable: try fakeGraft(configExistsWhen: flag)))
+        let store = ConfigStore(runner: CLIRunner(executable: try fakeGraft(configExistsWhen: flag)), notify: { _ in })
         let window = frontWindow(store)
         await waitFor(window) { store.setupNeed != nil }
         XCTAssertEqual(store.setupNeed?.step, 2, "premise: the config step")
@@ -521,7 +665,7 @@ final class SetupTests: XCTestCase {
     /// rather than a setup screen — from the window's own launch-time scan.
     func test_the_window_shows_the_missing_tools_notice_over_a_working_config() async throws {
         try AccessibilityTree.requireServed()
-        let store = ConfigStore(runner: CLIRunner(executable: try fakeGraft(configExistsWhen: nil)))
+        let store = ConfigStore(runner: CLIRunner(executable: try fakeGraft(configExistsWhen: nil)), notify: { _ in })
         let window = frontWindow(store)
         let notice = MissingToolsNotice.text(count: 2)
         var texts: [String] = []
@@ -536,6 +680,153 @@ final class SetupTests: XCTestCase {
         XCTAssertEqual(window.window.title, "Example+", "the app, not a setup screen")
         XCTAssertTrue(texts.contains(notice), "\(texts)")
     }
+
+    // MARK: - The account, set up in the app
+
+    private static func idleSetup() -> AccountSetupStore {
+        AccountSetupStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/false")))
+    }
+
+    /// Every need a release build's setup screen can be put up for, and not
+    /// one sends the user to Terminal. The CLI is inside the app, the account
+    /// is set up in it, and a CLI or tool that won't start is a damaged copy.
+    func test_a_release_build_never_sends_the_user_to_terminal() throws {
+        let needs: [SetupNeed] = [
+            .config(path: "/Users/x/.config/graft/config.yaml"),
+            .tools([MissingTool(name: "zsign", command: "brew install zsign")]),
+            .damagedApp(),
+            .damagedApp(.builtWithoutCLI),
+            .damagedApp(.moved),
+            .cli,
+            .brokenCLI(BrokenCLI(path: "/x/graft", errno: 2, reason: "it is gone")),
+        ]
+        for need in needs {
+            let pane = hosted(
+                SetupView(need: need, isChecking: false, onCheckAgain: {},
+                          accountSetup: Self.idleSetup(), isRelease: true),
+                size: NSSize(width: 800, height: 700)
+            )
+            settle(pane)
+            let nodes = try AccessibilityTree.nodes(in: pane.window)
+            let shown = Self.strings(nodes)
+            XCTAssertFalse(shown.isEmpty, "\(need): nothing on screen")
+            for absent in ["Terminal", "pipx", "brew", "graft --", "ensurepath"] {
+                XCTAssertFalse(shown.contains { $0.contains(absent) }, "\(need): \(absent) in \(shown)")
+            }
+            let copies = nodes.filter { $0.role == kAXButtonRole && $0.name.hasPrefix("Copy") }
+            XCTAssertEqual(copies.map(\.name), [], "\(need): a command to copy")
+        }
+    }
+
+    /// A release build's first run opens on Welcome, then the account question,
+    /// and has no Check again: the setup moves itself on.
+    func test_a_release_first_run_opens_on_the_welcome_then_asks_about_the_account() throws {
+        let setup = Self.idleSetup()
+        let pane = hosted(
+            SetupView(need: .config(path: nil), isChecking: false, onCheckAgain: {},
+                      accountSetup: setup, isRelease: true),
+            size: NSSize(width: 800, height: 700)
+        )
+        settle(pane)
+        var shown = Self.strings(try AccessibilityTree.nodes(in: pane.window))
+        XCTAssertTrue(shown.contains(AccountSetupView.welcomeTitle), "\(shown)")
+        XCTAssertTrue(shown.contains(AccountSetupView.startLabel), "\(shown)")
+        XCTAssertFalse(shown.contains("Check again"), "\(shown)")
+
+        setup.begin()
+        settle(pane)
+        shown = Self.strings(try AccessibilityTree.nodes(in: pane.window))
+        XCTAssertTrue(shown.contains(AccountSetupView.questionTitle), "\(shown)")
+        XCTAssertTrue(shown.contains(AccountSetupView.freeLabel), "\(shown)")
+        XCTAssertTrue(shown.contains(AccountSetupView.paidAccessibilityLabel), "\(shown)")
+    }
+
+    /// A Debug build keeps its three steps, but the account step is the same
+    /// in-app setup, not `graft --init` with a Copy button.
+    func test_a_debug_build_sets_up_the_account_in_the_app_too() throws {
+        let pane = hosted(
+            SetupView(need: .config(path: nil), isChecking: false, onCheckAgain: {},
+                      accountSetup: Self.idleSetup(), isRelease: false),
+            size: NSSize(width: 800, height: 900)
+        )
+        settle(pane)
+        let shown = Self.strings(try AccessibilityTree.nodes(in: pane.window))
+        XCTAssertTrue(shown.contains { $0.contains("Step 2 of 3") }, "\(shown)")
+        XCTAssertTrue(shown.contains(AccountSetupView.welcomeTitle), "\(shown)")
+        XCTAssertFalse(shown.contains { $0.contains("graft --init") }, "\(shown)")
+    }
+
+    /// The free result's steps, with their links, on the done screen.
+    func test_the_free_result_lists_the_device_steps_with_their_links() async throws {
+        let dir = try scratchDir()
+        let result = #"{"type":"init-result","account":"free","config":"/tmp/x/config.yaml","change":"created","dry_run":false,"summary":"Set up for a free Apple ID.","team_id":null,"profile_name":null,"certificate":null,"device_count":null,"devices":[],"expires":null,"pinned":[],"sideloads":[],"steps":["Install SideStore (https://sidestore.io).","In LiveContainer, open Settings and tap Import Certificate from SideStore."]}"#
+        let graft = try executable(dir, "graft", "#!/bin/sh\nprintf '%s\\n' '\(result)'\n")
+        let setup = AccountSetupStore(runner: CLIRunner(executable: graft))
+        setup.begin()
+        await setup.chooseFree()
+        let pane = hosted(
+            SetupView(need: .config(path: nil), isChecking: false, onCheckAgain: {},
+                      accountSetup: setup, isRelease: true),
+            size: NSSize(width: 800, height: 700)
+        )
+        settle(pane)
+        let nodes = try AccessibilityTree.nodes(in: pane.window)
+        let shown = Self.strings(nodes)
+        XCTAssertTrue(shown.contains("Set up for a free Apple ID."), "\(shown)")
+        XCTAssertTrue(shown.contains { $0.contains("Import Certificate from SideStore") }, "\(shown)")
+        XCTAssertTrue(shown.contains(AccountSetupView.finishLabel), "\(shown)")
+        XCTAssertTrue(nodes.contains { $0.name.contains("sidestore.io") }, "the step's link")
+    }
+
+    func test_the_setup_screen_stays_up_until_the_account_result_is_read() {
+        XCTAssertEqual(ContentView.setupScreen(need: .cli, holding: false), .cli)
+        XCTAssertEqual(ContentView.setupScreen(need: .damagedApp(), holding: true), .damagedApp())
+        XCTAssertEqual(ContentView.setupScreen(need: nil, holding: true), .config(path: nil))
+        XCTAssertNil(ContentView.setupScreen(need: nil, holding: false))
+    }
+
+    /// Review part 2, finding 1. A release build with no config sent the user
+    /// to `graft --init`, a command a release build never puts on PATH, and
+    /// the setup screen kept Settings › Command-line tool out of reach. With
+    /// the app's own CLI resolved as a release build resolves it, and no
+    /// config, the first run offers the setup in the app, and nothing on it
+    /// says `graft --init`, Terminal or the Command-line tool settings.
+    func test_with_the_bundled_cli_and_no_config_the_first_run_sets_up_in_the_app() async throws {
+        let dir = try scratchDir()
+        let app = dir.appendingPathComponent("Graft.app")
+        let cli = GraftExecutable.resolve(
+            home: dir.path, path: "/usr/bin:/bin:/usr/sbin:/sbin", bundleURL: app,
+            preferBundled: true, isExecutable: { _ in false }
+        )
+        XCTAssertEqual(cli, GraftExecutable.bundled(in: app))
+        XCTAssertTrue(GraftExecutable.isBundled(cli.path))
+        let helpers = cli.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: helpers, withIntermediateDirectories: true)
+        // What Helpers/graft says on a Mac with no config.
+        _ = try executable(helpers, cli.lastPathComponent, "#!/bin/sh\n" + Self.noConfigScript + "\n")
+        let config = ConfigStore(runner: CLIRunner(executable: cli), notify: { _ in })
+
+        _ = await config.checkSetup()
+
+        guard let need = config.setupNeed, case .config = need else {
+            return XCTFail("\(String(describing: config.setupNeed))")
+        }
+        XCTAssertNil(config.lastError, "a setup step, not an alert")
+        let setup = AccountSetupStore(runner: config.runner)
+        XCTAssertEqual(setup.step, .welcome)
+        let pane = hosted(
+            SetupView(need: need, isChecking: false, onCheckAgain: {},
+                      accountSetup: setup, isRelease: GraftExecutable.isBundled(cli.path)),
+            size: NSSize(width: 800, height: 700)
+        )
+        settle(pane)
+        let shown = Self.strings(try AccessibilityTree.nodes(in: pane.window))
+        XCTAssertTrue(shown.contains(AccountSetupView.welcomeTitle), "\(shown)")
+        XCTAssertTrue(shown.contains(AccountSetupView.startLabel), "\(shown)")
+        for absent in ["graft --init", "Terminal", "Command-line tool", "pipx", "brew"] {
+            XCTAssertFalse(shown.contains { $0.contains(absent) }, "\(absent) in \(shown)")
+        }
+    }
 }
 
 /// F2: an account change made in Terminal is noticed when the window comes
@@ -548,7 +839,7 @@ final class AccountChangeOnReturnTests: XCTestCase {
         let store: ConfigStore
         let active: ControlActiveState
         var body: some View {
-            ContentView(store: store).environment(\.controlActiveState, active)
+            ContentView(store: store, adminShell: NoAdminShell()).environment(\.controlActiveState, active)
         }
     }
 
@@ -584,7 +875,7 @@ final class AccountChangeOnReturnTests: XCTestCase {
         try "free".write(to: accountFile, atomically: true, encoding: .utf8)
         let store = ConfigStore(runner: CLIRunner(
             executable: try fakeGraft(accountFile: accountFile, listCount: listCount)
-        ))
+        ), notify: { _ in })
 
         let host = NSHostingView(rootView: Harness(store: store, active: .key))
         let window = NSWindow(
@@ -630,7 +921,7 @@ final class AccountChangeOnReturnTests: XCTestCase {
         try "free".write(to: accountFile, atomically: true, encoding: .utf8)
         let store = ConfigStore(runner: CLIRunner(
             executable: try fakeGraft(accountFile: accountFile, listCount: listCount)
-        ))
+        ), notify: { _ in })
         let host = NSHostingView(rootView: Harness(store: store, active: .key))
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
@@ -738,7 +1029,7 @@ final class ReturnRefreshTests: XCTestCase {
     /// Launched: the app list read, and the launch scan run.
     private func launched(_ fake: Fake) async throws -> (ConfigStore, SettingsStore) {
         let runner = CLIRunner(executable: fake.cli)
-        let config = ConfigStore(runner: runner)
+        let config = ConfigStore(runner: runner, notify: { _ in })
         let settings = SettingsStore(runner: runner)
         _ = try await config.loadApps()
         try await settings.runChecks()
@@ -807,6 +1098,17 @@ final class ReturnRefreshTests: XCTestCase {
         XCTAssertFalse(ContentView.isReturn(from: .key, to: .active), "a sheet took key")
         XCTAssertFalse(ContentView.isReturn(from: .active, to: .key), "the sheet closed")
         XCTAssertFalse(ContentView.isReturn(from: .key, to: .inactive))
+    }
+
+    /// Whole-diff review, app-1: only the setup screen's Check again asks the
+    /// login shell again. A return to the window doesn't: a startup file
+    /// that runs a Command Line Tools stub put up macOS's install dialog,
+    /// and dismissing it was a return that asked again.
+    func test_only_check_again_asks_the_login_shell_again() {
+        XCTAssertTrue(ContentView.SetupCheck.checkAgain.asksShellAgain)
+        XCTAssertFalse(ContentView.SetupCheck.windowReturn.asksShellAgain)
+        XCTAssertFalse(ContentView.SetupCheck.launch.asksShellAgain)
+        XCTAssertFalse(ContentView.SetupCheck.accountSetupFinished.asksShellAgain)
     }
 
     func test_the_gate_runs_one_refresh_at_a_time() {

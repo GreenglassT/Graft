@@ -51,3 +51,28 @@ def test_a_config_naming_the_old_password_variable_keeps_it(tmp_path: Path) -> N
         "apps: {}\n"
     )
     assert load_config(cfg_path).signing.cert_password_env == "TWEAK_BUILD_P12_PASS"
+
+
+def test_every_place_that_states_the_version_agrees() -> None:
+    """pyproject, the package, the app's project file and its Info.plist all
+    say the same release. verify-bundle checks the built app against the
+    built CLI; this catches a bump that missed a file before any build."""
+    import plistlib
+    import tomllib
+
+    import yaml
+
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert __version__ == project
+    yml = yaml.safe_load((REPO_ROOT / "Graft" / "project.yml").read_text())
+    info = yml["targets"]["Graft"]["info"]["properties"]
+    plist = plistlib.loads((REPO_ROOT / "Graft" / "Graft" / "Info.plist").read_bytes())
+    for key in ("CFBundleShortVersionString", "CFBundleVersion"):
+        assert str(info[key]) == plist[key], key
+    short = plist["CFBundleShortVersionString"].split(".")
+    assert short == project.split(".")[: len(short)], (plist["CFBundleShortVersionString"], project)
+
+
+def test_this_is_graft_2_0() -> None:
+    """The release this branch ships."""
+    assert __version__ == "2.0.0"

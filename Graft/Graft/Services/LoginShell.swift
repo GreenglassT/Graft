@@ -53,7 +53,7 @@ enum LoginShell {
     /// Variables a shell sets about *itself* — where it is, how deep, which
     /// terminal it thinks it is in. None describes the user's setup, and a few
     /// are actively wrong for a subprocess with no terminal: `TERM` invites
-    /// colour codes into a pipe, `PWD` names the directory the shell started
+    /// color codes into a pipe, `PWD` names the directory the shell started
     /// in rather than the CLI's own.
     static let noise: Set<String> = [
         "PWD", "OLDPWD", "SHLVL", "_",
@@ -150,11 +150,15 @@ enum LoginShell {
     ///   what the user's startup files make of it. A test passes a fake `HOME`
     ///   here so a real shell reads a scratch startup file, not the
     ///   developer's own.
+    ///
+    /// `shell` and `run` have no defaults: together they start the user's own
+    /// login shell, with their startup files. `ShellEnvironment.shared` names
+    /// them; a test passes its own (`NoRealDefaultsTests`).
     static func resolve(
-        shell: String = userShell(),
+        shell: String,
         timeout: TimeInterval = timeout,
         environment: [String: String]? = nil,
-        run: Runner = runProcess
+        run: Runner
     ) async -> [String: String]? {
         let markers = Markers.fresh()
         let output = await run(
@@ -167,7 +171,7 @@ enum LoginShell {
     /// The real runner: the shell as a child, stdin `/dev/null`, stderr
     /// discarded, stdout read until it closes **or the end marker arrives**.
     ///
-    /// The second half is not an optimisation. A startup file that starts a
+    /// The second half is not an optimization. A startup file that starts a
     /// background agent (ssh-agent, gpg-agent, a prompt theme's worker) hands
     /// it the shell's stdout, and that pipe then never reaches EOF while the
     /// agent lives. Waiting for EOF would turn every such setup into a
@@ -181,7 +185,7 @@ enum LoginShell {
     /// **A timeout kills the shell's whole process group.** `Process` starts
     /// the shell as a group leader (its pgid is its pid), and without job
     /// control — no terminal — everything its startup files run stays in that
-    /// group. Signalling the shell alone, as this used to, killed the shell
+    /// group. Signaling the shell alone, as this used to, killed the shell
     /// and left the command it was waiting on: a hung `brew` or `nvm` call, or
     /// anything that ignores SIGTERM, ran on re-parented to launchd, still
     /// holding the write end of the pipe, and the reader thread stayed parked
@@ -293,18 +297,46 @@ enum LoginShell {
 /// against the wrong config directory. The wait is bounded, because the
 /// resolution is — `LoginShell.timeout`.
 ///
-/// **Re-resolvable.** The setup screen's Check again is pressed by someone who
-/// just changed their setup in Terminal — `pipx ensurepath`, a `PATH` line in
-/// `~/.zshrc` — and an answer read once at launch could never see it: the CLI
-/// stayed "not installed" until the app was relaunched. `refresh()` starts a
-/// new resolution; launches after it wait for that one.
+/// **Re-resolvable, when asked.** The setup screen's Check again is pressed by
+/// someone who just changed their setup in Terminal — `pipx ensurepath`, a
+/// `PATH` line in `~/.zshrc` — and an answer read once at launch could never
+/// see it: the CLI stayed "not installed" until the app was relaunched.
+/// `refresh()` starts a new resolution; launches after it wait for that one.
+///
+/// **Only when asked, and not often** (whole-diff review, app-1). Each ask runs
+/// the user's startup files, `<shell> -l -i -c`. It used to happen on every
+/// visit to Settings and on every return to the window during setup, and a
+/// startup file that runs a Command Line Tools stub (`git`, `python3`) with
+/// the tools not installed then put up macOS's "install the command line
+/// developer tools" dialog each time: dismissing it returned focus, which
+/// asked again. Each ask also made the next CLI launches wait for it. So the
+/// launch-time answer is reused, a new one is asked for only by an explicit
+/// Check again or Re-run, and `refresh()` asks at most once per
+/// `minimumInterval`.
 final class ShellEnvironment: @unchecked Sendable {
+    /// The least time between two asks of the shell: launch, then each
+    /// `refresh()` that asked. A refresh sooner than this keeps the answer
+    /// the last ask gets.
+    static let minimumRefreshInterval: TimeInterval = 10
+
     private let resolve: @Sendable () async -> [String: String]?
+    private let minimumInterval: TimeInterval
+    private let now: @Sendable () -> Date
     private let lock = NSLock()
     private var task: Task<[String: String]?, Never>
+    /// When the shell was last asked.
+    private var askedAt: Date
 
-    init(resolve: @escaping @Sendable () async -> [String: String]?) {
+    /// `now` and `minimumInterval` are for the tests of the interval.
+    init(
+        minimumInterval: TimeInterval = ShellEnvironment.minimumRefreshInterval,
+        now: @escaping @Sendable () -> Date = { Date() },
+        resolve: @escaping @Sendable () async -> [String: String]?
+    ) {
         self.resolve = resolve
+        self.minimumInterval = minimumInterval
+        self.now = now
+        askedAt = now()
         task = Self.start(resolve)
     }
 
@@ -324,8 +356,10 @@ final class ShellEnvironment: @unchecked Sendable {
         }
     }
 
-    /// Ask the shell again. Callers that are already waiting keep waiting for
-    /// the answer they asked for; every later `value` is the new one.
+    /// Ask the shell again, unless it was asked less than `minimumInterval`
+    /// ago: then nothing starts, and `value` stays that ask's answer. Returns
+    /// whether it asked. Callers that are already waiting keep waiting for the
+    /// answer they asked for; every later `value` is the new one.
     ///
     /// **A refresh that gets no answer keeps the last one that did.** The
     /// shell is asked under a timeout, and a slow `~/.zshrc` on a busy Mac can
@@ -334,19 +368,27 @@ final class ShellEnvironment: @unchecked Sendable {
     /// to *find* a newly installed `graft`, could lose the one the app had
     /// been running all along. An environment that was right a moment ago is
     /// a better answer than none.
-    func refresh() {
+    @discardableResult
+    func refresh() -> Bool {
         let resolve = self.resolve
-        let previous = lock.withLock { task }
-        let next = Task.detached(priority: .userInitiated) { () -> [String: String]? in
-            if let fresh = await resolve() { return fresh }
-            return await previous.value
+        return lock.withLock {
+            let at = now()
+            guard at.timeIntervalSince(askedAt) >= minimumInterval else { return false }
+            askedAt = at
+            let previous = task
+            task = Task.detached(priority: .userInitiated) { () -> [String: String]? in
+                if let fresh = await resolve() { return fresh }
+                return await previous.value
+            }
+            return true
         }
-        lock.withLock { task = next }
     }
 
     /// The app's one resolution, started the first time anything asks —
     /// `GraftApp.init`, so it runs while the window is still being built.
-    static let shared = ShellEnvironment { await LoginShell.resolve() }
+    static let shared = ShellEnvironment {
+        await LoginShell.resolve(shell: LoginShell.userShell(), run: LoginShell.runProcess)
+    }
 }
 
 /// What the shell printed from the start marker on, bounded.

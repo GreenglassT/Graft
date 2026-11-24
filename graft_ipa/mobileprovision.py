@@ -21,6 +21,7 @@ file under ~/.config by hand.
 from __future__ import annotations
 
 import plistlib
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,24 +42,84 @@ def decode(profile: Path) -> dict:
         raise PreflightError(f"provisioning profile not found: {profile}")
     try:
         data = profile.read_bytes()
+    except OSError as e:
+        raise PreflightError(f"failed to decode {profile}: {e}") from e
+    return decode_bytes(data, source=str(profile))
+
+
+#: The largest profile `decode_bytes` reads. A development profile is tens
+#: of KiB, a hundred devices included; anything near this is not a profile.
+MAX_PROFILE_BYTES = 2 << 20
+
+#: `<!DOCTYPE …>` up to its `>`, and whether an internal subset (`[`) opens
+#: before it. Apple's line is `<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST
+#: 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">`.
+_DOCTYPE = re.compile(rb"<!DOCTYPE\b([^>\[]*)(\[)?", re.IGNORECASE)
+
+
+def _refuse_declarations(xml: bytes, source: str) -> None:
+    """Refuse XML that declares an entity, or has an internal DTD subset
+    beyond Apple's one DOCTYPE line, before any parser sees it: the billion
+    laughs, and its cousins. plistlib refuses entity declarations too, but
+    only once expat is reading them; this is a scan, linear in the bytes."""
+    if re.search(rb"<!ENTITY", xml, re.IGNORECASE):
+        raise PreflightError(f"failed to decode {source}: it declares an XML entity, "
+                             "which no provisioning profile does")
+    doctypes = list(_DOCTYPE.finditer(xml))
+    if len(doctypes) > 1 or any(m.group(2) for m in doctypes):
+        raise PreflightError(f"failed to decode {source}: it has a DTD of its own, which no "
+                             "provisioning profile does")
+
+
+#: What plistlib raises for an XML plist it can't read: a missing marker or
+#: a bad number (ValueError), XML that doesn't parse (ExpatError), a <date>
+#: it can't match (AttributeError), and a structure it can't build
+#: (TypeError, OverflowError).
+_UNPARSEABLE = (ValueError, ExpatError, plistlib.InvalidFileException, AttributeError, TypeError,
+                OverflowError)
+
+
+def decode_bytes(data: bytes, *, source: str = "the profile") -> dict:
+    """`decode` for a profile already read: `data` is its bytes, `source`
+    names it in the error. For a caller that must decode exactly the bytes it
+    read (`account_setup`, which installs those bytes), and for one App Store
+    Connect has just sent, read before anything decides to keep it
+    (`apple_portal`).
+
+    Refused before any parsing: more than `MAX_PROFILE_BYTES`, an XML entity
+    or a DTD of its own (`_refuse_declarations`). And only an XML plist is
+    read. Apple's profiles, from developer.apple.com and from App Store
+    Connect alike, always carry one; a binary plist can make one object
+    stand for many (a DAG), and walking it as a tree costs twice as much per
+    level of a file of a few hundred bytes (the 2.0 review's SEC-2).
+    """
+    if len(data) > MAX_PROFILE_BYTES:
+        raise PreflightError(f"failed to decode {source}: it is larger than 2 MiB, so it "
+                             "isn't a provisioning profile")
+    try:
         start = data.index(b"<?xml")
         end = data.rindex(b"</plist>", start) + len(b"</plist>")
-        plist = plistlib.loads(data[start:end])
-    except (OSError, ValueError, ExpatError, plistlib.InvalidFileException) as e:
-        # ValueError: a missing marker; ExpatError: a plist that does not parse.
+        _refuse_declarations(data[start:end], source)
+        plist = plistlib.loads(data[start:end], fmt=plistlib.FMT_XML)
+    except _UNPARSEABLE as e:
+        # ValueError: a missing marker; ExpatError: a plist that does not parse;
+        # AttributeError: a <date> plistlib's pattern doesn't match, which it
+        # reads as None.groupdict() (combined fix check #30).
         # The slice fails on BER content split into octet-string chunks, whose
         # headers sit between the pieces (an 0x04 tag is never valid XML, so
         # the slice can never parse into a wrong plist instead): read the
         # signed content out of the CMS structure and try that.
-        content = _signed_content(data) if isinstance(e, (ExpatError, ValueError)) else None
+        content = _signed_content(data)
+        if content:
+            _refuse_declarations(content, source)
         try:
-            plist = plistlib.loads(content) if content else None
-        except (ValueError, ExpatError, plistlib.InvalidFileException):
+            plist = plistlib.loads(content, fmt=plistlib.FMT_XML) if content else None
+        except _UNPARSEABLE:
             plist = None
         if plist is None:
-            raise PreflightError(f"failed to decode {profile}: {e}") from e
+            raise PreflightError(f"failed to decode {source}: {e}") from e
     if not isinstance(plist, dict):
-        raise PreflightError(f"failed to decode {profile}: embedded plist is not a dictionary")
+        raise PreflightError(f"failed to decode {source}: embedded plist is not a dictionary")
     return plist
 
 
@@ -162,6 +223,23 @@ def expiration(plist: dict) -> datetime | None:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+#: An Apple team ID: ten capital letters and digits, nothing else.
+_TEAM_ID = re.compile(r"[A-Z0-9]{10}")
+
+
+def is_team_id(value: str) -> bool:
+    """Whether `value` is shaped like an Apple team ID.
+
+    A profile is a downloaded file, not trusted input, and the team it names
+    goes into the Keychain account `p12-<team>` (written through `security
+    -i`, one command per line), into config.yaml and into file and bundle
+    names. A `TeamIdentifier` holding a line break or a quote could otherwise
+    end that command and start another, so every team read off a profile to
+    be stored is checked against this first.
+    """
+    return _TEAM_ID.fullmatch(value) is not None
+
+
 def provisioned_devices(plist: dict) -> list[str]:
     """The UDIDs the profile lists. Empty for a distribution profile."""
     return list(plist.get("ProvisionedDevices") or [])
@@ -180,11 +258,48 @@ def app_id_prefix(plist: dict, fallback: str = "") -> str:
     return (plist.get("ApplicationIdentifierPrefix") or plist.get("TeamIdentifier") or [fallback])[0]
 
 
+def serial_value(serial: str) -> int | None:
+    """A certificate serial as the number it is, or None if it isn't hex.
+
+    App Store Connect, Keychain Access and `openssl` print serials with or
+    without colons and spaces, in either case, and padded to whole bytes or
+    not (`0F3A…` against `F3A…`). Compared as numbers, every spelling of one
+    serial is equal and no two serials are.
+    """
+    try:
+        return int(serial.replace(":", "").replace(" ", ""), 16)
+    except ValueError:
+        return None
+
+
+def developer_certificate_serials(plist: dict) -> set[int] | None:
+    """The serial of each certificate the profile lets sign, or None if it
+    lists none (`DeveloperCertificates` absent: not judged on it).
+
+    An entry that won't parse as DER X.509 is left out, so a profile whose
+    every entry is unreadable lists no usable certificate.
+    """
+    entries = plist.get("DeveloperCertificates")
+    if entries is None:
+        return None
+    from cryptography import x509
+
+    serials: set[int] = set()
+    for der in entries:
+        try:
+            serials.add(x509.load_der_x509_certificate(bytes(der)).serial_number)
+        except (TypeError, ValueError):
+            continue
+    return serials
+
+
 def cache_problem(
     profile: Path,
     *,
     device_udids: Iterable[str] = (),
     application_identifier: str | None = None,
+    cert_serial: str | None = None,
+    team_id: str | None = None,
 ) -> str | None:
     """Why this cached profile can't be reused as-is, or None if it can.
 
@@ -211,6 +326,14 @@ def cache_problem(
     (as `matches[0]` once did, picking `….LiveProcess` for the main app) is
     valid in every other respect and would otherwise be reused forever. A
     profile that declares no application-identifier is not judged on it.
+
+    `team_id` and `cert_serial` (the signing .p12's certificate) add two more:
+    the profile must belong to that team and list that certificate among its
+    `DeveloperCertificates`. Without them a profile made for a revoked or
+    replaced certificate, or by the team the user just moved away from, was
+    reused forever: zsign signs with the .p12's own certificate whatever the
+    profile says, and the phone refuses the result. A profile that declares
+    no team, or lists no certificates, is not judged on that.
     """
     try:
         plist = decode(profile)
@@ -222,6 +345,20 @@ def cache_problem(
         wanted = f"{app_id_prefix(plist)}.{application_identifier}"
         if declared and declared.lower() != wanted.lower():
             return f"the cached profile is for {declared}, not {wanted}"
+
+    if team_id is not None:
+        teams = [str(t) for t in plist.get("TeamIdentifier") or []]
+        if teams and team_id.upper() not in {t.upper() for t in teams}:
+            return f"the cached profile belongs to team {', '.join(teams)}, not {team_id}"
+
+    wanted_serial = serial_value(cert_serial) if cert_serial is not None else None
+    if wanted_serial is not None:
+        listed_serials = developer_certificate_serials(plist)
+        if listed_serials is not None and wanted_serial not in listed_serials:
+            return (
+                f"the cached profile does not list the signing certificate "
+                f"(serial {wanted_serial:X})"
+            )
 
     expiry = expiration(plist)
     if expiry is not None and expiry <= datetime.now(UTC):

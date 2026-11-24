@@ -386,7 +386,7 @@ final class AddAppSheetPrefillTests: XCTestCase {
     // `click(at:in:)` and `hosted(_:width:)` are shared from ClickHarness.swift.
     // This file's own copy of `hosted` had already drifted from the other
     // three (it dropped the `width` parameter and hardcoded 480) — the
-    // predicted cost of four independent copies, realised — so every call
+    // predicted cost of four independent copies, realized — so every call
     // below now passes `width: 480` explicitly to reproduce that same value
     // through the shared signature.
 
@@ -450,9 +450,9 @@ final class AddAppSheetPrefillTests: XCTestCase {
             try? FileManager.default.removeItem(atPath: capturePath)
         }
 
-        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: scriptPath)))
+        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: scriptPath)), notify: { _ in })
         let prefill = AddAppSheet.Prefill(staged: try stagedIPARecord(), installedVersion: "1.0")
-        let sheet = AddAppSheet(store: store, prefill: prefill)
+        let sheet = AddAppSheet(store: store, appStore: AppStoreStore(runner: store.runner, shell: NoAdminShell()), prefill: prefill)
             .defaultAppStorage(testDefaults)
         let box = hosted(sheet, width: 480)
 
@@ -537,10 +537,18 @@ final class AddAppSheetPrefillTests: XCTestCase {
         )
         let completePrefill = AddAppSheet.Prefill(staged: try stagedIPARecord(), installedVersion: "1.0")
 
+        // A throwaway preferences suite, as every render of the sheet has:
+        // `lastDeliveryMode` is an `@AppStorage` (NoRealDefaultsTests'
+        // `allowedWrappers`), and this render must not read the host's own.
+        let suiteName = "AddAppSheetPrefillTests.height.\(UUID().uuidString)"
+        let testDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { testDefaults.removePersistentDomain(forName: suiteName) }
         func sheetHeight(_ prefill: AddAppSheet.Prefill) -> CGFloat {
-            hosted(AddAppSheet(store: ConfigStore(
-                runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
-            ), prefill: prefill), width: 480).size.height
+            let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+            return hosted(AddAppSheet(
+                store: ConfigStore(runner: runner, notify: { _ in }), appStore: AppStoreStore(runner: runner, shell: NoAdminShell()),
+                prefill: prefill
+            ).defaultAppStorage(testDefaults), width: 480).size.height
         }
         let strippedHeight = sheetHeight(strippedPrefill)
         let completeHeight = sheetHeight(completePrefill)

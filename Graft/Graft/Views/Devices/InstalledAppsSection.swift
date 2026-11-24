@@ -444,7 +444,7 @@ struct DeviceAppTile: View {
     /// This app on the phone is FairPlay-encrypted — a decrypt candidate.
     ///
     /// Extracted rather than repeated: `.dumpable` and `.addable` (when
-    /// `app.encrypted`) drew the identical glyph, size, colour and
+    /// `app.encrypted`) drew the identical glyph, size, color and
     /// 62-character `.help` string by two call sites staying in sync by
     /// coincidence, not by sharing code. A third arm was the reason to stop
     /// trusting that.

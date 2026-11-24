@@ -76,7 +76,7 @@ func clickButton(named name: String, in window: NSWindow) throws {
 /// exactly to its content (`fittingSize`, not a size picked by hand), so
 /// there is no slack left for SwiftUI's default placement rules to hide a
 /// click target inside. A window taller or wider than its content leaves a
-/// real, unanswered question — does the row's content top-align or centre in
+/// real, unanswered question — does the row's content top-align or center in
 /// the extra space? — that a hand-picked coordinate could get wrong
 /// silently; sizing to the content removes the question rather than guessing
 /// the answer.
@@ -111,7 +111,7 @@ func clickButton(named name: String, in window: NSWindow) throws {
 /// — the fourth (`AddAppSheetPrefillTests`) had already dropped the `width`
 /// parameter in favour of a hardcoded 480, a real drift after one file's
 /// worth of independent maintenance, and the predicted cost of four copies
-/// realised. `internal`, not `private`: every test file that calls this is
+/// realized. `internal`, not `private`: every test file that calls this is
 /// in the same `GraftTests` target, so no import is needed.
 @MainActor
 func hosted<V: View>(_ view: V, width: CGFloat) -> Hosted {
@@ -147,7 +147,7 @@ func hosted<V: View>(_ view: V, width: CGFloat) -> Hosted {
 ///
 /// Does not settle: an observation-driven render (a store loaded *after* the
 /// pane is on screen, which is the order production runs in) needs `settle`
-/// below afterwards, and a static one does not.
+/// below afterward, and a static one does not.
 @MainActor
 func hosted<V: View>(
     _ view: V,

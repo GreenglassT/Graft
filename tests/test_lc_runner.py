@@ -15,6 +15,9 @@ import pytest
 
 
 class _FakeLockdown:
+    #: A phone that already trusts this Mac: `open_lockdown` asks nothing.
+    paired = True
+
     def __init__(self, closed: list[str]) -> None:
         self._closed = closed
 
@@ -48,7 +51,7 @@ def _fake_services(
     import pymobiledevice3.lockdown as lockdown_mod
     import pymobiledevice3.services.house_arrest as house_arrest_mod
 
-    async def _create_lockdown(*, serial: str):
+    async def _create_lockdown(*, serial: str, autopair: bool):
         assert serial == "UDID1"
         return _FakeLockdown(closed)
 

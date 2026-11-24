@@ -331,7 +331,7 @@ final class StagedIPAStoreTests: XCTestCase {
     /// that rebuilt the sentence from the `used_by` list on the
     /// `staged-ipa-in-use` event would produce a different one and fail here.
     ///
-    /// The event is what the refusal is *recognised* by (and exit 17 as the
+    /// The event is what the refusal is *recognized* by (and exit 17 as the
     /// fallback for a CLI too old to emit it, the same two-channel reading
     /// `TweaksView` does for `--delete-tweak`); stderr is what it is *shown*
     /// in. Two channels, two jobs.

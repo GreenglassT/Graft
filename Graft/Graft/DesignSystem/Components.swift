@@ -411,6 +411,10 @@ struct SearchField: View {
     let placeholder: String
     @Binding var text: String
     var onSubmit: () -> Void = {}
+    /// Up (-1) and down (+1) arrow in the field, for a field with a list
+    /// under it to move through. Returns whether it used the key; nil, and a
+    /// key it didn't use, leave the field its usual arrow keys.
+    var onMove: ((Int) -> Bool)? = nil
 
     var body: some View {
         HStack(spacing: 6) {
@@ -420,6 +424,10 @@ struct SearchField: View {
                 .textFieldStyle(.plain)
                 .font(AppFont.body)
                 .onSubmit(onSubmit)
+                .onKeyPress(keys: [.upArrow, .downArrow]) { press in
+                    guard let onMove else { return .ignored }
+                    return onMove(press.key == .downArrow ? 1 : -1) ? .handled : .ignored
+                }
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(Palette.surface)
@@ -473,7 +481,7 @@ struct TagChip: View {
     }
 }
 
-// `DeliveryBadge` used to live here — a warn-coloured dot plus "not delivered"
+// `DeliveryBadge` used to live here — a warn-colored dot plus "not delivered"
 // / "out of date", for the 320pt apps column. When that column merged into the
 // sidebar the label no longer fit, and `AppSidebarRow` carries the dot alone
 // with the CLI's sentence on hover. Deleted rather than left standing: it had
@@ -622,7 +630,7 @@ struct BuildButton: View {
         case .running(let stage): return "Building — \(stage)"
         case .ok: return "Done"
         case .failed: return "Retry"
-        // Not "Cancelled": the button's job is to name what pressing it does,
+        // Not "Canceled": the button's job is to name what pressing it does,
         // and the state is already told by the amber dot beside it plus the
         // log's own last line.
         case .cancelled: return title

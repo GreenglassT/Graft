@@ -1,0 +1,15 @@
+# The build backends stage_python needs to build the two projects it
+# installs from source, so pip never fetches them itself (unpinned and
+# unhashed) through build isolation. scripts/lock-bundle locks this into
+# bundle/build-requirements.lock.
+#
+# graft: pyproject.toml [build-system] requires.
+hatchling>=1.27
+# cyan (pyzule-rw at the pinned commit) has only a setup.py, so pip builds it
+# with setuptools.build_meta:__legacy__ and pip's default requirement for that.
+setuptools>=40.8.0
+
+# Anything both locks name is pinned to the runtime lock's version, so
+# installing this lock and then the runtime one never swaps a version, and
+# uninstalling what only this lock names leaves the runtime set whole.
+-c requirements.lock

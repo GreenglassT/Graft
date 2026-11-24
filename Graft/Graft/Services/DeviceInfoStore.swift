@@ -99,7 +99,7 @@ private typealias Flag = CLIContract.Flag
 ///   for far longer than any interval worth choosing, so the poll sleeps
 ///   *after* its read returns rather than on a wall clock. A stalled read
 ///   delays the next tick instead of stacking a second query behind the first,
-///   and `CLIRunner` SIGTERMs the child when the task is cancelled, so a stall
+///   and `CLIRunner` SIGTERMs the child when the task is canceled, so a stall
 ///   does not survive the window losing focus.
 ///
 ///   One case that reasoning stops short of, stated rather than fixed: the

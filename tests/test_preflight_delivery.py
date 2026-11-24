@@ -31,9 +31,9 @@ def test_livecontainer_skips_signing_and_device_when_not_installing(tmp_path: Pa
     names = _names(
         run_all_checks(_cfg(tmp_path), delivery="livecontainer", will_install=False)
     )
-    # injection + decrypt verification still needed
+    # injection still needed; the decrypt check reads load commands itself
     assert "cyan" in names
-    assert "otool" in names
+    assert "otool" not in names
     # signing identity is irrelevant to a livecontainer build
     assert "zsign" not in names
     assert "ideviceinstaller" not in names
@@ -59,17 +59,17 @@ def test_livecontainer_requires_device_when_installing(tmp_path: Path) -> None:
 
 
 def test_sideload_default_requires_full_signing_identity(tmp_path: Path) -> None:
-    # Default args must preserve the original mode-agnostic behaviour so the
+    # Default args must preserve the original mode-agnostic behavior so the
     # global `--check` command and existing callers are unaffected.
     names = _names(run_all_checks(_cfg(tmp_path)))
     for required in (
         "cyan",
         "zsign",
-        "ideviceinstaller",
-        "otool",
         "signing.cert (.p12)",
         "signing profile (.mobileprovision)",
         ".p12 password",
         "connected ios device(s)",
     ):
         assert required in names, required
+    # Installed over pymobiledevice3, so no libimobiledevice tool is needed.
+    assert "ideviceinstaller" not in names

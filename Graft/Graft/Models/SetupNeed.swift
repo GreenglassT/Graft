@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-/// What a new user still has to do in Terminal before the app can work.
+/// What a new user still has to do before the app can work.
 ///
 /// Read off the failure of the app's first CLI call (`ConfigStore.checkSetup`)
 /// rather than probed for separately, because that call is the one that has
@@ -13,6 +13,10 @@ import Foundation
 /// `graft --init`" — which is the first thing a stranger saw on opening the
 /// app, phrased as a fault. They are a setup step, and `SetupView` shows them
 /// as one.
+///
+/// A release build never asks for Terminal: `.cli` and `.brokenCLI` can't
+/// arise from its bundled CLI, and its config step is the in-app account
+/// setup (`SetupView`).
 enum SetupNeed: Equatable {
     /// The `graft` CLI could not be started: it is not installed anywhere the
     /// app looks.
@@ -25,6 +29,13 @@ enum SetupNeed: Equatable {
     /// screen asked again. What fixes it is a reinstall, and what the user
     /// needs to see is which file it was and why it would not run.
     case brokenCLI(BrokenCLI)
+    /// Release builds: the app's own CLI, `Contents/Helpers/graft`, would not
+    /// start. Nothing installed in Terminal is ever run in its place
+    /// (`GraftExecutable.resolve`), and neither `.cli`'s install nor
+    /// `.brokenCLI`'s reinstall reaches inside the bundle. Usually part of
+    /// Graft.app is missing or broken, and the remedy is a fresh copy; the
+    /// payload says when it is something else (`BundledCLIFailure`).
+    case damagedApp(BundledCLIFailure = .damaged)
     /// The CLI runs but has no config.yaml. `path` is where it looked, as it
     /// said so, or nil if the message carried none.
     case config(path: String?)
@@ -43,11 +54,25 @@ enum SetupNeed: Equatable {
     /// substring of raw stderr (where a path or a hint could contain it).
     init?(error: Error) {
         if case let CLIRunner.RunError.launchFailed(executable, underlying) = error {
-            if let broken = BrokenCLI.diagnose(path: executable, underlying: underlying) {
+            // Before `diagnose`: a bundled launcher that is there but will not
+            // start is still the app's damage, not a pipx venv to rebuild.
+            if GraftExecutable.isBundled(executable) {
+                self = .damagedApp(BundledCLIFailure.diagnose(executable: executable))
+            } else if let broken = BrokenCLI.diagnose(path: executable, underlying: underlying) {
                 self = .brokenCLI(broken)
             } else {
                 self = .cli
             }
+            return
+        }
+        // The launcher started and could not start the app's Python: it says
+        // so in its own words and status (`bundle/launcher.c`). The status
+        // alone is a shell's "found but not executable" too, so the sentence
+        // decides, as the first thing on stderr.
+        if case let CLIError.exited(_, code, stderr) = error,
+           code == CLIContract.Exit.bundleDamaged,
+           stderr.drop(while: \.isWhitespace).hasPrefix(CLIContract.Message.bundleDamaged) {
+            self = .damagedApp(.damaged)
             return
         }
         guard case let CLIError.exited(_, code, stderr) = error,
@@ -64,7 +89,7 @@ enum SetupNeed: Equatable {
     /// of them and marks which the user is on.
     var step: Int {
         switch self {
-        case .cli, .brokenCLI: return 1
+        case .cli, .brokenCLI, .damagedApp: return 1
         case .config: return 2
         case .tools: return 3
         }
@@ -72,6 +97,76 @@ enum SetupNeed: Equatable {
 
     /// How many steps the setup screen lists.
     static let stepCount = 3
+
+    /// The app's own CLI would not start, for whatever reason.
+    var isDamagedApp: Bool {
+        if case .damagedApp = self { return true }
+        return false
+    }
+
+    /// What `.damagedApp(.damaged)` says, on the setup screen and in any
+    /// banner a failed launch of the bundled CLI puts up.
+    /// Where to get it as every doc says: GitHub Releases, and the project's
+    /// own site (whole-diff review, docs-5).
+    static let damagedAppMessage = "Graft.app is damaged: part of it is missing. "
+        + "Download Graft again from GitHub Releases (github.com/GreenglassT/Graft/releases) "
+        + "or graftipa.com and replace this copy."
+}
+
+/// Why a release build's own CLI, `Contents/Helpers/graft`, would not start,
+/// read off the bundle it is in. Each has a different remedy, and "download
+/// Graft again" is the right one only for the first.
+enum BundledCLIFailure: Equatable {
+    /// Part of Graft.app is missing or broken: a fresh copy is the remedy.
+    case damaged
+    /// The app has no `Contents/Helpers` at all. That is a plain Xcode
+    /// Release build, not one `scripts/graft-release` made: a Release build
+    /// only ever runs the CLI inside it, and only the release script puts
+    /// one there.
+    case builtWithoutCLI
+    /// Nothing is at the path the app was opened from any more: it was
+    /// moved or renamed while open. The app finds its CLI from the path it
+    /// was opened at (`CLIRunner.forApp`), so reopening it is the remedy.
+    case moved
+
+    /// `executable` is `<app>/Contents/Helpers/graft`.
+    static func diagnose(
+        executable: String, exists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> BundledCLIFailure {
+        let contents = ((executable as NSString).deletingLastPathComponent as NSString)
+            .deletingLastPathComponent
+        if !exists((contents as NSString).appendingPathComponent("Info.plist")) { return .moved }
+        if !exists((contents as NSString).appendingPathComponent("Helpers")) { return .builtWithoutCLI }
+        return .damaged
+    }
+
+    /// The setup screen's step, and the start of every banner.
+    var message: String {
+        switch self {
+        case .damaged:
+            return SetupNeed.damagedAppMessage
+        case .builtWithoutCLI:
+            return Self.builtWithoutCLIMessage
+        case .moved:
+            return Self.movedMessage
+        }
+    }
+
+    var stepTitle: String {
+        switch self {
+        case .damaged: return "Download Graft again"
+        case .builtWithoutCLI: return "Build Graft with its command-line tool"
+        case .moved: return "Quit Graft and open it again"
+        }
+    }
+
+    static let builtWithoutCLIMessage = "This copy of Graft.app has no command-line tool inside it "
+        + "(no Contents/Helpers), which is what a plain Xcode Release build looks like. "
+        + "The download is built by scripts/graft-release. To run a build of your own, build "
+        + "the Debug configuration, which runs the graft it finds on your PATH."
+
+    static let movedMessage = "Graft.app was moved or renamed while it was open, so it can't "
+        + "find its command-line tool. Quit Graft and open it again."
 }
 
 /// An installed `graft` that would not start, and why.

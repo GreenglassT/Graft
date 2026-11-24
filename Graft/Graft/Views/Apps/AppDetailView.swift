@@ -19,7 +19,7 @@ struct AppDetailView: View {
     /// still true, so every reopen re-spawned `--devices`; and once a device
     /// *was* found the guard latched shut forever, because the store survived
     /// app switches as `State(initialValue:)`, so a phone plugged in
-    /// afterwards could never appear in this pane. The polled store carries no
+    /// afterward could never appear in this pane. The polled store carries no
     /// such guard — it is kept current by `ContentView` on a 5s timer while
     /// the window is key — so injecting it is strictly better, and it also
     /// means this pane and the sidebar can never disagree about what is
@@ -69,6 +69,9 @@ struct AppDetailView: View {
     /// picker (C-LCPIN): it lists the default device's instances from the same
     /// `--lc-status` answers the device pane shows.
     let liveContainer: LiveContainerStore
+    /// `ContentView`'s settings, for the Edit sheet's auto-provisioning
+    /// toggle, which needs to know whether an App Store Connect key is set.
+    let settings: SettingsStore
     /// What the build-target bar's Change control does: in the app, select the
     /// Settings section.
     ///
@@ -90,6 +93,9 @@ struct AppDetailView: View {
     @State private var showingEditSheet = false
     @State private var deviceCheck: DeviceCheck?
     @State private var pendingCancel: AppRecord?
+    /// The app whose unverified decrypt the user is being asked about, while
+    /// "Use it anyway…"'s confirmation is up (C-UNVERIFIED).
+    @State private var confirmingUnverified: String?
 
     /// What the last `--reconcile` said about itself, as opposed to what it
     /// changed — which arrives separately, as a re-reported delivery state on
@@ -123,6 +129,7 @@ struct AppDetailView: View {
         staged: StagedIPAStore,
         appStore: AppStoreStore,
         liveContainer: LiveContainerStore,
+        settings: SettingsStore,
         showSettings: @escaping () -> Void
     ) {
         self.app = app
@@ -134,6 +141,7 @@ struct AppDetailView: View {
         self.staged = staged
         self.appStore = appStore
         self.liveContainer = liveContainer
+        self.settings = settings
         self.showSettings = showSettings
     }
 
@@ -186,7 +194,7 @@ struct AppDetailView: View {
         // navigated away from loses its visible log — switching back shows an
         // empty panel, not A's output. That is the lesser evil versus
         // attributing A's log and A's frozen controls to app B. The build
-        // itself is deliberately NOT cancelled here: it is a real subprocess
+        // itself is deliberately NOT canceled here: it is a real subprocess
         // that will finish signing and installing, and killing it on a stray
         // sidebar click would be worse than losing the transcript. It stays
         // visible where it matters instead — `store.buildingApp` keeps the
@@ -274,7 +282,7 @@ struct AppDetailView: View {
             guard !app.tweaks.isEmpty, !tweaksStore.hasLoaded else { return }
             do { _ = try await tweaksStore.loadTweaks() }
             catch {
-                // A cancelled load is not a failed one — `ContentView`'s
+                // A canceled load is not a failed one — `ContentView`'s
                 // stance, and it holds here for the same reason: leaving the
                 // pane cancels this task, `CLIRunner` reports the SIGTERM'd
                 // child as an ordinary non-zero exit, and the error that comes
@@ -303,7 +311,7 @@ struct AppDetailView: View {
         // the least deliberate input in the app and that was the most
         // destructive thing it can do, with no confirmation and no undo.
         //
-        // The Task it cancelled is safe to outlive us. Every write it makes to
+        // The Task it canceled is safe to outlive us. Every write it makes to
         // this view's state goes through the `logOwner == owner` guard, so it
         // repaints nothing; `store.endBuild(appName:)` only releases the slot
         // it claimed; and `store` is a reference the Task legitimately
@@ -314,7 +322,8 @@ struct AppDetailView: View {
         // while the user is in another section must still update them.
         .sheet(isPresented: $showingEditSheet) {
             EditAppSheet(
-                app: app, store: store, liveContainer: liveContainer, devices: devices
+                app: app, store: store, liveContainer: liveContainer, devices: devices,
+                settings: settings
             ) { showingEditSheet = false }
         }
         // Confirmed rather than immediate, because what a cancel costs depends
@@ -871,10 +880,16 @@ struct AppDetailView: View {
     }
 
     /// The Profile cell's value. A free Apple ID has no provisioning profile
-    /// at all (LiveContainer signs the app on import), so "manual" there
-    /// would name a setting that does not exist.
+    /// at all (LiveContainer signs the app on import), and a LiveContainer
+    /// app on a paid one is never signed by Graft either, so "manual" or
+    /// "auto" there would name a setting that does nothing.
+    /// An app with its own `profile:` signs with that file whatever
+    /// `auto_profile` says, so it reads as that file's name, not "auto".
     static func profileValue(_ app: AppRecord, account: AccountMode?) -> String {
-        if account.isFree { return "not used" }
+        if account.isFree || app.delivery == .livecontainer { return "not used" }
+        if let override = app.profileOverride, !override.isEmpty {
+            return (override as NSString).lastPathComponent
+        }
         return app.autoProfile ? "auto" : "manual"
     }
 
@@ -1189,6 +1204,21 @@ struct AppDetailView: View {
     /// what this side actually knows: the check raised no objection.
     @ViewBuilder
     private var deviceCheckNote: some View {
+        // While the check waits on the phone, what it is waiting for, in the
+        // color of information: "tap Trust" is an instruction, not a fault.
+        if store.checkingApp == app.name, let live = store.deviceCheckStatus {
+            Text(live)
+                .font(AppFont.monoSmall)
+                .foregroundStyle(Palette.textDim)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            deviceCheckResult
+        }
+    }
+
+    @ViewBuilder
+    private var deviceCheckResult: some View {
         switch deviceCheck {
         case .none:
             EmptyView()
@@ -1316,7 +1346,24 @@ struct AppDetailView: View {
                             app: app.name, context: versionContext, force: true
                         )
                     }
-                }
+                },
+                license: appStore.licenseNeeded[app.name],
+                isClaiming: appStore.isClaiming(app.name),
+                isCheckingClaim: appStore.checkingClaim.contains(app.name),
+                claimConfirmation: appStore.claimConfirmations[app.name],
+                onCheckClaim: { Task { await appStore.checkBeforeClaim(app: app.name) } },
+                onClaim: { appStore.startClaim(app: app.name, confirmed: $0) },
+                onCancelClaim: { appStore.cancelClaim(app: app.name) },
+                onOpenInStore: {
+                    if let url = appStore.licenseNeeded[app.name]?.storeURL {
+                        NSWorkspace.shared.open(url)
+                    } else {
+                        MacAppStore.open()
+                    }
+                },
+                appName: app.displayName ?? app.name,
+                claimBlockedReason: appStore.claimBlockedReason,
+                getBlockedReason: appStore.getBlockedReason
             )
             // What the last get or drop staged, until the next action — a
             // drop that worked used to look exactly like one that did nothing.
@@ -1329,13 +1376,44 @@ struct AppDetailView: View {
                     .textSelection(.enabled)
                     .lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true)
+                // The CLI's own warning, after "Use it anyway…": the decrypt
+                // that was staged was never verified, and that stays said for
+                // as long as the confirmation does.
+                ForEach(staged.warnings, id: \.self) { warning in
+                    Text("warning: \(warning)")
+                        .font(AppFont.monoSmall)
+                        .foregroundStyle(Palette.warn)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if let ipaError {
                 ErrorBanner(message: ipaError, onDismiss: { self.ipaError = nil })
             }
             if let failed = appStore.errors[app.name] {
                 ErrorBanner(message: failed, onDismiss: { appStore.dismissError(app: app.name) })
+                if appStore.unverifiedRetry[app.name] != nil {
+                    Button(UnverifiedDecrypt.offerButton) { confirmingUnverified = app.name }
+                        .controlSize(.small)
+                        .disabled(appStore.isBusy(app.name) || store.buildingApp == app.name)
+                }
             }
+        }
+        // Asked first: what it stages is a decrypt nothing could check, and
+        // the sentence says what that can cost. The value is passed to the
+        // button rather than re-read, for the reason `stopBuildConfirmation`
+        // gives — dismissing clears the binding.
+        .alert(
+            UnverifiedDecrypt.confirmTitle,
+            isPresented: $confirmingUnverified.isPresent(),
+            presenting: confirmingUnverified
+        ) { name in
+            Button("Cancel", role: .cancel) {}
+            Button(UnverifiedDecrypt.confirmButton) {
+                appStore.useUnverified(app: name, config: store)
+            }
+        } message: { _ in
+            Text(UnverifiedDecrypt.confirmMessage)
         }
     }
 
@@ -1569,7 +1647,7 @@ struct AppDetailView: View {
                             // match this pane against config.yaml or a build
                             // log. It is *not* asked to carry the case where
                             // two rows are otherwise identical — a tooltip you
-                            // have to hover to read is a poor last defence in
+                            // have to hover to read is a poor last defense in
                             // front of a destructive control, so that row puts
                             // its filename on screen instead
                             // (`AttachedTweak.filenameLine`).
@@ -1644,8 +1722,8 @@ struct AppDetailView: View {
         // has no meta strip to fill, and its record would land in the other
         // app's.
         let handingOver = built && options.forPlaycover
-        // Read outside this Task when a Stop cancelled it: `runOnce` in a
-        // cancelled Task kills its own child at once, so the read came back
+        // Read outside this Task when a Stop canceled it: `runOnce` in a
+        // canceled Task kills its own child at once, so the read came back
         // nil and "Last build" went from "just now" to "—" over a history the
         // stop had not touched (a stop writes no row). An unstructured Task
         // does not inherit the cancellation.
@@ -1673,7 +1751,7 @@ struct AppDetailView: View {
         // "Changed since the last delivery" card outlives the build that made
         // it current, and the user rebuilds to try to clear it.
         //
-        // Detached when this Task was cancelled, because awaiting it there
+        // Detached when this Task was canceled, because awaiting it there
         // does nothing at all: `refreshDeliveryStates` checks `Task.isCancelled`
         // and unwinds silently, by design, so a Stop pressed during `lc-push`
         // would leave the badge reading "up to date" over a phone now holding
@@ -1687,7 +1765,7 @@ struct AppDetailView: View {
         }
     }
 
-    /// - Returns: whether the CLI finished this build cleanly — not cancelled,
+    /// - Returns: whether the CLI finished this build cleanly — not canceled,
     ///   no throw, exit 0. The three `return false` sites below are exactly the
     ///   three that already report a failure, so the answer cannot drift from
     ///   what the pane paints.
@@ -1726,7 +1804,7 @@ struct AppDetailView: View {
             // both drainers to hit EOF, so the slot is still claimed and Stop
             // is still on screen — reaps nothing, so `exitCode` is 0 and the
             // old `if result.exitCode != 0` took neither branch. The queued
-            // `.finished` event is meanwhile dropped by `handle`'s cancelled
+            // `.finished` event is meanwhile dropped by `handle`'s canceled
             // guard, so the pane sat painted as a running build forever.
             // A stop the CLI reported counts too (C-STOP), read off the
             // collected events rather than the callback: a stop nobody pressed
@@ -1745,7 +1823,7 @@ struct AppDetailView: View {
             return true
         } catch {
             // `stream` throws rather than returning only when the Task was
-            // already cancelled before the child launched — `ProcessHandle`
+            // already canceled before the child launched — `ProcessHandle`
             // refuses to adopt and resumes with `CancellationError`, so no
             // subprocess is spawned at all. Same reading as the branch above.
             if store.wasCancelled(owner) || error is CancellationError {
@@ -1849,7 +1927,7 @@ struct AppDetailView: View {
     /// rather than assumed** — each mutated on its own and the whole suite
     /// re-run, 735 passing either way:
     ///
-    ///  - `runBuild`'s `built` gate. Drop it and a *cancelled* Mac build hands
+    ///  - `runBuild`'s `built` gate. Drop it and a *canceled* Mac build hands
     ///    over the previous run's archive, which `handoffFilename` accepts
     ///    quite correctly — it is a successful Mac row — so the app that
     ///    appears is yesterday's and nothing says so.

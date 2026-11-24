@@ -89,7 +89,7 @@ def parse_archive(path: Path) -> Archive | None:
     if m is None:
         return None
     try:
-        size = path.stat().st_size
+        st = path.stat()
     except OSError:
         return None
     return Archive(
@@ -97,7 +97,7 @@ def parse_archive(path: Path) -> Archive | None:
         app=m["app"],
         version=m["version"],
         stamp=m["stamp"],
-        size_bytes=size,
+        size_bytes=st.st_size,
     )
 
 
@@ -127,7 +127,11 @@ def scan_archives(built_dir: Path) -> tuple[list[Archive], list[Path]]:
 
 
 def plan_prune(
-    built_dir: Path, *, keep: int, exclude: Iterable[Path] = ()
+    built_dir: Path,
+    *,
+    keep: int,
+    exclude: Iterable[Path] = (),
+    reinstallable: Iterable[Path] | None = None,
 ) -> PrunePlan:
     """Decide which archives a "newest `keep` per (app, version)" policy drops.
 
@@ -152,6 +156,25 @@ def plan_prune(
     vetoes removal, so `keep: 0` still means "keep nothing but what I just
     built".
 
+    `reinstallable` names the archives a successful history row points at:
+    the ones with a Re-install button. When it is given, those take keep slots
+    first, newest first. Any other archive — left by a build whose push or
+    install failed after it was archived, or by a row a failed Trash move
+    already cleared — has no button, and once let it compete on its timestamp
+    alone the debris of a phone that wasn't plugged in pushed the last
+    re-installable build out of the budget (#1). So it gets only a slot no
+    re-installable archive wants, newest first after them. It got none at all
+    for a while, and that trashed every archive the history didn't cover at
+    any `keep` — a reset state directory, a history write that failed — while
+    everything the user reads promises "the newest N" (re-check #15). `None`
+    (no history database) means nothing is known and every archive competes
+    on its timestamp, as before.
+
+    An archive another build is still delivering is not this function's to
+    know about: the caller plans under the retention lock, which a build
+    shares while its archive is in flight (`cli._RetentionLock`), so its row
+    is written before any sweep can see it.
+
     Raises ValueError for a negative `keep`.
     """
     if keep < 0:
@@ -159,6 +182,7 @@ def plan_prune(
 
     archives, unparsed = scan_archives(built_dir)
     spared = {_identity(p) for p in exclude}
+    known = None if reinstallable is None else set().union(*map(_spellings, reinstallable))
 
     # One bucket per (app, version). Both halves are load-bearing: version
     # strings are not unique across apps — `bravo_1.0_*` and `delta_1.0_*`
@@ -175,14 +199,34 @@ def plan_prune(
         ordered = sorted(
             by_version[key], key=lambda a: (a.stamp, a.path.name), reverse=True
         )
-        kept.extend(ordered[:keep])
-        for archive in ordered[keep:]:
+        if known is None:
+            budgeted = ordered
+        else:
+            named = [a for a in ordered if _spellings(a.path) & known]
+            budgeted = named + [a for a in ordered if not _spellings(a.path) & known]
+        kept.extend(budgeted[:keep])
+        holds_a_slot = {id(a) for a in budgeted[:keep]}
+        for archive in ordered:
+            if id(archive) in holds_a_slot:
+                continue
             if _identity(archive.path) in spared:
                 kept.append(archive)
             else:
                 remove.append(archive)
 
     return PrunePlan(remove=remove, kept=kept, unparsed=unparsed)
+
+
+def _spellings(path: Path) -> set[str]:
+    """`path` as written and as resolved, each normalized by `_identity`.
+
+    A history row holds the string the build wrote (`str(cfg.built_dir /
+    name)`), and the scan builds its paths from the same `built_dir`, so the
+    written forms normally agree. The resolved form covers a `built_dir`
+    spelled differently since (through a symlink, say), so an archive with a
+    Re-install button is never taken for one without.
+    """
+    return {_identity(path), _identity(Path(os.path.realpath(path)))}
 
 
 def _identity(path: Path) -> str:

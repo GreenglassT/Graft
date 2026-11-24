@@ -143,6 +143,124 @@ def test_a_truncated_plist_is_a_preflight_error(tmp_path: Path) -> None:
         mobileprovision.decode(f)
 
 
+@pytest.mark.parametrize("value", [b"<date>soon</date>", b"<date>2030-13-45T00:00:00Z</date>",
+                                   b"<real>lots</real>", b"<integer>many</integer>"])
+def test_a_malformed_value_is_a_preflight_error_not_a_raw_one(value: bytes) -> None:
+    """Combined fix check #30: plistlib reads a <date> its pattern doesn't
+    match as None.groupdict(), an AttributeError that reached setup, --check
+    and builds as 'a failure graft knows nothing of'."""
+    xml = plistlib.dumps(PLIST, fmt=plistlib.FMT_XML)
+    start = xml.index(b"<key>ExpirationDate</key>") + len(b"<key>ExpirationDate</key>")
+    end = xml.index(b"</date>", start) + len(b"</date>")
+    data = _hand_built(PLIST).replace(xml, xml[:start] + value + xml[end:])
+    with pytest.raises(PreflightError, match="failed to decode"):
+        mobileprovision.decode_bytes(data, source="bad.mobileprovision")
+
+
 def test_a_missing_file_is_still_a_preflight_error(tmp_path: Path) -> None:
     with pytest.raises(PreflightError, match="not found"):
         mobileprovision.decode(tmp_path / "nope.mobileprovision")
+
+
+def test_decode_bytes_reads_only_the_bytes_it_is_given() -> None:
+    """`account_setup` reads a chosen profile once and decodes those bytes,
+    so the profile it checks is the profile it installs. `source` names it in
+    the error, as the path does for `decode`."""
+    with _no_security():
+        assert mobileprovision.decode_bytes(_hand_built(PLIST), source="x.mobileprovision") == PLIST
+    with pytest.raises(PreflightError, match=r"failed to decode chosen\.mobileprovision"):
+        mobileprovision.decode_bytes(b"not a profile", source="chosen.mobileprovision")
+
+
+# --- hostile profiles (2.0 review SEC-2) ---------------------------------------------
+
+
+def _cms(content: bytes) -> bytes:
+    """A minimal ContentInfo / SignedData whose eContent is `content`: just
+    enough structure for `_signed_content` to walk, no signature."""
+
+    def der(tag: int, body: bytes) -> bytes:
+        n = len(body)
+        size = bytes([n]) if n < 0x80 else bytes([0x80 | ((n.bit_length() + 7) // 8)]) + n.to_bytes(
+            (n.bit_length() + 7) // 8, "big")
+        return bytes([tag]) + size + body
+
+    data_oid = der(0x06, bytes.fromhex("2a864886f70d010701"))
+    signed_oid = der(0x06, bytes.fromhex("2a864886f70d010702"))
+    encap = der(0x30, data_oid + der(0xA0, der(0x04, content)))
+    signed = der(0x30, der(0x02, b"\x01") + der(0x31, b"") + encap)
+    return der(0x30, signed_oid + der(0xA0, signed))
+
+
+def _billion_laughs(levels: int = 10) -> bytes:
+    entities = ['<!ENTITY lol0 "lol">'] + [
+        f'<!ENTITY lol{n} "{("&lol" + str(n - 1) + ";") * 10}">' for n in range(1, levels)
+    ]
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist [\n' + "\n".join(entities)
+        + f'\n]>\n<plist version="1.0"><dict><key>Name</key><string>&lol{levels - 1};</string>'
+        "</dict></plist>"
+    ).encode()
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["bare", "in CMS"])
+def test_a_billion_laughs_profile_is_refused_at_once(wrapped: bool) -> None:
+    import time
+
+    data = _billion_laughs()
+    if wrapped:
+        data = _cms(data)
+    started = time.monotonic()
+    with pytest.raises(PreflightError, match="declares an XML entity"):
+        mobileprovision.decode_bytes(data)
+    assert time.monotonic() - started < 2, "a parser expanding it would never finish"
+
+
+def test_an_internal_dtd_subset_without_entities_is_refused() -> None:
+    xml = plistlib.dumps({"Name": "x"}).replace(
+        b'"http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+        b'"http://www.apple.com/DTDs/PropertyList-1.0.dtd" [ <!ATTLIST plist a CDATA "b"> ]>',
+    )
+    with pytest.raises(PreflightError, match="has a DTD of its own"):
+        mobileprovision.decode_bytes(xml)
+
+
+def test_apples_own_doctype_line_is_read() -> None:
+    xml = plistlib.dumps({"Name": "x"})
+    assert b"<!DOCTYPE plist PUBLIC" in xml
+    assert mobileprovision.decode_bytes(xml) == {"Name": "x"}
+
+
+def test_a_binary_plist_dag_is_refused_without_being_walked() -> None:
+    """The review's 210-byte profile: a list made of itself, doubled 24 times,
+    as a binary plist inside CMS. Apple never ships a binary plist in a
+    profile, so it isn't read at all, where walking it once took 7 s."""
+    import time
+
+    a: list = ["x"]
+    for _ in range(24):
+        a = [a, a]
+    data = _cms(plistlib.dumps({"TeamIdentifier": a}, fmt=plistlib.FMT_BINARY))
+    assert len(data) < 400
+    started = time.monotonic()
+    with pytest.raises(PreflightError, match="failed to decode"):
+        mobileprovision.decode_bytes(data)
+    assert time.monotonic() - started < 2, "walking it took 7 s"
+
+
+def test_a_profile_over_2_mib_is_refused_before_it_is_read() -> None:
+    big = plistlib.dumps({"Name": "x" * (mobileprovision.MAX_PROFILE_BYTES + 1)})
+    with pytest.raises(PreflightError, match="larger than 2 MiB"):
+        mobileprovision.decode_bytes(big)
+
+
+def test_a_cms_wrapped_xml_profile_still_reads() -> None:
+    assert mobileprovision.decode_bytes(_cms(plistlib.dumps(PLIST)))["Name"] == PLIST["Name"]
+
+
+@pytest.mark.parametrize("value", ["ABCDE12345\n", "ABCDE12345 ", " ABCDE12345", "ABCDE1234\n5"])
+def test_is_team_id_refuses_a_team_with_anything_around_it(value: str) -> None:
+    """T4 of the 2.0 review: `match` with `$` accepts a trailing newline;
+    `fullmatch` doesn't."""
+    assert mobileprovision.is_team_id(value) is False
+    assert mobileprovision.is_team_id("ABCDE12345") is True

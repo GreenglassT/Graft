@@ -33,7 +33,7 @@ final class DevicesStore {
     /// (`devices.isEmpty && lastError == nil`) re-spawns `--devices` on every
     /// single check in exactly that, the most common, case.
     ///
-    /// **A cancelled load is not an attempt.** That reasoning above is about
+    /// **A canceled load is not an attempt.** That reasoning above is about
     /// the *outcome* of a scan that ran; cancellation is the case it did not
     /// consider, and it is not hypothetical — `ContentView`'s first listing
     /// runs inside `.task(id: controlActiveState)`, which is torn down the
@@ -96,7 +96,7 @@ final class DevicesStore {
     /// Drop the "already fetched" mark so the next `load`-if-needed actually
     /// re-runs. This is what a user-facing Refresh button calls: without it
     /// `hasLoaded` would pin the list to whatever was connected at launch and
-    /// a phone plugged in afterwards could never appear.
+    /// a phone plugged in afterward could never appear.
     func invalidate() {
         hasLoaded = false
     }
@@ -139,12 +139,12 @@ final class DevicesStore {
         // it exited 0, exited non-zero, or never launched — so both flags are
         // settled on every exit path.
         //
-        // Except a cancelled one, which is not an attempt: the CLI was SIGTERMed
+        // Except a canceled one, which is not an attempt: the CLI was SIGTERMed
         // part-way through and nothing was learned. `hasLoaded` is what
         // `SidebarView` turns into "No devices connected", and claiming that off
         // a scan the user interrupted by switching windows is a wrong answer
         // rather than a stale one — see the property's own doc. Only ever set
-        // true here, never back to false, so a cancelled *re*-scan leaves the
+        // true here, never back to false, so a canceled *re*-scan leaves the
         // previous attempt's answer standing.
         //
         // `isLoading` is settled unconditionally, cancellation included: it
@@ -285,7 +285,7 @@ final class DevicesStore {
     /// clears. Latching an error onto it from a poll the user never noticed
     /// running would interrupt them over a hiccup in an unrelated part of the
     /// app, exactly the failure mode `ContentView`'s `.task(id: selection)`
-    /// avoids for a cancelled section load, and the same reason `load()`
+    /// avoids for a canceled section load, and the same reason `load()`
     /// leaves `devices` untouched on a failed rescan rather than clearing it.
     /// `devices` is left exactly as the last successful `load()` — manual or
     /// escalated — found it, and so is `deviceErrors`: swallowing a failure and

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import logging
 import os
 import re
@@ -224,6 +225,23 @@ def bagbak_available() -> str | None:
     return child_which("bagbak")
 
 
+def bagbak_path(exe: str) -> list[Path]:
+    """The folders a bagbak run needs on its PATH (`child_env`'s
+    `path_also`): bagbak's own and the user's node's. bagbak is
+    `#!/usr/bin/env node`, and in Graft.app a child's PATH is otherwise the
+    app's and the system's. npm puts bagbak beside node only when its prefix
+    is node's; a custom prefix (`npm config set prefix ~/.npm-global`) puts
+    it elsewhere, and node is wherever the login PATH has it (Homebrew's,
+    nvm's), so env found no node: exit 127, and `bagbak_major` None, so a
+    4.x bagbak got 5.x's argv (the whole-diff review's upgrade-3 = cli-13).
+    """
+    folders = [Path(exe).parent]
+    node = child_which("node")
+    if node is not None and Path(node).parent not in folders:
+        folders.append(Path(node).parent)
+    return folders
+
+
 def bagbak_major(_cache: dict[str, int | None] = {}) -> int | None:  # noqa: B006 — the dict is the memo
     """bagbak's major version, or None if it can't be determined.
 
@@ -239,7 +257,7 @@ def bagbak_major(_cache: dict[str, int | None] = {}) -> int | None:  # noqa: B00
     if exe:
         try:
             proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30,
-                                  env=child_env())
+                                  env=child_env(path_also=bagbak_path(exe)))
             m = re.search(r"(\d+)\.\d+", (proc.stdout or "") + (proc.stderr or ""))
             if m:
                 _cache["v"] = int(m.group(1))
@@ -295,7 +313,7 @@ def _free_port() -> int:
 
     Bind-then-release: the kernel hands out a port that is free *now*, which is
     the best available answer — there is no way to hold it and also give it to
-    iproxy. The window is narrow and the caller checks afterwards that iproxy
+    iproxy. The window is narrow and the caller checks afterward that iproxy
     actually got it, so losing the race is caught rather than believed.
     """
     with socket.socket() as probe:
@@ -426,9 +444,14 @@ def available_backends() -> list[str]:
     return out
 
 
+#: The one bagbak mode that dumps an app: `Payload/App.app/…`, the thing the
+#: build pipeline injects into. Fixed here rather than passed down, because it
+#: is the only one a decrypt can stage (`cli._require_whole_app_mode`).
+_WHOLE_APP_MODE = "all"
+
+
 def build_command(
-    bundle_id: str, output_dir: Path, *, udid: str | None, mode: str = "all",
-    major: int | None = None,
+    bundle_id: str, output_dir: Path, *, udid: str | None, major: int | None = None,
 ) -> list[str]:
     """The bagbak argv, for whichever major is installed.
 
@@ -445,10 +468,10 @@ def build_command(
     filename tripped an internal extension assertion in `main` mode; a directory
     is the form the tool documents and it sidesteps that.
 
-    `mode` defaults to `all`, which is the only mode that produces a full app
-    bundle (`Payload/App.app/…`) — the thing the build pipeline injects into.
-    `main` writes a bare `binaries.zip` with no `Payload`, useful for reverse
-    engineering but not for a build.
+    The mode is always `all` (`_WHOLE_APP_MODE`), the only one that produces
+    a full app bundle (`Payload/App.app/…`) — the thing the build pipeline
+    injects into. `main` writes a bare `binaries.zip` with no `Payload`, useful
+    for reverse engineering but not for a build.
 
     `all` is also the fragile one, and unavoidably so: it dumps every app
     extension, and extensions are short-lived processes iOS suspends and reaps
@@ -463,19 +486,17 @@ def build_command(
         cmd += ["-D", udid]
     cmd += ["-o", str(output_dir), bundle_id]
     if (major if major is not None else bagbak_major()) != _BAGBAK_SSH_MAJOR:
-        cmd.append(mode)
+        cmd.append(_WHOLE_APP_MODE)
     return cmd
 
 
 def mode_is_supported(major: int | None = None) -> bool:
-    """Whether the installed bagbak has a `mode` at all.
+    """Whether the installed bagbak has a `mode` positional at all.
 
-    4.x does not: it dumps the whole bundle and has no positional for this. So
-    `--decrypt-mode main` is inert there — and 4.x is the major that can talk to
-    a 16.x frida-server, which makes "inert" the normal case. The caller says so
-    rather than printing "dumping with bagbak (main)" and then dumping
-    everything, which is minutes and hundreds of megabytes the user did not ask
-    for with nothing anywhere admitting the flag was dropped.
+    4.x does not: it dumps the whole bundle and has no positional for this, and
+    it is the major that pulls the bundle over SSH — which is what the decrypt
+    readiness probe reads this for (`decrypt_ready`). 4.x is also the major
+    that can talk to a 16.x frida-server, so it is the normal case here.
     """
     return (major if major is not None else bagbak_major()) != _BAGBAK_SSH_MAJOR
 
@@ -558,7 +579,6 @@ def decrypt_app(
     *,
     udid: str | None,
     backend: str = BAGBAK,
-    mode: str = "all",
     dry_run: bool = False,
     on_line=None,
 ) -> DecryptResult:
@@ -566,16 +586,15 @@ def decrypt_app(
 
     Returns the .ipa the backend wrote. The caller (`_do_decrypt`) verifies it
     is cryptid 0 before staging — a backend's job is to produce a file, not to
-    promise it decrypted.
+    promise it decrypted. Always the whole app: there is no mode to ask for
+    (`_WHOLE_APP_MODE`).
     """
     if backend == FRIDA:
         _refuse_if_frida_dump_would_target_another_device(udid)
         return _dump_frida_ios_dump(
             bundle_id, output_dir, udid=udid, dry_run=dry_run, on_line=on_line
         )
-    return _dump_bagbak(
-        bundle_id, output_dir, udid=udid, mode=mode, dry_run=dry_run, on_line=on_line
-    )
+    return _dump_bagbak(bundle_id, output_dir, udid=udid, dry_run=dry_run, on_line=on_line)
 
 
 def _refuse_if_frida_dump_would_target_another_device(udid: str | None) -> None:
@@ -679,7 +698,6 @@ def _dump_bagbak(
     output_dir: Path,
     *,
     udid: str | None,
-    mode: str = "all",
     dry_run: bool = False,
     on_line=None,
 ) -> DecryptResult:
@@ -695,13 +713,16 @@ def _dump_bagbak(
             hint=f"install it with: {BAGBAK_INSTALL} (needs Node)",
         )
     output_dir.mkdir(parents=True, exist_ok=True)
-    cmd = build_command(bundle_id, output_dir, udid=udid, mode=mode)
+    cmd = build_command(bundle_id, output_dir, udid=udid)
     if dry_run:
         return DecryptResult(ipa_path=output_dir, bundle_id=bundle_id, stdout=" ".join(cmd))
 
     try:
         returncode, combined = _run_streaming(
-            cmd, env=child_env(bagbak_env(udid)), on_line=on_line,
+            # bagbak's own folder and node's on its PATH: it is
+            # `#!/usr/bin/env node` (`bagbak_path`).
+            cmd, env=child_env(bagbak_env(udid), path_also=bagbak_path(bagbak_available())),
+            on_line=on_line,
             # `cwd` is not incidental. bagbak 4.x makes a `.bagbak` scratch
             # directory *in its current working directory*, so where it runs
             # decides whether it can run at all:
@@ -841,20 +862,152 @@ _FRIDA_SSH_AUTH_RE = re.compile(
 )
 
 
-def _import_frida(need: str):
-    """Import frida, or raise a DecryptError naming what needed it.
+#: Graft's questions to frida, run by frida-ios-dump's own interpreter.
+FRIDA_PROBE = Path(__file__).resolve().with_name("frida_probe.py")
+#: How long one question may take: frida's own connect timeout is 10s.
+_FRIDA_PROBE_TIMEOUT = 30
 
-    The `import frida` / ImportError→DecryptError block is identical for every
-    frida caller bar the noun, so it lives here — one copy of the reinstall hint.
+
+class FridaProbeError(Exception):
+    """frida, asked through `frida_probe.py`, failed or gave no answer."""
+
+
+class FridaNotImportable(FridaProbeError):
+    """frida-ios-dump's virtualenv has no frida that imports (the probe's
+    reply says `frida: null`): this Mac's problem, never the phone's."""
+
+
+def frida_not_importable(e: FridaNotImportable, need: str) -> DecryptError:
+    """The error for `e`, as 1.1's `import frida` failing was: what needed
+    frida, and how to put it back in frida-ios-dump's virtualenv. Every
+    caller that asks frida and reads a failure as the phone's says this
+    instead, before its own words (the whole-diff review's cli-10)."""
+    pip = shlex.quote(str(frida_ios_dump_pip()))
+    return DecryptError(
+        f"the frida module is needed to {need}, and frida-ios-dump's virtualenv can't import frida: {e}",
+        hint=f"reinstall it there: `{pip} install 'frida==16.*'` (the phone is fine), or "
+        f"{frida_ios_dump_setup_hint()}",
+    )
+
+
+class _Answer:
+    """One record of a probe's answer, read as frida's objects are."""
+
+    def __init__(self, fields: dict) -> None:
+        self.__dict__.update(fields)
+
+
+class _ProbedFrida:
+    """The few calls Graft makes on frida, each asked of `frida_probe.py`
+    under frida-ios-dump's virtualenv Python (review part 2 #3).
+
+    Graft itself has no frida: the app doesn't bundle it, and the jailbroken
+    dump that needs it is frida-ios-dump's, whose virtualenv has frida 16 for
+    its own `dump.py`. One subprocess per question, argv only, no shell; the
+    answer is the probe's last stdout line, as JSON.
     """
-    try:
-        import frida
-    except ImportError as e:
+
+    def __init__(self, python: Path) -> None:
+        self.python = python
+
+    def ask(self, question: str, *, device: str | None = None, bundle_id: str | None = None):
+        argv = [str(self.python), "-I", str(FRIDA_PROBE), question]
+        if device:
+            argv += ["--device", device]
+        if bundle_id is not None:
+            argv.append(bundle_id)
+        try:
+            proc = subprocess.run(argv, capture_output=True, text=True, timeout=_FRIDA_PROBE_TIMEOUT,
+                                  env=child_env())
+        except (OSError, subprocess.SubprocessError) as e:
+            raise FridaProbeError(f"couldn't ask frida through {self.python}: {e}") from e
+        lines = [line for line in (proc.stdout or "").splitlines() if line.startswith("{")]
+        try:
+            reply = json.loads(lines[-1]) if lines else None
+        except ValueError:
+            reply = None
+        if not isinstance(reply, dict):
+            tail = ((proc.stderr or "") + (proc.stdout or "")).strip().splitlines()[-3:]
+            raise FridaProbeError(f"frida-ios-dump's Python gave no answer (exit {proc.returncode}): "
+                                  + (" / ".join(tail) or "no output"))
+        if not reply.get("ok"):
+            error = str(reply.get("error") or "frida failed")
+            # The probe names frida's version on every answer it could import
+            # frida for, and null when it couldn't.
+            if "frida" in reply and reply["frida"] is None:
+                raise FridaNotImportable(error)
+            raise FridaProbeError(error)
+        return reply.get("result")
+
+    @property
+    def __version__(self) -> str:
+        try:
+            return str(self.ask("version"))
+        except FridaProbeError:
+            return "unknown"
+
+    def enumerate_devices(self) -> list[_Answer]:
+        return [_Answer(d) for d in self.ask("devices")]
+
+    def get_device(self, udid: str, timeout: int = 10) -> _ProbedDevice:
+        return _ProbedDevice(self, udid)
+
+    def get_usb_device(self, timeout: int = 10) -> _ProbedDevice:
+        return _ProbedDevice(self, None)
+
+
+class _ProbedDevice:
+    """One device, asked through `_ProbedFrida`. Nothing is connected until a
+    question is asked, so a missing device fails there, inside the caller's
+    own try, as `frida.get_device` failing would have."""
+
+    def __init__(self, frida: _ProbedFrida, udid: str | None) -> None:
+        self.frida, self.udid = frida, udid
+        self._launched: set[int] = set()
+
+    def enumerate_processes(self) -> list[_Answer]:
+        return [_Answer(p) for p in self.frida.ask("processes", device=self.udid)]
+
+    def enumerate_applications(self) -> list[_Answer]:
+        return [_Answer(a) for a in self.frida.ask("applications", device=self.udid)]
+
+    def get_frontmost_application(self) -> _Answer | None:
+        app = self.frida.ask("frontmost", device=self.udid)
+        return _Answer(app) if app else None
+
+    def spawn(self, argv: list[str]) -> int:
+        """Launch the app: spawned *and resumed*, in one probe. A spawned
+        process is frida's to hold suspended, and the probe that spawned it
+        exits straight after, so the resume can't wait for another."""
+        (bundle_id,) = argv
+        pid = int(self.frida.ask("launch", device=self.udid, bundle_id=bundle_id)["pid"])
+        self._launched.add(pid)
+        return pid
+
+    def resume(self, pid: int) -> None:
+        if pid not in self._launched:
+            raise FridaProbeError(f"pid {pid} wasn't launched here, and only a launch resumes")
+
+
+def frida_ios_dump_pip() -> Path:
+    """frida-ios-dump's virtualenv pip: the frida Graft asks is that one."""
+    return frida_dump_home() / ".venv" / "bin" / "pip"
+
+
+def _import_frida(need: str):
+    """frida, as frida-ios-dump's virtualenv has it, or a DecryptError naming
+    what needed it and how to set frida-ios-dump up.
+
+    Every frida caller goes through here, bar the noun: one copy of the hint.
+    """
+    python = frida_ios_dump_available()
+    if python is None:
         raise DecryptError(
             f"the frida module is needed to {need}",
-            hint="reinstall graft so its `frida` dependency is present",
-        ) from e
-    return frida
+            hint="Graft asks frida through frida-ios-dump's own Python, and frida-ios-dump is not set up: "
+            f"{frida_ios_dump_setup_hint()}",
+        )
+    return _ProbedFrida(python)
 
 
 def _frida_device(frida, udid: str | None):
@@ -883,6 +1036,8 @@ def app_is_running(bundle_id: str, udid: str | None) -> bool:
         for app in device.enumerate_applications():
             if app.identifier == bundle_id and app.pid:
                 return True
+    except FridaNotImportable as e:
+        raise frida_not_importable(e, "check the app is running") from e
     except Exception:
         return False
     return False
@@ -1092,6 +1247,8 @@ def frontmost_app(udid: str | None) -> str | None:
     try:
         device = _frida_device(frida, udid)
         app = device.get_frontmost_application()
+    except FridaNotImportable as e:
+        raise frida_not_importable(e, "read the foreground app") from e
     except Exception as e:
         raise DecryptError(
             "couldn't reach frida-server on the device to read the foreground app",

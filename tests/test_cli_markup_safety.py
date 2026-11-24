@@ -1,7 +1,7 @@
 """F6 — exception text must not be parsed as Rich markup.
 
 `console.print` interprets `[...]` in the string it is given. On rich 15.0.0 a
-closing-tag-shaped token raises `MarkupError`, and an unrecognised opening tag
+closing-tag-shaped token raises `MarkupError`, and an unrecognized opening tag
 like `[foo]` is deleted from the output without a word. Every one of this
 module's error and warning renderings interpolated an exception, a path or a
 subprocess's stderr into exactly such a string.
@@ -18,7 +18,7 @@ Where that lands decides how bad it is:
 
 Escaped rather than `markup=False` at all three: the prefixes (`[red]error:`,
 `[yellow]warning:`) are markup this module means, and turning markup off would
-print the tags literally. Escaping the interpolated span keeps the colour and
+print the tags literally. Escaping the interpolated span keeps the color and
 makes only the untrusted half inert. The structured half — the `log` event, the
 `build-end` error field — carries the original text, because JSON has no markup
 and a consumer diffing the two should see the same string.
@@ -37,7 +37,7 @@ from graft_ipa.json_output import JsonEmitter
 # A closing tag with no opener: `MarkupError` on rich 15. Reachable from a real
 # subprocess stderr, a filename, or a hint quoting either.
 CLOSING_TAG = "unterminated [/section] in the manifest"
-# An opening tag rich does not recognise: silently deleted, so the message the
+# An opening tag rich does not recognize: silently deleted, so the message the
 # user reads is missing a word and nothing says so.
 SWALLOWED_TAG = "could not read [config] block"
 
@@ -214,7 +214,7 @@ def test_a_deb_filename_that_looks_like_a_tag_still_reports_the_download(
     with patch.object(cli_mod.canister, "fetch_deb", return_value=dest):
         cli_mod._do_fetch(cfg, "com.example.tweak")
 
-    # Whitespace-normalised: rich wraps at the console width, and a tmp_path is
+    # Whitespace-normalized: rich wraps at the console width, and a tmp_path is
     # long enough to break the filename across lines. Both prints, because both
     # name the file and either one alone would leave the other unpinned.
     assert "".join(capsys.readouterr().out.split()).count("tweak[bold].deb") == 2

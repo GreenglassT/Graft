@@ -24,7 +24,7 @@ too. On-device re-signers leave other suffixes. Every id under the
 pattern names it), and `choose` uses the only one there is, whatever it is.
 
 `role_of` with a team keeps the old exact-id reading too, so a paid config
-whose team id is not ten characters (a test fixture, say) still recognises the
+whose team id is not ten characters (a test fixture, say) still recognizes the
 LiveContainers `--lc-install` put on under it.
 """
 
@@ -68,7 +68,7 @@ PAID_SETUP_HINT = (
 #: install as a System app, the bare `com.kdt.livecontainer` included.
 APPLICATION_TYPE = "Any"
 #: The one attribute discovery needs. A System listing with every attribute
-#: is the whole OS's app catalogue, and nothing here reads it.
+#: is the whole OS's app catalog, and nothing here reads it.
 BUNDLE_ID_ONLY = ["CFBundleIdentifier"]
 
 
@@ -110,7 +110,7 @@ def role_of(bundle_id: str, team: str | None = None) -> str | None:
 
 def is_livecontainer_id(bundle_id: str) -> bool:
     """Whether `bundle_id` can name a LiveContainer: what an `lc_bundle_id:`
-    pin must be. Any id `role_of` recognises, in any case, the prefix forms
+    pin must be. Any id `role_of` recognizes, in any case, the prefix forms
     `choose` accepts (`com.kdt.LiveContainer2`) included."""
     return bool(bundle_id) and role_of(bundle_id) is not None
 
@@ -134,7 +134,7 @@ def choose(
 ) -> tuple[str, list[str]]:
     """The LiveContainer a push goes into, and the others that are installed.
 
-    Every id `role_of` recognises is a candidate, `legacy` ones included.
+    Every id `role_of` recognizes is a candidate, `legacy` ones included.
     Exactly one is used:
 
     1. with `pinned` (an app's `lc_bundle_id`), that one: by id in any case,
@@ -163,9 +163,12 @@ def choose(
 
 
 #: How to change or drop a pin, for every refusal of one.
+#: Where an app's LiveContainer is chosen in Graft.app (EditAppSheet's picker).
+APP_LC_PICKER = "Edit App \u203a LiveContainer in Graft.app"
+
 PIN_HINT = (
-    "pin one of them with `graft --set-app-options --app <name> --lc-bundle-id <id>`, "
-    "or drop the pin with `--no-lc-bundle-id`"
+    "pin one of them with `graft --set-app-options --app <name> --lc-bundle-id <id>` "
+    f"or in {APP_LC_PICKER}, or drop the pin with `--no-lc-bundle-id`"
 )
 
 
@@ -226,7 +229,8 @@ def _unpinned(
         f"{len(several)} LiveContainers are installed and Graft will not guess "
         f"which to use: {', '.join(several)}",
         hint=(
-            f"pin the one you import from: set `lc_bundle_id: {several[0]}` "
-            f"(or {' or '.join(several[1:])}) on this app in config.yaml"
+            "pin the one you import from with "
+            f"`graft --set-app-options --app <name> --lc-bundle-id {several[0]}` "
+            f"(or {' or '.join(several[1:])}), or choose it in {APP_LC_PICKER}"
         ),
     )

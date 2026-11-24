@@ -14,7 +14,7 @@ struct AppSidebarRow: View {
     /// What the CLI last said about this app's delivery, if anything. Absent
     /// means it said nothing — see `ConfigStore.deliveryStates`.
     let state: DeliveryStateRecord?
-    /// Drives the quiet text's colour, which has to change on the selection
+    /// Drives the quiet text's color, which has to change on the selection
     /// fill rather than stay unreadable on it.
     let isSelected: Bool
     /// This app's real icon, already resolved by the caller. nil draws the
@@ -40,7 +40,7 @@ struct AppSidebarRow: View {
                     .truncationMode(.tail)
                 // `textDim` on the selection fill is 1.09:1 — no fill light
                 // enough to be visible can carry it (see
-                // `Palette.onAccentMuted`), so the quiet text changes colour
+                // `Palette.onAccentMuted`), so the quiet text changes color
                 // when the row is selected rather than staying unreadable on it.
                 Text(app.bundleId)
                     .font(AppFont.monoSmall)

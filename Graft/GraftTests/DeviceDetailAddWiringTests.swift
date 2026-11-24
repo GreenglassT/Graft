@@ -176,7 +176,7 @@ final class DeviceDetailAddWiringTests: XCTestCase {
             try? FileManager.default.removeItem(atPath: capturePath)
         }
 
-        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: scriptPath)))
+        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: scriptPath)), notify: { _ in })
         let prefill = AddAppSheet.Prefill(staged: try stagedIPARecord(), installedVersion: "1.0")
         XCTAssertEqual(
             prefill.suggestedName, "exampleplayer",
@@ -184,11 +184,12 @@ final class DeviceDetailAddWiringTests: XCTestCase {
             + "or this test cannot tell the two apart"
         )
         var captured: String?
-        // The same shape `DeviceDetailView` builds: `onAdded:` labelled
+        // The same shape `DeviceDetailView` builds: `onAdded:` labeled
         // rather than trailing — see that file's own comment on why the
         // trailing form does not compile once `prefill:` is also supplied.
         let sheet = AddAppSheet(
-            store: store, onAdded: { added in captured = added }, prefill: prefill
+            store: store, appStore: AppStoreStore(runner: store.runner, shell: NoAdminShell()),
+            onAdded: { added in captured = added }, prefill: prefill
         )
         .defaultAppStorage(testDefaults)
         let box = hosted(sheet, width: 480)

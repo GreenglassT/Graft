@@ -31,7 +31,8 @@ final class AppOptionsDraftTests: XCTestCase {
         stripExtensions: Bool = false,
         stripSupportedDevices: Bool = true,
         compressionLevel: Int = 6,
-        pin: PinKey = .null
+        pin: PinKey = .null,
+        autoProfile: Bool = false
     ) throws -> AppRecord {
         var json: [String: Any] = [
             "type": "app",
@@ -41,7 +42,7 @@ final class AppOptionsDraftTests: XCTestCase {
             "tweaks": [],
             "display_name": displayName.map { $0 as Any } ?? NSNull(),
             "delivery": delivery.rawValue,
-            "auto_profile": false,
+            "auto_profile": autoProfile,
             "keep_bundle_id": keepBundleId,
             "strip_extensions": stripExtensions,
             "strip_supported_devices": stripSupportedDevices,
@@ -75,6 +76,7 @@ final class AppOptionsDraftTests: XCTestCase {
         if draft.changed(\.stripSupportedDevices) != nil { names.append("strip_supported_devices") }
         if draft.changed(\.compressionLevel) != nil { names.append("compression_level") }
         if draft.changed(\.lcPin) != nil { names.append("lc_bundle_id") }
+        if draft.changed(\.autoProfile) != nil { names.append("auto_profile") }
         return names
     }
 
@@ -109,6 +111,7 @@ final class AppOptionsDraftTests: XCTestCase {
             ("strip_supported_devices", { $0.stripSupportedDevices = false }),
             ("compression_level", { $0.compressionLevel = 9 }),
             ("lc_bundle_id", { $0.lcPin = .bundleId("com.kdt.livecontainer2.ABCDE12345") }),
+            ("auto_profile", { $0.autoProfile = true }),
         ]
         for edit in edits {
             var draft = AppOptionsDraft(app: try makeApp())
@@ -172,7 +175,7 @@ final class AppOptionsDraftTests: XCTestCase {
         // The post-write reload runs the same stub and appends to the same
         // file; a marker argument nobody else uses separates the two calls.
         let runner = CLIRunner(executable: URL(fileURLWithPath: scriptPath))
-        let store = ConfigStore(runner: runner, cliArgs: ["--reload-marker"])
+        let store = ConfigStore(runner: runner, cliArgs: ["--reload-marker"], notify: { _ in })
         _ = try await store.updateAppOptions(appName: "example", draft: draft)
 
         let captured = try String(contentsOfFile: capturePath, encoding: .utf8)
@@ -310,6 +313,182 @@ final class AppOptionsDraftTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("lc_bundle_id"),
                           error.localizedDescription)
         }
+    }
+}
+
+// MARK: - Auto-provisioning (C-AUTOPROFILE)
+
+extension AppOptionsDraftTests {
+    @MainActor
+    func test_turning_auto_provisioning_on_sends_the_flag_alone() async throws {
+        var draft = AppOptionsDraft(app: try makeApp(autoProfile: false))
+        draft.edited.autoProfile = true
+
+        let args = try await capturedArgs(for: draft, echoing: ["auto_profile"])
+
+        XCTAssertEqual(args, ["--json", "--set-app-options", "--app", "example", "--auto-profile"])
+    }
+
+    @MainActor
+    func test_turning_it_off_sends_the_negated_flag() async throws {
+        var draft = AppOptionsDraft(app: try makeApp(autoProfile: true))
+        XCTAssertTrue(draft.original.autoProfile, "seeded from the app event")
+        draft.edited.autoProfile = false
+
+        let args = try await capturedArgs(for: draft, echoing: ["auto_profile"])
+
+        XCTAssertEqual(args, ["--json", "--set-app-options", "--app", "example", "--no-auto-profile"])
+    }
+
+    // `autoProfileLock`: why the toggle can't be changed, or nil.
+
+    private static let key = #","app_store_connect":{"key_id":"K","issuer_id":"I","key_file":"/k.p8","key_file_exists":true}"#
+    private static let noKey = #","app_store_connect":null"#
+    private static let lostKey = #","app_store_connect":{"key_id":"K","issuer_id":"I","key_file":"/k.p8","key_file_exists":false}"#
+
+    private func settings(_ part: String) throws -> SettingsRecord {
+        let line = #"{"type":"settings","default_device_udid":null,"archive_keep":2,"signing_cert":"/c","signing_profile":"/p","signing_team_id":"T"\#(part)}"#
+        guard case let .settings(record)? = line.buildEvents().first else { throw XCTSkip("fixture") }
+        return record
+    }
+
+    func test_a_free_account_locks_it_with_the_paid_reason() throws {
+        XCTAssertEqual(
+            EditAppSheet.autoProfileLock(delivery: .sideload, account: .free, settings: try settings(Self.key), current: false),
+            PaidOnly.autoProfile
+        )
+    }
+
+    func test_no_key_locks_turning_it_on() throws {
+        XCTAssertEqual(
+            EditAppSheet.autoProfileLock(delivery: .sideload, account: .paid, settings: try settings(Self.noKey), current: false),
+            EditAppSheet.autoProfileNeedsKey
+        )
+        XCTAssertEqual(
+            EditAppSheet.autoProfileLock(delivery: .sideload, account: .paid, settings: try settings(Self.lostKey), current: false),
+            EditAppSheet.autoProfileNeedsKey,
+            "a key whose .p8 is gone signs nothing"
+        )
+    }
+
+    func test_no_key_still_lets_it_be_turned_off() throws {
+        XCTAssertNil(EditAppSheet.autoProfileLock(delivery: .sideload, account: .paid, settings: try settings(Self.noKey), current: true))
+    }
+
+    func test_a_key_unlocks_it() throws {
+        XCTAssertNil(EditAppSheet.autoProfileLock(delivery: .sideload, account: .paid, settings: try settings(Self.key), current: false))
+    }
+
+    /// Nil disables nothing: settings not read yet, or a CLI too old to say.
+    func test_not_knowing_locks_nothing() throws {
+        XCTAssertNil(EditAppSheet.autoProfileLock(delivery: .sideload, account: .paid, settings: nil, current: false))
+        XCTAssertNil(EditAppSheet.autoProfileLock(delivery: .sideload, account: .paid, settings: try settings(""), current: false))
+        XCTAssertNil(EditAppSheet.autoProfileLock(delivery: .sideload, account: nil, settings: try settings(Self.key), current: false))
+    }
+
+    /// LiveContainer delivery never signs, so there is no profile to make.
+    func test_a_livecontainer_app_locks_it_with_the_delivery_reason() throws {
+        XCTAssertEqual(
+            EditAppSheet.autoProfileLock(delivery: .livecontainer, account: .paid, settings: try settings(Self.key), current: false),
+            EditAppSheet.autoProfileNotUsed
+        )
+        XCTAssertEqual(
+            EditAppSheet.autoProfileLock(delivery: .livecontainer, account: .paid, settings: try settings(Self.key), current: true),
+            EditAppSheet.autoProfileNotUsed,
+            "on or off, it does nothing there"
+        )
+    }
+
+    /// Neither a paid account nor a key would make it do anything, so the
+    /// delivery is the reason given — and it is known even when they are not.
+    func test_the_delivery_reason_wins_over_the_others() throws {
+        XCTAssertEqual(
+            EditAppSheet.autoProfileLock(delivery: .livecontainer, account: .free, settings: try settings(Self.key), current: false),
+            EditAppSheet.autoProfileNotUsed
+        )
+        XCTAssertEqual(
+            EditAppSheet.autoProfileLock(delivery: .livecontainer, account: .paid, settings: try settings(Self.noKey), current: false),
+            EditAppSheet.autoProfileNotUsed
+        )
+        XCTAssertEqual(
+            EditAppSheet.autoProfileLock(delivery: .livecontainer, account: nil, settings: nil, current: false),
+            EditAppSheet.autoProfileNotUsed
+        )
+    }
+
+    /// The sheet reads the delivery the picker shows, not the saved one, and
+    /// locking the control leaves the saved value where it was.
+    func test_switching_the_delivery_picker_moves_the_lock() throws {
+        let key = try settings(Self.key)
+        var draft = AppOptionsDraft(app: try makeApp(delivery: .sideload, autoProfile: true))
+        XCTAssertNil(EditAppSheet.autoProfileLock(draft: draft, account: .paid, settings: key))
+
+        draft.edited.delivery = .livecontainer
+        XCTAssertEqual(EditAppSheet.autoProfileLock(draft: draft, account: .paid, settings: key),
+                       EditAppSheet.autoProfileNotUsed)
+        XCTAssertNil(draft.changed(\.autoProfile), "only the control is locked")
+
+        var fromLC = AppOptionsDraft(app: try makeApp(delivery: .livecontainer))
+        XCTAssertEqual(EditAppSheet.autoProfileLock(draft: fromLC, account: .paid, settings: key),
+                       EditAppSheet.autoProfileNotUsed)
+        fromLC.edited.delivery = .sideload
+        XCTAssertNil(EditAppSheet.autoProfileLock(draft: fromLC, account: .paid, settings: key))
+    }
+
+    // `revertEditsHiddenByDelivery`: what a delivery switch takes back.
+
+    /// The toggle locks on LiveContainer. One turned on under Sideload stayed
+    /// on, grayed, after the switch, and Save sent `--auto-profile` with
+    /// nothing on screen to say so.
+    func test_switching_to_livecontainer_drops_an_unsaved_auto_profile_edit() throws {
+        var draft = AppOptionsDraft(app: try makeApp(delivery: .sideload, autoProfile: false))
+        draft.edited.autoProfile = true
+        draft.edited.delivery = .livecontainer
+
+        draft.revertEditsHiddenByDelivery(lcPinShown: true)
+
+        XCTAssertFalse(draft.edited.autoProfile)
+        XCTAssertEqual(changedFields(draft), ["delivery"], "only what the sheet still shows goes out")
+    }
+
+    /// Back to what config holds, not to off: the switch drops an edit and
+    /// never changes a saved value.
+    func test_switching_to_livecontainer_keeps_a_saved_auto_profile() throws {
+        var untouched = AppOptionsDraft(app: try makeApp(delivery: .sideload, autoProfile: true))
+        untouched.edited.delivery = .livecontainer
+        untouched.revertEditsHiddenByDelivery(lcPinShown: true)
+        XCTAssertTrue(untouched.edited.autoProfile)
+        XCTAssertEqual(changedFields(untouched), ["delivery"])
+
+        var turnedOff = AppOptionsDraft(app: try makeApp(delivery: .sideload, autoProfile: true))
+        turnedOff.edited.autoProfile = false
+        turnedOff.edited.delivery = .livecontainer
+        turnedOff.revertEditsHiddenByDelivery(lcPinShown: true)
+        XCTAssertTrue(turnedOff.edited.autoProfile, "the saved value, which the switch leaves alone")
+        XCTAssertEqual(changedFields(turnedOff), ["delivery"])
+    }
+
+    /// Sideload leaves the toggle live, so an edit made there stands.
+    func test_an_auto_profile_edit_on_sideload_stands() throws {
+        var draft = AppOptionsDraft(app: try makeApp(delivery: .livecontainer, autoProfile: false))
+        draft.edited.delivery = .sideload
+        draft.revertEditsHiddenByDelivery(lcPinShown: false)
+        draft.edited.autoProfile = true
+        draft.revertEditsHiddenByDelivery(lcPinShown: false)
+
+        XCTAssertEqual(changedFields(draft), ["delivery", "auto_profile"])
+    }
+
+    /// The pin's picker is off the sheet on Sideload, so its edit goes too.
+    func test_a_pin_edit_goes_when_its_picker_does() throws {
+        var draft = AppOptionsDraft(app: try makeApp(delivery: .livecontainer))
+        draft.edited.lcPin = .bundleId("com.kdt.livecontainer2.ABCDE12345")
+        draft.edited.delivery = .sideload
+
+        draft.revertEditsHiddenByDelivery(lcPinShown: false)
+
+        XCTAssertEqual(draft.edited.lcPin, .automatic)
+        XCTAssertEqual(changedFields(draft), ["delivery"])
     }
 }
 
@@ -534,12 +713,18 @@ final class LiveContainerPinPickerTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(atPath: script) }
         let lc = LiveContainerStore(runner: CLIRunner(executable: URL(fileURLWithPath: script)))
         let box = hosted(
-            EditAppSheet(app: app, store: config, liveContainer: lc, devices: devices, onClose: {}),
+            EditAppSheet(
+                app: app, store: config, liveContainer: lc, devices: devices,
+                settings: SettingsStore(runner: accountTestShell), onClose: {}
+            ),
             width: 460
         )
-        try await Task.sleep(nanoseconds: 600_000_000)
-        settle(box, seconds: 0.2)
-        XCTAssertTrue(lc.hasLoaded.contains(Self.udid), "the sheet asked the default device")
+        // Waits for the load itself, not a fixed 600 ms: under load the
+        // lc-status child could still be running when the tree was read, and
+        // the picker wasn't there yet.
+        await eventually({ lc.hasLoaded.contains(Self.udid) }, timeout: 10,
+                         "the sheet asked the default device")
+        settle(box, seconds: 0.3)
         return try AccessibilityTree.nodes(in: box.window)
     }
 
@@ -558,6 +743,98 @@ final class LiveContainerPinPickerTests: XCTestCase {
         XCTAssertNotNil(nodes.first {
             $0.role == kAXPopUpButtonRole && ($0.value as? String) == "LiveContainer2"
         }, "\(nodes.filter { $0.role == kAXPopUpButtonRole }.map(\.value))")
+    }
+
+    /// Fix-check #6/#26: Save for an app whose own `profile:` outranks the
+    /// `auto_profile` just turned on. The CLI saves it and warns; the sheet
+    /// stays open to show the warning, with Done, and closes on Done.
+    @MainActor
+    func test_a_save_the_cli_warns_about_stays_open_and_shows_the_warning() async throws {
+        try AccessibilityTree.requireServed()
+        let warning = "example has its own profile: line (/Users/x/old.mobileprovision), which outranks "
+            + "auto_profile. Remove that line to use the profile Graft makes"
+        let appLine = accountTestAppLine(delivery: .sideload)
+        let cli = try ScriptCLI("""
+        case " $* " in
+          *" --set-app-options "*)
+            printf '%s\\n' '{"type":"log","source":"warning","line":"\(warning)"}'
+            printf '%s\\n' '{"type":"app-updated","name":"example","changed":["auto_profile"]}' ;;
+          *) printf '%s\\n' '\(accountEventLine("paid"))' '\(appLine)' ;;
+        esac
+        """, test: self)
+        let store = ConfigStore(runner: cli.runner, notify: { _ in })
+        _ = try await store.loadApps()
+        let app = try XCTUnwrap(store.apps.first)
+        var edit = AppOptionsDraft(app: app)
+        edit.edited.autoProfile = true
+        var closed = 0
+        let box = hosted(
+            EditAppSheet(
+                app: app, store: store, liveContainer: LiveContainerStore(runner: accountTestShell),
+                devices: DevicesStore(runner: accountTestShell), settings: SettingsStore(runner: accountTestShell),
+                onClose: { closed += 1 }, edit: edit
+            ),
+            size: NSSize(width: 460, height: 700)
+        )
+        settle(box)
+        try clickButton(named: "Save", in: box.window)
+        // Sleeping, not only settling: the save is a Task on the main actor,
+        // and it runs only while this test is suspended.
+        var texts: [String] = []
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            settle(box, seconds: 0.05)
+            texts = try AccessibilityTree.texts(in: box.window)
+            if texts.contains("warning: " + warning) { break }
+        }
+        XCTAssertTrue(cli.argv().contains { $0.contains("--set-app-options --app example --auto-profile") },
+                      "\(cli.argv())")
+        XCTAssertTrue(texts.contains("warning: " + warning), "\(texts)")
+        XCTAssertEqual(closed, 0, "the sheet closed over the warning")
+        let nodes = try AccessibilityTree.nodes(in: box.window)
+        XCTAssertFalse(nodes.contains { $0.role == kAXButtonRole && $0.name == "Save" }, "Save again would resend it")
+
+        try clickButton(named: EditAppSheet.doneLabel, in: box.window)
+        settle(box, seconds: 0.2)
+        XCTAssertEqual(closed, 1, "Done closes it")
+    }
+
+    /// The control: a save with nothing to warn about closes the sheet, as
+    /// it always has.
+    @MainActor
+    func test_a_save_with_no_warning_closes_the_sheet() async throws {
+        try AccessibilityTree.requireServed()
+        let appLine = accountTestAppLine(delivery: .sideload)
+        let cli = try ScriptCLI("""
+        case " $* " in
+          *" --set-app-options "*)
+            printf '%s\\n' '{"type":"app-updated","name":"example","changed":["auto_profile"]}' ;;
+          *) printf '%s\\n' '\(accountEventLine("paid"))' '\(appLine)' ;;
+        esac
+        """, test: self)
+        let store = ConfigStore(runner: cli.runner, notify: { _ in })
+        _ = try await store.loadApps()
+        let app = try XCTUnwrap(store.apps.first)
+        var edit = AppOptionsDraft(app: app)
+        edit.edited.autoProfile = true
+        var closed = 0
+        let box = hosted(
+            EditAppSheet(
+                app: app, store: store, liveContainer: LiveContainerStore(runner: accountTestShell),
+                devices: DevicesStore(runner: accountTestShell), settings: SettingsStore(runner: accountTestShell),
+                onClose: { closed += 1 }, edit: edit
+            ),
+            size: NSSize(width: 460, height: 700)
+        )
+        settle(box)
+        try clickButton(named: "Save", in: box.window)
+        let deadline = Date().addingTimeInterval(5)
+        while closed == 0, Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+            settle(box, seconds: 0.05)
+        }
+        XCTAssertEqual(closed, 1)
     }
 
     /// F8/S6, through the sheet's own `.task`: opened with no default device
@@ -580,7 +857,10 @@ final class LiveContainerPinPickerTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(atPath: script) }
         let lc = LiveContainerStore(runner: CLIRunner(executable: URL(fileURLWithPath: script)))
         let box = hosted(
-            EditAppSheet(app: app, store: config, liveContainer: lc, devices: devices, onClose: {}),
+            EditAppSheet(
+                app: app, store: config, liveContainer: lc, devices: devices,
+                settings: SettingsStore(runner: accountTestShell), onClose: {}
+            ),
             width: 460
         )
         try await Task.sleep(nanoseconds: 300_000_000)

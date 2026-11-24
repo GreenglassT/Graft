@@ -1,23 +1,22 @@
 import SwiftUI
 
-/// The first thing a new user sees: the Terminal steps between downloading
-/// Graft.app and using it, in the order they come — install the CLI, create
-/// the config, install the tools a build needs.
+/// The first thing a new user sees: what stands between opening Graft.app and
+/// using it.
 ///
-/// It replaces two modal alerts that greeted a stranger as faults — a launch
-/// failure naming a path in `~/.local/bin`, then "Something didn't work: config
-/// file not found at …". Neither is a fault; both are setup, and what the user
-/// needs is the command, a Copy button, and a way back in once it has run.
+/// **A release build** runs the CLI inside it, so its one first-run step is
+/// the Apple account, set up right here (`AccountSetupView`): Welcome, then
+/// "Do you have a paid Apple Developer account?". Nothing on this screen
+/// sends a release build's user to Terminal. A CLI or a tool that won't
+/// start is a damaged copy of the app, and the remedy is a fresh download.
 ///
-/// Shown in the detail area while `ConfigStore.setupNeed` is set, so the
-/// sidebar stays where it is (empty, but usable) and nothing modal covers the
-/// window. Check again re-runs the same first load (`ConfigStore.checkSetup`);
-/// coming back to the window does too, so a user who runs the command and
-/// switches back is usually not asked to press anything.
+/// **A Debug build** finds `graft` on PATH, as it always has, so it keeps
+/// three steps: install the CLI (in Terminal, because it is the developer's
+/// venv or pipx), the account (in the app, as above), and the tools `--check`
+/// finds missing (in Terminal).
 ///
-/// The copy is plain on purpose: what to type, what it will ask, and where
-/// the app looks. No emoji, and no assumption that the reader knows what pipx
-/// or a provisioning profile is beyond the one clause that says.
+/// Shown in the detail area while `ConfigStore.setupNeed` is set, or while
+/// the account setup's result is still being read (`ContentView.setupScreen`),
+/// so the sidebar stays where it is and nothing modal covers the window.
 struct SetupView: View {
     let need: SetupNeed
     let isChecking: Bool
@@ -28,39 +27,114 @@ struct SetupView: View {
     /// still can.
     var onContinueWithoutTools: () -> Void = {}
 
+    /// The account setup the config step runs. Nil only in tests of the other steps.
+    var accountSetup: AccountSetupStore? = nil
+    /// The account setup's last screen was read: load the app. ContentView's
+    /// runs the first load, then lets the setup go (`AccountSetupStore.finish`).
+    var onAccountSetupFinished: () -> Void = {}
+    /// A release build, which runs its own CLI. A parameter so a test can
+    /// render both kinds.
+    var isRelease: Bool = GraftExecutable.preferBundledDefault
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Metrics.sectionGap) {
-                intro
-                VStack(alignment: .leading, spacing: Metrics.sectionGap) {
-                    SetupStep(
-                        number: 1, title: Self.stepOneTitle(for: need),
-                        state: Self.state(of: 1, for: need)
-                    ) {
-                        installSteps
-                    }
-                    SetupStep(
-                        number: 2, title: "Create your config",
-                        state: Self.state(of: 2, for: need)
-                    ) {
-                        configSteps
-                    }
-                    SetupStep(
-                        number: 3, title: "Install the tools",
-                        state: Self.state(of: 3, for: need)
-                    ) {
-                        toolSteps
+                if isRelease || need.isDamagedApp {
+                    releaseSteps
+                } else {
+                    intro
+                    VStack(alignment: .leading, spacing: Metrics.sectionGap) {
+                        SetupStep(
+                            number: 1, title: Self.stepOneTitle(for: need),
+                            state: Self.state(of: 1, for: need)
+                        ) {
+                            installSteps
+                        }
+                        SetupStep(
+                            number: 2, title: Self.stepTwoTitle,
+                            state: Self.state(of: 2, for: need)
+                        ) {
+                            accountSteps
+                        }
+                        SetupStep(
+                            number: 3, title: "Install the tools",
+                            state: Self.state(of: 3, for: need)
+                        ) {
+                            toolSteps
+                        }
                     }
                 }
-                checkAgain
+                if Self.offersCheckAgain(for: need, isRelease: isRelease) {
+                    checkAgain
+                }
             }
-            // A readable measure for the prose, centred in a wide pane.
+            // A readable measure for the prose, centered in a wide pane.
             .frame(maxWidth: 600, alignment: .leading)
             .padding(Metrics.paneGutter)
             .frame(maxWidth: .infinity)
         }
         .background(Palette.bg)
         .navigationTitle(Self.title)
+    }
+
+    /// A release build's screen, and the damaged-app screen in either build.
+    /// Never a Terminal command.
+    @ViewBuilder
+    private var releaseSteps: some View {
+        switch need {
+        case .config:
+            accountSteps
+        case let .tools(missing):
+            damagedStep(.damaged) {
+                note(Self.missingFromThisCopy(missing))
+                continueWithoutTools(count: missing.count)
+            }
+        case let .damagedApp(failure):
+            damagedStep(failure) { EmptyView() }
+        case .cli, .brokenCLI:
+            damagedStep(.damaged) { EmptyView() }
+        }
+    }
+
+    private func damagedStep<Extra: View>(
+        _ failure: BundledCLIFailure, @ViewBuilder _ extra: () -> Extra
+    ) -> some View {
+        // Built here rather than inside the step's closure, so the
+        // non-escaping `extra` is never captured by another closure.
+        let more = extra()
+        return SetupStep(
+            number: 1, title: failure.stepTitle, state: .current, total: 1
+        ) {
+            VStack(alignment: .leading, spacing: Metrics.rowGap) {
+                prose(failure.message)
+                more
+            }
+        }
+    }
+
+    /// The Apple account, set up in the app, where "run graft --init in
+    /// Terminal" with a Copy button used to be.
+    @ViewBuilder
+    private var accountSteps: some View {
+        if let accountSetup {
+            AccountSetupView(
+                store: accountSetup, onFinished: onAccountSetupFinished, finishing: isChecking
+            )
+        }
+    }
+
+    static let stepTwoTitle = "Set up your Apple account"
+
+    /// Check again is for a step done somewhere else. A release build's account
+    /// step is done right here and moves itself on. A Debug build keeps the
+    /// button there, for a developer who ran `graft --init` in Terminal.
+    static func offersCheckAgain(for need: SetupNeed, isRelease: Bool) -> Bool {
+        if case .config = need, isRelease { return false }
+        return true
+    }
+
+    static func missingFromThisCopy(_ missing: [MissingTool]) -> String {
+        "Missing from this copy: " + missing.map(\.name).joined(separator: ", ")
     }
 
     /// The window title while this is showing — also what a test reads back
@@ -97,6 +171,7 @@ struct SetupView: View {
     /// installing is what the user already did.
     static func stepOneTitle(for need: SetupNeed) -> String {
         if case .brokenCLI = need { return "Repair the command-line tool" }
+        if case let .damagedApp(failure) = need { return failure.stepTitle }
         return "Install the command-line tool"
     }
 
@@ -142,32 +217,7 @@ struct SetupView: View {
         }
     }
 
-    // MARK: Step 2
-
-    private var configSteps: some View {
-        VStack(alignment: .leading, spacing: Metrics.rowGap) {
-            // Mirrors `graft --init`'s own order: the paid-membership
-            // question first, because everything after it depends on it.
-            prose("Run the setup. It first asks whether you have a paid Apple Developer "
-                  + "Program membership. With one, it asks where your signing certificate "
-                  + "(.p12) and provisioning profile are and copies them into Graft's config "
-                  + "folder. With a free Apple ID it skips those and lists the steps to do "
-                  + "on the phone. Either way it writes config.yaml:")
-            TerminalCommand(command: Self.initCommand)
-            // Said as paid-only in so many words: a free Apple ID has no
-            // certificate, and `--set-p12-password` refuses on its config.
-            prose("With a free Apple ID that is all: there is no certificate, and "
-                  + "LiveContainer signs each app when you import it. With a paid "
-                  + "membership, then store the certificate's password in your Keychain:")
-            TerminalCommand(command: Self.passwordCommand)
-            if case let .config(path?) = need {
-                note("Graft looks for its config at \(path).")
-            }
-        }
-    }
-
-    static let initCommand = "graft --init"
-    static let passwordCommand = "graft --set-p12-password"
+    // MARK: Step 2: the account, in the app (`accountSteps`, above)
 
     // MARK: Step 3
 
@@ -187,16 +237,20 @@ struct SetupView: View {
                         TerminalCommand(command: tool.command)
                     }
                 }
-                HStack(spacing: Metrics.controlGap) {
-                    Button(Self.continueLabel(count: missing.count), action: onContinueWithoutTools)
-                        .buttonStyle(.borderless)
-                        .font(AppFont.body)
-                        .foregroundStyle(Palette.accent)
-                    Text(Self.continueNote(count: missing.count))
-                        .font(AppFont.monoSmall)
-                        .foregroundStyle(Palette.textDim)
-                }
+                continueWithoutTools(count: missing.count)
             }
+        }
+    }
+
+    private func continueWithoutTools(count: Int) -> some View {
+        HStack(spacing: Metrics.controlGap) {
+            Button(Self.continueLabel(count: count), action: onContinueWithoutTools)
+                .buttonStyle(.borderless)
+                .font(AppFont.body)
+                .foregroundStyle(Palette.accent)
+            Text(Self.continueNote(count: count))
+                .font(AppFont.monoSmall)
+                .foregroundStyle(Palette.textDim)
         }
     }
 
@@ -260,6 +314,9 @@ private struct SetupStep<Content: View>: View {
     let number: Int
     let title: String
     let state: SetupView.StepState
+    /// How many steps the screen shows. One is not counted: "Step 1 of 1"
+    /// says nothing.
+    var total: Int = SetupNeed.stepCount
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -289,7 +346,7 @@ private struct SetupStep<Content: View>: View {
     private var statusText: String {
         switch state {
         case .done: return "Done"
-        case .current: return "Step \(number) of \(SetupNeed.stepCount)"
+        case .current: return total > 1 ? "Step \(number) of \(total)" : ""
         case .upcoming: return "Next"
         }
     }
