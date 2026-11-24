@@ -49,12 +49,19 @@ Follow these even when a command's hint suggests something else.
    `--install-to-mac` installs on this Mac, under PlayCover: ask first too.
 8. **Ask before removing anything:** `--remove-app`, `--detach-tweak`,
    `--delete-tweak`, `--delete-staged`, `--remove-repo` and `--prune-builds`.
+9. **Updates and Graft's own data are the person's.** Don't run
+   `--download-update` or `--install-update`: Graft.app updates itself, and
+   an install quits and replaces it. Never run `--remove-data --items …`
+   unless the person asks for that exact removal; it deletes their settings,
+   sign-in or saved passwords. `--remove-data` on its own only lists, and is
+   safe.
 
 These report, change nothing on a device or an account, and are safe to run
 without asking: `--version`, `--describe`, `--help`, `--list`, `--tweaks`,
 `--repos`, `--staged-ipas`, `--cached-ipa`, `--builds`, `--delivery-state`,
 `--settings`, `--appstore-search`, `--appstore-check`, `--search`,
-`--devices`, `--lc-status`, `--reconcile`, `--check-update`, and a build with
+`--devices`, `--lc-status`, `--reconcile`, `--check-update`, `--remove-data`
+(listing only, without `--items`), and a build with
 `--dry-run`. The steps below that change only Graft's own files (`--add-app`,
 `--appstore-get` for an app the Apple ID has, `--provide-ipa`, `--fetch`,
 `--attach-tweak`) need no yes beyond the person's request. Several commands go

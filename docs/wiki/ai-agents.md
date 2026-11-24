@@ -72,6 +72,8 @@ And it tells the agent never to:
   device's SSH password;
 - answer a keychain or password dialog for you. If one appears while the
   agent works, it says which command caused it.
+- install a Graft update, or remove Graft's data, unless you ask for that
+  yourself. Graft.app updates itself.
 
 An agent can still get things wrong. Read what it's about to do to your
 device before you say yes.
