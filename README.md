@@ -1246,6 +1246,31 @@ and use the macOS trust settings, Keychain included.
 | `killed: 9` from zsign | Quarantine attribute on a zsign you installed: `xattr -cr "$(which zsign)"`. |
 | A PlayCover build stops saying it needs Xcode | The tweak links an iOS private framework, and the pipx CLI builds its stand-in with Xcode's iOS SDK. Install and select full Xcode, or build from Graft.app, which carries the stand-in. |
 
+## Scripting and AI agents
+
+Graft is fully scriptable. Every action in the app is a `graft` command,
+almost every command answers in JSON with `--json`, and `graft --describe`
+lists every flag and event (see [Scripting](#scripting)). So an AI coding
+agent that runs Terminal commands on your Mac can drive Graft from a request
+in plain English. [AGENTS.md](AGENTS.md) tells an agent how, and what to
+leave to you: the App Store sign-in, every password, decryption setup and any
+purchase, and a yes before it changes your device.
+[Use Graft from an AI Agent](docs/wiki/ai-agents.md) shows how to set one up,
+with example requests.
+
+A full run, from the App Store search to the device:
+
+```bash
+graft --appstore-search "Example App" --json
+graft --add-app https://apps.apple.com/app/id123456789 --json   # app-added: its name, "example"
+graft --appstore-get --app example --json
+graft --search "some tweak" --json
+graft --fetch com.example.sometweak --json                      # canister-fetch-end: its filename
+graft --attach-tweak some-tweak.deb --app example --json
+graft example --json                                            # build and deliver
+graft --delivery-state --app example --json
+```
+
 ## Building the app from source
 
 ```bash

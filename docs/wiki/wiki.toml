@@ -67,6 +67,11 @@ slug = "cli-scripting"
 nav = "Scripting & Environment"
 source = "cli-scripting.md"
 
+[[group.page]]
+slug = "ai-agents"
+nav = "AI Agents"
+source = "ai-agents.md"
+
 [[group]]
 name = "Reference"
 

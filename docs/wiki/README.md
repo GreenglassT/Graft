@@ -20,6 +20,7 @@ tweaks, and sends it to your iPhone or iPad. It works with a free Apple ID.
 - [Quick Start](cli-quick-start.md): the commands for a first build from Terminal, with a free Apple ID or a paid Apple Developer account.
 - [CLI Reference](cli-reference.md): the `graft` commands, grouped by what they do.
 - [Scripting & Environment](cli-scripting.md): scripts drive `graft` with `--json`, and the environment variables it reads include the ones for a proxy.
+- [AI Agents](ai-agents.md): an AI coding agent on your Mac can run the `graft` commands for you, from a request in plain English.
 
 ## Reference
 
