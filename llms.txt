@@ -1,0 +1,30 @@
+# Graft
+
+> Graft is a Mac app, with a `graft` command-line tool inside it, that downloads and decrypts iOS apps you own, injects tweaks into them, and installs them on your own iPhone or iPad: into LiveContainer with a free Apple ID, or as a normal app with a paid Apple Developer account.
+
+Graft needs a Mac with Apple silicon and macOS 14 or later. It searches the App Store and downloads apps your Apple ID owns or can get for free, then decrypts them on the Mac. It also takes an IPA you already have, or a dump from your own jailbroken device. It finds tweaks on canister.me and in APT repositories, and delivers builds over USB or Wi-Fi.
+
+Graft is fully scriptable. Every action in the app is a `graft` command, almost every command answers in newline-delimited JSON with `--json`, and `graft --describe` prints every flag and event type. An AI coding agent that runs Terminal commands can drive the whole workflow. AGENTS.md in the repository gives it the commands, how to read the results, and the rules: the person signs in to the App Store, types every password, sets up decryption, and says yes before a free app is added to their Apple ID or anything changes on their device. Graft never buys anything.
+
+Graft is for personal use: your own Apple ID, apps you own or get for free, on your own devices. Graft's own source code is MIT-licensed. Graft is not affiliated with Apple.
+
+## Docs
+
+- [Getting Started](https://graftipa.com/wiki/getting-started/): install Graft, check what it needs, and the five steps to installing an app
+- [CLI Reference](https://graftipa.com/wiki/cli-reference/): the `graft` commands, grouped by what they do
+- [Use Graft from an AI Agent](https://graftipa.com/wiki/ai-agents/): set up an AI coding agent to run `graft`, with example requests and what it leaves to you
+- [Troubleshooting](https://graftipa.com/wiki/troubleshooting/): common symptoms and error messages, and their likely causes
+- [What Graft Connects To](https://graftipa.com/wiki/network/): every host Graft and its tools contact, why, when, and what is sent
+- [Changelog](https://graftipa.com/wiki/changelog/): what changed in each release, newest first
+
+## Source
+
+- [GitHub repository](https://github.com/GreenglassT/Graft): the source code, and Graft.zip on GitHub Releases
+- [AGENTS.md](https://github.com/GreenglassT/Graft/blob/main/AGENTS.md): for AI agents that run `graft`: the workflow as commands, JSON events, exit codes and rules
+
+## Optional
+
+- [Installing the CLI](https://graftipa.com/wiki/cli-install/): put the `graft` command on your Mac, from Graft.app or with pipx
+- [Quick Start](https://graftipa.com/wiki/cli-quick-start/): the commands for a first build from Terminal
+- [Scripting & Environment](https://graftipa.com/wiki/cli-scripting/): `--json` output, and the environment variables `graft` reads
+- [App Store Downloads](https://graftipa.com/wiki/app-store/): signing in, setting up decryption, and getting an app

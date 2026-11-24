@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Use Graft from an AI Agent | Graft Docs</title>
+<meta name="description" content="Graft is fully scriptable: every action in the app is a graft command, and almost every command can answer in JSON. So an AI coding agent that runs Terminal…">
+<link rel="canonical" href="https://graftipa.com/wiki/ai-agents/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Use Graft from an AI Agent | Graft Docs">
+<meta property="og:description" content="Graft is fully scriptable: every action in the app is a graft command, and almost every command can answer in JSON. So an AI coding agent that runs Terminal…">
+<meta property="og:url" content="https://graftipa.com/wiki/ai-agents/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<a href="/wiki/ai-agents/" aria-current="page">AI Agents</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/changelog/">Changelog</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Terminal</nav>
+<h1>Use Graft from an AI Agent</h1>
+<p>Graft is fully scriptable: every action in the app is a <code>graft</code> command, and
+almost every command can answer in JSON. So an AI coding agent that runs
+Terminal commands on your Mac, such as Claude Code, can drive Graft for you
+from a request in plain English.</p>
+<h2 id="what-it-can-do">What it can do</h2>
+<p>An agent can take the same steps you would, in order:</p>
+<ul>
+<li>search the App Store and add an app;</li>
+<li>get the app's IPA from the App Store, or stage an IPA you give it;</li>
+<li>search Canister or your repos for tweaks, download them and attach them;</li>
+<li>build the app and deliver it to your iPhone or iPad;</li>
+<li>check what's out of date, what was last delivered, and why a build failed.</li>
+</ul>
+<p>It reads Graft's results and its hints as it goes, so it can tell you what
+went wrong and what to do next. <code>graft --describe</code> gives it the full list of
+commands, flags and events.</p>
+<h2 id="set-it-up">Set it up</h2>
+<ol>
+<li>Set up Graft.app first: its first run, and for App Store downloads,
+<a href="/wiki/app-store/#sign-in">Sign in</a> and
+<a href="/wiki/app-store/#set-up-decryption">Set up decryption</a>.</li>
+<li>In Graft.app, open Settings › Command-line tool and press <strong>Install graft
+for Terminal</strong> (see <a href="/wiki/cli-install/#install-graft-for-terminal">Installing the CLI</a>).
+In a new Terminal window, <code>graft --version</code> prints Graft's version.</li>
+<li>Make a folder for the agent to work in, and save
+<a href="https://github.com/GreenglassT/Graft/blob/main/AGENTS.md">AGENTS.md</a> from Graft's repository into it. It tells an
+agent how to call <code>graft</code>, how to read its answers, and what to leave to
+you. Some agents read a file with that name by themselves; with others,
+start by asking the agent to read it.</li>
+<li>Open your agent in that folder.</li>
+</ol>
+<p>The agent runs <code>graft</code> as you, with your config, apps and settings, just as
+if you typed the commands yourself.</p>
+<h2 id="example-requests">Example requests</h2>
+<ul>
+<li>&quot;Add Example App from the App Store, attach the tweak com.example.sometweak
+from Canister, and install it to my iPhone through LiveContainer.&quot;</li>
+<li>&quot;Search Canister for tweaks for Example App, show me what you find, and
+attach the one I pick.&quot;</li>
+<li>&quot;Check whether any of my apps has a newer version on the App Store, or any
+of my tweaks a newer release, and tell me what you'd rebuild.&quot;</li>
+<li>&quot;My last build of Example App failed. Find out why and tell me what to do.&quot;</li>
+</ul>
+<h2 id="what-it-does-and-what-it-leaves-to-you">What it does, and what it leaves to you</h2>
+<p>AGENTS.md lets an agent search, list and check things, add an app, download
+an app your Apple ID already has, fetch and attach tweaks, and preview a
+build with <code>--dry-run</code>, without asking.</p>
+<p>It tells the agent to ask you first before:</p>
+<ul>
+<li>anything that changes your iPhone or iPad: a build that delivers to it,
+installing or cleaning up LiveContainer, or a re-install;</li>
+<li>getting a free app your Apple ID doesn't have yet. Graft never buys
+anything: the agent asks before it adds a free app to your Apple ID's
+purchases, and a paid app is yours to buy in the App Store;</li>
+<li>removing anything: an app, a tweak, a staged IPA or old builds.</li>
+</ul>
+<p>And it tells the agent never to:</p>
+<ul>
+<li>sign in to the App Store for you, or ask for your Apple ID password or the
+code Apple sends. You sign in in Graft.app;</li>
+<li>set up decryption, which needs your administrator password in macOS's own
+dialog. You press <strong>Set Up Decryption…</strong> yourself;</li>
+<li>ask for or type any other password: your Mac's, your <code>.p12</code>'s or your
+device's SSH password;</li>
+<li>answer a keychain or password dialog for you. If one appears while the
+agent works, it says which command caused it.</li>
+</ul>
+<p>An agent can still get things wrong. Read what it's about to do to your
+device before you say yes.</p>
+<p>LiveContainer delivery puts the IPA in LiveContainer's Documents on your
+device. Opening LiveContainer and importing it is still your step, as it is
+when you build from the app.</p>
+<p>Graft is for personal use, whoever runs it: your own Apple ID, apps you own
+or get for free, on your own devices. Don't redistribute decrypted or
+modified IPAs.</p>
+<h2 id="privacy">Privacy</h2>
+<p>The agent runs on your Mac and sees what Graft prints: your apps and tweaks,
+your devices' names and UDIDs, file paths in your home folder, and, from
+<code>graft --appstore-status</code>, the email of the Apple ID you signed in with. Your
+passwords stay in your login keychain and aren't part of that output.</p>
+<p>If the agent's AI model runs online, what the agent reads is sent to that
+service, and that service's terms apply to it.</p>
+<p>See <a href="/wiki/cli-scripting/">Scripting &amp; Environment</a> for <code>--json</code>, and the
+<a href="/wiki/cli-reference/">CLI Reference</a> for every command.</p>
+<nav class="pager"><a rel="prev" href="/wiki/cli-scripting/">← Scripting &amp; Environment</a><a rel="next" href="/wiki/configuration/">Configuration &amp; Files →</a></nav>
+</main>
+</div>
+<footer>
+      <p><a href="/wiki/changelog/">Changelog</a></p>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

@@ -102,7 +102,7 @@ h1 {
 .fineprint { margin: 1.25rem 0 0; font-size: 0.95rem; color: var(--ink-soft); max-width: 36rem; }
 
 /* Sections */
-.build, .more, .install, .faq, .own { margin-top: clamp(4.5rem, 9vw, 7.5rem); scroll-margin-top: 1.5rem; }
+.build, .more, .agents, .install, .faq, .own { margin-top: clamp(4.5rem, 9vw, 7.5rem); scroll-margin-top: 1.5rem; }
 h2 { margin: 0 0 0.75rem; font-size: clamp(2rem, 4.5vw, 3.2rem); font-weight: 800; letter-spacing: -0.03em; line-height: 1.05; }
 .intro { margin: 0 0 1.75rem; font-size: 1.15rem; color: var(--ink-soft); }
 
@@ -190,3 +190,14 @@ footer p { margin: 0.3rem 0; }
   .req li { break-inside: avoid; }
   .own { max-width: 64rem; }
 }
+
+/* Fully scriptable */
+.agents-grid { display: grid; gap: 2rem; align-items: start; }
+.agents-grid > * { min-width: 0; }
+@media (min-width: 52rem) { .agents-grid { grid-template-columns: 1.1fr 1fr; gap: 3.5rem; } }
+.agents h3 { margin: 0 0 0.5rem; font-size: 1.3rem; font-weight: 700; }
+.agents p { color: var(--ink-soft); }
+.agents p.small { margin: 0.9rem 0 0; font-size: 0.97rem; }
+.agents a { color: var(--accent); font-weight: 600; }
+pre.prompt { white-space: pre-wrap; font-size: 1rem; }
+.agents .req { columns: auto; max-width: none; }
