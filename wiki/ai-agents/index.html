@@ -10,8 +10,13 @@
 <meta property="og:title" content="Use Graft from an AI Agent | Graft Docs">
 <meta property="og:description" content="Graft is fully scriptable: every action in the app is a graft command, and almost every command can answer in JSON. So an AI coding agent that runs Terminal…">
 <meta property="og:url" content="https://graftipa.com/wiki/ai-agents/">
-<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta property="og:site_name" content="Graft">
+<meta property="og:image" content="https://graftipa.com/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Graft&#x27;s icon and name beside “Pick an app. Pick your tweaks. Graft does the rest.”, above the Graft window with example apps and its Build &amp; Install button.">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://graftipa.com/og.png">
 <link rel="icon" href="/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -75,9 +80,11 @@ from a request in plain English.</p>
 <p>An agent can take the same steps you would, in order:</p>
 <ul>
 <li>search the App Store and add an app;</li>
-<li>get the app's IPA from the App Store, or stage an IPA you give it;</li>
+<li>get the app's IPA from the App Store, the latest version or an older one,
+or stage an IPA you give it;</li>
 <li>search Canister or your repos for tweaks, download them and attach them;</li>
-<li>build the app and deliver it to your iPhone or iPad;</li>
+<li>build the app and deliver it to your iPhone or iPad, or export its IPA
+unsigned, for a signer on your phone;</li>
 <li>check what's out of date, what was last delivered, and why a build failed.</li>
 </ul>
 <p>It reads Graft's results and its hints as it goes, so it can tell you what
@@ -109,11 +116,16 @@ attach the one I pick.&quot;</li>
 <li>&quot;Check whether any of my apps has a newer version on the App Store, or any
 of my tweaks a newer release, and tell me what you'd rebuild.&quot;</li>
 <li>&quot;My last build of Example App failed. Find out why and tell me what to do.&quot;</li>
+<li>&quot;The new version of Example App broke my tweak. Get the version before it
+from the App Store, and rebuild it once I say yes.&quot;</li>
 </ul>
 <h2 id="what-it-does-and-what-it-leaves-to-you">What it does, and what it leaves to you</h2>
 <p>AGENTS.md lets an agent search, list and check things, add an app, download
 an app your Apple ID already has, fetch and attach tweaks, and preview a
 build with <code>--dry-run</code>, without asking.</p>
+<p>It exports an IPA only when you ask, saves it only where you say, and never
+sends the file anywhere. It asks before it replaces a file that's already
+there.</p>
 <p>It tells the agent to ask you first before:</p>
 <ul>
 <li>anything that changes your iPhone or iPad: a build that delivers to it,
@@ -157,7 +169,7 @@ service, and that service's terms apply to it.</p>
 </main>
 </div>
 <footer>
-      <p><a href="/wiki/changelog/">Changelog</a></p>
+      <p><a href="/wiki/changelog/">Changelog</a> · <a class="star-link" href="https://github.com/GreenglassT/Graft"><svg class="star-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M12 2.6l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5L12 17.4l-5.8 3.1 1.1-6.5-4.7-4.6 6.5-.9z" fill="currentColor"/></svg>Star Graft on GitHub</a></p>
       <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
       <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
     </footer>

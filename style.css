@@ -99,6 +99,12 @@ h1 {
 .button:hover { filter: brightness(1.08); }
 .button.ghost { background: transparent; color: var(--ink); border-color: var(--rule-strong); }
 .button.ghost:hover { border-color: var(--ink); filter: none; }
+/* Star on GitHub: an inline star, and the count app.js fills in when GitHub answers. */
+.star-icon { flex: none; }
+.button .star-icon { margin-right: 0.5rem; color: var(--accent); }
+.star-count { margin-left: 0.65rem; padding-left: 0.65rem; border-left: 1px solid var(--rule-strong); }
+.star-count[hidden] { display: none; }
+.star-link .star-icon { vertical-align: -0.12em; margin-right: 0.3em; }
 .fineprint { margin: 1.25rem 0 0; font-size: 0.95rem; color: var(--ink-soft); max-width: 36rem; }
 
 /* Sections */

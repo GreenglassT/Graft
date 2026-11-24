@@ -38,3 +38,23 @@
 
   render();
 })();
+
+// Star on GitHub: the repo's star count, from one anonymous request (no cookies, no
+// referrer). If it fails, or GitHub says nothing usable, the button shows no number.
+(function () {
+  var counts = document.querySelectorAll("[data-stars]");
+  if (!counts.length || !window.fetch) return;
+  fetch("https://api.github.com/repos/GreenglassT/Graft", { credentials: "omit", referrerPolicy: "no-referrer" })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (repo) {
+      var n = repo && repo.stargazers_count;
+      if (typeof n !== "number" || !(n > 0)) return;
+      var text = n < 1000 ? String(n) : (Math.floor(n / 100) / 10).toString().replace(/\.0$/, "") + "k";
+      for (var i = 0; i < counts.length; i++) {
+        counts[i].textContent = text;
+        counts[i].setAttribute("aria-label", n === 1 ? "1 star" : n + " stars");
+        counts[i].hidden = false;
+      }
+    })
+    .catch(function () {});
+})();
