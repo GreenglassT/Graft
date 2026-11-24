@@ -151,9 +151,9 @@ graft --delivery-state [--app example]   # would building now produce something 
 graft --reconcile [--app example]        # check the device first, then report
 ```
 
-`--dry-run` previews only a build, `--prune-builds` and `--init --account`.
-Every other command refuses it, before doing anything, rather than running for
-real under a flag that said it wouldn't.
+`--dry-run` previews only a build, `--prune-builds`, `--init --account` and
+`--remove-data --items`. Every other command refuses it, before doing
+anything, rather than running for real under a flag that said it wouldn't.
 
 ## LiveContainer
 
@@ -193,7 +193,14 @@ graft --set-portal --asc-key-id ABCDE12345 \
 graft --setup-portal                # the same key, with questions
 graft --clear-portal                # remove it (the .p8 stays)
 graft --check-update                # is a newer Graft out? (asks GitHub; downloads nothing)
+graft --download-update             # download it into Graft's cache and check it (installs nothing)
+graft --remove-data                 # what Graft keeps outside Graft.app, with sizes
+graft --remove-data --items all     # remove it (see Removing Graft); add --dry-run to preview
 ```
+
+Graft.app installs a download it checked with `--install-update`, which it
+runs as it quits; see [Updating Graft](updating.md).
+[Removing Graft](removing.md#what-it-removes) lists every item `--items` takes.
 
 `--set-settings --signing-*` refuses on a free config rather than write part of
 a `signing:` section, which would leave a config that no longer loads. To

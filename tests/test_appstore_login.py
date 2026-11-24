@@ -375,6 +375,18 @@ def test_ipatool_fetching_unicorn_offline_says_the_first_use_sentence() -> None:
     assert "pypi.org" in failed.hint
 
 
+def test_a_first_sign_in_whose_restore_image_is_gone_says_a_newer_graft_fixes_it() -> None:
+    """The first sign-in downloads the App Store's frameworks from the macOS
+    restore image ipatool 2.8.0 pins. Apple's host answers a removed file
+    with 403, which no other rule may read as a network or password problem."""
+    error = ("sign-in request failed: load Store runtime: resolve macOS 27.0.1 (26A434) frameworks: "
+             "open remote image: server returned 403 Forbidden without byte-range support")
+    failed = appstore_login.classify(error)
+    assert failed.reason == appstore_login.REASON_RESTORE_IMAGE == "restore-image-gone"
+    assert failed.message == ipatool.RESTORE_IMAGE_GONE == appstore_login.MESSAGES[failed.reason]
+    assert failed.hint == f"ipatool said: {error}"
+
+
 def test_an_unrecognised_failure_still_says_what_ipatool_said() -> None:
     assert "something nobody has seen" in appstore_login.classify(
         "something nobody has seen"

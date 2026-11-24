@@ -196,7 +196,13 @@ def test_the_lock_check_reads_the_login_keychain_s_state_without_asking() -> Non
     On try13 this failed against a really locked keychain: the check went
     through $HOME, which conftest points at a temp folder, so it found no
     keychain at all and answered None. The path it reads is the account's,
-    whatever HOME says, and it must be the file there."""
+    whatever HOME says, and it must be the file there.
+
+    Since the try14 delta audit's kc-path the check also reads the default
+    keychain (SecKeychainCopyDefault), through $HOME. Under this test's
+    temp HOME there is none (-25307), so the login keychain's answer is
+    the one checked here. That a custom default keychain, locked, reads as
+    locked under the real HOME is a hands-on check, not a test."""
     import pwd
     from pathlib import Path
 

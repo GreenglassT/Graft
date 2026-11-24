@@ -448,3 +448,47 @@ def test_an_icloud_container_is_still_a_likely_crash(tmp_path: Path, key: str) -
     (gap,) = capabilities.missing_for(ipa, wildcard_profile(tmp_path))
     assert (gap.name, gap.likely_crash) == ("iCloud", True)
     assert capabilities.warnings("Example", "example", [gap])[0].endswith("it will probably crash at launch.")
+
+
+# --- d14-cli-4: iCloud containers, one by one ------------------------------------------
+
+VENDOR_CONTAINER = {"com.apple.developer.icloud-container-identifiers": ["iCloud.com.vendor.app"]}
+
+
+@pytest.mark.parametrize("granted", [
+    {**KVSTORE},
+    {**KVSTORE, "com.apple.developer.icloud-container-identifiers": []},
+    {"com.apple.developer.icloud-container-identifiers": ["iCloud.com.mine.app"]},
+], ids=["key-value only", "an empty container list", "the user's own container"])
+def test_a_profile_with_icloud_but_not_the_app_s_container_is_a_likely_crash(
+    tmp_path: Path, granted: dict
+) -> None:
+    """The try14 delta audit's d14-cli-4: any iCloud key in the profile
+    counted as iCloud granted, so a paid user who turned iCloud on for their
+    App ID was told nothing, and the app looks its vendor's container up at
+    launch and finds none."""
+    ipa = make_ipa(tmp_path / "x.ipa", {**REWRITTEN, **VENDOR_CONTAINER})
+    (gap,) = capabilities.missing_for(ipa, profile_granting(tmp_path, granted))
+    assert (gap.name, gap.groups, gap.likely_crash) == ("iCloud", ("iCloud.com.vendor.app",), True)
+    (line,) = capabilities.warnings("Example", "example", [gap])
+    assert line == ("Example asks for iCloud (iCloud.com.vendor.app), which the profile doesn't grant; "
+                    "it will probably crash at launch.")
+
+
+@pytest.mark.parametrize("granted", [["iCloud.com.vendor.app"], ["iCloud.com.vendor.*"], ["iCloud.*"]])
+def test_the_app_s_own_container_granted_is_no_gap(tmp_path: Path, granted: list[str]) -> None:
+    ipa = make_ipa(tmp_path / "x.ipa", {**REWRITTEN, **KVSTORE, **VENDOR_CONTAINER})
+    profile = profile_granting(tmp_path, {"com.apple.developer.icloud-container-identifiers": granted})
+    assert capabilities.missing_for(ipa, profile) == []
+
+
+def test_only_the_containers_the_profile_lacks_are_named(tmp_path: Path) -> None:
+    ipa = make_ipa(tmp_path / "x.ipa", {
+        **REWRITTEN,
+        "com.apple.developer.icloud-container-identifiers": ["iCloud.com.vendor.app", "iCloud.com.vendor.shared"],
+    }, appexes={"Widget": {"com.apple.developer.ubiquity-container-identifiers": ["iCloud.com.vendor.docs"]}})
+    profile = profile_granting(tmp_path, {
+        "com.apple.developer.icloud-container-identifiers": ["iCloud.com.vendor.app"],
+    })
+    (gap,) = capabilities.missing_for(ipa, profile)
+    assert gap.groups == ("iCloud.com.vendor.docs", "iCloud.com.vendor.shared")

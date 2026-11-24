@@ -46,14 +46,29 @@ class Stopped(SystemExit):
 NOT_LET_READ = frozenset({errno.EPERM, errno.EACCES})
 
 
-def not_let_read_hint(shown: str) -> str:
+def not_let_read_hint(shown: str, code: int = errno.EPERM) -> str:
     """The hint for a file the user chose that macOS wouldn't let Graft
-    read (`NOT_LET_READ`): the app hands the CLI the file's path, and the
-    privacy prompt that raises is Graft's to allow (the whole-diff review's
-    app-2)."""
+    read (`NOT_LET_READ`), by `code`, the `open` failure's errno.
+
+    EPERM is macOS's privacy controls: the app hands the CLI the file's
+    path, and the prompt that raises is Graft's to allow (the whole-diff
+    review's app-2). macOS asks on behalf of the app that started the CLI,
+    which from Terminal is Terminal, so both are named.
+
+    EACCES is the file's own owner and permissions, which no privacy
+    setting changes: a .p12 copied with sudo belongs to root (the try14
+    delta audit's d14-cli-5).
+    """
+    if code == errno.EACCES:
+        return (
+            f"your user can't read {shown}: it may belong to another user, root for one if it "
+            "was copied with sudo, or have no read permission. Check its owner in Finder › Get Info "
+            "› Sharing & Permissions, or copy it somewhere as yourself and choose the copy"
+        )
     return (
-        f"macOS didn't let Graft read {shown}: allow Graft in System Settings › Privacy & Security "
-        "› Files and Folders, or move the file out of Downloads/Desktop/Documents and choose it again"
+        f"macOS didn't let Graft read {shown}: allow Graft (or Terminal, if you ran graft there) in "
+        "System Settings › Privacy & Security › Files and Folders, or move the file out of "
+        "Downloads/Desktop/Documents and choose it again"
     )
 
 

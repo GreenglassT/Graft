@@ -65,6 +65,22 @@ def _no_real_home_or_tools(
 
 
 @pytest.fixture(autouse=True)
+def _no_real_temp_folder(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every test gets a scratch temp folder for `--remove-data` to look in.
+
+    `--remove-data` removes what Graft's runs left in $TMPDIR, and the
+    suite's own TMPDIR is the developer's real one, where other runs' (and
+    other worktrees') temporary folders live. Beside tmp_path, not in it, for
+    `_no_real_home_or_tools`' reason.
+    """
+    from graft_ipa import remove_data
+
+    monkeypatch.setattr(remove_data, "TEMP_ROOT", tmp_path_factory.mktemp("tmpdir"))
+
+
+@pytest.fixture(autouse=True)
 def _an_apple_silicon_mac(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test runs as if on Apple silicon, whatever Mac runs the suite.
 
@@ -90,6 +106,26 @@ def _no_real_mac_region(monkeypatch: pytest.MonkeyPatch) -> None:
     from graft_ipa import host
 
     monkeypatch.setattr(host, "_read_apple_locale", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_proxy_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reads this Mac's own proxy settings (System Settings › Network).
+
+    requests asks `urllib.request` for proxies on every request, and with
+    none in the environment macOS's urllib asks SystemConfiguration
+    (`_scproxy`). That leaves native threads running in the test process for
+    the rest of the run, so every later `os.fork()` (test_data_dirs'
+    `multiprocessing` fork, test_program_guard's own) warned "multi-threaded
+    process", about 360 times, and a forked child could deadlock on a lock
+    one of those threads held. It also let a proxy set on the developer's
+    Mac change what a test saw. Proxies from the environment
+    (`HTTPS_PROXY`), which tests set on purpose, still apply.
+    """
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "getproxies_macosx_sysconf", lambda: {}, raising=False)
+    monkeypatch.setattr(urllib.request, "proxy_bypass_macosx_sysconf", lambda host: False, raising=False)
 
 
 @pytest.fixture(autouse=True)

@@ -466,6 +466,16 @@ enum Symbols {
     /// app's smallest size at its quietest color.
     static let encrypted = Symbol(name: "lock.fill", weight: .medium)
 
+    /// Graft is busy and this has to wait for it: Remove Graft's Data while a
+    /// build or download runs. Drawn in `Palette.warn` beside the sentence
+    /// that says what it waits for.
+    static let waiting = Symbol(name: "hourglass", weight: .medium)
+
+    /// The login keychain is locked or didn't answer, so Graft couldn't check
+    /// what it keeps there (Remove Graft's Data). Its own role rather than
+    /// `deviceLocked`, which is a phone's passcode lock.
+    static let keychainLocked = Symbol(name: "lock", weight: .medium)
+
     /// A newer build of this tweak exists, or a newer Graft (`UpdateNotice`).
     static let updateAvailable = Symbol(name: "arrow.up.circle.fill", weight: .regular)
 
@@ -523,7 +533,7 @@ enum Symbols {
         revealInFinder, rowMenu, buildOptions, dismiss, clearOption, search,
         dropIPA, checkboxOn, checkboxOff,
         ok, blocked, advisory, failure, attention, encrypted, updateAvailable,
-        note,
+        note, waiting, keychainLocked,
         device, noDefaultDevice, noDevice, deviceLocked, scanning, notDelivering,
     ]
 }

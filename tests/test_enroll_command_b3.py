@@ -158,10 +158,10 @@ def test_every_value_in_the_script_is_a_single_quoted_literal(place) -> None:
     for line in (
         f"D=$(/usr/bin/mktemp -d '{_plain(enrollment.WORK_TEMPLATE)}')",
         f"cancelled() {{ [ -e '{_plain(command.cancel_file)}' ]; }}",
-        f"for F in {fpsd}/* {shared}/*; do case \"${{F##*/}}\" in "
-        "[Ss][Cc]' '[Ii][Nn][Ff][Oo].[Ss][Ii][Dd][Bb]) "
-        "if [ ! -h \"$F\" ] && [ -f \"$F\" ]; then I=1; fi ;; esac; done",
-        f"[ -n \"$I\" ] || {{ echo '{NO_STATE}' >&2; exit 69; }}",
+        f"  ( for G in {fpsd} {shared}; do",
+        "        for F in *; do case \"$F\" in [Ss][Cc]' '[Ii][Nn][Ff][Oo].[Ss][Ii][Dd][Bb]) "
+        "if [ ! -h \"$F\" ] && [ -f \"$F\" ]; then exit 0; fi ;; esac; done",
+        f"case \"$S\" in 0) ;; 69) {{ echo '{NO_STATE}' >&2; exit 69; }} ;; *) exit 1 ;; esac",
         f"/bin/cp '{_plain(place['up'])}' \"$D/unfairplay\"",
         "/usr/bin/codesign --verify --strict -R '=anchor apple generic and identifier \"unfairplay\" "
         "and certificate leaf[subject.OU] = \"TESTTEAM01\"' \"$D/unfairplay\"",
@@ -1366,11 +1366,48 @@ def test_root_looks_once_the_watchdog_runs_and_before_any_copy(place) -> None:
     lines = _command(place, make_ios_app(place["apps"])).script.splitlines()
     first_cancel = lines.index('if cancelled; then : >"$D/stop-67"; exit 67; fi')
     watchdog_end = next(i for i, line in enumerate(lines) if line.startswith(") </dev/null >/dev/null 2>&1 &"))
-    look = next(i for i, line in enumerate(lines) if line.startswith("for F in "))
-    refuse = next(i for i, line in enumerate(lines) if line.startswith('[ -n "$I" ] || '))
+    look = next(i for i, line in enumerate(lines) if line.startswith("  ( for G in "))
+    refuse = next(i for i, line in enumerate(lines) if line.startswith('case "$S" in 0) ;; 69) '))
     first_copy = next(i for i, line in enumerate(lines) if line.startswith("/bin/cp "))
-    assert lines[look - 1] == "I="
     assert first_cancel < watchdog_end < look < refuse < first_copy
+
+
+def test_root_looks_in_a_shell_of_its_own_that_the_watchdog_and_leave_can_kill(place) -> None:
+    """Review of 2.0.1: the look was the script's own shell's, so a listing
+    that stalled had no child for the watchdog to kill. Now it is two
+    shells in the background, with nothing but builtins (a child of the
+    inner one would be deeper than the watchdog kills), its output going
+    nowhere, and the script waits for it as `P`, which `leave` stops. A stop
+    the watchdog marked is said before the look's own status is believed."""
+    lines = _command(place, make_ios_app(place["apps"])).script.splitlines()
+    start = lines.index("( trap - EXIT HUP INT PIPE TERM")
+    end = lines.index(") </dev/null >/dev/null 2>&1 &")
+    fpsd, shared = (f"'{_plain(folder.parent)}/SC Info'" for folder in place["state"])
+    assert lines[start:end + 1] == [
+        "( trap - EXIT HUP INT PIPE TERM",
+        f"  ( for G in {fpsd} {shared}; do",
+        '      if [ ! -h "$G" ] && [ -d "$G" ] && cd -P "$G"; then',
+        "        for F in *; do case \"$F\" in [Ss][Cc]' '[Ii][Nn][Ff][Oo].[Ss][Ii][Dd][Bb]) "
+        'if [ ! -h "$F" ] && [ -f "$F" ]; then exit 0; fi ;; esac; done',
+        "      fi",
+        "    done",
+        "    exit 69 ) &",
+        '  wait "$!"',
+        ") </dev/null >/dev/null 2>&1 &",
+    ]
+    assert lines[end + 1:end + 7] == [
+        "P=$!",
+        "S=0",
+        'wait "$P" || S=$?',
+        "P=",
+        'if [ -e "$D/stop-67" ] || [ -e "$D/stop-68" ]; then exit 1; fi',
+        f"case \"$S\" in 0) ;; 69) {{ echo '{NO_STATE}' >&2; exit 69; }} ;; *) exit 1 ;; esac",
+    ]
+    look = "\n".join(lines[start:end]).replace(fpsd, "").replace(shared, "")  # up to its redirections
+    assert "/" not in look and "$(" not in look and "`" not in look, "builtins only: no tool by its path"
+    assert 'if [ -n "$P" ]; then stop "$P" 2>/dev/null; wait "$P" 2>/dev/null || :; fi; ' in lines[
+        next(i for i, line in enumerate(lines) if line.startswith("leave() {"))
+    ]
 
 
 def _no_state(place, tmp_path: Path, how: str) -> None:
@@ -1391,17 +1428,33 @@ def _no_state(place, tmp_path: Path, how: str) -> None:
         shared.mkdir(parents=True)
         (shared / "SC Info.sidb.bak").write_bytes(b"x")
         (shared / "[Ss][Cc] [Ii][Nn][Ff][Oo].[Ss][Ii][Dd][Bb]").write_bytes(b"x")  # the pattern, as a name
+    elif how == "a-fifo-by-that-name":
+        os.mkfifo(fpsd / "SC Info.sidb")  # opened, it would block: nothing opens it
+    elif how in ("folders-that-are-links", "the-shared-folder-a-link"):
+        # Each folder a link to one that holds the state: never entered.
+        # The second is the review's case, a link a user put in
+        # /Users/Shared where no folder was.
+        for i, folder in enumerate((fpsd, shared) if how == "folders-that-are-links" else (shared,)):
+            target = tmp_path / f"elsewhere-{i}" / "SC Info"
+            target.mkdir(parents=True)
+            (target / "SC Info.sidb").write_bytes(b"sidb")
+            if folder.exists():
+                folder.rmdir()
+            folder.parent.mkdir(parents=True, exist_ok=True)
+            folder.symlink_to(target)
     else:
         raise AssertionError(how)
 
 
-NO_STATE_CASES = ["neither-folder", "empty-folders", "a-folder-by-that-name", "a-link-to-one", "other-names"]
+NO_STATE_CASES = ["neither-folder", "empty-folders", "a-folder-by-that-name", "a-link-to-one", "other-names",
+                  "a-fifo-by-that-name", "folders-that-are-links", "the-shared-folder-a-link"]
 
 
 @pytest.mark.parametrize("how", NO_STATE_CASES)
 def test_without_the_state_root_stops_with_its_own_status_and_nothing_runs(place, tmp_path: Path, how: str) -> None:
     """A missing folder is no state, like an empty one, never a failure of
-    its own under set -e. Only a regular file counts, never a link to one."""
+    its own under set -e. Only a regular file counts, never a link to one,
+    and only in a folder that is one, never through a link to one."""
     _no_state(place, tmp_path, how)
 
     run = _as_this_user(_command(place, make_ios_app(place["apps"])).script)
@@ -1451,11 +1504,12 @@ def test_the_state_in_either_folder_in_any_case_lets_setup_run(place, where: int
     assert len(place["fakes"].calls("unfairplay")) == 1
 
 
-@pytest.mark.parametrize("state", ["there", "neither-folder"])
+@pytest.mark.parametrize("state", ["there", "neither-folder", "folders-that-are-links"])
 @pytest.mark.parametrize("shell", sorted(SHELLS))
 def test_the_state_is_looked_for_alike_in_each_shell(place, tmp_path: Path, shell: str, state: str) -> None:
     """zsh, as sh, could make a pattern that matches nothing an error of its
-    own (NOMATCH); in each shell it is no state, and the state is found."""
+    own (NOMATCH); in each shell it is no state, and the state is found. A
+    folder that is a link is passed over in each."""
     if not Path(SHELLS[shell][0]).exists():
         pytest.skip(f"no {SHELLS[shell][0]}")
     if state != "there":
@@ -1472,6 +1526,154 @@ def test_the_state_is_looked_for_alike_in_each_shell(place, tmp_path: Path, shel
         assert run.stderr.strip() == NO_STATE
         assert place["fakes"].calls("unfairplay") == []
         assert list(place["work"].iterdir()) == []
+
+
+def test_a_folder_that_is_a_link_doesn_t_keep_root_from_the_other(place, tmp_path: Path) -> None:
+    fpsd, shared = place["state"]
+    target = tmp_path / "elsewhere" / "SC Info"
+    target.parent.mkdir()
+    os.rename(fpsd, target)
+    fpsd.symlink_to(target)
+    shared.mkdir(parents=True)
+    (shared / "SC Info.sidb").write_bytes(b"sidb")
+
+    run = _as_this_user(_command(place, make_ios_app(place["apps"])).script)
+
+    assert run.returncode == 0, run.stderr
+    assert len(place["fakes"].calls("unfairplay")) == 1
+
+
+# The review of 2.0.1: a link a user puts at /Users/Shared/SC Info can lead
+# the listing to a folder that is slow to list, an automount say, and the
+# look was the script's own shell's, so the watchdog had nothing to kill. A
+# test can't make a folder slow to list, so the look's listing is rewritten
+# to stall as one would: the inner shell itself opens a FIFO no one writes
+# to, one process blocked in the kernel, with no child of its own.
+
+#: Where the look lists the folder it entered.
+LISTING = "        for F in *; do "
+
+
+@pytest.fixture
+def stalled(place, tmp_path: Path):
+    """Yields a starter: it runs a script, in `shell`, with its look stalled
+    where it lists the first folder, and returns it with the inner shell's
+    pid once the look has stalled. Each script starts a session of its own,
+    killed as a group afterward."""
+    fifo, pid_file = tmp_path / "listing-fifo", tmp_path / "look-pid"
+    os.mkfifo(fifo)
+    procs: list[subprocess.Popen] = []
+
+    def start(script: str, shell: str) -> tuple[subprocess.Popen, int]:
+        if not Path(SHELLS[shell][0]).exists():
+            pytest.skip(f"no {SHELLS[shell][0]}")
+        assert script.count(LISTING) == 1
+        stall = f"/bin/sh -c 'echo \"$PPID\"' >'{_plain(pid_file)}'; : <'{_plain(fifo)}'; "
+        proc = subprocess.Popen([*SHELLS[shell], script.replace(LISTING, LISTING[:8] + stall + LISTING[8:])],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        procs.append(proc)
+        deadline = time.monotonic() + 20
+        while not (pid_file.exists() and pid_file.read_text().endswith("\n")):
+            assert time.monotonic() < deadline and proc.poll() is None, proc.communicate(timeout=5)
+            time.sleep(0.05)
+        inner = int(pid_file.read_text())
+        assert os.getpgid(inner) == proc.pid, "the look's own shell, in the script's session"
+        return proc, inner
+
+    yield start
+    for proc in procs:
+        try:
+            os.killpg(proc.pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait(timeout=10)
+
+
+def _session_gone(pgid: int) -> bool:
+    """Nothing of the script's session is left running: not the look's
+    shells, however they were blocked, nor the watchdog."""
+    deadline = time.monotonic() + 5  # a killed orphan is reaped by launchd, not at once
+    while time.monotonic() < deadline:
+        if not subprocess.run(["/usr/bin/pgrep", "-g", str(pgid)], capture_output=True, text=True).stdout.strip():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _stopped_in_the_look(place, proc: subprocess.Popen, status: int, said: str) -> None:
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == status, err
+    assert err.strip() == said, "said once, with no job notice from the shell"
+    assert out == "", "no folder for finish"
+    assert _session_gone(proc.pid), "the stalled look was killed, not left running"
+    assert list(place["work"].iterdir()) == [], "root's folder is gone"
+    assert place["fakes"].calls("unfairplay") == [], "UnfairPlay never started"
+
+
+@pytest.mark.parametrize("shell", sorted(SHELLS))
+def test_a_look_that_stalls_is_stopped_by_cancel(place, stalled, shell: str) -> None:
+    command = _command(place, make_ios_app(place["apps"]))
+    proc, _ = stalled(command.script, shell)
+    time.sleep(1)
+    assert proc.poll() is None, "stalled in the look"
+
+    command.cancel_file.touch()
+
+    _stopped_in_the_look(place, proc, enrollment.EXIT_CANCELLED,
+                         "graft: stopped: the enrollment was canceled before UnfairPlay started")
+
+
+@pytest.mark.parametrize("shell", sorted(SHELLS))
+def test_a_look_that_stalls_is_stopped_at_the_time_limit(place, stalled, monkeypatch, shell: str) -> None:
+    monkeypatch.setattr(enrollment, "TIME_LIMIT_SECONDS", 2)
+    command = _command(place, make_ios_app(place["apps"]))
+    assert command.time_limit_seconds == 2
+
+    proc, _ = stalled(command.script, shell)
+
+    _stopped_in_the_look(place, proc, enrollment.EXIT_TIME_LIMIT,
+                         "graft: stopped: the enrollment ran for more than 2 seconds")
+
+
+@pytest.mark.parametrize("status", [0, 69], ids=["found", "none"])
+@pytest.mark.parametrize("stop", [67, 68], ids=["cancel", "time-limit"])
+def test_a_stop_marked_as_the_look_ends_is_that_stop_never_what_the_look_found(
+    place, stop: int, status: int
+) -> None:
+    """The watchdog marks a stop, then sends TERM. A look that ends between
+    the two, with the state or without, is still that stop: never on to the
+    copy, never 69."""
+    command = _command(place, make_ios_app(place["apps"]))
+    look = "  ( for G in "
+    assert command.script.count(look) == 1
+
+    run = _as_this_user(command.script.replace(look, f'  ( : >"$D/stop-{stop}"; exit {status}; for G in '))
+
+    assert run.returncode == stop, run.stderr
+    assert run.stderr.strip() == {
+        67: "graft: stopped: the enrollment was canceled before UnfairPlay started",
+        68: f"graft: stopped: the enrollment ran for more than {command.time_limit_seconds} seconds",
+    }[stop]
+    assert run.stdout == ""
+    assert place["fakes"].calls("unfairplay") == []
+    assert list(place["work"].iterdir()) == []
+
+
+def test_a_look_killed_by_anything_else_fails_never_no_state_or_a_pass(place, stalled) -> None:
+    """No stop was marked, so none is said; but the look never answered
+    either, so it is neither 69 nor on to the copy."""
+    command = _command(place, make_ios_app(place["apps"]))
+    proc, inner = stalled(command.script, "bash")
+
+    os.kill(inner, 9)
+    out, err = proc.communicate(timeout=30)
+
+    assert proc.returncode == 1, err
+    assert err.strip() == "", "no job notice, and not the no-state refusal"
+    assert out == ""
+    assert _session_gone(proc.pid)
+    assert place["fakes"].calls("unfairplay") == []
+    assert list(place["work"].iterdir()) == []
 
 
 # --- finish: the model moved, as the user ---------------------------------------

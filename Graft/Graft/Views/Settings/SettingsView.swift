@@ -25,8 +25,8 @@ struct SettingsView: View {
     /// A build is running (`ConfigStore.buildingApp`): it signs with the
     /// account, so the account isn't changed under it.
     var isBuilding: Bool = false
-    /// The daily update check's switch. Nil hides Updates, which only tests
-    /// of other sections do.
+    /// The update switches. Nil hides Updates, which only tests of other
+    /// sections do.
     var updates: UpdateStore? = nil
     @State private var showAccountSheet = false
     @State private var confirmingSwitchToFree = false
@@ -260,6 +260,12 @@ struct SettingsView: View {
                 // finished last won, so the pane could settle on the pre-save
                 // scan and show a red row for a path just fixed.
                 .disabled(store.isBusy)
+            }
+            if store.shellAskedTooRecently {
+                Text(ShellEnvironment.askedTooRecentlyNote)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.warn)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if store.checks.isEmpty {
                 Text("Press Re-run to inspect your environment.")
@@ -846,15 +852,23 @@ private struct PathRow: View {
     }
 }
 
-/// Settings › Updates: the daily check's switch, and what it sends.
+/// Settings › Updates: the daily check's switch, the automatic update's,
+/// and what each does.
 struct UpdatesSection: View {
     @Bindable var updates: UpdateStore
 
-    static let toggleTitle = "Check for a newer Graft once a day"
-    static let note = "Graft asks GitHub for its latest release while it's open, with nothing "
-        + "that identifies you or this Mac, and shows a banner when there's a newer one. It "
-        + "never downloads or installs anything. Help › Check for Updates… asks now, "
-        + "whether this is on or off."
+    static let toggleTitle = "Check for updates automatically"
+    static let installToggleTitle = "Download and install updates automatically"
+    static let note = "Graft asks GitHub for its latest release once a day while it's open, with "
+        + "nothing that identifies you or this Mac, and shows a banner when there's a newer one. "
+        + "Help › Check for Updates… asks now, whether this is on or off."
+    static let installNote = "Graft downloads a newer version from GitHub, checks that it's "
+        + "Graft, signed by its developer and notarized by Apple, and installs it when you quit "
+        + "Graft, or right away with Restart to Update. The old version goes to the Trash. With "
+        + "this off, the banner's Update does the same when you choose it."
+    /// For a copy that can't replace itself (`UpdateStore.canUpdate`).
+    static let cannotInstallNote = "This copy of Graft can't update itself: the banner links the "
+        + "release page instead."
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -863,6 +877,13 @@ struct UpdatesSection: View {
                 Toggle(Self.toggleTitle, isOn: $updates.dailyCheck)
                     .font(AppFont.body)
                 Text(Self.note)
+                    .font(AppFont.body)
+                    .foregroundStyle(Palette.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle(Self.installToggleTitle, isOn: $updates.autoInstall)
+                    .font(AppFont.body)
+                    .disabled(!updates.canUpdate)
+                Text(updates.canUpdate ? Self.installNote : Self.cannotInstallNote)
                     .font(AppFont.body)
                     .foregroundStyle(Palette.textMuted)
                     .fixedSize(horizontal: false, vertical: true)

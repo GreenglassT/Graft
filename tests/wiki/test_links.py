@@ -81,6 +81,22 @@ def test_readme_anchor_ambiguous_is_error(repo):
         r("../../README.md#dup")
 
 
+def test_readme_section_that_is_a_whole_page_resolves_to_the_page(repo):
+    """README's "## Removing Graft" is the wiki page titled "Removing Graft", not an H2 in one."""
+    write(repo / "docs/wiki/second.md", "# Second Page\n\n## Part\n")
+    r = setup(repo, "CHANGELOG.md")
+    assert r("README.md#second-page") == "/wiki/second/"
+    assert r("README.md#part") == "/wiki/second/#part"  # a section in a page still wins
+
+
+def test_readme_anchor_two_page_titles_is_error(repo):
+    write(repo / "docs/wiki/first.md", "# Same\n")
+    write(repo / "docs/wiki/second.md", "# Same\n")
+    r = setup(repo)
+    with pytest.raises(WikiError, match=r"#same.*first.*second"):
+        r("../../README.md#same")
+
+
 def test_readme_anchor_unknown_is_error(repo):
     r = setup(repo)
     with pytest.raises(WikiError, match=r"#nothing"):

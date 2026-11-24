@@ -35,6 +35,7 @@ from rich.table import Table
 
 from . import (
     __version__,
+    app_update,
     appstore,
     appstore_search,
     artwork,
@@ -4218,8 +4219,9 @@ def _do_init_account(
     except (Stopped, KeyboardInterrupt) as stop:
         # A Stop that came while the setup's undo ran still stops the run,
         # but what the undo couldn't put back is said first: the stop alone
-        # says nothing (the whole-diff review's cli-4).
-        report = getattr(stop, "undo_incomplete", None)
+        # says nothing (the whole-diff review's cli-4). So is why the setup
+        # failed, when the undo put everything back (d14-cli-6).
+        report = getattr(stop, "undo_incomplete", None) or getattr(stop, "setup_failed", None)
         if report is not None:
             _warn(emitter, f"{report.message}: {report.hint}" if report.hint else report.message)
         raise
@@ -4531,6 +4533,97 @@ def _verb_check_update(*, current_version: str | None, json_mode: bool, **_: Any
         _say_plain(f"Graft {found.version} is available (this is {current}): {found.url}")
     else:
         _say_plain(f"Graft {current} is up to date: the latest release is {found.version}.")
+
+
+def _update_app_path(app_path: str | None, verb: str) -> Path:
+    """`--app-path`, or the Graft.app this CLI runs from. A CLI outside an
+    app (pipx) has no app of its own to replace, so it must be told."""
+    if app_path is not None:
+        return Path(app_path)
+    from .enrollment import running_app
+
+    found = running_app()
+    if found is None:
+        raise _fatal(ConfigError(
+            f"{verb} needs --app-path: this graft doesn't run from inside a Graft.app"
+        ))
+    return found
+
+
+def _verb_download_update(
+    *, current_version: str | None, app_path: str | None, json_mode: bool, **_: Any
+) -> None:
+    """`--download-update`: the latest release's Graft.zip, downloaded into
+    Graft's cache and checked (`app_update.download_update`), when it is
+    newer than `--current-version` (Graft.app passes its own).
+
+    Under --json, `update-progress` while it works and one
+    `update-download-end`, worked or not; a failure then exits 1 with its
+    sentence on stderr, like `--check-update`. A Stop (SIGTERM, which is
+    what the app's cancel sends) deletes what was downloaded.
+    """
+    from . import lc_manage
+
+    current = __version__ if current_version is None else current_version.strip()
+    if release_check.parse_version(current) is None:
+        raise _fatal(ConfigError(
+            f"--current-version takes a version such as 2.0.1, not {current_version!r}"
+        ))
+    app = _update_app_path(app_path, "--download-update")
+    emitter = JsonEmitter() if json_mode else None
+
+    def progress(fields: dict[str, Any]) -> None:
+        if emitter:
+            emitter.emit("update-progress", **fields)
+
+    with lc_manage.exit_on_termination():
+        try:
+            staged = app_update.download_update(current, app, progress=progress)
+        except app_update.UpdateError as e:
+            if emitter:
+                emitter.emit("update-download-end", **app_update.download_event(current, error=e))
+            raise
+    if emitter:
+        emitter.emit("update-download-end", **app_update.download_event(current, staged=staged))
+    else:
+        _say_plain(f"Graft {staged.version} is downloaded and checked: {staged.path}")
+
+
+def _verb_install_update(
+    *, install_update: str, app_path: str | None, wait_pid: int | None,
+    relaunch: bool | None, json_mode: bool, **_: Any
+) -> None:
+    """`--install-update PATH`: start the helper that installs PATH over the
+    app once `--wait-pid` has quit (`app_update.schedule_install`), and
+    return at once. Graft.app runs it as it quits, then quits.
+
+    Under --json, one `update-install`, worked or not; a failure starts
+    nothing and exits 1 with its sentence on stderr.
+    """
+    if wait_pid is None:
+        raise _fatal(ConfigError(
+            "--install-update needs --wait-pid: the Graft that has to quit first"
+        ))
+    app = _update_app_path(app_path, "--install-update")
+    again = bool(relaunch)
+    emitter = JsonEmitter() if json_mode else None
+    try:
+        scheduled = app_update.schedule_install(
+            Path(install_update), app, pid=wait_pid, relaunch=again,
+        )
+    except app_update.UpdateError as e:
+        if emitter:
+            emitter.emit("update-install", **app_update.install_event(relaunch=again, error=e))
+        raise
+    if emitter:
+        emitter.emit("update-install", **app_update.install_event(
+            version=scheduled.version, log=scheduled.log, relaunch=again,
+        ))
+    else:
+        _say_plain(
+            f"Graft {scheduled.version} will be installed once process {wait_pid} quits. "
+            f"Its log: {scheduled.log}"
+        )
 
 
 def _verb_init(
@@ -5058,12 +5151,15 @@ def _verb_appstore_get(
 
 
 def _verb_appstore_claim(
-    *, cfg: Config, provide_ipa_app: str | None, json_mode: bool, **_: Any
+    *, cfg: Config, provide_ipa_app: str | None, json_mode: bool, expect_email: str | None, **_: Any
 ) -> None:
     if not provide_ipa_app:
         raise ConfigError("--appstore-claim requires --app <name>")
+    if expect_email is not None and not expect_email.strip():
+        raise ConfigError("--expect-email needs the Apple ID's email")
     appstore.claim(
-        cfg, provide_ipa_app, emitter=JsonEmitter() if json_mode else None, say=_say_plain
+        cfg, provide_ipa_app, emitter=JsonEmitter() if json_mode else None, say=_say_plain,
+        expect_email=expect_email,
     )
 
 
@@ -5679,6 +5775,146 @@ def _verb_prune_builds(
         dry_run=dry_run,
         emitter=JsonEmitter() if json_mode else None,
     )
+
+
+def _verb_remove_data(
+    *, config_path: Path, data_items: str | None, dry_run: bool, json_mode: bool, **_: Any
+) -> None:
+    _do_remove_data(
+        config_path, items=data_items, dry_run=dry_run,
+        emitter=JsonEmitter() if json_mode else None,
+    )
+
+
+def _do_remove_data(
+    config_path: Path, *, items: str | None, dry_run: bool, emitter: JsonEmitter | None
+) -> None:
+    """`--remove-data`: what Graft keeps outside Graft.app, and, with
+    `--items`, removing it (`remove_data`).
+
+    Without `--items` it only lists, `--dry-run` or not: removing anything
+    takes naming it. With `--items` and `--dry-run` it says what would go and
+    touches nothing. Every item is listed afresh first, so what is removed is
+    what is there now, not what an earlier listing saw.
+    """
+    from . import remove_data
+
+    found = remove_data.survey(config_path)
+    if items is None:
+        if emitter:
+            for item in found.items:
+                emitter.emit("data-item", **item.fields())
+            emitter.emit(
+                "data-items-end",
+                count=len(found.items),
+                keychain=found.keychain,
+                total_bytes=sum(
+                    i.size_bytes or 0 for i in found.items if i.removable and i.present
+                ),
+            )
+        else:
+            _print_data_items(found)
+        return
+
+    chosen = remove_data.choose(found, items)
+    outcomes = remove_data.remove(chosen, dry_run=dry_run)
+    failed = [o for o in outcomes if not o.ok]
+    if emitter:
+        for outcome in outcomes:
+            emitter.emit("data-removed", **outcome.fields(dry_run=dry_run))
+        emitter.emit(
+            "data-removal-end",
+            ok=not failed,
+            dry_run=dry_run,
+            removed=[o.id for o in outcomes if o.ok],
+            failed=[o.id for o in failed],
+            freed_bytes=sum(o.freed_bytes for o in outcomes),
+        )
+    else:
+        _print_data_removal(found, outcomes, dry_run=dry_run)
+    if failed:
+        raise GraftError(
+            f"{len(failed)} of the {len(outcomes)} items couldn't be removed completely",
+            hint="what is still there is listed above; run graft --remove-data to see it again",
+        )
+
+
+def _print_data_items(found: Any) -> None:
+    """`--remove-data`'s listing in Terminal, by group."""
+    from .remove_data import GROUP_TITLES, KEYCHAIN_LOCKED, KEYCHAIN_NO_ANSWER, human_size
+
+    group = None
+    for item in found.items:
+        if item.present is False:
+            continue
+        if item.group != group:
+            group = item.group
+            console.print(f"\n[bold]{escape(GROUP_TITLES[group])}[/bold]")
+        if item.present is None:
+            size = "couldn't check"
+        else:
+            # Nothing for a link or keychain items, which have no size to speak of.
+            size = human_size(item.size_bytes) if item.size_bytes else ""
+        mark = (
+            "" if not item.removable
+            else ("  [dim](removed with all)[/dim]" if item.default else "  [dim](only by name)[/dim]")
+        )
+        head = f"  {escape(item.id)}" if item.removable else "  -"
+        console.print(f"{head}  {escape(item.title)}  {escape(size)}{mark}")
+        console.print(f"      [dim]{escape(item.detail)}[/dim]")
+        for path in item.paths:
+            console.print(f"      {escape(str(path))}")
+        for service, account in item.keychain:
+            console.print(f"      keychain: {escape(service)} {escape(account)}")
+        if item.note:
+            console.print(f"      [yellow]{escape(item.note)}[/yellow]")
+        if item.how:
+            console.print(f"      [dim]to remove it: {escape(item.how)}[/dim]")
+    if found.keychain in (KEYCHAIN_LOCKED, KEYCHAIN_NO_ANSWER):
+        console.print(
+            "\n[yellow]Your login keychain is locked or didn't answer, so the keychain items "
+            "weren't checked. Unlock it in Keychain Access, then run this again.[/yellow]"
+        )
+    if not any(i.present is not False and i.removable for i in found.items):
+        console.print("\nGraft keeps nothing outside Graft.app here.")
+        return
+    console.print(
+        "\nNothing was removed. To remove items, name them (this can't be undone):\n"
+        "  graft --remove-data --items all              # every item above marked 'removed with all'\n"
+        "  graft --remove-data --items all,passwords    # and the passwords too\n"
+        "  graft --remove-data --items cache,temp       # only these\n"
+        "Add --dry-run to see what would go first."
+    )
+
+
+def _print_data_removal(found: Any, outcomes: list[Any], *, dry_run: bool) -> None:
+    from .remove_data import human_size
+
+    titles = {i.id: i.title for i in found.items}
+    for outcome in outcomes:
+        title = escape(titles.get(outcome.id, outcome.id))
+        if not outcome.removed and outcome.ok:
+            console.print(f"[dim]-[/dim] {title}: nothing there")
+            continue
+        if outcome.ok:
+            said = "would be removed" if dry_run else "removed"
+        else:
+            said = "not all of it was removed"
+        if outcome.freed_bytes:
+            said += f", {human_size(outcome.freed_bytes)}"
+        mark = "[green]✓[/green]" if outcome.ok else "[red]✗[/red]"
+        console.print(f"{mark} {title}: {said}")
+        for what in outcome.removed:
+            console.print(f"    {escape(what)}")
+        for what, why in outcome.failed:
+            console.print(f"    [red]still there:[/red] {escape(what)}: {escape(why)}")
+    total = human_size(sum(o.freed_bytes for o in outcomes))
+    if dry_run:
+        console.print(f"\n[dim]Dry run: nothing was removed ({total} would be).[/dim]")
+    else:
+        console.print(
+            f"\n{total} removed. To remove Graft itself, quit it and move Graft.app to the Trash."
+        )
 
 
 def _do_decrypt(
@@ -6623,6 +6859,7 @@ _VERB_ONLY_FLAGS: dict[str, str] = {
     "--again": "again",
     "--allow-unverified-helper": "allow_unverified_helper",
     "--expect-ipatool": "expect_ipatool",
+    "--expect-email": "expect_email",
     "--country": "search_country",
     "--limit": "search_limit",
     "--instances": "lc_instances",
@@ -6631,6 +6868,7 @@ _VERB_ONLY_FLAGS: dict[str, str] = {
     "--asc-key-id": "asc_key_id",
     "--asc-issuer-id": "asc_issuer_id",
     "--asc-key-file": "asc_key_file",
+    "--items": "data_items",
 }
 
 
@@ -6813,7 +7051,8 @@ class _StrayFlagGate:
                 "--appstore-check, --appstore-get, --appstore-claim, --appstore-login, --appstore-enroll-command, --appstore-search, --attach-tweak, --detach-tweak, --set-app-options, "
                 "--delivery-state, --reconcile, --set-settings, --set-portal, --artwork, "
                 "--prune-builds, --devices, --device-apps, --decrypt, "
-                "--decrypt-frontmost, --delete-staged, --lc-status, --lc-install, or --lc-clean"
+                "--decrypt-frontmost, --delete-staged, --lc-status, --lc-install, --lc-clean, "
+                "or --remove-data"
             )
         )
         raise _fatal(ConfigError(f"{', '.join(stray)} {detail}"))
@@ -6888,6 +7127,12 @@ _MODIFIERS: dict[str, str] = {
     # `--check-update`'s: a version compared against nothing would read as a
     # check that ran.
     "current_version": "--current-version",
+    # The self-update's: which app is replaced, after which process, and
+    # whether it opens again. Dropped by another verb, each would read as
+    # an update that was arranged.
+    "app_path": "--app-path",
+    "wait_pid": "--wait-pid",
+    "relaunch": "--relaunch",
 }
 
 #: Why a verb ignores a modifier, where there is more to say than "it does".
@@ -6973,6 +7218,12 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
     # `--current-version` is a modifier `_ModifierGate` refuses elsewhere,
     # as `--init`'s `--account` is.
     _Verb("--check-update", "check_update", _verb_check_update, needs=_Needs.NOTHING, migrates=False),
+    # The self-update, beside the check for the same reasons: about the
+    # program, not the user's files (what they write is Graft's own cache
+    # folder and the old app's move to the Trash), and run before setup is
+    # done as readily as after.
+    _Verb("--download-update", "download_update", _verb_download_update, needs=_Needs.NOTHING, migrates=False),
+    _Verb("--install-update", "install_update", _verb_install_update, needs=_Needs.NOTHING, migrates=False),
     _Verb("--init", "init", _verb_init, needs=_Needs.NOTHING),
     _Verb("--setup-portal", "setup_portal", _verb_setup_portal, needs=_Needs.NOTHING),
     # --- everything below here needs a config ---
@@ -7012,7 +7263,7 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
         "--appstore-get", "appstore_get", _verb_appstore_get,
         accepts=frozenset({"--app", "--allow-unverified", "--again"}),
     ),
-    _Verb("--appstore-claim", "appstore_claim", _verb_appstore_claim, accepts=frozenset({"--app"})),
+    _Verb("--appstore-claim", "appstore_claim", _verb_appstore_claim, accepts=frozenset({"--app", "--expect-email"})),
     _Verb("--appstore-login", "appstore_login", _verb_appstore_login, accepts=frozenset({"--expect-ipatool"})),
     _Verb("--appstore-logout", "appstore_logout", _verb_appstore_logout),
     _Verb("--appstore-enroll-candidates", "appstore_enroll_candidates", _verb_appstore_enroll_candidates),
@@ -7125,6 +7376,15 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
         accepts=frozenset({"--decrypt-mode", "--decrypt-backend", "--strip-encrypted-extensions"}),
     ),
     _Verb("--check", "check", _verb_check),
+    # What Graft keeps outside Graft.app, and removing it. `_Needs.NOTHING`:
+    # it must list and remove on a machine whose setup never finished or
+    # whose config.yaml won't load, and reads that file itself, leniently.
+    # No migration, which would also make the four folders it is about to
+    # measure (`secure_app_dirs`). Below the gate, which checks `--items`.
+    _Verb(
+        "--remove-data", "remove_data", _verb_remove_data, needs=_Needs.NOTHING,
+        accepts=frozenset({"--items"}), migrates=False,
+    ),
 )
 
 
@@ -7133,7 +7393,7 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
 def main(
     ctx: typer.Context,
     apps: list[str] = typer.Argument(None, help="App name(s) from config to build & install."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With a build, --prune-builds or --init --account: show what would happen without doing it. Every other verb refuses it."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With a build, --prune-builds, --init --account or --remove-data --items: show what would happen without doing it. Every other verb refuses it."),
     skip_install: bool = typer.Option(False, "--skip-install", help="Build only (and sign, for a sideload app): don't install or push it to the device."),
     for_playcover: bool = typer.Option(False, "--for-playcover", help="Also make the build loadable on this Mac under PlayCover."),
     skip_decrypt_check: bool = typer.Option(
@@ -7188,6 +7448,8 @@ def main(
     appstore_login: bool = typer.Option(False, "--appstore-login", help="Sign ipatool in to the App Store. stdin gives the Apple ID, then the password, then the 2FA code if Apple asks (asked for in a terminal, the password without echo). None of them is ever an argument, and Graft saves none of them."),
     # `str | None` defaulting to None: a verb-only flag, passed when not None.
     expect_ipatool: str | None = typer.Option(None, "--expect-ipatool", help="With --appstore-login: sign in only if the ipatool found is PATH (compared as real paths). Any other is refused before stdin is read or ipatool starts: appstore-login {state: failed, reason: ipatool-changed}. Graft.app passes the one its sign-in sheet named."),
+    # `str | None` defaulting to None: a verb-only flag, passed when not None.
+    expect_email: str | None = typer.Option(None, "--expect-email", help="With --appstore-claim: claim only if ipatool is signed in as this Apple ID (compared ignoring case). Another is refused before anything is bought: appstore-refused {reason: account-changed, email}. Graft.app passes the Apple ID its Get (free) confirmation named."),
     appstore_logout: bool = typer.Option(False, "--appstore-logout", help="Sign ipatool out of the App Store (ipatool auth revoke)."),
     appstore_enroll_candidates: bool = typer.Option(False, "--appstore-enroll-candidates", help="List the installed iPhone and iPad apps that can enroll this Mac for App Store decryption."),
     appstore_enroll_command: bool = typer.Option(False, "--appstore-enroll-command", help="Print the script that enrolls this Mac with --app PATH (one of --appstore-enroll-candidates). It runs as root, in a folder of its own: Graft.app runs it behind the macOS administrator prompt; in Terminal, run it with sudo /bin/sh, then --appstore-enroll-finish with the folder it prints."),
@@ -7307,7 +7569,18 @@ def main(
     decrypt_check: bool = typer.Option(False, "--decrypt-check", help="Report whether the device can decrypt an app right now, and what is blocking it."),
     version: bool = typer.Option(False, "--version", help="Print version and exit."),
     check_update: bool = typer.Option(False, "--check-update", help="Ask GitHub whether a newer Graft is published: one request, with a generic User-Agent and nothing that identifies you or this Mac. Downloads nothing. Graft.app runs it once a day while open, unless Settings › Updates turns that off."),
-    current_version: str | None = typer.Option(None, "--current-version", help="With --check-update: the version to compare against (default: this CLI's own). Graft.app passes its own."),
+    remove_data: bool = typer.Option(False, "--remove-data", help="List everything Graft keeps outside Graft.app, with sizes: its folders, the App Store sign-in, the decryption model, its passwords in the keychain, the graft link, the update log. Removes nothing unless --items names what to remove."),
+    # `str | None` defaulting to None: a verb-only flag, passed when not None.
+    data_items: str | None = typer.Option(None, "--items", help="With --remove-data: what to remove, as a comma list of the ids it lists, or all (every item marked 'removed with all'; the .p12 and SSH passwords only by name: all,passwords). This can't be undone. With --dry-run, says what would go and removes nothing."),
+    current_version: str | None = typer.Option(None, "--current-version", help="With --check-update or --download-update: the version to compare against (default: this CLI's own). Graft.app passes its own."),
+    download_update: bool = typer.Option(False, "--download-update", help="When the latest release is newer, download its Graft.zip into Graft's cache and check it: GitHub's SHA-256, the signature, Graft's team and bundle id, and Apple's notarization. Deletes it if any check fails. Installs nothing (see --install-update)."),
+    # `str | None` / `int | None` / `bool | None` defaulting to None, like
+    # `--current-version`: modifiers `_ModifierGate` refuses beside any verb
+    # whose handler doesn't read them.
+    install_update: str | None = typer.Option(None, "--install-update", help="Start the helper that installs PATH, a Graft.app --download-update checked, over --app-path once the process --wait-pid names has quit. The old app goes to the Trash. Graft.app runs it as it quits."),
+    app_path: str | None = typer.Option(None, "--app-path", help="With --download-update or --install-update: the Graft.app to replace (default: the one this CLI runs from)."),
+    wait_pid: int | None = typer.Option(None, "--wait-pid", help="With --install-update: the running Graft's process id. Nothing is replaced until it has quit."),
+    relaunch: bool | None = typer.Option(None, "--relaunch", help="With --install-update: open Graft again once it is installed (or once the old one is put back)."),
     describe: bool = typer.Option(
         False,
         "--describe",

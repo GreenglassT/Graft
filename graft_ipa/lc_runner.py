@@ -544,9 +544,15 @@ async def _write_into_place(ha, ipa: Path, path: str, teardown=None) -> None:
     finishing = "as the upload was put in place"
     aside = partial_path(f"{path}.previous")
     there = await _answered(ha.exists(path), finishing)
-    if there:
-        await _answered(ha.rename(path, aside), finishing)
     try:
+        # The move-aside inside the try too: the phone can apply it and its
+        # answer never arrive (it goes silent, or a Stop lands while Graft
+        # waits). Nothing was then at `path`, the old file was hidden under
+        # a name the next push's sweep removes, and nothing put it back (the
+        # try14 delta audit's d14-cli-2). Putting it back when it was never
+        # moved fails harmlessly: there is nothing at `aside`.
+        if there:
+            await _answered(ha.rename(path, aside), finishing)
         await _answered(ha.rename(partial, path), finishing)
     except BaseException:
         if there:

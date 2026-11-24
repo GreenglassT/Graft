@@ -214,6 +214,14 @@ struct AppDetailView: View {
             // letting a second `--reconcile` race the first on log.sqlite.
             deviceCheck = nil
         }
+        // Get (free)'s confirmation lives in the store, by app, so it isn't
+        // reset with the rest. Leaving an app gives up its confirmation and
+        // any status read still running for one: otherwise that dialog
+        // opened by itself on coming back, maybe hours later, naming an
+        // Apple ID read back then (the try14 delta audit's D14-APP-1).
+        .onChange(of: app.id) { left, _ in
+            appStore.cancelClaim(app: left)
+        }
         // Keyed on the version pin as well as the app, because the Source IPA
         // card answers "which IPA will the next build use", and `preferred_version`
         // is exactly what decides that. `app.id` is `app.name`, which an options

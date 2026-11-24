@@ -672,6 +672,9 @@ final class ConfigStore: CLIStore {
     /// Whether `checkSetup` is running — the setup screen's Check again shows
     /// it, and refuses a second press while it does.
     private(set) var isCheckingSetup = false
+    /// The last Check again found the login shell asked too recently to ask
+    /// again, and used its last answer (`ShellEnvironment.askedTooRecentlyNote`).
+    private(set) var shellAskedTooRecently = false
 
     /// The app's first load, and the setup screen's Check again.
     ///
@@ -705,7 +708,7 @@ final class ConfigStore: CLIStore {
         guard !isCheckingSetup else { return nil }
         isCheckingSetup = true
         defer { isCheckingSetup = false }
-        if refreshingEnvironment { runner.refreshEnvironment() }
+        shellAskedTooRecently = refreshingEnvironment && !runner.refreshEnvironment()
         let onSetupScreen = setupNeed != nil
         do {
             let loaded = try await loadApps()

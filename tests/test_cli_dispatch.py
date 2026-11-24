@@ -93,6 +93,13 @@ _NON_VERB_PARAMS: dict[str, str] = {
         "Not in `_VERB_ONLY_FLAGS` for `--account`'s reason: `--check-update` needs no "
         "config and sits above the gate. `_ModifierGate` refuses it beside anything else."
     ),
+    "app_path": (
+        "`--app-path` qualifies `--download-update` and `--install-update`: the Graft.app "
+        "to replace. Both sit above the gate for `--check-update`'s reason, so "
+        "`_ModifierGate` refuses it beside anything else."
+    ),
+    "wait_pid": "`--wait-pid` qualifies `--install-update`; refused elsewhere like `--app-path`.",
+    "relaunch": "`--relaunch` qualifies `--install-update`; refused elsewhere like `--app-path`.",
     "dry_run": (
         "A build modifier, read by `_verb_build_apps`, `_verb_prune_builds` and "
         "`_verb_init` (with `--account`). "
@@ -443,9 +450,17 @@ def test_the_verbs_that_need_nothing_are_the_ones_that_have_to() -> None:
     An exact set, restored: while this was a boolean the settings verbs had to
     be listed here too, under a docstring claiming they ran "against no config
     at all" — which they never did. They need the file to exist and say so.
+
+    `--remove-data` has to as well: it lists and removes what Graft left on a
+    machine whose setup never finished, or whose config.yaml won't load, and
+    reads that file itself, leniently, only for the folders it must leave.
     """
     assert {v.flag for v in _verbs() if v.needs is _Needs.NOTHING} == {
         "--describe", "--version", "--check-update", "--init", "--setup-portal",
+        "--remove-data",
+        # The self-update: the app downloads and installs a newer Graft
+        # whether or not setup is done, as it checks for one.
+        "--download-update", "--install-update",
     }
 
 

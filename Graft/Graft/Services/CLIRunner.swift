@@ -424,8 +424,9 @@ final class CLIRunner {
     private let willLaunch: (@Sendable () -> Void)?
 
     /// What `refreshEnvironment()` does: ask the login shell again, for the
-    /// app's runner; nothing, for a runner with a fixed target.
-    private let refresh: (@Sendable () -> Void)?
+    /// app's runner, and say whether it asked; nothing, for a runner with a
+    /// fixed target.
+    private let refresh: (@Sendable () -> Bool)?
 
     init(
         executable: URL,
@@ -444,7 +445,7 @@ final class CLIRunner {
     ///   `refreshEnvironment()`.
     init(
         resolving target: @escaping @Sendable () async -> Target,
-        refresh: (@Sendable () -> Void)? = nil
+        refresh: (@Sendable () -> Bool)? = nil
     ) {
         self.target = target
         self.willLaunch = nil
@@ -453,20 +454,25 @@ final class CLIRunner {
 
     /// Re-read the environment launches are built from, so the next one sees
     /// a setup the user just changed in Terminal. The setup screen's Check
-    /// again calls this; see `ShellEnvironment.refresh()`.
-    func refreshEnvironment() {
-        refresh?()
+    /// again calls this; see `ShellEnvironment.refresh()`. False when the
+    /// shell was asked too recently to ask again, and the last answer stands
+    /// (`ShellEnvironment.askedTooRecentlyNote`); true otherwise, a runner
+    /// with nothing to re-read included.
+    @discardableResult
+    func refreshEnvironment() -> Bool {
+        refresh?() ?? true
     }
 
     /// The app's runner: `graft`, wherever it is now, in the user's
     /// environment.
     ///
     /// Each launch waits for the login shell's environment — bounded by
-    /// `LoginShell.timeout`, and immediate after the first — then merges it
-    /// under this app's own augmentation and looks for `graft` on the PATH that
-    /// produces. Looking again every launch costs a handful of `stat`s against
-    /// a Python interpreter's startup, and it is what lets the setup screen's
-    /// Check again find a CLI installed after the app opened.
+    /// `LoginShell.startLimit` and `LoginShell.timeout`, and immediate after
+    /// the first — then merges it under this app's own augmentation and looks
+    /// for `graft` on the PATH that produces. Looking again every launch costs
+    /// a handful of `stat`s against a Python interpreter's startup, and it is
+    /// what lets the setup screen's Check again find a CLI installed after the
+    /// app opened.
     ///
     /// A release build skips the lookup and runs its own
     /// `Contents/Helpers/graft` (`GraftExecutable.resolve`), still in the

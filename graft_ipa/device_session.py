@@ -299,7 +299,16 @@ async def open_lockdown(
     from pymobiledevice3.exceptions import FatalPairingError
     from pymobiledevice3.lockdown import create_using_usbmux
 
-    lock = await create_using_usbmux(serial=udid, autopair=False)
+    # Imported here: device_install imports this module.
+    from .device_install import _answered
+
+    # The handshake has no limit of its own past the dial and the TLS
+    # handshake, so a Wi-Fi-synced phone asleep with the connection
+    # half-open held every verb that talks to it, with no word, until Stop
+    # (the try14 delta audit's d14-cli-3). It never waits on the user: the
+    # Trust dialog is `pair`'s, which has its own limit.
+    connecting = "when Graft connected to it"
+    lock = await _answered(create_using_usbmux(serial=udid, autopair=False), connecting)
     try:
         if not lock.paired:
             if on_trust_prompt is not None:
@@ -307,7 +316,7 @@ async def open_lockdown(
             await lock.pair(
                 timeout=PAIR_TIMEOUT_SECONDS if pair_timeout is None else pair_timeout
             )
-            if not await lock.validate_pairing():
+            if not await _answered(lock.validate_pairing(), connecting):
                 raise FatalPairingError()
     except BaseException:
         with contextlib.suppress(Exception):

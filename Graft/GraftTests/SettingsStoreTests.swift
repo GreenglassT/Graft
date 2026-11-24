@@ -35,13 +35,30 @@ final class SettingsStoreTests: XCTestCase {
         let asks = Asks()
         let runner = CLIRunner(resolving: {
             CLIRunner.Target(executable: URL(fileURLWithPath: "/bin/sh"), environment: nil)
-        }, refresh: { asks.add() })
+        }, refresh: { asks.add(); return true })
         let store = SettingsStore(runner: runner)
         let script = #"printf '%s\n' '{"type":"preflight-end","ok_count":0,"fail_count":0}'"#
         try await store.runChecks(argsOverride: ["-c", script])
         XCTAssertEqual(asks.count, 0, "a scan on its own")
         try await store.runChecks(argsOverride: ["-c", script], askingShellAgain: true)
         XCTAssertEqual(asks.count, 1, "Re-run")
+        XCTAssertFalse(store.shellAskedTooRecently)
+    }
+
+    /// The try14 delta audit's D14-APP-3: a Re-run within the shell's
+    /// interval scanned with the last answer and looked as if it had asked.
+    /// It says so now, until the next scan.
+    @MainActor
+    func test_a_rerun_the_shell_wasnt_asked_for_says_so() async throws {
+        let runner = CLIRunner(resolving: {
+            CLIRunner.Target(executable: URL(fileURLWithPath: "/bin/sh"), environment: nil)
+        }, refresh: { false })
+        let store = SettingsStore(runner: runner)
+        let script = #"printf '%s\n' '{"type":"preflight-end","ok_count":0,"fail_count":0}'"#
+        try await store.runChecks(argsOverride: ["-c", script], askingShellAgain: true)
+        XCTAssertTrue(store.shellAskedTooRecently)
+        try await store.runChecks(argsOverride: ["-c", script])
+        XCTAssertFalse(store.shellAskedTooRecently)
     }
 
     @MainActor

@@ -581,6 +581,7 @@ class UsbmuxDevice:
     async def _apps(udid: str) -> dict[str, dict]:
         from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
+        from .device_install import _answered
         from .device_session import closing_best_effort, open_lockdown
 
         # Two listings, not one with everything: a System listing with every
@@ -595,37 +596,47 @@ class UsbmuxDevice:
         async with closing_best_effort(lock):
             proxy = InstallationProxyService(lockdown=lock)
             async with closing_best_effort(proxy):
-                apps = dict(await proxy.lookup({
+                # Each with the silence limit (d14-cli-3): pymobiledevice3's
+                # lookup has none, and a phone asleep half-open held
+                # --lc-install here, saying nothing, until Stop.
+                listing = "when Graft listed the apps on it"
+                apps = dict(await _answered(proxy.lookup({
                     "ApplicationType": lc_discovery.APPLICATION_TYPE,
                     "ReturnAttributes": LISTING_ATTRIBUTES,
-                }) or {})
+                }), listing) or {})
                 ours = sorted(lc_discovery.livecontainers(apps))
                 if ours:
-                    apps.update(await proxy.lookup({
+                    apps.update(await _answered(proxy.lookup({
                         "ApplicationType": lc_discovery.APPLICATION_TYPE,
                         "BundleIDs": ours,
-                    }) or {})
+                    }), listing) or {})
                 return apps
 
     @staticmethod
     async def _bundle_ids(udid: str) -> list[str]:
+        from .device_install import _answered
         from .device_session import closing_best_effort, open_lockdown
 
         lock = await open_lockdown(udid)
         async with closing_best_effort(lock):
-            return await lc_discovery.installed_bundle_ids(lock)
+            return await _answered(lc_discovery.installed_bundle_ids(lock), "when Graft listed the apps on it")
 
     @staticmethod
     async def _sandbox(udid: str, bundle_id: str, body):
+        """`body(ha)` in `bundle_id`'s sandbox. Opening it and `body`, one
+        small AFC call on a Documents file, each have the silence limit
+        (d14-cli-3)."""
         from pymobiledevice3.services.house_arrest import HouseArrestService
 
+        from .device_install import _answered
         from .device_session import closing_best_effort, open_lockdown
 
         lock = await open_lockdown(udid)
         async with closing_best_effort(lock):
-            ha = await HouseArrestService.create(lockdown=lock, bundle_id=bundle_id)
+            ha = await _answered(HouseArrestService.create(lockdown=lock, bundle_id=bundle_id),
+                                 "when Graft opened LiveContainer's Documents")
             async with closing_best_effort(ha):
-                return await body(ha)
+                return await _answered(body(ha), "in LiveContainer's Documents")
 
 
 def _plain(name: str) -> str:

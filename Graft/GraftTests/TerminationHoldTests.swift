@@ -245,6 +245,8 @@ final class TerminationHoldTests: XCTestCase {
 
     /// Quit Anyway asks the work to stop, then waits for its hold to clear,
     /// but no longer than `stopGrace`: work that doesn't end is quit from.
+    /// Not before the runner's SIGKILL for a stopped CLI (`cliStopGrace`),
+    /// though: only a Graft still running can send it.
     func test_quit_anyway_stops_the_work_then_waits_a_bounded_time_and_quits() throws {
         let h = QuitHarness()
         var stops = 0
@@ -256,8 +258,129 @@ final class TerminationHoldTests: XCTestCase {
         h.runDown()
         XCTAssertEqual(h.replies, [true])
         XCTAssertEqual(try XCTUnwrap(h.repliedAt), QuitGuard.stopGrace, accuracy: QuitGuard.checkEvery)
+        XCTAssertGreaterThanOrEqual(try XCTUnwrap(h.repliedAt), cliStopGrace + 1,
+                                    "past the SIGKILL, with time for it to land and the hold to clear")
         XCTAssertEqual(stops, 1, "asked once")
         XCTAssertEqual(h.takeDowns, 0, "answered, so nothing to take down")
+    }
+
+    /// The same against a real CLI that ignores its SIGTERM, as a wedged one
+    /// does, and whose child does too: Graft doesn't quit until the runner's
+    /// SIGKILL (`cliStopGrace` after the stop) has ended both, so neither is
+    /// left running without it. With the 5-second wait this had, Graft quit
+    /// with both still running and nothing left to kill them.
+    func test_quit_anyway_stays_until_the_runner_has_killed_a_cli_that_ignores_its_stop() async throws {
+        let hold = TerminationHold(control: FakeControl())
+        let mine = dir.path
+        addTeardownBlock { Self.reap(matching: mine) }
+        // `trap '' TERM` is inherited: the child's shell ignores it too.
+        let runner = try cli("""
+            trap '' TERM
+            /bin/sh -c 'while :; do /bin/sleep 0.1; done' '\(mine)/child' &
+            wait
+            """)
+        let work = Task { @MainActor in
+            try? await hold.holding(TerminationHold.building) { _ = try await runner.runOnce(arguments: []) }
+        }
+        await eventually({ Self.running(matching: mine) >= 2 }, "the CLI and its child run")
+
+        final class Reply { var at: Date? }
+        let reply = Reply()
+        let quitGuard = QuitGuard(
+            hold: hold,
+            present: { _, answer in
+                Task { @MainActor in answer(.quitAnyway) }
+                return { then in then() }
+            },
+            reply: { _ in reply.at = Date() },
+            schedule: { delay, block in
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(delay))
+                    block()
+                }
+            }
+        )
+        let asked = Date()
+        XCTAssertEqual(quitGuard.shouldTerminate(), .terminateLater)
+        await eventually({ reply.at != nil }, timeout: QuitGuard.stopGrace + 10, "Graft quits")
+
+        let waited = try XCTUnwrap(reply.at).timeIntervalSince(asked)
+        XCTAssertGreaterThanOrEqual(waited, cliStopGrace, "not before the SIGKILL")
+        XCTAssertLessThan(waited, QuitGuard.stopGrace, "once the hold cleared, not at the end of the wait")
+        XCTAssertFalse(hold.isHolding)
+        XCTAssertEqual(Self.running(matching: mine), 0, "nothing of it is left running without Graft")
+        await work.value
+    }
+
+    /// How many processes have `text` in their arguments (`pgrep -f`, which
+    /// never counts itself).
+    nonisolated private static func running(matching text: String) -> Int {
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        probe.arguments = ["-f", text]
+        let out = Pipe()
+        probe.standardOutput = out
+        probe.standardError = Pipe()
+        guard (try? probe.run()) != nil else { return 0 }
+        probe.waitUntilExit()
+        let found = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return found.split(separator: "\n").count
+    }
+
+    /// So a failing run doesn't leave its stand-ins behind.
+    nonisolated private static func reap(matching text: String) {
+        let killer = Process()
+        killer.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        killer.arguments = ["-9", "-f", text]
+        killer.standardOutput = Pipe()
+        killer.standardError = Pipe()
+        guard (try? killer.run()) != nil else { return }
+        killer.waitUntilExit()
+    }
+
+    /// Work with no stop isn't asked to stop, and Graft doesn't quit from
+    /// under it: Quit Anyway waits for it to finish, past the grace, then
+    /// quits; through the handover, since nothing is held by then.
+    func test_quit_anyway_waits_for_work_with_no_stop_to_finish() throws {
+        let h = QuitHarness()
+        let handover = FakeHandover()
+        h.quitGuard.handover = handover
+        let ticket = h.hold.begin(TerminationHold.settingUp, stop: nil)
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.answer?(.quitAnyway)
+        while h.now < QuitGuard.stopGrace * 3 { XCTAssertTrue(h.step(), "still checking") }
+        XCTAssertEqual(h.replies, [], "still waiting, well past the grace")
+        XCTAssertEqual(handover.offers, 0, "nothing installs while it runs")
+
+        let ended = h.now
+        h.hold.end(ticket)
+        h.runDown()
+        XCTAssertEqual(handover.offers, 1)
+        handover.done?(true)
+        XCTAssertEqual(h.replies, [true])
+        XCTAssertEqual(try XCTUnwrap(h.repliedAt), ended, accuracy: QuitGuard.checkEvery + 0.001)
+    }
+
+    /// With work that has no stop beside work that does: the one is stopped
+    /// and given the grace, the other waited for. A stopped one still
+    /// holding then quits with it, and hands nothing over.
+    func test_quit_anyway_stops_what_it_can_and_waits_for_the_rest() throws {
+        let h = QuitHarness()
+        let handover = FakeHandover()
+        h.quitGuard.handover = handover
+        var stops = 0
+        _ = h.hold.begin(TerminationHold.building) { stops += 1 }
+        let setup = h.hold.begin(TerminationHold.settingUp, stop: nil)
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.answer?(.quitAnyway)
+        XCTAssertEqual(stops, 1)
+        while h.now < QuitGuard.stopGrace * 2 { XCTAssertTrue(h.step()) }
+        XCTAssertEqual(h.replies, [])
+
+        h.hold.end(setup)
+        h.runDown()
+        XCTAssertEqual(h.replies, [true], "the stopped build outlasted its grace")
+        XCTAssertEqual(handover.offers, 0, "nothing installs while work holds")
     }
 
     func test_quit_anyway_quits_as_soon_as_the_stopped_work_ends() throws {
@@ -292,6 +415,124 @@ final class TerminationHoldTests: XCTestCase {
         h.answer?(.keepWorking)
         XCTAssertEqual(h.replies, [true], "a late answer changes nothing")
         XCTAssertEqual(stops, 0, "nothing left to stop")
+    }
+
+    // MARK: On the way out
+
+    /// A `QuitHandover` that records each offer and keeps the `done` it was
+    /// given, for the test to call.
+    @MainActor
+    final class FakeHandover: QuitHandover {
+        var takes = true
+        private(set) var offers = 0
+        private(set) var canceled = 0
+        private(set) var done: (@MainActor (Bool) -> Void)?
+
+        func handOver(_ done: @escaping @MainActor (Bool) -> Void) -> Bool {
+            offers += 1
+            guard takes else { return false }
+            self.done = done
+            return true
+        }
+
+        func quitCanceled() { canceled += 1 }
+    }
+
+    func test_with_nothing_running_the_handover_takes_the_quit_and_a_second_quit_waits() {
+        let h = QuitHarness()
+        let handover = FakeHandover()
+        h.quitGuard.handover = handover
+
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        XCTAssertEqual(handover.offers, 1)
+        XCTAssertEqual(h.questions, [], "nothing held: nothing asked")
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateCancel,
+                       "a quit during the handover can't go past it")
+        XCTAssertEqual(handover.offers, 1)
+        XCTAssertEqual(h.replies, [])
+
+        handover.done?(true)
+        XCTAssertEqual(h.replies, [true])
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater, "the next quit is offered again")
+        XCTAssertEqual(handover.offers, 2)
+    }
+
+    func test_a_handover_with_nothing_to_do_lets_graft_quit_at_once() {
+        let h = QuitHarness()
+        let handover = FakeHandover()
+        handover.takes = false
+        h.quitGuard.handover = handover
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateNow)
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateNow, "and isn't left pending")
+        XCTAssertEqual(handover.offers, 2)
+        XCTAssertEqual(h.replies, [])
+    }
+
+    func test_a_handover_can_cancel_the_quit() {
+        let h = QuitHarness()
+        let handover = FakeHandover()
+        h.quitGuard.handover = handover
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        handover.done?(false)
+        XCTAssertEqual(h.replies, [false])
+    }
+
+    func test_keep_working_hands_nothing_over_and_says_the_quit_was_canceled() {
+        let h = QuitHarness()
+        let handover = FakeHandover()
+        h.quitGuard.handover = handover
+        let ticket = h.hold.begin(TerminationHold.building, stop: nil)
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.answer?(.keepWorking)
+        XCTAssertEqual(h.replies, [false])
+        XCTAssertEqual(handover.offers, 0)
+        XCTAssertEqual(handover.canceled, 1)
+        h.hold.end(ticket)
+    }
+
+    func test_work_that_ends_while_asking_is_handed_over_before_the_quit() {
+        let h = QuitHarness()
+        let handover = FakeHandover()
+        h.quitGuard.handover = handover
+        let ticket = h.hold.begin(TerminationHold.decrypting, stop: nil)
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.step()
+        XCTAssertEqual(handover.offers, 0, "not while it runs")
+        h.hold.end(ticket)
+        h.runDown()
+        XCTAssertEqual(h.takeDowns, 1)
+        XCTAssertEqual(handover.offers, 1)
+        XCTAssertEqual(h.replies, [], "the quit waits for the handover")
+        handover.done?(true)
+        XCTAssertEqual(h.replies, [true])
+    }
+
+    /// Quit Anyway: handed over once the stopped work has ended, and never
+    /// while it still holds.
+    func test_quit_anyway_hands_over_only_once_the_work_has_ended() {
+        let stubborn = QuitHarness()
+        let first = FakeHandover()
+        stubborn.quitGuard.handover = first
+        _ = stubborn.hold.begin(TerminationHold.building) {}
+        XCTAssertEqual(stubborn.quitGuard.shouldTerminate(), .terminateLater)
+        stubborn.answer?(.quitAnyway)
+        stubborn.runDown()
+        XCTAssertEqual(stubborn.replies, [true], "quit after the grace")
+        XCTAssertEqual(first.offers, 0, "nothing installs while work holds")
+
+        let h = QuitHarness()
+        let handover = FakeHandover()
+        h.quitGuard.handover = handover
+        var ticket: TerminationHold.Ticket?
+        ticket = h.hold.begin(TerminationHold.reinstalling) { [unowned h] in
+            h.after(0.3) { if let ticket { h.hold.end(ticket) } }
+        }
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.answer?(.quitAnyway)
+        h.runDown()
+        XCTAssertEqual(handover.offers, 1)
+        handover.done?(true)
+        XCTAssertEqual(h.replies, [true])
     }
 
     /// The question names what runs, in plain words, each once.
@@ -330,6 +571,44 @@ final class TerminationHoldTests: XCTestCase {
         )
         let detail = QuitQuestion(reasons: [TerminationHold.building]).detail
         XCTAssertTrue(detail.contains(QuitQuestion.keepWorking) && detail.contains(QuitQuestion.quitAnyway), detail)
+    }
+
+    /// Work with no stop: the question says Quit Anyway can't stop it and
+    /// Graft quits when it finishes, not that Quit Anyway stops it.
+    func test_the_question_says_when_graft_waits_for_work_it_cannot_stop() {
+        let setUp = "Graft can't stop setting up your signing account partway. With Quit Anyway, "
+            + "Graft will quit when it finishes. Keep Working cancels the quit, and any logout or restart."
+        XCTAssertEqual(
+            QuitQuestion(reasons: [TerminationHold.settingUp], withoutStop: [TerminationHold.settingUp]).detail,
+            setUp
+        )
+        XCTAssertEqual(
+            QuitQuestion(
+                reasons: [TerminationHold.building, TerminationHold.removingData],
+                withoutStop: [TerminationHold.removingData]
+            ).detail,
+            "Graft can't stop removing its data partway. With Quit Anyway, Graft stops everything else, "
+                + "leaving it unfinished, and will quit when removing its data finishes. Keep Working "
+                + "cancels the quit, and any logout or restart."
+        )
+        XCTAssertEqual(
+            QuitQuestion(reasons: ["something new"], withoutStop: ["something new"]).detail,
+            "Graft can't stop what it's doing partway. With Quit Anyway, Graft will quit when it "
+                + "finishes. Keep Working cancels the quit, and any logout or restart."
+        )
+        XCTAssertEqual(QuitQuestion(reasons: [TerminationHold.building]).detail, QuitQuestion.detail)
+        XCTAssertEqual(QuitQuestion(reasons: [TerminationHold.building], withoutStop: []).detail,
+                       QuitQuestion.detail)
+
+        // What `QuitGuard` asks, from the hold.
+        let h = QuitHarness()
+        _ = h.hold.begin(TerminationHold.settingUp, stop: nil)
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        XCTAssertEqual(h.questions.map(\.detail), [setUp])
+        let other = QuitHarness()
+        _ = other.hold.begin(TerminationHold.settingUp) {}
+        XCTAssertEqual(other.quitGuard.shouldTerminate(), .terminateLater)
+        XCTAssertEqual(other.questions.map(\.detail), [QuitQuestion.detail], "it has a stop")
     }
 
     // MARK: A build
@@ -479,6 +758,52 @@ final class TerminationHoldTests: XCTestCase {
             XCTAssertTrue(control.isBalanced, "works: \(works)")
             XCTAssertEqual(store.error == nil, works)
         }
+    }
+
+    /// A setup that writes has no Stop: the quit question says Graft quits
+    /// when it finishes, which is what Quit Anyway then does.
+    func test_an_init_write_has_no_stop_so_the_question_says_graft_waits_for_it() async throws {
+        let control = FakeControl()
+        let runner = try cli("""
+            \(wait)
+            printf '%s\\n' '\(Self.freeResult)'
+            """)
+        let hold = TerminationHold(control: control)
+        let store = AccountSetupStore(runner: runner, hold: hold)
+        let run = Task { await store.chooseFree() }
+        await eventually({ control.isHeld(TerminationHold.settingUp) })
+
+        XCTAssertEqual(hold.reasonsWithoutStop, [TerminationHold.settingUp])
+        XCTAssertEqual(
+            QuitQuestion(reasons: hold.reasons, withoutStop: hold.reasonsWithoutStop).detail,
+            QuitQuestion.waitingDetail("setting up your signing account", others: false)
+        )
+        try go()
+        await run.value
+        XCTAssertTrue(control.isBalanced)
+    }
+
+    /// A review writes nothing and has Cancel: Quit Anyway stops it the same
+    /// way, and the question is the usual one.
+    func test_an_init_review_is_stopped_by_quit_anyway() async throws {
+        let control = FakeControl()
+        let runner = try cli(wait)
+        let hold = TerminationHold(control: control)
+        let store = AccountSetupStore(runner: runner, hold: hold)
+        store.choosePaid()
+        store.form.p12Path = "/private/var/empty/example.p12"
+        store.form.profilePath = "/private/var/empty/example.mobileprovision"
+        store.startReview()
+        await eventually({ control.isHeld(TerminationHold.settingUp) })
+
+        XCTAssertEqual(hold.reasonsWithoutStop, [])
+        XCTAssertEqual(QuitQuestion(reasons: hold.reasons, withoutStop: hold.reasonsWithoutStop).detail,
+                       QuitQuestion.detail)
+        hold.stopAll()
+        await eventually({ control.isLetGo(TerminationHold.settingUp) }, "stopped, well before its 30 s wait")
+        XCTAssertTrue(control.isBalanced)
+        XCTAssertEqual(store.step, .paidForm, "still on the form")
+        XCTAssertNil(store.error, "a stop isn't a failure")
     }
 
     // MARK: Enrollment

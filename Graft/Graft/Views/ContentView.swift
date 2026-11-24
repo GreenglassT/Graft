@@ -294,8 +294,13 @@ struct ContentView: View {
                 // may be the fix for whatever is on screen. Quiet, like the
                 // tools notice, and below it.
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    if let updates, let release = updates.banner, let version = release.latest {
-                        UpdateNotice(version: version) { updates.openReleasePage(release) }
+                    if let updates, let notice = updates.notice {
+                        UpdateNotice(
+                            notice: notice,
+                            onUpdate: { updates.update() },
+                            onRestart: { updates.restartToUpdate() },
+                            onOpenPage: { updates.openNoticePage() }
+                        )
                     }
                 }
         }
@@ -581,13 +586,16 @@ struct ContentView: View {
             presenting: updates?.answer
         ) { answer in
             if case let .available(release) = answer {
+                if updates?.canUpdate == true {
+                    Button(UpdateNotice.updateTitle) { updates?.update() }
+                }
                 Button("Open Release Page") { updates?.openReleasePage(release) }
                 Button("Later", role: .cancel) {}
             } else {
                 Button("OK", role: .cancel) {}
             }
         } message: { answer in
-            Text(answer.message(appVersion: updates?.appVersion ?? ""))
+            Text(answer.message(appVersion: updates?.appVersion ?? "", canUpdate: updates?.canUpdate ?? false))
         }
         // The daily check: now, then hourly while the app is open, each a
         // no-op until a day has passed since the last success
@@ -613,6 +621,7 @@ struct ContentView: View {
             SetupView(
                 need: need, isChecking: store.isCheckingSetup,
                 onCheckAgain: { Task { await checkSetup(.checkAgain) } },
+                checkAgainNote: store.shellAskedTooRecently ? ShellEnvironment.askedTooRecentlyNote : nil,
                 onContinueWithoutTools: { store.continueWithoutTools() },
                 accountSetup: accountSetupStore,
                 onAccountSetupFinished: {
@@ -1030,37 +1039,68 @@ struct MissingToolsNotice: View {
     }
 }
 
-/// "Graft 2.0.1 is available": the main window's word that the daily check
-/// found a newer release, with the way to its page.
+/// "Graft 2.0.1 is available": the main window's word that a newer Graft is
+/// out, and where updating to it is (`UpdateStore.notice`).
 ///
-/// `MissingToolsNotice`'s strip, with the accent rather than a warning: nothing
-/// is wrong. No dismiss button: Settings › Updates turns the check, and this
-/// with it, off. Graft downloads and installs nothing; the page is where the
-/// new Graft.zip is.
+/// `MissingToolsNotice`'s strip, with the accent rather than a warning:
+/// nothing is wrong, except when updating failed, which says why and links
+/// the release page. No dismiss button: Settings › Updates turns the check,
+/// and the offer with it, off.
 struct UpdateNotice: View {
-    let version: String
-    let onOpen: () -> Void
+    let notice: UpdateStore.Notice
+    let onUpdate: () -> Void
+    let onRestart: () -> Void
+    let onOpenPage: () -> Void
+
+    static let buttonTitle = "Release Page"
+    static let updateTitle = "Update"
+    static let restartTitle = "Restart to Update"
 
     static func text(version: String) -> String {
         "Graft \(version) is available"
     }
 
-    static let buttonTitle = "Release Page"
+    /// The strip's line for `notice`.
+    static func text(_ notice: UpdateStore.Notice) -> String {
+        let version = notice.version
+        switch notice.state {
+        case .available:
+            return text(version: version)
+        case let .downloading(fraction?):
+            return "Downloading Graft \(version)… \(Int((fraction * 100).rounded(.down)))%"
+        case .downloading(nil):
+            return "Downloading Graft \(version)…"
+        case .verifying:
+            return "Checking Graft \(version)…"
+        case .ready(installsOnQuit: true):
+            return "Graft \(version) is ready. It installs when you quit Graft."
+        case .ready(installsOnQuit: false):
+            return "Graft \(version) is ready to install"
+        case .installing:
+            return "Installing Graft \(version)…"
+        case .failed:
+            return "Graft couldn't update to \(version)"
+        }
+    }
 
     var body: some View {
         HStack(spacing: Metrics.controlGap) {
-            Symbols.updateAvailable.image(size: 12)
-                .foregroundStyle(Palette.accent)
+            symbol
                 .accessibilityHidden(true)
-            Text(Self.text(version: version))
-                .font(AppFont.body)
-                .foregroundStyle(Palette.text)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(Self.text(notice))
+                    .font(AppFont.body)
+                    .foregroundStyle(Palette.text)
+                if case let .failed(why) = notice.state {
+                    Text(why)
+                        .font(AppFont.body)
+                        .foregroundStyle(Palette.textMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
             Spacer(minLength: Metrics.controlGap)
-            Button(Self.buttonTitle, action: onOpen)
-                .buttonStyle(.borderless)
-                .font(AppFont.body)
-                .foregroundStyle(Palette.accent)
-                .help("Open this release's page on GitHub, where the new Graft.zip is")
+            buttons
         }
         .padding(.horizontal, Metrics.paneGutter)
         .padding(.vertical, Metrics.innerPadding)
@@ -1070,5 +1110,50 @@ struct UpdateNotice: View {
             Rectangle().fill(Palette.line).frame(height: 1)
         }
         .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private var symbol: some View {
+        switch notice.state {
+        case .downloading, .verifying, .installing:
+            ProgressView().controlSize(.small)
+        case .failed:
+            Symbols.attention.image(size: 12).foregroundStyle(Palette.warn)
+        default:
+            Symbols.updateAvailable.image(size: 12).foregroundStyle(Palette.accent)
+        }
+    }
+
+    @ViewBuilder
+    private var buttons: some View {
+        switch notice.state {
+        case let .available(canUpdate):
+            if canUpdate {
+                Button(Self.updateTitle, action: onUpdate)
+                    .buttonStyle(.borderless)
+                    .font(AppFont.body)
+                    .foregroundStyle(Palette.accent)
+                    .help("Download it, check it's Graft from its developer, and restart into it")
+            }
+            pageButton
+        case .ready:
+            Button(Self.restartTitle, action: onRestart)
+                .buttonStyle(.borderless)
+                .font(AppFont.body)
+                .foregroundStyle(Palette.accent)
+                .help("Quit Graft, put the new version in its place, and open it")
+        case .failed:
+            pageButton
+        case .downloading, .verifying, .installing:
+            EmptyView()
+        }
+    }
+
+    private var pageButton: some View {
+        Button(Self.buttonTitle, action: onOpenPage)
+            .buttonStyle(.borderless)
+            .font(AppFont.body)
+            .foregroundStyle(Palette.accent)
+            .help("Open this release's page on GitHub, where the new Graft.zip is")
     }
 }

@@ -3,6 +3,120 @@
 What changed in each release of Graft, newest first. Each release's download
 is on [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
 
+## 2.0.2 (2026-11-24)
+
+Graft now updates itself.
+
+- **Automatic updates.** When a newer Graft is out, Graft downloads it from
+  GitHub in the background, checks it, and shows Restart to Update in the
+  banner at the bottom of the window. If you don't restart, it installs the
+  update when you quit. The old Graft.app goes to the Trash, so you can put it
+  back.
+- **Checked before it's installed.** The download must match the SHA-256
+  GitHub lists for it, and the app inside must be Graft, newer than yours,
+  signed with the same developer's Developer ID as yours and notarized by
+  Apple. If any check fails, Graft deletes the download and the banner links
+  to the release page.
+- **Never in the middle of work.** Graft doesn't install an update while it's
+  building, installing or downloading an app. It waits until that's done, or
+  until you quit.
+- **Settings › Updates** has a second switch, Download and install updates
+  automatically, on by default. With it off, the banner offers Update, which
+  downloads, checks and restarts when you choose it. The first switch is now
+  called Check for updates automatically.
+- **When it can't.** Graft can't replace itself when it runs straight from
+  Downloads, or from a folder your account can't change. The banner says so
+  and links to the release page. If an install fails after Graft quits, Graft
+  keeps the version you have, says so the next time it opens, and writes what
+  happened to `~/Library/Logs/Graft/update.log`.
+- `graft --download-update` downloads and checks a newer Graft from Terminal.
+  [What Graft connects to](docs/network.md) lists the download.
+- **Remove Graft's Data.** Help › Remove Graft's Data… lists everything Graft
+  keeps outside Graft.app, each with its size and what it is: its folders,
+  your App Store sign-in, ipatool's App Store components, the decryption
+  model, your `.p12` and SSH passwords, the `graft` link for Terminal, the
+  app's own settings, the update log, and temporary files a stopped run left
+  behind. Check what to remove, and it removes that and nothing else. Your
+  passwords stay unless you check them, and anything `config.yaml` points to
+  outside Graft's folders is never removed. It waits while Graft is building
+  or downloading, and when it's done it says what it removed, so you can quit
+  Graft and move it to the Trash. In Terminal, `graft --remove-data` lists
+  the same, and `--items` removes what you name.
+  [Removing Graft](README.md#removing-graft) has the whole list.
+
+### Fixes
+
+- **If Apple stops serving the macOS restore image** that the bundled ipatool
+  takes the App Store's frameworks from, the first sign-in or App Store action
+  on a Mac now says so in plain words: a newer Graft fixes it, and the update
+  notice (or Help › Check for Updates…) says when one is out. It used to show
+  only ipatool's own error, such as "server returned 403 Forbidden". A Mac
+  that already has those frameworks in `~/Library/Caches/ipatool` isn't
+  affected.
+- Get (free) no longer adds an app to an Apple ID the question didn't name. If
+  you signed in as someone else in Terminal while "Get … for free?" was open,
+  the app went into that Apple ID's purchases. Graft now checks again as it
+  gets the app, and if the Apple ID changed it says so and buys nothing. The
+  question also no longer opens by itself when you come back to an app you
+  left while Graft was checking.
+- If you've made a keychain other than login your default in Keychain Access,
+  Graft no longer reads only the login keychain to tell whether it's locked.
+  With that default keychain locked, the App Store sign-in could ask for its
+  password.
+- Check again, in Settings and on the setup screen, and Preflight's Re-run say
+  when Graft asked your shell less than 10 seconds before and used that answer,
+  instead of looking as if they had asked again. Setting the Mac's clock back
+  no longer holds them off.
+- A login shell from Homebrew no longer costs Graft your shell's settings the
+  first time it runs. macOS checks a new program before it starts it, which
+  can take seconds on a slow network, and that time counted against the five
+  seconds Graft gives your shell.
+- A push into LiveContainer that the phone stopped answering, or that you
+  stopped, just as the old copy was moved aside no longer leaves the app
+  missing from LiveContainer's Documents. The old copy is put back.
+- A phone that goes silent while Graft connects to it, lists its apps, or reads
+  or writes LiveContainer's files is given up on after a minute, instead of
+  waiting until you press Stop.
+- An app that uses its developer's iCloud container now gets the "will probably
+  crash at launch" warning when your profile has iCloud but not that
+  container.
+- A `.p12`, profile or App Store Connect key your user can't read (one copied
+  with sudo belongs to root) gets a hint about its owner and permissions, not
+  the Privacy & Security one. That hint now names Terminal too, for `graft`
+  run there.
+- A paid account setup that failed, then was stopped while it put things back,
+  still says why it failed.
+- A pipx `graft` whose `appstore.ipatool` names Graft.app's own ipatool no
+  longer deletes Graft.app's App Store sign-in when it signs in. Neither does
+  Graft.app when the setting spells that path another way: in another case,
+  through a hard link, or under /System/Volumes/Data.
+- When macOS's Keychain refuses a pipx `graft`'s own ipatool, the hint says to
+  sign in again with it in Terminal. It sent you to Graft.app, whose sign-in
+  doesn't help that ipatool.
+- **Set Up Decryption's check for the App Store state** passes over a folder
+  that is a link, and Cancel and the time limit stop it like the rest of the
+  step. Another user of this Mac could put a link in place of that state's
+  folder in the Mac's Shared folder, to a network folder that is slow to
+  answer, and the check, which runs as root, could keep waiting on it past
+  Cancel and the time limit. It never read or changed anything there.
+- Release Page on the update banner, and Open Release Page after Help › Check
+  for Updates…, now open only Graft's own page for the version on offer.
+  Graft keeps the last update check's answer between launches, and another
+  program on your Mac could change it so the button opened a page somewhere
+  else. Graft now builds the link from the version number, and drops a saved
+  answer whose version isn't one. `graft --check-update` also names only that
+  release's page, or Graft's latest release.
+- Quit Anyway no longer leaves a stopped command running after Graft has
+  gone. Graft gives a stopped command 10 seconds to clean up before it ends
+  it outright, but Quit Anyway waited only 5, so a slow one, and the tools it
+  had started, could run on without Graft. Quit Anyway now waits up to 13
+  seconds, and Graft still quits as soon as the work has stopped.
+- Quitting while Graft sets up your signing account or removes its data now
+  says Graft can't stop that partway and will quit when it finishes, and Quit
+  Anyway does just that. It used to say Quit Anyway would stop it, then quit
+  after 5 seconds and leave it running. Quitting while Graft checks your
+  signing files stops the check, as Cancel does.
+
 ## 2.0.1 (2026-11-24)
 
 Graft now tells you when a new version is out, and has a new icon.

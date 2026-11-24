@@ -1408,7 +1408,10 @@ struct UpdateCheckRecord: Codable, Hashable {
     /// The latest published release, without its "v" ("2.0.1"); nil when the
     /// check failed.
     let latest: String?
-    /// That release's page on GitHub; nil when the check failed.
+    /// That release's page on GitHub; nil when the check failed. Decoded,
+    /// and never opened: the app builds the page from `latest`
+    /// (`UpdateStore.releasePage`), since this one is also read back from
+    /// `defaults`, which any process running as the user can write.
     let url: String?
     let updateAvailable: Bool
     /// Why it failed (offline, http, malformed); nil when it didn't.
@@ -1422,6 +1425,64 @@ struct UpdateCheckRecord: Codable, Hashable {
         case ok, current, latest, url, reason, status, message
         case updateAvailable = "update_available"
     }
+}
+
+/// `update-progress`: `--download-update` at work, the same keys every time.
+struct UpdateProgressRecord: Codable, Hashable {
+    /// "download" or "verify".
+    let step: String
+    /// The release's version.
+    let version: String?
+    /// Bytes so far and in all, while downloading; nil while verifying.
+    let received: Int?
+    let total: Int?
+    /// While verifying, the check that is running (archive, bundle,
+    /// signature, requirement, notarization); nil while downloading.
+    let check: String?
+
+    static let download = "download"
+    static let verify = "verify"
+
+    /// How far the download is, 0 to 1, when it says.
+    var fraction: Double? {
+        guard step == Self.download, let received, let total, total > 0 else { return nil }
+        return min(1, Double(received) / Double(total))
+    }
+}
+
+/// `update-download-end`: what `--download-update` ended with, exactly once,
+/// with the same keys whether it worked or not.
+struct UpdateDownloadRecord: Codable, Hashable {
+    let ok: Bool
+    let current: String
+    /// The checked download's version and the Graft.app waiting in Graft's
+    /// cache; nil when it failed, having deleted it.
+    let version: String?
+    let appPath: String?
+    /// The release's page: where to download it by hand. Never opened, as
+    /// `UpdateCheckRecord.url`.
+    let url: String?
+    /// Why it failed (`app_update`'s names), and the CLI's sentence for it.
+    let reason: String?
+    let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ok, current, version, url, reason, message
+        case appPath = "app_path"
+    }
+}
+
+/// `update-install`: whether `--install-update` started the helper that
+/// installs the download once Graft has quit. Exactly once.
+struct UpdateInstallRecord: Codable, Hashable {
+    let ok: Bool
+    let version: String?
+    /// The helper's log file.
+    let log: String?
+    let relaunch: Bool
+    let url: String?
+    let reason: String?
+    let message: String?
 }
 
 enum CanisterFetchResult: Equatable {
@@ -1524,6 +1585,15 @@ enum BuildEvent {
     case appStoreSearchEnd(AppStoreSearchEndRecord)
     case appStoreSearchFailed(AppStoreSearchFailedRecord)
     case updateCheck(UpdateCheckRecord)
+    // What Graft keeps outside Graft.app (`--remove-data`); records in
+    // `RemoveDataRecords.swift`.
+    case dataItem(DataItemRecord)
+    case dataItemsEnd(DataItemsEndRecord)
+    case dataRemoved(DataRemovedRecord)
+    case dataRemovalEnd(DataRemovalEndRecord)
+    case updateProgress(UpdateProgressRecord)
+    case updateDownloadEnd(UpdateDownloadRecord)
+    case updateInstall(UpdateInstallRecord)
     case unknown(type: String, raw: [String: Any])
 
     enum DecodeError: Error {
@@ -1895,6 +1965,20 @@ enum BuildEvent {
             return .appStoreSearchFailed(try decoder.decode(AppStoreSearchFailedRecord.self, from: data))
         case "update-check":
             return .updateCheck(try decoder.decode(UpdateCheckRecord.self, from: data))
+        case "data-item":
+            return .dataItem(try decoder.decode(DataItemRecord.self, from: data))
+        case "data-items-end":
+            return .dataItemsEnd(try decoder.decode(DataItemsEndRecord.self, from: data))
+        case "data-removed":
+            return .dataRemoved(try decoder.decode(DataRemovedRecord.self, from: data))
+        case "data-removal-end":
+            return .dataRemovalEnd(try decoder.decode(DataRemovalEndRecord.self, from: data))
+        case "update-progress":
+            return .updateProgress(try decoder.decode(UpdateProgressRecord.self, from: data))
+        case "update-download-end":
+            return .updateDownloadEnd(try decoder.decode(UpdateDownloadRecord.self, from: data))
+        case "update-install":
+            return .updateInstall(try decoder.decode(UpdateInstallRecord.self, from: data))
         case "init-step":
             return .initStep(try decoder.decode(InitStepRecord.self, from: data))
         case "init-result":

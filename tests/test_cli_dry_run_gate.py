@@ -76,8 +76,13 @@ def test_the_refusal_comes_before_the_config_is_even_read(
 
 def test_the_verbs_that_preview_are_the_ones_whose_handlers_take_dry_run() -> None:
     """Pinned, so a verb gaining or losing a preview is a decision somebody
-    makes here rather than something the gate notices for them."""
-    assert {v.flag for v in _verbs() if v.honours_dry_run} == {"--init", "--prune-builds"}
+    makes here rather than something the gate notices for them.
+
+    `--remove-data` joined them: with `--items` it removes things that can't
+    be put back, so saying what would go first is worth having."""
+    assert {v.flag for v in _verbs() if v.honours_dry_run} == {
+        "--init", "--prune-builds", "--remove-data",
+    }
     for v in _verbs():
         assert v.honours_dry_run == ("dry_run" in inspect.signature(v.run).parameters)
 

@@ -322,3 +322,191 @@ def test_in_the_source_archive_the_pinned_sources_and_sdists_are_scanned_by_name
                     f"Graft-9.9-sources.tar.gz!Graft-9.9-sources/pinned/zed+/y.tar.gz: the deny-list's line {ZED}"]
     r = _cli("sources", str(sources))
     assert r.returncode == 1 and "sdists" not in r.stderr and "graft/README.md" in r.stderr
+
+
+# --- the owner's device UDIDs (2.0.2) -----------------------------------------------------------
+#
+# Every UDID here is made up and zero-padded, one of each shape a profile
+# holds; none is a real device's. Nothing reads the real config or profiles:
+# conftest gives each test its own HOME and XDG roots, and the device check
+# reads config.yaml under XDG_CONFIG_HOME.
+
+PHONE = "00008030-000000000000001A"
+MAC = "00000000-0000-0000-0000-0000000000B2"
+OLD = "000000000000000000000000000000000000c0d3"
+LISTED = "00008110-00000000000000E4"
+
+
+def _der(tag: int, body: bytes) -> bytes:
+    n = len(body)
+    width = (n.bit_length() + 7) // 8
+    return bytes([tag]) + (bytes([n]) if n < 0x80 else bytes([0x80 | width]) + n.to_bytes(width, "big")) + body
+
+
+def _cms(content: bytes) -> bytes:
+    """A test CMS: a ContentInfo / SignedData whose eContent is `content`,
+    split into octet-string chunks as a streaming signer writes it, so it
+    can only be read through the CMS structure, never by cutting the XML out.
+    No signature: nothing here verifies one."""
+    chunks = b"".join(_der(0x04, content[i:i + 100]) for i in range(0, len(content), 100))
+    encap = _der(0x30, _der(0x06, bytes.fromhex("2a864886f70d010701")) + _der(0xA0, _der(0x24, chunks)))
+    signed = _der(0x30, _der(0x02, b"\x01") + _der(0x31, b"") + encap + _der(0x31, b""))
+    return _der(0x30, _der(0x06, bytes.fromhex("2a864886f70d010702")) + _der(0xA0, signed))
+
+
+def _profile(path: Path, devices: list, *, cms: bool = False) -> Path:
+    import plistlib
+
+    plist = plistlib.dumps({"Name": "Placeholder Profile", "TeamIdentifier": ["ABCDE12345"],
+                            "ProvisionedDevices": devices}, fmt=plistlib.FMT_XML)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_cms(plist) if cms else plist)
+    return path
+
+
+@pytest.fixture
+def owner(tmp_path, monkeypatch):
+    """A Graft config naming three profiles (signing, one app's, and a
+    portal cache holding one), and a UDID the config lists itself."""
+    monkeypatch.delenv(dl_mod.PROFILES_ENV, raising=False)
+    config = Path(os.environ["XDG_CONFIG_HOME"]) / "graft"
+    _profile(config / "wildcard.mobileprovision", [PHONE, "not-a-udid", 7])
+    _profile(tmp_path / "elsewhere" / "Example Game.mobileprovision", [MAC.lower()], cms=True)
+    _profile(config / "profiles" / "com.example.thing.mobileprovision", [OLD, PHONE.lower()])
+    (config / "config.yaml").write_text(
+        "signing:\n  cert: cert.p12\n  cert_password_env: X\n  profile: wildcard.mobileprovision\n  team_id: ABCDE12345\n"
+        f"apps:\n  Example Game:\n    bundle_id: com.example.thing\n    profile: {tmp_path / 'elsewhere' / 'Example Game.mobileprovision'}\n"
+        "  Other:\n    bundle_id: com.example.other\n"
+        f"app_store_connect:\n  key_id: K\n  issuer_id: I\n  key_file: k.p8\n  device_udids: [{LISTED}]\n")
+    return config
+
+
+def test_the_udids_come_from_every_profile_the_config_names_and_its_own_list(owner):
+    devices = dl_mod.load_devices()
+    assert set(devices.udids) == {u.lower() for u in (PHONE, MAC, OLD, LISTED)}
+    assert devices.profiles == 3 and devices.skipped == 2, "'not-a-udid' and 7 aren't UDIDs"
+    assert set(devices.sources) == {"signing.profile", "apps entry 1's profile",
+                                    "app_store_connect.profile_cache_dir, profile 1", "app_store_connect.device_udids"}
+    source = dict(zip(devices.udids, devices.sources))
+    assert source[PHONE.lower()] == "signing.profile", "where it was first read: the cache's copy adds nothing"
+    assert source[LISTED.lower()] == "app_store_connect.device_udids"
+
+
+def test_a_profile_is_decoded_in_python_and_security_never_runs(owner, monkeypatch):
+    """`security cms -D` can touch the login keychain; the plist is read out
+    of the CMS bytes instead (graft_ipa.mobileprovision), the test CMS's
+    chunked content included."""
+    import subprocess as sp
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: pytest.fail(f"ran {a}"))
+    monkeypatch.setattr(sp, "Popen", lambda *a, **k: pytest.fail(f"ran {a}"))
+    assert MAC.lower() in dl_mod.load_devices().udids
+
+
+def test_with_no_config_or_no_profile_it_says_so_and_skips(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv(dl_mod.PROFILES_ENV, raising=False)
+    assert dl_mod.devices_main(["check"]) == dl_mod.NO_PROFILES == 3
+    assert "there is no Graft config at" in capsys.readouterr().out
+    config = Path(os.environ["XDG_CONFIG_HOME"]) / "graft"
+    config.mkdir(parents=True)
+    (config / "config.yaml").write_text("apps:\n  Example Game:\n    bundle_id: com.example.thing\n")
+    assert dl_mod.devices_main(["tracked", str(tmp_path), "HEAD"]) == 3
+    out = capsys.readouterr().out
+    assert "names no provisioning profile" in out and "skipped" in out and "Example Game" not in out
+    _profile(config / "empty.mobileprovision", [])
+    (config / "config.yaml").write_text("signing:\n  profile: empty.mobileprovision\n")
+    assert dl_mod.devices_main(["check"]) == 3
+    assert "provision no device" in capsys.readouterr().out
+
+
+def test_the_variable_names_the_profiles_instead_and_empty_names_none(owner, tmp_path, monkeypatch):
+    folder = tmp_path / "chosen"
+    _profile(folder / "a" / "one.mobileprovision", ["00008030-00000000000000F1"], cms=True)
+    other = _profile(tmp_path / "two.mobileprovision", ["00008030-00000000000000F2"])
+    monkeypatch.setenv(dl_mod.PROFILES_ENV, f"{folder}:{other}")
+    devices = dl_mod.load_devices()
+    assert devices.udids == ("00008030-00000000000000f1", "00008030-00000000000000f2"), "the config is not read"
+    assert devices.sources == (f"{dl_mod.PROFILES_ENV} entry 1, profile 1", f"{dl_mod.PROFILES_ENV} entry 2")
+    monkeypatch.setenv(dl_mod.PROFILES_ENV, "")
+    assert dl_mod.devices_main(["check"]) == 3
+
+
+def test_a_profile_that_cant_be_read_fails_naming_its_key_never_its_path(owner, tmp_path, capsys):
+    (tmp_path / "elsewhere" / "Example Game.mobileprovision").unlink()
+    assert dl_mod.devices_main(["check"]) == 1
+    err = capsys.readouterr().err
+    assert "can't read apps entry 1's profile" in err and dl_mod.PROFILES_ENV in err
+    assert "Example Game" not in err and str(tmp_path) not in err
+    (tmp_path / "elsewhere" / "Example Game.mobileprovision").write_bytes(b"not a profile")
+    assert dl_mod.devices_main(["check"]) == 1
+    err = capsys.readouterr().err
+    assert "failed to decode apps entry 1's profile" in err and "Example Game" not in err
+
+
+def test_check_says_how_many_and_never_which(owner, capsys):
+    assert dl_mod.devices_main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "device UDIDs: 4 from 3 provisioning profiles and the config's own list; 2 entries" in out
+    for udid in (PHONE, MAC, OLD, LISTED):
+        assert udid.lower() not in out.lower() and udid.replace("-", "").lower() not in out.lower()
+
+
+def test_a_udid_is_found_in_any_case_with_or_without_hyphens_and_never_printed(owner, tmp_path):
+    app = tmp_path / "Graft.app"
+    files = {"Contents/Resources/upper.txt": f"device {PHONE.upper()} here".encode(),
+             "Contents/Resources/bare.json": f'{{"udid": "{PHONE.replace("-", "").lower()}"}}'.encode(),
+             "Contents/MacOS/Graft": b"\0" + zlib.compress(f"mac {MAC}".encode()) + b"\0",
+             "Contents/Resources/near.txt": f"{PHONE[:-1]}B, {OLD}0, 1{LISTED}".encode(),
+             "Contents/Resources/clear.txt": b"00008030-000000000000000A, nothing of yours",
+             "Contents/Resources/Licenses/zsign-LICENSE": OLD.encode(),
+             f"Contents/Resources/Licenses/go-modules/example.com/{OLD}@v1.0.0/LICENSE": b"MIT",
+             "Contents/_CodeSignature/CodeResources": OLD.encode(),
+             f"Contents/Resources/named-{MAC.lower()}.txt": b"clear"}
+    for rel, data in files.items():
+        (app / rel).parent.mkdir(parents=True, exist_ok=True)
+        (app / rel).write_bytes(data)
+    r = _cli("devices", "app", str(app))
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "Graft.app/Contents/Resources/upper.txt: device" in r.stderr
+    assert "Graft.app/Contents/Resources/bare.json: device" in r.stderr
+    assert "Graft.app/Contents/MacOS/Graft: device" in r.stderr, "inside a zlib stream too"
+    assert "near.txt" not in r.stderr and "clear.txt" not in r.stderr, "a longer hex run isn't the UDID"
+    assert "zsign-LICENSE" not in r.stderr and "go-modules" not in r.stderr and "CodeResources" not in r.stderr, (
+        "the deny-list's app scopes: others' files skipped, names too, and what codesign writes")
+    assert "Graft.app/Contents/Resources/named-[device 3].txt: device 3" in r.stderr, (
+        "a name of Graft's own is scanned, and the UDID in it is masked where the location is printed")
+    shown = (r.stdout + r.stderr).lower()
+    for udid in (PHONE, MAC, OLD, LISTED):
+        assert udid.lower() not in shown and udid.replace("-", "").lower() not in shown
+    assert str(owner) not in r.stderr and "Example Game" not in r.stderr
+
+
+@needs_tools("git")
+def test_the_tracked_files_and_the_source_archive_are_scanned_for_them(owner, tmp_path):
+    repo = tmp_path / "repo"
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "GIT_AUTHOR_NAME": "t",
+           "GIT_AUTHOR_EMAIL": "t@example.invalid", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid"}
+    for name, text in {"README.md": "Graft", "tests/fixture.py": f'UDID = "{LISTED.lower()}"',
+                       "docs/superpowers/notes.md": PHONE}.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "x"]):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, env=env, capture_output=True)
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    r = _cli("devices", "tracked", str(repo), head)
+    assert r.returncode == 1 and "tests/fixture.py: device" in r.stderr and "app_store_connect.device_udids" in r.stderr
+    assert "notes.md" not in r.stderr, "kept out of every export"
+    sources = tmp_path / "Graft-9.9-sources.tar.gz"
+    sources.write_bytes(_tar_gz({"Graft-9.9-sources/graft/README.md": b"clear",
+                                 "Graft-9.9-sources/pinned/y/y.tar.gz": OLD.encode()}))
+    r = _cli("devices", "sources", str(sources))
+    assert r.returncode == 0 and "no device UDID from your provisioning profiles" in r.stdout
+    sources.write_bytes(_tar_gz({"Graft-9.9-sources/graft/SOURCES.md": MAC.encode()}))
+    r = _cli("devices", "sources", str(sources))
+    assert r.returncode == 1 and "graft/SOURCES.md: device" in r.stderr
+
+
+def test_the_devices_command_takes_only_its_own_forms():
+    for args in (["devices"], ["devices", "scan", "x"], ["devices", "tracked", "x"], ["devices", "app"]):
+        assert _cli(*args).returncode == 2, args

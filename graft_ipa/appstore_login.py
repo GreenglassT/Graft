@@ -119,6 +119,10 @@ REASON_UNKNOWN_PROMPT = "unknown-prompt"
 #: `--expect-ipatool`: the ipatool that would get the password isn't the one
 #: the caller (the sign-in sheet) named.
 REASON_IPATOOL_CHANGED = "ipatool-changed"
+#: Apple no longer serves the macOS restore image ipatool takes the App
+#: Store's frameworks from, the first time (`ipatool.restore_image_failure`).
+#: Its own reason, not "network": trying again can't fix it.
+REASON_RESTORE_IMAGE = "restore-image-gone"
 REASON_OTHER = "other"
 
 #: What the sign-in sheet says for each, in words a person can act on.
@@ -164,6 +168,7 @@ MESSAGES: dict[str, str] = {
         "The ipatool that would get your password isn't the one Settings named, so Graft "
         "didn't sign in."
     ),
+    REASON_RESTORE_IMAGE: ipatool.RESTORE_IMAGE_GONE,
     REASON_OTHER: "ipatool couldn't sign in.",
 }
 
@@ -280,9 +285,14 @@ def classify(error: str, *, code_typed: bool = True) -> LoginFailed:
     code alone, and without a code it names only the password (decision 9).
     ipatool failing to fetch its Unicorn emulator, the first time, offline,
     says what the rest of Graft says for it (`ipatool.UNICORN_FIRST_USE`).
+    Apple no longer serving the restore image ipatool sets itself up from
+    says that a newer Graft fixes it (`ipatool.RESTORE_IMAGE_GONE`), before
+    any rule could call its HTTP status something else.
     """
     if (first_use := ipatool.unicorn_failure(error)) is not None:
         return LoginFailed(REASON_NETWORK, first_use.message, hint=first_use.hint)
+    if (gone := ipatool.restore_image_failure(error)) is not None:
+        return LoginFailed(REASON_RESTORE_IMAGE, gone.message, hint=gone.hint)
     lower = error.lower()
     reason = next(
         (reason for reason, patterns in _COMPILED_RULES if any(p.search(lower) for p in patterns)),

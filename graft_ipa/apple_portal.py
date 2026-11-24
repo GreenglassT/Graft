@@ -142,7 +142,7 @@ def read_key_file(path: Path) -> bytes:
     except OSError as e:
         raise PortalError(
             f"couldn't open the App Store Connect key at {path}: {e.strerror}",
-            hint=not_let_read_hint(str(path)) if e.errno in NOT_LET_READ else _KEY_HINT,
+            hint=not_let_read_hint(str(path), e.errno) if e.errno in NOT_LET_READ else _KEY_HINT,
         ) from None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):

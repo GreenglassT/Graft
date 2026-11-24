@@ -18,6 +18,9 @@ struct CommandLineToolSection: View {
     @State private var confirmingReplace = false
     /// Check again is asking the shell.
     @State private var isRechecking = false
+    /// The last Check again used the shell's last answer: it was asked too
+    /// recently to ask again.
+    @State private var askedTooRecently = false
 
     static var isOffered: Bool { GraftExecutable.preferBundledDefault }
 
@@ -123,6 +126,12 @@ struct CommandLineToolSection: View {
                         .controlSize(.small)
                         .disabled(isRechecking)
                     }
+                    if askedTooRecently {
+                        Text(ShellEnvironment.askedTooRecentlyNote)
+                            .font(AppFont.monoSmall)
+                            .foregroundStyle(Palette.warn)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 if let failure {
                     Text(failure)
@@ -173,6 +182,7 @@ struct CommandLineToolSection: View {
         defer { if askShellAgain { isRechecking = false } }
         refresh()
         loginPATH = await context.loginPATH(askShellAgain)
+        askedTooRecently = askShellAgain && context.askedTooRecently()
         advice = CommandLineTool.pathAdvice(
             loginPATH: loginPATH, shell: context.shell, home: context.home
         )

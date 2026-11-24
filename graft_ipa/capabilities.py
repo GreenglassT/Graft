@@ -27,8 +27,12 @@ saying "those features won't work", so the crash warning keeps its weight.
 
 App Groups are checked group by group: a profile that grants some groups but
 not the app's own still leaves the app without its container, and the
-warning names the groups missing. A profile's `*` matches as Apple's does,
-at the end of a value (`group.com.example.*`).
+warning names the groups missing. iCloud containers are checked the same
+way, container by container: a profile with iCloud on that grants
+key-value storage, an empty container list or the user's own container
+still leaves an app that looks up its vendor's container without it (the
+try14 delta audit's d14-cli-4). A profile's `*` matches as Apple's does, at
+the end of a value (`group.com.example.*`).
 
 A warning, never a refusal. Nothing here suggests `auto_profile`: App Group
 assignment can't be done through the App Store Connect API (`apple_portal`).
@@ -57,8 +61,10 @@ from . import macho, mobileprovision
 
 #: Every capability this checks: the name developer.apple.com gives it, and
 #: the entitlement keys (`fnmatch` patterns) that ask for it. A profile
-#: grants a capability when it lists any of its keys; an app asks for one
-#: when one of its binaries does, with a value that isn't empty or false.
+#: grants a capability when it lists any of its keys, except App Groups and
+#: iCloud containers, which are compared value by value (`missing`); an app
+#: asks for one when one of its binaries does, with a value that isn't empty
+#: or false.
 #: `keychain-access-groups` and `application-identifier` are not here: zsign
 #: writes those from the profile.
 CAPABILITIES: dict[str, tuple[str, ...]] = {
@@ -96,7 +102,8 @@ class Gap:
     """One capability the app asks for and the profile doesn't grant."""
 
     name: str
-    #: For App Groups: the groups asked for that the profile doesn't grant.
+    #: For App Groups: the groups asked for that the profile doesn't grant;
+    #: for iCloud, the containers.
     groups: tuple[str, ...] = ()
     #: Said after the name: "(key-value storage only)", `ON_THE_WATCH`.
     note: str = ""
@@ -170,13 +177,34 @@ def missing(requested: Iterable[Mapping[str, Any]], granted: Mapping[str, Any]) 
             lacking = tuple(g for g in asked if not any(grants(x, g) for x in given))
             if lacking or (not asked and name not in have):
                 gaps.append(Gap(name, lacking))
+        elif name == ICLOUD:
+            if (gap := _icloud_gap(requested, granted, name in have)) is not None:
+                gaps.append(gap)
         elif name not in have:
-            kvstore_only = name == ICLOUD and not any(
-                ents.get(key) for ents in requested for key in ICLOUD_CONTAINER_KEYS
-            )
-            gaps.append(Gap(name, note="(key-value storage only)", crash=False) if kvstore_only
-                        else Gap(name))
+            gaps.append(Gap(name))
     return gaps
+
+
+def _icloud_gap(requested: list[Mapping[str, Any]], granted: Mapping[str, Any], has_icloud: bool) -> Gap | None:
+    """iCloud's gap, or None.
+
+    An app that looks containers up at launch (`ICLOUD_CONTAINER_KEYS`)
+    needs each of its own: any iCloud key in the profile used to count, so a
+    profile with key-value storage, an empty container list or the user's
+    own container gave no warning for an app after its vendor's container
+    (d14-cli-4). Key-value storage alone is still granted by any iCloud key,
+    as before: zsign signs the profile's store in, and the app reads it.
+    """
+    asks_containers = any(ents.get(key) for ents in requested for key in ICLOUD_CONTAINER_KEYS)
+    if not asks_containers:
+        return None if has_icloud else Gap(ICLOUD, note="(key-value storage only)", crash=False)
+    asked = sorted({c for ents in requested for key in ICLOUD_CONTAINER_KEYS for c in _strings(ents.get(key))})
+    if not asked:
+        # Asked for by a value that names no container: nothing to compare.
+        return None if has_icloud else Gap(ICLOUD)
+    given = [c for key in ICLOUD_CONTAINER_KEYS for c in _strings(granted.get(key))]
+    lacking = tuple(c for c in asked if not any(grants(x, c) for x in given))
+    return Gap(ICLOUD, lacking) if lacking else None
 
 
 def _watch_only(on_watch: list[Gap], on_phone: list[Gap]) -> list[Gap]:

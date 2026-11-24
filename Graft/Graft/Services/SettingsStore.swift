@@ -57,6 +57,9 @@ final class SettingsStore {
     /// the same reason `save()` does, so they hold it as well.
     var isBusy: Bool { isRunning || isSaving || isSavingPortal }
     private(set) var isRunning: Bool = false
+    /// The last Re-run found the login shell asked too recently to ask again,
+    /// and scanned with its last answer (`ShellEnvironment.askedTooRecentlyNote`).
+    private(set) var shellAskedTooRecently = false
     var lastError: String?
 
     /// The pill's two counts. An `info` row is in neither: a free Apple ID's
@@ -139,7 +142,7 @@ final class SettingsStore {
         // first to finish would clear `isRunning` while the other is still
         // going, stopping the spinner over a live scan.
         guard !isRunning else { return }
-        if askingShellAgain { runner.refreshEnvironment() }
+        shellAskedTooRecently = askingShellAgain && !runner.refreshEnvironment()
         let args = argsOverride ?? [Flag.json, Flag.check]
         isRunning = true
         let result: CLIRunner.RunResult

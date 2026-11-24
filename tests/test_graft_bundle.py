@@ -1965,15 +1965,69 @@ def test_the_source_archive_names_the_tree_and_never_the_private_commit(tmp_path
 
 
 def test_a_tree_that_isnt_what_git_archive_wrote_is_refused(tmp_path):
+    empty = ("100644", gb.git_blob_id(b""))
     with tarfile.open(tmp_path / "g.tar", "w") as tf:
         for name in ("top/graft/a", "top/graft/b"):
             info = tarfile.TarInfo(name)
+            info.mode = 0o664
             tf.addfile(info, io.BytesIO(b""))
-    gb.check_archived_tree({"a", "b"}, tmp_path / "g.tar", "top/graft/")
+    gb.check_archived_tree({"a": empty, "b": empty}, tmp_path / "g.tar", "top/graft/")
     with pytest.raises(gb.BundleError, match="export-ignore"):
-        gb.check_archived_tree({"a", "b", "c"}, tmp_path / "g.tar", "top/graft/")
+        gb.check_archived_tree({"a": empty, "b": empty, "c": empty}, tmp_path / "g.tar", "top/graft/")
     with pytest.raises(gb.BundleError, match="export-ignore"):
-        gb.check_archived_tree({"a"}, tmp_path / "g.tar", "top/graft/")
+        gb.check_archived_tree({"a": empty}, tmp_path / "g.tar", "top/graft/")
+    # The delta audit's d14-bundle-4: the same names, other contents or mode.
+    with pytest.raises(gb.BundleError, match=r"contents or mode aren't the tree's.*export-subst.*\['b'\]"):
+        gb.check_archived_tree({"a": empty, "b": ("100644", gb.git_blob_id(b"x"))}, tmp_path / "g.tar", "top/graft/")
+    with pytest.raises(gb.BundleError, match=r"\['a'\]"):
+        gb.check_archived_tree({"a": ("100755", empty[1]), "b": empty}, tmp_path / "g.tar", "top/graft/")
+
+
+def test_a_git_blob_id_is_gits_own():
+    assert gb.git_blob_id(b"") == "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
+    assert gb.git_blob_id(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
+    assert len(gb.git_blob_id(b"", "sha256")) == 64
+
+
+def _repo_with_placeholder(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _tree(repo, ["pyproject.toml"])
+    (repo / "VERSION").write_text("built from $Format:%H$\n")
+    (repo / "run.sh").write_text("#!/bin/sh\n")
+    (repo / "run.sh").chmod(0o755)
+    (repo / "link").symlink_to("pyproject.toml")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "x")
+    return repo
+
+
+@needs_tools("git")
+def test_an_export_subst_from_the_checkouts_own_attributes_is_refused(tmp_path):
+    """The delta audit's d14-bundle-4: .git/info/attributes is never
+    committed or reviewed, and git archive of a commit honors it, expanding
+    $Format:%H$ to the private commit while every name stays the same."""
+    repo = _repo_with_placeholder(tmp_path)
+    tree, _ = gb.graft_source_tar(tmp_path / "plain.tar", "top/graft/", repo=repo)
+    assert tree, "no attributes: the archive is the tree, executable bit and symlink included"
+    (repo / ".git" / "info").mkdir(exist_ok=True)
+    (repo / ".git" / "info" / "attributes").write_text("VERSION export-subst\n")
+    commit = _git(repo, "rev-parse", "HEAD").strip()
+    with pytest.raises(gb.BundleError, match=r"export-subst.*\['VERSION'\]"):
+        gb.graft_source_tar(tmp_path / "g.tar", "top/graft/", repo=repo, commit=commit)
+    with tarfile.open(tmp_path / "g.tar") as tf:
+        assert commit.encode() in tf.extractfile("top/graft/VERSION").read(), "what the check stops"
+
+
+@needs_tools("git")
+def test_an_export_subst_from_a_committed_gitattributes_is_refused(tmp_path):
+    repo = _repo_with_placeholder(tmp_path)
+    (repo / ".gitattributes").write_text("VERSION export-subst\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "attributes")
+    with pytest.raises(gb.BundleError, match=r"export-subst.*\['VERSION'\]"):
+        gb.graft_source_tar(tmp_path / "g.tar", "top/graft/", repo=repo)
 
 
 def test_the_stage_takes_its_caches_from_the_environment(monkeypatch, tmp_path):
@@ -3513,9 +3567,36 @@ def test_the_source_archive_gets_ipatools_vendored_modules_from_its_build(tmp_pa
 @pytest.mark.parametrize("licence, only", [
     ("MPL-2.0", True), ("LGPL-3.0-only WITH LGPL-3.0-linking-exception", True), ("MIT", False),
     ("MIT OR Apache-2.0 OR LGPL-2.1-or-later", False), ("Apache-2.0 OR GPL-2.0-only", False),
-    ("MIT/Apache-2.0", False), ("", False)])
+    ("MIT/Apache-2.0", False), ("", False),
+    # The delta audit's d14-bundle-3: read clause by clause, an OR in one
+    # clause is no choice about another clause's copyleft license.
+    ("(MIT OR Apache-2.0) AND MPL-2.0", True), ("LGPL-2.1-only AND (MIT OR Apache-2.0)", True),
+    ("Apache-2.0/MIT AND GPL-3.0-only", True), ("MPL-2.0 OR (MIT AND Apache-2.0)", False),
+    ("(MPL-2.0 OR MIT) AND Apache-2.0", False), ("GPL-3.0-or-later", True), ("MIT or Apache-2.0", False),
+    ("Apache-2.0 WITH LLVM-exception OR GPL-2.0-only", False), ("GPL-2.0-only WITH Classpath-exception-2.0", True),
+    # A wheel's SBOM gives several licenses space-joined: one text, copyleft if any part is.
+    ("MPL-2.0 MIT", True),
+    # Not an expression: copyleft-only if it names a copyleft license at all.
+    ("MPL-2.0 OR", True), ("MIT AND (MPL-2.0", True), ("MIT OR (Apache-2.0", False)])
 def test_a_crate_whose_licence_offers_a_permissive_choice_needs_no_source(licence, only):
     assert gb.copyleft_only(licence) is only
+
+
+def test_a_licence_expression_is_read_clause_by_clause():
+    assert gb.licence_expression("(MIT OR Apache-2.0) AND MPL-2.0") == ("and", [("or", ["MIT", "Apache-2.0"]), "MPL-2.0"])
+    assert gb.licence_expression("MIT OR Apache-2.0 AND MPL-2.0") == ("or", ["MIT", ("and", ["Apache-2.0", "MPL-2.0"])])
+    assert gb.licence_expression("A/B AND C") == ("and", [("or", ["A", "B"]), "C"]), "Cargo's / never makes C optional"
+    assert gb.licence_expression("LGPL-3.0-only WITH LGPL-3.0-linking-exception") == "LGPL-3.0-only"
+    assert gb.licence_expression("GNU General Public License v3") == "GNU General Public License v3"
+    for broken in ("", "MIT AND", "(MIT", "MIT)", "AND MIT", "MIT WITH", "MIT () Apache-2.0"):
+        assert gb.licence_expression(broken) is None, broken
+
+
+def test_every_licence_ipatools_core_crates_are_pinned_with_parses():
+    """So none of them is called copyleft-only for want of being read."""
+    for (crate, version), pinned in gb.pinned_crates().items():
+        assert gb.licence_expression(pinned["license"]) is not None, (crate, version, pinned["license"])
+    assert [c for c, _, _ in gb.core_crate_sources()] == ["nom-supreme"]
 
 
 def _md(tmp_path, monkeypatch) -> str:
@@ -3780,13 +3861,15 @@ def _qh3_with_crate(tmp_path: Path, monkeypatch, sbom_licence: str, cargo_licenc
     ("MIT OR Apache-2.0", "", False), ("Apache-2.0 OR GPL-2.0-only", "", False),
     ("MPL-2.0", "", True), ("LGPL-3.0-only", "", True),
     ("", "GPL-3.0-only", True), ("", "MIT/Apache-2.0", False),
+    # d14-bundle-3: a copyleft license ANDed beside an OR is still mandatory.
+    ("(MIT OR Apache-2.0) AND MPL-2.0", "", True), ("", "LGPL-2.1-only AND (MIT OR Apache-2.0)", True),
 ])
 def test_a_wheels_rust_crate_with_no_permissive_choice_is_refused(tmp_path, monkeypatch, sbom, cargo, refused):
     """Its source would have to ship with the app, and the source archive
     carries only the wheel's sdist, not the crates it was built from."""
     contents = _qh3_with_crate(tmp_path, monkeypatch, sbom, cargo)
     if refused:
-        with pytest.raises(gb.BundleError, match=r"qh3 1\.9\.4.*dep 1\.0\.0 \((MPL|LGPL|GPL)"):
+        with pytest.raises(gb.BundleError, match=r"qh3 1\.9\.4.*dep 1\.0\.0 \(.*(MPL|LGPL|GPL)"):
             gb.rust_crate_licences(contents, {}, tmp_path / "rust-crates")
     else:
         assert gb.rust_crate_licences(contents, {}, tmp_path / "rust-crates") == {"qh3": ["qh3/dep@1.0.0"]}
@@ -3834,6 +3917,53 @@ def test_a_go_module_under_a_copyleft_licence_its_tool_isnt_listed_under_is_refu
     assert gb.go_copyleft_problems(notices, "MIT AND LGPL-3.0-only") != [], "LGPL is not the GPL"
     (notices / "example.com/lib@v1.0.0" / "LICENSE-MIT").write_text(MIT_TEXT)
     assert gb.go_copyleft_problems(notices, "MIT AND BSD-3-Clause") == [], "dual-licensed: a permissive choice"
+
+
+@pytest.mark.parametrize("name", ["NOTICE", "COPYRIGHT", "PATENTS", "LEGAL.txt"])
+def test_a_notice_beside_a_copyleft_licence_offers_no_choice(tmp_path, name):
+    """The delta audit's d14-bundle-2: in a Go module, a NOTICE, COPYRIGHT or
+    PATENTS file adds to its license. Any licence-like text there used to
+    count as a permissive choice, so a GPL-only module with one passed."""
+    notices = _notices(tmp_path / "modules", ["example.com/gplmod@v1.0.0"], text=GPL_TEXT)
+    (notices / "example.com/gplmod@v1.0.0" / name).write_text(
+        "Copyright 2026 Example Authors. Parts of this module carry their own copyright notices. " * 3)
+    assert gb.go_copyleft_problems(notices, "MIT AND BSD-3-Clause") == [
+        "example.com/gplmod@v1.0.0: GPL, which its tool's license (MIT AND BSD-3-Clause) doesn't name"]
+
+
+def test_a_licence_file_is_a_choice_only_when_its_text_is_a_permissive_licence(tmp_path):
+    notices = _notices(tmp_path / "modules", ["example.com/gplmod@v1.0.0"], text=GPL_TEXT)
+    other = notices / "example.com/gplmod@v1.0.0" / "LICENSE-OTHER"
+    other.write_text("A license nobody here recognizes, whose copyright holder grants some permission. " * 3)
+    assert gb.go_copyleft_problems(notices, "MIT") != [], "a text nothing recognizes can't be called permissive"
+    other.write_text("Copyright 2026 Example Authors.\n\nRedistribution and use in source and binary forms, with or "
+                     "without modification, are permitted provided that the following conditions are met.\n")
+    assert gb.permissive_text(other.read_text()) == "BSD"
+    assert gb.go_copyleft_problems(notices, "MIT") == []
+    assert gb.permissive_text(MPL_TEXT) is None, "a copyleft text quoting permissive words is still copyleft"
+
+
+def test_a_copyleft_title_after_a_long_preamble_is_found_and_one_named_in_passing_is_not():
+    preamble = "This module is maintained by Example Authors and offered under the license that follows. " * 12
+    assert len(preamble) > 800
+    assert gb.licence_text_family(preamble + "\n\n" + GPL_TEXT) == "GPL"
+    assert gb.licence_text_family(preamble + "\n\n" + LGPL_TEXT) == "LGPL"
+    assert gb.licence_text_family(preamble + "\n\n" + MPL_TEXT) == "MPL"
+    assert gb.licence_text_family(preamble + "\nYou may also ask us about the GNU General Public License.\n") is None
+    # MPL-2.0's own text names the GPL family in its body, wrapped across lines.
+    mpl = MPL_TEXT + "x " * 500 + ("\n1.12. \"Secondary License\"\n    means either the GNU General Public License, "
+                                   "Version 2.0, the GNU\n    Lesser General Public License, Version 2.1, the GNU "
+                                   "Affero General\n    Public License, Version 3.0\n")
+    assert gb.licence_text_family(mpl) == "MPL"
+
+
+def test_a_tools_licence_must_name_a_copyleft_module_in_every_choice_it_offers(tmp_path):
+    notices = _notices(tmp_path / "modules", ["example.com/lib@v1.0.0"], text=GPL_TEXT)
+    assert gb.go_copyleft_problems(notices, "MIT OR GPL-3.0-only") == [
+        "example.com/lib@v1.0.0: GPL, which its tool's license (MIT OR GPL-3.0-only) names only as one choice"]
+    assert gb.go_copyleft_problems(notices, "(MIT OR Apache-2.0) AND GPL-3.0-only") == []
+    assert gb.licence_names("GPL", "MIT AND (GPL-2.0-only OR GPL-3.0-or-later)")
+    assert not gb.licence_names("GPL", "MIT AND (GPL-3.0-only"), "an expression that doesn't parse names nothing"
 
 
 def test_ipatools_real_copyleft_modules_are_ones_its_licence_names():
@@ -3980,7 +4110,9 @@ def _plan_world(tmp_path, monkeypatch):
 def test_the_plan_lists_only_what_isnt_cached_without_touching_the_network(tmp_path, monkeypatch):
     pins, cache, work, lock, crates = _plan_world(tmp_path, monkeypatch)
     monkeypatch.setattr(gb, "_urlopen", lambda *a, **k: pytest.fail("the plan went to the network"))
-    plan = gb.download_plan(pins, cache, work, lock, crates)
+    build_lock = tmp_path / "build-requirements.lock"
+    build_lock.write_text("bbb==2.0 \\\n    --hash=sha256:" + "2" * 64 + "\nddd==4.0 \\\n    --hash=sha256:" + "6" * 64 + "\n")
+    plan = gb.download_plan(pins, cache, work, lock, crates, build_lock)
     assert [(d.what, d.mb, d.kept) for d in plan] == [
         ("openssl 1.0", 53, True),
         ("ipatool 1.0", 6, True),
@@ -3988,7 +4120,7 @@ def test_the_plan_lists_only_what_isnt_cached_without_touching_the_network(tmp_p
         ("unfairplay's Go modules", 1, True),
         ("1 source distribution(s) for the source archive: ccc 3.0", 1.0, True),
         ("1 Rust crate(s) for their licenses", 0.15, True),
-        ("the Python wheels the app bundles (every build downloads them again)", None, False)]
+        ("4 Python wheel(s) the app bundles: aaa-pkg 1.0, bbb 2.0, ccc 3.0, ddd 4.0", 4.0, True)]
 
 
 def test_go_modules_a_cached_build_or_an_earlier_one_fetched_are_not_planned(tmp_path, monkeypatch):
@@ -3999,6 +4131,101 @@ def test_go_modules_a_cached_build_or_an_earlier_one_fetched_are_not_planned(tmp
     record.write_text("")
     whats = [d.what for d in gb.download_plan(pins, cache, work, lock, crates)]
     assert "ipatool's Go modules" not in whats and "unfairplay's Go modules" not in whats
+
+
+# --- 2.0.2: the locked wheels are kept in pip's own cache, per user --------------------------
+
+
+def _pip_report(path: Path, files: list[tuple[str, str, str, str]]) -> Path:
+    """A pip --report choosing (name, version, url, sha256) for each file."""
+    path.write_text(json.dumps({"install": [
+        {"metadata": {"name": n, "version": v}, "download_info": {"url": u, "archive_info": {"hashes": {"sha256": h}}}}
+        for n, v, u, h in files]}))
+    return path
+
+
+def _cached_body(cache_dir: Path, url: str, data: bytes) -> Path:
+    body = gb.pip_cache_body(cache_dir, url)
+    body.parent.mkdir(parents=True, exist_ok=True)
+    body.write_bytes(data)
+    return body
+
+
+def test_pips_cache_is_in_the_shared_downloads_cache():
+    assert gb.pip_cache() == gb.CACHE / "pip"
+    assert gb.default_download_cache() == Path.home() / "Library" / "Caches" / "graft-release" / "bundle-cache"
+
+
+def test_a_cached_wheel_is_looked_for_where_pip_itself_keeps_it(tmp_path):
+    """pip's own layout (http-v2/, keyed by the URL as cachecontrol
+    normalizes it), from the pip in this venv: a layout that moved would
+    only make the plan count wheels as still to download, but should be
+    seen."""
+    from pip._internal.network.cache import SafeFileCache
+    from pip._vendor.cachecontrol.controller import CacheController
+
+    url = "HTTPS://Files.PythonHosted.org/packages/ab/cd/x-1.0-py3-none-any.whl#sha256=" + "0" * 64
+    pips = SafeFileCache(str(tmp_path / "http-v2"))._get_cache_path(CacheController.cache_url(url)) + ".body"
+    assert gb.pip_cache_body(tmp_path, url) == Path(pips)
+    assert gb.pip_cache_body(tmp_path, url) == gb.pip_cache_body(
+        tmp_path, "https://files.pythonhosted.org/packages/ab/cd/x-1.0-py3-none-any.whl")
+
+
+def test_a_locked_install_shares_pips_cache_keeps_every_hash_check_and_records_the_wheels(tmp_path, monkeypatch):
+    """The plan's resolution (which fetches whole wheels in hash-checking
+    mode) and the download share pip's cache; the install from the
+    downloaded files needs none. --require-hashes stays on all three."""
+    url = "https://files.pythonhosted.org/packages/aa/bb/x-1.0-py3-none-any.whl"
+    calls = []
+
+    def fake_run(argv, **kw):
+        argv = [str(a) for a in argv]
+        calls.append(argv)
+        if "--dry-run" in argv:
+            _cached_body(gb.pip_cache(), url, b"wheel bytes")
+        if "--report" in argv:
+            _pip_report(Path(argv[argv.index("--report") + 1]), [("X", "1.0", url, "a" * 64)])
+    monkeypatch.setattr(gb.subprocess, "run", fake_run)
+    gb.install_locked(tmp_path / "python3.13", gb.RUNTIME_LOCK, tmp_path / "plan.json", tmp_path / "s", {})
+    resolve, download, install = calls
+    assert "--dry-run" in resolve and "download" in download and "--no-index" in install
+    for argv in (resolve, download):
+        assert argv[argv.index("--cache-dir") + 1] == str(gb.CACHE / "pip") and "--no-cache-dir" not in argv
+    for argv in calls:
+        assert "--require-hashes" in argv and "--only-binary=:all:" in argv
+    assert "--no-cache-dir" in install and "--cache-dir" not in install
+    assert gb.cached_wheels() == {"a" * 64: {"name": "x", "version": "1.0", "url": url, "mb": 0.0}}
+
+
+def test_a_failed_resolution_or_download_names_the_cache_to_delete(tmp_path, monkeypatch):
+    """pip never replaces a cached file that fails its hash: the way out is
+    deleting the cache, which the error names."""
+    def fake_run(argv, **kw):
+        if "download" in [str(a) for a in argv]:
+            raise subprocess.CalledProcessError(1, argv)
+    monkeypatch.setattr(gb.subprocess, "run", fake_run)
+    with pytest.raises(gb.BundleError, match=rf"delete pip's cache, {re.escape(str(gb.CACHE / 'pip'))}, and build"):
+        gb.install_locked(tmp_path / "python3.13", gb.RUNTIME_LOCK, tmp_path / "plan.json", tmp_path / "s", {})
+
+
+def test_the_plan_counts_a_wheel_cached_only_while_pip_holds_one_the_lock_allows(tmp_path):
+    lock = tmp_path / "requirements.lock"
+    lock.write_text("aaa==1.0 \\\n    --hash=sha256:" + "1" * 64 + " \\\n    --hash=sha256:" + "7" * 64
+                    + "\nbbb==2.0 \\\n    --hash=sha256:" + "2" * 64 + "\n")
+    cache = tmp_path / "cache"
+    pip = gb.pip_cache(cache)
+    a, b = "https://files.example.invalid/aaa-1.0.whl", "https://files.example.invalid/bbb-2.0.whl"
+    _cached_body(pip, a, b"a" * 2_000_000)
+    _cached_body(pip, b, b"b")
+    plan = _pip_report(tmp_path / "plan.json", [("aaa", "1.0", a, "7" * 64), ("bbb", "2.0", b, "9" * 64)])
+    assert gb.record_cached_wheels(plan, pip) == 2
+    assert gb.uncached_wheels((lock,), cache) == ["bbb 2.0"], "bbb's cached file isn't one its lock allows"
+    assert gb.cached_wheels(pip)["7" * 64]["mb"] == 2.0
+    gb.pip_cache_body(pip, a).unlink()
+    assert gb.uncached_wheels((lock,), cache) == ["aaa 1.0", "bbb 2.0"], "gone from pip's cache since"
+    (pip / gb.WHEEL_RECORD).write_text("not json")
+    assert gb.cached_wheels(pip) == {}
+    assert gb.uncached_wheels((lock,), tmp_path / "empty") == ["aaa 1.0", "bbb 2.0"]
 
 
 ROUTE = """   route to: default
@@ -4046,6 +4273,13 @@ def test_on_a_hotspot_with_only_the_wheels_left_it_says_so_and_goes_on(monkeypat
     _on(monkeypatch, gb.HOTSPOT_GATEWAY, BIG[3:])
     assert gb.check_hotspot({}, interactive=True, answer=lambda: pytest.fail("asked"))
     assert "hotspot" in capsys.readouterr().err
+
+
+def test_on_a_hotspot_with_everything_cached_it_says_so_and_goes_on(monkeypatch, capsys):
+    _on(monkeypatch, gb.HOTSPOT_GATEWAY, [])
+    assert gb.check_hotspot({}, interactive=True, answer=lambda: pytest.fail("asked"))
+    err = capsys.readouterr().err
+    assert err.endswith("everything is cached\n") and " but " not in err
 
 
 def test_on_a_hotspot_it_says_what_and_how_much_then_asks(monkeypatch, capsys):

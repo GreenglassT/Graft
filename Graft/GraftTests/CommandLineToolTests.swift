@@ -274,8 +274,8 @@ final class CommandLineToolTests: XCTestCase {
         }
         final class Clock: @unchecked Sendable {
             private let lock = NSLock()
-            private var t = Date(timeIntervalSinceReferenceDate: 0)
-            var now: Date { lock.withLock { t } }
+            private var t: TimeInterval = 1_000
+            var now: TimeInterval { lock.withLock { t } }
             func advance(_ seconds: TimeInterval) { lock.withLock { t += seconds } }
         }
         let answers = Answers()
@@ -422,11 +422,12 @@ final class CommandLineToolTests: XCTestCase {
     }
 
     private func section(
-        _ fake: FakeFS, loginPATH: @escaping (Bool) async -> String?, location: AppLocation = .settled
+        _ fake: FakeFS, loginPATH: @escaping (Bool) async -> String?, location: AppLocation = .settled,
+        askedTooRecently: @escaping () -> Bool = { false }
     ) -> some View {
         CommandLineToolSection(context: CommandLineTool.Context(
             home: home, target: target, shell: "/bin/zsh", fs: fake.fs, loginPATH: loginPATH,
-            location: location
+            askedTooRecently: askedTooRecently, location: location
         ))
         .frame(width: 700)
     }
@@ -574,6 +575,23 @@ final class CommandLineToolTests: XCTestCase {
         XCTAssertEqual(asks.made, [false, true])
         XCTAssertFalse(after.contains { $0.contains(#"export PATH="$HOME/.local/bin:$PATH""#) }, "\(after)")
         XCTAssertFalse(after.contains(CommandLineToolSection.checkAgainCaption), "\(after)")
+    }
+
+    /// The try14 delta audit's D14-APP-3: Check again within the shell's
+    /// interval served the last answer with no sign of it, and the advice
+    /// stayed as if the new line were wrong. It says so now.
+    func test_check_again_the_shell_wasnt_asked_for_says_so() async throws {
+        try AccessibilityTree.requireServed()
+        let fake = FakeFS()
+        let pane = hosted(section(
+            fake, loginPATH: { _ in "/usr/bin:/bin" }, askedTooRecently: { true }
+        ), size: NSSize(width: 700, height: 500))
+        let before = Self.strings(try await shown(pane))
+        XCTAssertFalse(before.contains(ShellEnvironment.askedTooRecentlyNote), "not on appearing: \(before)")
+
+        try clickButton(named: CommandLineToolSection.checkAgainLabel, in: pane.window)
+        let after = Self.strings(try await shown(pane))
+        XCTAssertTrue(after.contains(ShellEnvironment.askedTooRecentlyNote), "\(after)")
     }
 
     /// Replace says what happens to what is there: a link is repointed, a

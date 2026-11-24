@@ -598,26 +598,35 @@ def root_script(
     named `SC Info.sidb`, in any case, in either folder. Without one, setup
     would run to its end and only then fail ("canonical input has no SIDB
     state"), so root stops first, with `EXIT_NO_FAIRPLAY_STATE`. A folder
-    that isn't there is no state, never a failure of its own under `set -e`.
-    The look is the shell's own (a glob, a `case` on each name, then `[ -h ]`
-    and `[ -f ]`), so there is no child for the watchdog to kill should it
-    block; but it only lists two fixed folders, never the admin-writable
-    app, opens no file in them and follows no link it finds there.
+    that isn't there, or is a link, is no state, never a failure of its own
+    under `set -e`. The look lists only those two fixed folders, never the
+    admin-writable app, and opens no file in them. But any user can change
+    what is in /Users/Shared/SC Info (0777, no sticky bit), or put a link by
+    that name in /Users/Shared when there is no folder, and a folder reached
+    through a link can be one that is slow to list, an automount say. Done
+    by the script's own shell, such a listing had no child for the watchdog
+    to kill, only the script to send TERM, which a shell may not take until
+    the listing returns (review of 2.0.1). So the look runs in a shell of
+    its own, in the background, which the watchdog and `leave` kill as they
+    do UnfairPlay: a look that stalls ends with Cancel or the time limit,
+    and their statuses, never 69 or a pass. The comment on it says exactly
+    what it can and can't rule out.
 
-    UnfairPlay runs in the background, its output to a file in $D rather
+    UnfairPlay runs in the background too, its output to a file in $D rather
     than the pipe the script was given, so a Graft that quits mid-setup
     can't kill it with SIGPIPE.
 
     A watchdog covers the whole run, from just after the traps: every copy
     and check before UnfairPlay (any of which a swapped file can block: a
-    FIFO for `/bin/cp` or plutil to open) as well as setup itself. Once a
-    second it tests for `cancel_file` (`EXIT_CANCELLED`) and the time
-    (`time_limit` seconds, `EXIT_TIME_LIMIT`). When either comes it leaves a
-    marker in $D and sends the script TERM, which ends a `wait` for
-    UnfairPlay at once; a shell waiting for a command in the foreground
-    takes the trap only when that command ends, so a second later the
-    watchdog kills whatever the script is running (its children, and theirs)
-    until the script is gone. That holds in every shell /bin/sh can be only
+    FIFO for `/bin/cp` or plutil to open, a link to a folder slow to list)
+    as well as setup itself. Once a second it tests for `cancel_file`
+    (`EXIT_CANCELLED`) and the time (`time_limit` seconds,
+    `EXIT_TIME_LIMIT`). When either comes it leaves a marker in $D and sends
+    the script TERM, which ends a `wait` for the look or UnfairPlay at once;
+    a shell waiting for a command in the foreground takes the trap only when
+    that command ends, so a second later the watchdog kills whatever the
+    script is running (its children, and theirs) until the script is gone.
+    That holds in every shell /bin/sh can be only
     for a command in the foreground: zsh, as sh, takes TERM at once while it
     reads a command substitution, and runs `leave`, which stops the
     watchdog, so a step blocked inside `$(...)` was left running, orphaned,
@@ -631,9 +640,10 @@ def root_script(
     into. The watchdog is started from a command
     substitution, so it is not one of the script's own children and never
     kills itself, and `$$` in it is still the script. The EXIT trap
-    (`leave`) first stops the watchdog, then UnfairPlay (waiting for it),
-    removes $D, and says from the marker which stop it was, with its own
-    exit status, whatever status the killed step left. The script itself
+    (`leave`) first stops the watchdog, then whatever runs in the
+    background, the look or UnfairPlay (waiting for it), removes $D, and
+    says from the marker which stop it was, with its own exit status,
+    whatever status the killed step left. The script itself
     never waits for the watchdog, so nothing the watchdog meets can hold the
     script up.
     """
@@ -641,7 +651,7 @@ def root_script(
     if int(time_limit) < 1:
         raise ValueError(f"a time limit of {time_limit} seconds stops UnfairPlay before it starts")
     limit = int(time_limit)
-    state = " ".join(f"{q(str(folder))}/*" for folder in FAIRPLAY_STATE_DIRS)
+    folders = " ".join(q(str(folder)) for folder in FAIRPLAY_STATE_DIRS)
     over_time = f"stopped: the enrollment ran for more than {limit} seconds"
     cancel, over = f'"$D/stop-{EXIT_CANCELLED}"', f'"$D/stop-{EXIT_TIME_LIMIT}"'
     # The script's own Cancel checks: a marker, then out through `leave`,
@@ -651,8 +661,9 @@ def root_script(
         "set -eu",
         "umask 077",
         f"D=$(/usr/bin/mktemp -d {q(WORK_TEMPLATE)})",
-        # UnfairPlay's pid while it runs; whether it has been started; the
-        # watchdog's pid.
+        # The pid of what runs in the background (the look for this Mac's
+        # FairPlay state, then UnfairPlay) while it runs; whether UnfairPlay
+        # has been started; the watchdog's pid.
         "P=",
         "U=",
         "W=",
@@ -666,14 +677,16 @@ def root_script(
         # /usr/bin/sw_vers and /usr/sbin/ioreg (pkg/fairplay
         # enrollment_capture.go), read-only queries, so they are KILLed
         # first, while still its children; then UnfairPlay gets TERM, a
-        # short grace, and KILL.
+        # short grace, and KILL. The look's outer shell ($1) goes the same
+        # way: the shell that lists the folders is its child, KILLed first.
         'stop() { /usr/bin/pkill -KILL -P "$1" 2>/dev/null || :; /bin/kill -TERM "$1" 2>/dev/null || :; '
         '/bin/sleep 1; /usr/bin/pkill -KILL -P "$1" 2>/dev/null || :; /bin/kill -KILL "$1" 2>/dev/null || :; }',
         # On any way out but success. First nothing more can interrupt it,
         # and the watchdog goes, by the shell's own kill (no child for the
-        # watchdog to meet). Then UnfairPlay is stopped and waited for (its
-        # job notices dropped) before its folder goes, and a stop the
-        # watchdog or a Cancel check marked is said, with its own status.
+        # watchdog to meet). Then the look or UnfairPlay is stopped and
+        # waited for (its job notices dropped) before its folder goes, and a
+        # stop the watchdog or a Cancel check marked is said, with its own
+        # status.
         "leave() { trap '' HUP INT PIPE TERM; "
         'if [ -n "$W" ]; then kill -KILL "$W" 2>/dev/null || :; fi; '
         'if [ -n "$P" ]; then stop "$P" 2>/dev/null; wait "$P" 2>/dev/null || :; fi; '
@@ -713,14 +726,55 @@ def root_script(
         "  done",
         ') </dev/null >/dev/null 2>&1 & echo "$!" )',
         # This Mac's FairPlay state, before anything is copied: a regular
-        # file named SC Info.sidb, in any case, in either folder. Each
-        # name is matched as a string (`case`), so a folder that isn't there
-        # (its `/*` left as it is) or a file named like the pattern is no
-        # state; `[ ! -h ]` comes first, so a link there is never followed.
-        "I=",
-        f"for F in {state}; do case \"${{F##*/}}\" in {_any_case(FAIRPLAY_STATE_FILE)}) "
-        'if [ ! -h "$F" ] && [ -f "$F" ]; then I=1; fi ;; esac; done',
-        f'[ -n "$I" ] || {_refuse(EXIT_NO_FAIRPLAY_STATE, _NO_FAIRPLAY_STATE)}',
+        # file named SC Info.sidb, in any case, in either folder. The inner
+        # shell exits 0 for it and 69 for none.
+        #
+        # In the background, in two shells: the inner one lists the folders,
+        # with nothing but its own builtins, and the outer one only waits
+        # for it. So the watchdog (the script's children, and theirs) and
+        # `leave` (`stop`) can KILL the listing should it stall, and the
+        # script waits only for the outer shell, which a signal always ends,
+        # even when the listing can't be killed at once. Their output goes
+        # nowhere, so nothing left running holds the script's pipes. As
+        # after UnfairPlay, a stop the watchdog marked is said (`leave`)
+        # before the look's status is believed, so a look that was stopped
+        # is never no state or a pass; any status but 0 or 69 (a look
+        # killed by something else) is a failure of its own.
+        #
+        # What the look rules out, and what it can't. A folder is entered
+        # only if `[ -h ]` finds no link there, then `[ -d ]` a folder; the
+        # listing, and each look at a name in it, are then in the folder
+        # entered, never through its path again. A name is matched as a
+        # string (`case`), so an empty folder (`*` left as it is) or a file
+        # named like the pattern is no state, and only a name that matches
+        # is looked at: `[ -h ]` first, then `[ -f ]`. No file is opened or
+        # read, and a link that is there when it is looked at is never
+        # followed. But `[ -h ]` is sh's only look at a name that doesn't
+        # follow a link, so each check takes more than one look, and a
+        # folder or file swapped for a link just after its `[ -h ]` is
+        # followed: `[ -d ]` and `cd` go to the folder's target, `[ -f ]`
+        # to the file's. Any user can swap a file in /Users/Shared/SC Info,
+        # and the folder itself if it is theirs or wasn't there. That can
+        # stall the look, which the watchdog ends, or let it pass on
+        # something that isn't the state, as a plain file put there does
+        # anyway; UnfairPlay then fails at its end, as it did in 2.0.
+        "( trap - EXIT HUP INT PIPE TERM",
+        f"  ( for G in {folders}; do",
+        '      if [ ! -h "$G" ] && [ -d "$G" ] && cd -P "$G"; then',
+        f'        for F in *; do case "$F" in {_any_case(FAIRPLAY_STATE_FILE)}) '
+        'if [ ! -h "$F" ] && [ -f "$F" ]; then exit 0; fi ;; esac; done',
+        "      fi",
+        "    done",
+        f"    exit {EXIT_NO_FAIRPLAY_STATE} ) &",
+        '  wait "$!"',
+        ") </dev/null >/dev/null 2>&1 &",
+        "P=$!",
+        "S=0",
+        'wait "$P" || S=$?',
+        "P=",
+        f"if [ -e {cancel} ] || [ -e {over} ]; then exit 1; fi",
+        f'case "$S" in 0) ;; {EXIT_NO_FAIRPLAY_STATE}) {_refuse(EXIT_NO_FAIRPLAY_STATE, _NO_FAIRPLAY_STATE)} ;; '
+        "*) exit 1 ;; esac",
         # Copied first, then the *copy* checked and run: nothing can swap it.
         f'/bin/cp {q(str(unfairplay))} "$D/unfairplay"',
     ]

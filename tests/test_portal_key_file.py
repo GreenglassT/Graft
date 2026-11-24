@@ -267,7 +267,9 @@ import errno  # noqa: E402
 
 
 @pytest.mark.parametrize("code", [errno.EPERM, errno.EACCES])
-def test_a_key_macos_wont_let_graft_read_names_the_setting(tmp_path, monkeypatch, code) -> None:
+def test_a_key_macos_wont_let_graft_read_names_what_to_change(tmp_path, monkeypatch, code) -> None:
+    """EPERM is macOS's privacy controls; EACCES the file's own owner and
+    permissions (the try14 delta audit's d14-cli-5)."""
     key = tmp_path / "Downloads" / "AuthKey_ABCDE12345.p8"
     key.parent.mkdir()
     key.write_bytes(b"-----BEGIN PRIVATE KEY-----\n")
@@ -281,7 +283,12 @@ def test_a_key_macos_wont_let_graft_read_names_the_setting(tmp_path, monkeypatch
     monkeypatch.setattr(os, "open", fake)
     with pytest.raises(apple_portal.PortalError) as e:
         apple_portal.read_key_file(key)
-    assert e.value.hint == (
-        f"macOS didn't let Graft read {key}: allow Graft in System Settings › Privacy & Security › "
-        "Files and Folders, or move the file out of Downloads/Desktop/Documents and choose it again"
-    )
+    if code == errno.EPERM:
+        assert e.value.hint == (
+            f"macOS didn't let Graft read {key}: allow Graft (or Terminal, if you ran graft there) in "
+            "System Settings › Privacy & Security › Files and Folders, or move the file out of "
+            "Downloads/Desktop/Documents and choose it again"
+        )
+    else:
+        assert e.value.hint.startswith(f"your user can't read {key}: ")
+        assert "Privacy & Security" not in e.value.hint

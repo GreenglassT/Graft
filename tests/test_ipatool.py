@@ -114,6 +114,45 @@ def test_a_refusal_of_any_other_ipatool_names_it_and_says_signing_in_saves_over(
     assert isinstance(err, ipatool.KeychainRefusal) and err.refused
 
 
+GRAFT_APP_SETTINGS = "Graft (Settings › App Store)"
+
+
+def test_a_pipx_graft_s_ipatool_refused_is_told_to_sign_in_with_it_not_in_graft_app(
+    fakes: FakeTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The try15 delta audit's d15-py-3: from a pipx `graft`, the ipatool
+    on PATH or in ~/.local/bin isn't the one Graft.app signs in with.
+    Graft.app's own deletes the item instead of saving over it, and this one
+    still can't read the new sign-in. Only signing in again with it helps,
+    as status says."""
+    _item_there(monkeypatch)
+    err = _download_error(fakes, tmp_path, DENIED)
+    assert GRAFT_APP_SETTINGS not in err.hint
+    assert f"Sign in again with it, in Terminal: {ipatool.LOGIN_COMMAND}; that saves over it" in err.hint
+    assert "may ask for your login keychain password" in err.hint
+
+
+@pytest.mark.parametrize(("source", "inside", "offers_graft_app"), [
+    (tools.SOURCE_CONFIG, False, True),
+    (tools.SOURCE_PATH, False, False),
+    (tools.SOURCE_DEFAULT, False, False),
+    (None, False, False),
+    (None, True, True),
+    (tools.SOURCE_CONFIG, True, True),
+])
+def test_graft_app_is_offered_only_where_it_signs_in_with_the_same_ipatool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source, inside: bool, offers_graft_app: bool,
+) -> None:
+    """config.yaml's ipatool is Graft.app's too; inside Graft.app, the only
+    ipatool that isn't its own is config.yaml's."""
+    helpers = tmp_path / "Helpers" / "bin"
+    helpers.mkdir(parents=True)
+    monkeypatch.setattr(tools, "bundled_tools_dir", (lambda: helpers) if inside else (lambda: None))
+    _, hint = ipatool.keychain_refused_text(tmp_path / "elsewhere" / "ipatool", source)
+    assert (GRAFT_APP_SETTINGS in hint) is offers_graft_app
+    assert ipatool.LOGIN_COMMAND in hint and "saves over it" in hint
+
+
 def test_signed_out_is_false(fakes: FakeTools) -> None:
     fakes.set(signed_in=False)
 
@@ -319,6 +358,60 @@ def test_a_failure_that_isnt_unicorns_keeps_its_own_words(fakes: FakeTools, tmp_
     with pytest.raises(AppStoreError) as e:
         ipatool.download(fakes.ipatool, "com.example.app", tmp_path / "out")
     assert "Unicorn" not in e.value.message
+
+
+#: How ipatool 2.8.0 words a restore image that is gone or changed: its
+#: Store backend's wrapping (internal/store/backend.go:163) around the asset
+#: loader's (internal/sap/assets/remote.go:37), around each failure below.
+_LOAD = "failed to send http request: load Store runtime: resolve macOS 27.0.1 (26A434) frameworks: "
+RESTORE_IMAGE_GONE = [
+    # What Apple's S3 origin answered for a missing file on 2026-11-24.
+    _LOAD + "open remote image: server returned 403 Forbidden without byte-range support",
+    _LOAD + "open remote image: server returned 404 Not Found without byte-range support",
+    _LOAD + "read remote image range: server returned 410 Gone",
+    _LOAD + "open encrypted macOS filesystem: download Apple FCS key: server returned 404 Not Found",
+    "failed to send http request: load Store runtime: macOS 27.0.1 (26A434) restore image does not "
+    "contain 043-70867-640.dmg.aea",
+    "failed to send http request: load Store runtime: macOS 27.0.1 (26A434) restore member "
+    "kernelcache.release.mac13j does not match the pinned image",
+    "failed to send http request: load Store runtime: apple SAP asset CoreFP.icxs failed integrity verification",
+]
+#: What trying again can fix: offline, a server error, a rate limit.
+RESTORE_IMAGE_NOT_GONE = [
+    _LOAD + 'open remote image: Get "https://updates.cdn-apple.com/x.ipsw": dial tcp: lookup '
+            "updates.cdn-apple.com: no such host",
+    _LOAD + "open remote image: server returned 503 Service Unavailable without byte-range support",
+    _LOAD + "read remote image range: server returned 429 Too Many Requests",
+    "failed to send http request: server returned 404 Not Found",
+]
+
+
+@pytest.mark.parametrize("error", RESTORE_IMAGE_GONE)
+def test_a_gone_restore_image_says_a_newer_graft_fixes_it(fakes: FakeTools, tmp_path: Path, error: str) -> None:
+    fakes.set(download_error=error)
+    (tmp_path / "out").mkdir()
+    with pytest.raises(AppStoreError) as e:
+        ipatool.download(fakes.ipatool, "com.example.app", tmp_path / "out")
+    assert e.value.message == ipatool.RESTORE_IMAGE_GONE
+    assert e.value.hint == f"ipatool said: {error}"
+    message = " ".join(e.value.message.split())
+    assert "A newer Graft will fix this" in message and "update notice" in message
+    assert "Help › Check for Updates…" in message and "graft --check-update" in message
+
+
+@pytest.mark.parametrize("error", RESTORE_IMAGE_GONE[:2])
+def test_a_first_claim_with_the_restore_image_gone_says_the_same(fakes: FakeTools, error: str) -> None:
+    fakes.set(purchase_error=error)
+    with pytest.raises(AppStoreError) as e:
+        ipatool.purchase(fakes.ipatool, "com.example.app")
+    assert e.value.message == ipatool.RESTORE_IMAGE_GONE
+
+
+@pytest.mark.parametrize("error", RESTORE_IMAGE_NOT_GONE)
+def test_a_failure_trying_again_can_fix_is_not_called_a_gone_image(error: str) -> None:
+    assert ipatool.restore_image_failure(error) is None
+    assert ipatool.explain(error, bundle_id="com.example.app", path=Path("/x/ipatool"),
+                           reported_version="2.8.0").message != ipatool.RESTORE_IMAGE_GONE
 
 
 def test_graft_names_no_unicorn_to_any_ipatool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

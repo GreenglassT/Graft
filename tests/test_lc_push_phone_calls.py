@@ -187,6 +187,41 @@ def test_the_old_file_moved_aside_is_one_a_later_push_sweeps(tmp_path) -> None:
     assert ha.files[aside] == b"the old build", "never deleted: only moved"
 
 
+def _applied_then_unanswered(ha: Sandbox, *, then: str) -> None:
+    """The move-aside rename is applied on the phone, and then its answer
+    never comes: `then` is "silent" (the phone stops answering it) or
+    "stop" (a Stop lands while Graft waits on it). Every later call is
+    answered, as a phone that comes back for the clean-up would."""
+    real = ha.rename
+    moved: list[bool] = []
+
+    async def rename(source, target):
+        await real(source, target)
+        if source == TARGET and not moved:
+            moved.append(True)
+            if then == "stop":
+                raise asyncio.CancelledError()
+            await asyncio.Event().wait()
+
+    ha.rename = rename
+
+
+@pytest.mark.parametrize("then", ["silent", "stop"])
+def test_a_move_aside_applied_but_unanswered_is_put_back(tmp_path, then: str) -> None:
+    """The try14 delta audit's d14-cli-2: the move-aside sat outside the
+    try that puts the old file back, so a phone that applied it and then
+    went quiet, or a Stop at that moment, left nothing at the real name.
+    The old file was hidden under a name the next push's sweep removes."""
+    ha = Sandbox({TARGET: b"the old build"})
+    _applied_then_unanswered(ha, then=then)
+    expected = device_install.PhoneWentSilentError if then == "silent" else asyncio.CancelledError
+    with pytest.raises(expected):
+        asyncio.run(asyncio.wait_for(lc_runner._write_into_place(ha, _ipa(tmp_path), TARGET), 15))
+    assert ha.files[TARGET] == b"the old build", "put back"
+    partial = lc_runner.partial_path(TARGET)
+    assert set(ha.files) == {TARGET, partial}, "nothing else aside"
+
+
 def test_a_failed_upload_still_removes_its_partial_and_leaves_the_old_file(tmp_path) -> None:
     ha = Sandbox({TARGET: b"the old build"})
     ha.fail["fwrite"] = ConnectionTerminatedError()

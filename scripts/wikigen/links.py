@@ -9,7 +9,7 @@ from urllib.parse import quote, unquote
 
 from . import WikiError
 from .manifest import Manifest, Page
-from .render import anchors
+from .render import anchors, slugify
 
 REPO_BLOB = "https://github.com/GreenglassT/Graft/blob/main/"
 REPO_TREE = "https://github.com/GreenglassT/Graft/tree/main/"
@@ -70,6 +70,15 @@ def make_resolver(page: Page, index: LinkIndex, repo_root: Path) -> Callable[[st
             )
             if len(owners) == 1:
                 return owners[0].url_path + _frag(fragment)
+            if not owners:
+                # A README section the wiki gives a page of its own ("## Removing Graft"):
+                # the page whose title has that id, at its top.
+                owners = sorted(
+                    (p for p in index.pages.values() if slugify(p.title, {}) == fragment),
+                    key=lambda p: str(p.source),
+                )
+                if len(owners) == 1:
+                    return owners[0].url_path
             names = ", ".join(p.slug or "home" for p in owners)
             why = f"matches {names}" if owners else "matches no wiki page"
             raise WikiError(f"{page.source}: broken link {href}: README anchor #{fragment} {why}")

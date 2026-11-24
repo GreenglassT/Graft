@@ -226,9 +226,11 @@ struct AppStoreRefusalRecord: Decodable, Equatable {
     var kind: String? = nil
     var helper: String? = nil
     var message: String? = nil
+    /// With "account-changed": the Apple ID ipatool is signed in as now.
+    var email: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case app, reason, price, kind, helper, message
+        case app, reason, price, kind, helper, message, email
         case formattedPrice = "formatted_price"
         case trackId = "track_id"
     }
@@ -694,9 +696,35 @@ struct ClaimRefusedPaid: LocalizedError, Equatable {
     }
 }
 
+/// `--appstore-claim --expect-email` refused because ipatool is signed in
+/// as another Apple ID than the confirmation named
+/// (`appstore-refused {reason: "account-changed", email}`): the sign-in
+/// changed in Terminal while the confirmation was open. Nothing was bought.
+/// Its words are Get (free)'s own for a switch
+/// (`AppStoreStore.ClaimRefusal.switched`).
+struct ClaimAccountChanged: LocalizedError, Equatable {
+    /// The Apple ID signed in now, when the CLI named one.
+    let email: String?
+
+    var errorDescription: String? { AppStoreStore.ClaimRefusal.switched(to: email).message }
+
+    static func refusal(in events: [BuildEvent]) -> ClaimAccountChanged? {
+        for case let .appStoreRefused(record) in events.reversed()
+        where record.reason == CLIContract.AppStoreRefusal.accountChanged {
+            return ClaimAccountChanged(email: record.email)
+        }
+        return nil
+    }
+}
+
 extension CLIRunner.Refusal {
     /// What Get (free) reads off a failed claim.
-    static var appStoreClaim: Self { Self(ClaimRefusedPaid.refusal(in:)) }
+    static var appStoreClaim: Self {
+        Self { events in
+            if let changed = ClaimAccountChanged.refusal(in: events) { return changed }
+            return ClaimRefusedPaid.refusal(in: events)
+        }
+    }
 
     /// The two refusals a get answers with a button: "Use it anyway…", and Get (free) / Open in App Store.
     static var appStoreGet: Self {

@@ -1254,3 +1254,91 @@ def test_the_upgrade_guide_says_your_own_ipatool_s_sign_in_deletes_graft_s() -> 
     text = _doc("docs/upgrading.md")
     assert "deletes the sign-in Graft.app's own ipatool made" in text
     assert "saved over" in text
+
+
+# --- The try15 delta audit's d15-py-1 and d15-py-2: the same file, however named ---------
+
+
+def _graft_app(root: Path, store: FakeSecurity, bundle_id: str = ipatool.GRAFT_APP_BUNDLE_ID) -> FakeTools:
+    """An app bundle at `root` whose Contents/Helpers/bin holds a fake ipatool."""
+    import plistlib
+
+    fakes = _fake(root / "Contents" / "Helpers" / "bin", store)
+    (root / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier": bundle_id}))
+    return fakes
+
+
+def _counts_as_graft_s_own(configured, graft: FakeTools, store: FakeSecurity, vouched: dict) -> None:
+    """signin-A's outcome: the bundled rung, run by its own path; signed
+    in; and a sign-in that deletes nothing and keeps the record."""
+    tools_cfg = configured.appstore
+    assert ipatool.source_of(tools_cfg.ipatool, explicit=True) == tools.SOURCE_BUNDLED
+    assert ipatool.locate(tools_cfg.ipatool, explicit=True) == graft.ipatool
+    ipa = _status(configured)
+    assert (ipa["source"], ipa["signed_in"], ipa["legacy_signin"], ipa["unknown_reason"]) == \
+        (tools.SOURCE_BUNDLED, True, False, None)
+    assert appstore_account.needs_clearing(tools.SOURCE_BUNDLED) == []
+    appstore._require_signed_in(tools_cfg, ipatool.locate(tools_cfg.ipatool, explicit=True))
+    store.calls.clear()
+    assert _sign_in_graft(configured) == FAKE_EMAIL
+    assert _deletes(store) == [], "Graft's own items are not another program's"
+    assert set(appstore_account.vouched()) == set(vouched)
+    assert graft.dialogs() == []
+
+
+@pytest.mark.parametrize("how", ["its own path", "a link to it"])
+def test_a_pipx_graft_set_to_graft_app_s_own_ipatool_counts_it_as_graft_s_own(
+    cfg, store, temp_config_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, how: str,
+) -> None:
+    """d15-py-1: signin-A held inside Graft.app only. A pipx `graft` has no
+    app of its own, so the same setting was "another ipatool" to it: its
+    sign-in deleted Graft's items and emptied the record, and Graft.app's
+    next one deleted that sign-in's. Both now count the file in Graft.app
+    as Graft.app's own."""
+    graft = _graft_app(tmp_path / "GraftA.app", store)
+    monkeypatch.setattr(tools, "bundled_tools_dir", lambda: graft.root)
+    _sign_in_graft(cfg)
+    vouched = appstore_account.vouched()
+    monkeypatch.setattr(tools, "bundled_tools_dir", lambda: None)
+    named = graft.ipatool
+    if how == "a link to it":
+        named = tmp_path / "bin" / "ipatool"
+        named.parent.mkdir()
+        named.symlink_to(graft.ipatool)
+    _counts_as_graft_s_own(_naming(temp_config_env, tmp_path, named, graft.models), graft, store, vouched)
+
+
+def test_a_pipx_graft_set_to_another_app_s_ipatool_still_counts_it_as_configured(
+    store, temp_config_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The control: the app it lies in has to be Graft.app."""
+    other = _graft_app(tmp_path / "Other.app", store, bundle_id="com.example.other")
+    monkeypatch.setattr(tools, "bundled_tools_dir", lambda: None)
+    configured = _naming(temp_config_env, tmp_path, other.ipatool, other.models)
+    assert ipatool.source_of(configured.appstore.ipatool, explicit=True) == tools.SOURCE_CONFIG
+    assert not ipatool.is_bundled(other.ipatool)
+
+
+@pytest.mark.parametrize("how", ["a hard link", "another case", "the Data volume's spelling"])
+def test_graft_s_own_ipatool_named_another_way_is_graft_s_own(
+    cfg, app, bundled: FakeTools, store, temp_config_env: Path, tmp_path: Path, how: str,
+) -> None:
+    """d15-py-2: realpath doesn't fold case, map the /System/Volumes/Data
+    firmlink or see a hard link, so each of these, the very same file,
+    churned the sign-in as signin-A did. Compared by device and inode now."""
+    import os
+
+    app(True)
+    _sign_in_graft(cfg)
+    vouched = appstore_account.vouched()
+    if how == "a hard link":
+        named = tmp_path / "hard" / "ipatool"
+        named.parent.mkdir()
+        os.link(bundled.ipatool, named)
+    elif how == "another case":
+        named = bundled.ipatool.parent.with_name(bundled.ipatool.parent.name.upper()) / "IPATOOL"
+    else:
+        named = Path("/System/Volumes/Data" + os.path.realpath(bundled.ipatool))
+    assert named != bundled.ipatool and os.path.samefile(named, bundled.ipatool), "premise"
+    assert os.path.realpath(named) != os.path.realpath(bundled.ipatool) or how == "a hard link"
+    _counts_as_graft_s_own(_naming(temp_config_env, tmp_path, named, bundled.models), bundled, store, vouched)

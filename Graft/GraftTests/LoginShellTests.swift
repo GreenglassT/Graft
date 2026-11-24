@@ -202,6 +202,77 @@ final class LoginShellTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 4)
     }
 
+    // MARK: - The timeout starts when the shell does
+
+    /// macOS checks a shell that isn't Apple's on its first run, and the
+    /// shell waits inside exec meanwhile: about 3 s of the five over a slow
+    /// network. Time before the shell is seen to start doesn't count. Here
+    /// "seen to start" is held off for 0.8 s, as the check would hold it,
+    /// and the shell answers then: with a 0.5 s timeout from `run()` that
+    /// was no answer.
+    func test_time_before_the_shell_starts_doesnt_count() async throws {
+        let shell = try fakeShell(prelude: """
+        sleep 0.8
+        export GRAFT_EXAMPLE_LATE_START=yes
+        """)
+        let launched = Date()
+        let env = await LoginShell.resolve(shell: shell, timeout: 0.5) { shell, arguments, markers, environment, timeout in
+            await LoginShell.runProcess(
+                shell: shell, arguments: arguments, markers: markers, environment: environment,
+                timeout: timeout, startLimit: 10, hasStarted: { _ in Date().timeIntervalSince(launched) > 0.8 }
+            )
+        }
+        XCTAssertEqual(env?["GRAFT_EXAMPLE_LATE_START"], "yes")
+    }
+
+    /// One that never starts is still abandoned, at `startLimit`.
+    func test_a_shell_that_never_starts_is_abandoned_at_the_start_limit() async throws {
+        let shell = try fakeShell(prelude: "sleep 30")
+        let launched = Date()
+        let env = await LoginShell.resolve(shell: shell, timeout: 30) { shell, arguments, markers, environment, timeout in
+            await LoginShell.runProcess(
+                shell: shell, arguments: arguments, markers: markers, environment: environment,
+                timeout: timeout, startLimit: 0.5, hasStarted: { _ in false }
+            )
+        }
+        XCTAssertNil(env)
+        XCTAssertLessThan(Date().timeIntervalSince(launched), 5, "bounded by the start limit, not the timeout")
+    }
+
+    /// Anything the shell writes says it is running, whatever its CPU time
+    /// says: the timeout starts then.
+    func test_output_says_the_shell_has_started() async throws {
+        let shell = try fakeShell(prelude: """
+        echo 'Welcome to the example shell'
+        sleep 30
+        """)
+        let launched = Date()
+        let env = await LoginShell.resolve(shell: shell, timeout: 0.5) { shell, arguments, markers, environment, timeout in
+            await LoginShell.runProcess(
+                shell: shell, arguments: arguments, markers: markers, environment: environment,
+                timeout: timeout, startLimit: 60, hasStarted: { _ in false }
+            )
+        }
+        XCTAssertNil(env)
+        XCTAssertLessThan(Date().timeIntervalSince(launched), 5, "the timeout, not the start limit")
+    }
+
+    /// The real test of "started": a process that has run code of its own,
+    /// or one that is gone, has. (One held in exec by macOS's first-run
+    /// check reads zero until the check ends; that depends on the network,
+    /// so it was measured, not tested.)
+    func test_a_running_process_has_run_and_so_has_one_gone() async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sleep")
+        process.arguments = ["5"]
+        try process.run()
+        defer { process.terminate() }
+        await eventually { LoginShell.hasRun(process.processIdentifier) }
+        XCTAssertTrue(LoginShell.hasRun(process.processIdentifier))
+        XCTAssertTrue(LoginShell.hasRun(-1), "nothing to ask about: nothing to wait for")
+        XCTAssertGreaterThan(LoginShell.startLimit, LoginShell.timeout)
+    }
+
     func test_a_shell_that_cannot_be_started_is_no_answer() async {
         let env = await LoginShell.resolve(shell: scratch.appendingPathComponent("absent").path, run: LoginShell.runProcess)
         XCTAssertNil(env)
@@ -453,9 +524,9 @@ final class LoginShellTests: XCTestCase {
             var asked: Int { lock.withLock { n } }
         }
         final class Clock: @unchecked Sendable {
-            private var t = Date(timeIntervalSinceReferenceDate: 0)
+            private var t: TimeInterval = 1_000
             private let lock = NSLock()
-            var now: Date { lock.withLock { t } }
+            var now: TimeInterval { lock.withLock { t } }
             func advance(_ seconds: TimeInterval) { lock.withLock { t += seconds } }
         }
         let count = Count()
@@ -468,12 +539,14 @@ final class LoginShellTests: XCTestCase {
 
         clock.advance(9.9)
         XCTAssertFalse(shell.refresh(), "within the interval of launch")
+        XCTAssertTrue(shell.lastRefreshWasTooSoon, "so Check again can say so")
         let kept = await shell.value
         XCTAssertEqual(kept?["ANSWER"], "1")
         XCTAssertEqual(count.asked, 1, "the shell wasn't run")
 
         clock.advance(0.1)
         XCTAssertTrue(shell.refresh())
+        XCTAssertFalse(shell.lastRefreshWasTooSoon)
         let asked = await shell.value
         XCTAssertEqual(asked?["ANSWER"], "2")
 
@@ -484,6 +557,56 @@ final class LoginShellTests: XCTestCase {
         XCTAssertEqual(still?["ANSWER"], "2")
         XCTAssertEqual(count.asked, 2)
         XCTAssertEqual(ShellEnvironment.minimumRefreshInterval, 10)
+    }
+
+    /// The try14 delta audit's D14-APP-3: the interval was read off the wall
+    /// clock, so a clock set back after launch made it negative, and every
+    /// Check again was refused until the wall clock caught up. The default
+    /// clock is the monotonic one, and a clock that steps back anyway (only
+    /// an injected one can) reads as long enough.
+    func test_a_clock_that_steps_back_doesnt_hold_off_the_next_ask() async {
+        final class Clock: @unchecked Sendable {
+            private var t: TimeInterval = 5_000
+            private let lock = NSLock()
+            var now: TimeInterval { lock.withLock { t } }
+            func set(_ value: TimeInterval) { lock.withLock { t = value } }
+        }
+        let clock = Clock()
+        let shell = ShellEnvironment(minimumInterval: 10, now: { clock.now }) { ["ANSWER": "x"] }
+        _ = await shell.value
+        clock.set(5_000 - 3_600)
+        XCTAssertTrue(shell.refresh(), "an hour back is not \"less than 10 s ago\"")
+        XCTAssertFalse(shell.lastRefreshWasTooSoon)
+        XCTAssertFalse(shell.refresh(), "and the interval counts from that ask")
+    }
+
+    func test_the_default_clock_is_the_monotonic_one() {
+        let before = TimeInterval(clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1_000_000_000
+        let read = ShellEnvironment.monotonicNow()
+        let after = TimeInterval(clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1_000_000_000
+        XCTAssertTrue(before <= read && read <= after, "\(before) \(read) \(after)")
+        XCTAssertGreaterThan(abs(read - Date().timeIntervalSince1970), 1_000_000, "not the wall clock")
+    }
+
+    /// The setup screen's Check again, pressed again within the interval:
+    /// the store says it used the last answer, for the note under the button.
+    func test_check_again_within_the_interval_says_it_used_the_last_answer() async throws {
+        let shell = ShellEnvironment(minimumInterval: 3_600) { ["PATH": "/usr/bin:/bin"] }
+        let runner = CLIRunner.forApp(
+            shell: shell, process: ["PATH": "/usr/bin:/bin"],
+            home: scratch.appendingPathComponent("home").path, isExecutable: scratchOnly()
+        )
+        let store = await ConfigStore(runner: runner, notify: { _ in })
+        _ = await store.checkSetup()
+        let quiet = await store.shellAskedTooRecently
+        XCTAssertFalse(quiet, "a check that didn't ask says nothing")
+        _ = await store.checkSetup(refreshingEnvironment: true)
+        let said = await store.shellAskedTooRecently
+        XCTAssertTrue(said)
+        XCTAssertTrue(ShellEnvironment.askedTooRecentlyNote.contains("less than 10 seconds ago"))
+        _ = await store.checkSetup()
+        let cleared = await store.shellAskedTooRecently
+        XCTAssertFalse(cleared, "said only after the press it is about")
     }
 
     /// The whole Check again path: graft is only on a PATH the user added to

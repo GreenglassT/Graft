@@ -229,6 +229,10 @@ class FakeSecurity:
     def _find(self, tokens: list[str], *, text: bool, timeout: object = None) -> subprocess.CompletedProcess:
         opts = self._options(tokens)
         service, account = opts.get("-s", ""), opts.get("-a", "")
+        if "-a" not in opts:
+            # No account: the first item under the service, as `security`
+            # answers `find-generic-password -s <service>`.
+            account = next((a for (s, a) in self.items if s == service), "")
         key = (service, account)
 
         def out(s: str):

@@ -160,8 +160,31 @@ enum CLIContract {
         /// Is a newer Graft published? One request to GitHub, made by the CLI
         /// like every other: the app makes no connections of its own.
         static let checkUpdate = "--check-update"
-        /// With `--check-update`: the version to compare against, the app's own.
+        /// With `--check-update` or `--download-update`: the version to
+        /// compare against, the app's own.
         static let currentVersion = "--current-version"
+        /// Download the newer release's Graft.zip into Graft's cache and
+        /// check it (signature, team and bundle id, notarization, GitHub's
+        /// SHA-256). Installs nothing.
+        static let downloadUpdate = "--download-update"
+        /// Start the helper that installs a checked download once this app
+        /// has quit. Takes the download's path.
+        static let installUpdate = "--install-update"
+        /// With either: the Graft.app to replace, this one.
+        static let appPath = "--app-path"
+        /// With `--install-update`: this app's process id, which the helper
+        /// waits on.
+        static let waitPid = "--wait-pid"
+        /// With `--install-update`: open Graft again once it's installed.
+        static let relaunch = "--relaunch"
+
+        // RemoveDataStore
+        /// What Graft keeps outside Graft.app, one `data-item` each; with
+        /// `items`, removing the ones named. Help › Remove Graft's Data….
+        static let removeData = "--remove-data"
+        /// With `--remove-data`: the ids to remove, comma-separated. Never
+        /// `all`: the app sends exactly what is checked.
+        static let items = "--items"
 
         // BuildsStore / BuildLogView / ReinstallSheet / AppDetailView
         static let builds = "--builds"
@@ -265,6 +288,13 @@ enum CLIContract {
         /// Requires `--app`. The $0 "Get" for an app the CLI's iTunes lookup
         /// says is free; it refuses anything else. Sent only from Get (free).
         static let appstoreClaim = "--appstore-claim"
+        /// With `--appstore-claim`: the Apple ID the Get (free) confirmation
+        /// named. ipatool buys for whoever is signed in when the CLI runs, so
+        /// one signed in since, in Terminal, is refused before anything is
+        /// bought: `appstore-refused {reason: "account-changed", email}` (the
+        /// try14 delta audit's D14-APP-1 and F5). Not sent when the
+        /// confirmation named nobody (signed in, no email).
+        static let expectEmail = "--expect-email"
         /// The installed apps that can enroll this Mac (`AppStoreEnrollSheet`).
         static let appstoreEnrollCandidates = "--appstore-enroll-candidates"
         /// With `--app PATH`: the script root runs to enroll this Mac. The app
@@ -387,13 +417,14 @@ enum CLIContract {
             deleteTweak,
             repos, addRepo, removeRepo, repoPackages, refresh, fetch, fetchSha,
             search,
-            checkUpdate, currentVersion,
+            checkUpdate, currentVersion, downloadUpdate, installUpdate, appPath, waitPid, relaunch,
+            removeData, items,
             builds, buildsApp, buildsLimit, buildLog, revealBuild, reinstallBuild, pruneBuilds,
             devices, brief, deviceInfo, withIcons,
             lcStatus, lcInstall, lcPushCert, lcClean, instances, channel, certOnly,
             artwork, refreshArtwork,
             appstoreStatus, appstoreCheck, appstoreGet, allowUnverified, again, appstoreSearch, country,
-            appstoreLogin, expectIpatool, appstoreLogout, appstoreClaim, appstoreEnrollCandidates, appstoreEnrollCommand,
+            appstoreLogin, expectIpatool, appstoreLogout, appstoreClaim, expectEmail, appstoreEnrollCandidates, appstoreEnrollCommand,
             appstoreEnrollFinish, allowUnverifiedHelper,
             check, setP12Password, setSSHPassword,
             initSetup, account, p12, profile, replace,
@@ -457,6 +488,9 @@ enum CLIContract {
         static let needsLicense = "needs-license"
         /// `--appstore-claim` on an app that isn't free.
         static let paid = "paid"
+        /// `--appstore-claim --expect-email` while ipatool is signed in as
+        /// another Apple ID, named by the event's `email`. Nothing was bought.
+        static let accountChanged = "account-changed"
         /// `--appstore-enroll-command` without `--allow-unverified-helper`,
         /// for a script whose UnfairPlay nothing would check before root runs
         /// it. The event carries `kind` (`UnverifiedHelperKind`), `helper` and
@@ -834,6 +868,13 @@ enum CLIContract {
         "init-step",
         "init-result",
         "update-check",
+        "data-item",
+        "data-items-end",
+        "data-removed",
+        "data-removal-end",
+        "update-progress",
+        "update-download-end",
+        "update-install",
     ]
 
     /// Events the CLI emits that the GUI deliberately does *not* decode, each

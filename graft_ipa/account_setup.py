@@ -118,7 +118,7 @@ def read_chosen_file(path: Path, what: str) -> bytes:
             ) from None
         raise ConfigError(
             f"can't open {shown}: {e.strerror or e}",
-            hint=not_let_read_hint(shown) if e.errno in NOT_LET_READ else None,
+            hint=not_let_read_hint(shown, e.errno) if e.errno in NOT_LET_READ else None,
         ) from None
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -1032,6 +1032,12 @@ def _setup_paid(
             failed = getattr(stop, "undo_failed", [])
             if failed:
                 stop.undo_incomplete = _undo_incomplete(e, failed)  # type: ignore[union-attr]
+            elif not isinstance(e, (Stopped, KeyboardInterrupt)):
+                # Everything was put back, but the setup had failed for a
+                # reason of its own before the Stop: a wrong password, say.
+                # The stop alone dropped it (the try14 delta audit's
+                # d14-cli-6), and a re-run would only show it again.
+                stop.setup_failed = _setup_failed(e)  # type: ignore[union-attr]
             raise
         if failed:
             raise _undo_incomplete(e, failed) from e
@@ -1046,6 +1052,16 @@ def _undo_incomplete(cause: BaseException, failed: list[str]) -> GraftError:
         f"the setup failed ({_keychain_detail(cause) or type(cause).__name__}), and "
         f"{', '.join(failed)} couldn't be put back",
         hint="put those back by hand, or run the setup again",
+    )
+
+
+def _setup_failed(cause: BaseException) -> GraftError:
+    """What a setup that failed, then was stopped while its undo put
+    everything back, says before the stop."""
+    said = cause.message if isinstance(cause, GraftError) else (_keychain_detail(cause) or type(cause).__name__)
+    return GraftError(
+        f"the setup failed ({said}); everything it changed was put back",
+        hint=cause.hint if isinstance(cause, GraftError) else None,
     )
 
 

@@ -269,11 +269,11 @@ crashes at launch, the decrypt is the likely cause.
 
 ## What Graft downloads, and when
 
-Graft has no telemetry, analytics or crash reporting, and it doesn't update
-itself. Graft.app makes no connections of its own: its CLI does, for something
-you asked for or a pane you opened, to look up the icon of an app that has
-none yet, at launch and when the app list changes, and once a day to ask
-GitHub whether a newer Graft is out (Settings › Updates turns that off).
+Graft has no telemetry, analytics or crash reporting. Graft.app makes no
+connections of its own: its CLI does, for something you asked for or a pane
+you opened, to look up the icon of an app that has none yet, at launch and
+when the app list changes, once a day to ask GitHub whether a newer Graft is
+out, and to download that newer Graft (Settings › Updates turns either off).
 Device UDIDs never leave your Mac.
 
 | When | Who it contacts | What for |
@@ -282,6 +282,7 @@ Device UDIDs never leave your Mac.
 | You search, fetch or update tweaks | canister.me, and the repos you add | Tweak listings and downloads |
 | A device's pane opens, Edit App opens for a LiveContainer app, or you install LiveContainer | GitHub | LiveContainer's releases |
 | Once a day while Graft is open, unless Settings › Updates turns it off, and when you choose Help › Check for Updates… | GitHub (`api.github.com`), with nothing that identifies you or your Mac | Whether a newer Graft is out |
+| A newer Graft is out, unless Settings › Updates turns automatic updates off (then when you choose Update) | GitHub's release files (`github.com`), with nothing that identifies you or your Mac | The new `Graft.zip`, about 150 MB, once |
 | A paid account with an App Store Connect key makes a profile | Apple's App Store Connect API | Provisioning profiles |
 | You sign in, get an app, or get a free one | Apple's App Store, through the bundled ipatool | Your sign-in, the license, the IPA |
 | The first App Store action on a Mac (usually the first sign-in) | PyPI (`files.pythonhosted.org`), and Apple's software CDN | ipatool's Unicorn emulator (a few MB) and its App Store components (about 320 MB, skipped if a 1.x ipatool already downloaded them), once |
@@ -302,16 +303,37 @@ lists every host, when, and what is sent.
 
 ## Updating
 
-Graft says when a newer version is out: a banner at the bottom of the main
-window, from a check it makes once a day while it's open, or Help › Check for
-Updates… at any time. Download the new `Graft.zip` from
-[GitHub Releases](https://github.com/GreenglassT/Graft/releases) and replace
-the `Graft.app` in `/Applications`. Graft doesn't update itself.
+Graft updates itself. Once a day while it's open (or when you choose Help ›
+Check for Updates…), it asks GitHub whether a newer version is out. If one is,
+it downloads it in the background, then shows **Restart to Update** in a banner
+at the bottom of the main window. If you don't restart, it installs the update
+when you quit Graft.
+- Before it calls a download ready, Graft checks it: the SHA-256 GitHub lists
+  for it, then that the app inside is Graft, newer than yours, signed with
+  the same developer's Developer ID as yours and notarized by Apple. A download
+  that fails any check is deleted, and the banner links to the release page
+  instead. A Graft you built yourself, which has no Developer ID, doesn't
+  update itself.
+- The old Graft.app goes to the Trash, so you can put it back.
+- Graft never installs while it's working (a build, an install, an App Store
+  download and so on). It waits until that's done, or until you quit.
+- Settings › Updates has two switches: **Check for updates automatically**
+  and **Download and install updates automatically**. With the second off,
+  the banner offers **Update**, which downloads, checks and restarts when you
+  choose it.
 - Your config, apps and builds carry over, and so does your App Store
   sign-in from 2.0 on. From 1.x, you sign in once.
 - The Terminal command points into the app, so it updates too.
 - Help › What's New… shows what changed in each release. It also opens by
   itself once, the first time a new version of Graft starts.
+
+Graft can't update itself when it runs straight from Downloads (macOS runs a
+read-only copy of an app it hasn't moved), or from a folder your account
+can't change. The banner then says so and links to
+[GitHub Releases](https://github.com/GreenglassT/Graft/releases): download the
+new `Graft.zip` there and replace the `Graft.app` in `/Applications`. If an
+update can't be installed, Graft keeps the version you have, says so the next
+time it opens, and writes what happened to `~/Library/Logs/Graft/update.log`.
 
 From Graft 1.x, read [Upgrading from Graft 1.x](docs/upgrading.md) first:
 what happens to your config, your pipx `graft`, your Homebrew tools and your
@@ -758,7 +780,8 @@ keep the config in a dotfiles repository and symlink it, add
 ~/.cache/graft/
 ├── ipas/                # staged decrypted IPAs (never pruned)
 ├── built/               # archived builds (newest archive_keep per app version)
-└── artwork/             # cached app icons
+├── artwork/             # cached app icons
+└── updates/             # a newer Graft, downloaded and checked, until it's installed
 
 ~/.local/state/graft/
 ├── log.sqlite           # build history and delivery records
@@ -773,11 +796,15 @@ These four `graft` directories are owner-only (0700): Graft creates them that
 way and tightens them on every run if they aren't. Staged IPAs, archived
 builds, build logs and the `.p12` and profile the setup copies are written
 0600. Graft changes nothing outside these directories, and leaves alone a
-`graft` that is a symlink you made.
+`graft` that is a symlink you made. The one exception is updating itself: it
+replaces its own Graft.app, moves the old one to the Trash, and writes what it
+did to `~/Library/Logs/Graft/update.log`.
 
 Outside them, the App Store tools keep their own files: ipatool's sign-in in
-your login keychain and its downloads in `~/Library/Caches/ipatool`, and
-UnfairPlay's model in `~/Library/Application Support/unfairplay/models`.
+your login keychain, its session cookies in `~/.ipatool` and its downloads in
+`~/Library/Caches/ipatool`, and UnfairPlay's model in
+`~/Library/Application Support/unfairplay/models`. [Removing
+Graft](#removing-graft) lists everything.
 
 ## Troubleshooting
 
@@ -801,32 +828,70 @@ UnfairPlay's model in `~/Library/Application Support/unfairplay/models`.
 | Settings › App Store says "signed in by another ipatool (Graft 1's?): sign in again", or, with your own ipatool set in `config.yaml`, "a sign-in this ipatool can't read (another ipatool's?): sign in again" | Your sign-in was made by an ipatool this one can't read: with Graft's own, such as yours under Graft 1; with your own, Graft.app's or another. Press Sign In…; see [Upgrading from Graft 1.x](docs/upgrading.md#your-app-store-sign-in). |
 | A decrypt fails as the wrong model or the wrong Apple ID | Decryption was set up with another Apple ID. Use the same Apple ID in Graft as in the Mac App Store, then press Set Up Again… in Settings › App Store. |
 | Set Up Decryption… or Set Up Again… says this Mac's App Store state isn't there, or stops with "canonical input has no SIDB state" | macOS sometimes clears the state UnfairPlay reads, even for an app you've already opened. Open the app you picked once (the sheet's Open button does it), then set up again. In Terminal, the setup script exits 69 for this. |
-| The first sign-in, or the first App Store action, fails while it downloads ipatool's App Store components, with an error naming the macOS 27.0.1 (26A434) restore image (for example "server returned 404 Not Found") | A known issue since 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and if Apple removes that file, a Mac that hasn't downloaded them yet can't get them. A Mac whose ipatool already did (in `~/Library/Caches/ipatool`, a 1.x ipatool's included) isn't affected. Help › Check for Updates… says whether a later Graft is out (or look on [GitHub Releases](https://github.com/GreenglassT/Graft/releases)); a later Graft's ipatool will use an image Apple still serves. |
+| The first sign-in, or the first App Store action, fails with "Apple no longer serves the macOS 27.0.1 (26A434) restore image that ipatool 2.8.0 takes them from" | A known issue since 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and checks every file it takes against its source's pins, so no other image can stand in. If Apple removes that file, a Mac that hasn't downloaded them yet can't get them; Apple's server then answers "403 Forbidden" (or "404 Not Found"), which the error's details show. A Mac whose ipatool already did (in `~/Library/Caches/ipatool`, a 1.x ipatool's included) isn't affected. Graft's update notice, or Help › Check for Updates…, says whether a later Graft is out (or look on [GitHub Releases](https://github.com/GreenglassT/Graft/releases)); a later Graft's ipatool will use an image Apple still serves. |
 | Settings › App Store says "couldn't tell… your login keychain is locked" | Unlock the login keychain in Keychain Access, then refresh. Until then Settings offers neither Sign In… nor Sign Out, Get latest from App Store and Get (free) refuse, and so do `graft --appstore-login` and `--appstore-logout` in Terminal. |
 | "Graft.app is damaged: part of it is missing." | A file inside the app is missing. Download Graft again and replace this copy. |
 
 ## Removing Graft
 
 Dragging Graft.app to the Trash removes the app and everything inside it. What
-it made outside the app stays until you remove it:
+it made outside the app stays until you remove it.
 
-| What | Where | To remove it |
+**In the app:** Help › Remove Graft's Data… lists all of it, with sizes. Check
+what to remove, then press Remove…. It waits while Graft is building,
+installing, downloading or setting something up. When it's done, it says what
+it removed: quit Graft, then move Graft.app to the Trash. Removing can't be
+undone.
+
+**In Terminal:**
+
+```bash
+graft --remove-data                          # list it all, with sizes; removes nothing
+graft --remove-data --items all --dry-run    # what --items all would remove
+graft --remove-data --items all              # every item marked "removed with all"
+graft --remove-data --items all,passwords    # and your passwords
+graft --remove-data --items cache,temp       # only these
+```
+
+This is the whole list, by the name `--items` takes:
+
+| Item | What | Where |
 |---|---|---|
-| Your App Store sign-in | three items in your login keychain, service `ipatool-auth.service` | Before you remove the app, Settings › App Store › **Sign Out**. Then delete any of the three that's left in Keychain Access (search for `ipatool-auth.service`), or in Terminal: `security delete-generic-password -s ipatool-auth.service -a account`, and the same with `-a anisette-v4` and `-a kbsync-v1`, unless you use ipatool on its own: it keeps its sign-in in the same three items. |
-| Your `.p12` and SSH passwords | login keychain items with the service `graft` (`p12-<team id>`, `ssh-<device UDID>`), or `tweak-build` from before Graft's rename | Keychain Access: search for `graft`, and delete them. |
-| The decryption model | `~/Library/Application Support/unfairplay` | `rm -rf ~/Library/Application\ Support/unfairplay`, unless you use UnfairPlay on its own. |
-| ipatool's App Store components and Unicorn | `~/Library/Caches/ipatool` (about 320 MB) | `rm -rf ~/Library/Caches/ipatool`, unless you use ipatool on its own. |
-| Your config, `.p12`, profiles, App Store Connect key and tweaks | `~/.config/graft` | `rm -rf ~/.config/graft` |
-| Staged IPAs and archived builds, which can take several GB | `~/.cache/graft` | `rm -rf ~/.cache/graft` |
-| Build history and logs, repository caches, the App Store sign-in record | `~/.local/state/graft` | `rm -rf ~/.local/state/graft` |
-| frida-ios-dump, and tools a pipx install uses | `~/.local/share/graft` | `rm -rf ~/.local/share/graft` |
-| `graft` for Terminal | `~/.local/bin/graft`, a link into the app | `rm ~/.local/bin/graft`, if `ls -l ~/.local/bin/graft` shows it points into Graft.app (a pipx `graft` there is removed with `pipx uninstall graft-ipa`). |
-| The app's own settings | its preferences, `com.greenglasst.graft` | `defaults delete com.greenglasst.graft` |
+| `config` | Your setup: `config.yaml`, the `.p12` and profile Graft copied in when you set it up, your App Store Connect key and the profiles made with it, and your tweaks. The files you picked during setup stay where they were. | `~/.config/graft` |
+| `cache` | Staged IPAs, archived builds and app icons, often several GB | `~/.cache/graft` |
+| `state` | Build history and logs, repository indexes, earlier versions of tweaks you updated, and Graft's record of its App Store sign-in | `~/.local/state/graft` |
+| `data` | frida-ios-dump, and tools a pipx install of Graft uses | `~/.local/share/graft` |
+| `legacy` | `tweak-build` folders from before the rename that Graft left beside its own, because both held files. Only when you name it. | `~/.config/tweak-build` and the like |
+| `appstore-signin` | Your App Store sign-in: three items in your login keychain (service `ipatool-auth.service`, accounts `account`, `anisette-v4` and `kbsync-v1`) and ipatool's session cookies. Off when another ipatool made the sign-in. | the keychain, and `~/.ipatool` (or `$XDG_STATE_HOME/ipatool`) |
+| `ipatool-cache` | ipatool's App Store components and its Unicorn emulator, about 320 MB | `~/Library/Caches/ipatool`, and `ipatool-*` folders in your temp folder |
+| `unfairplay-model` | The decryption model Set Up Decryption made | `~/Library/Application Support/unfairplay` |
+| `passwords` | Your `.p12` and SSH passwords. Only when you name it. | your login keychain, service `graft` (or `tweak-build` from before the rename), accounts `p12-<team id>` and `ssh-<device UDID>` |
+| `graft-link` | `graft` for Terminal, when it's a link into Graft.app | `~/.local/bin/graft` |
+| `app-settings` | The app's own settings. The app removes these; in Terminal, `defaults delete com.greenglasst.graft`. | `~/Library/Preferences/com.greenglasst.graft.plist` |
+| `update-log` | The update log: what Graft wrote each time it updated itself, and the last rebuild's output for an app built from source | `~/Library/Logs/Graft` |
+| `temp` | Temporary folders a stopped build, signing or install left behind, more than an hour old, and the rebuild marker of an app built from source | your temp folder (`$TMPDIR`), `~/Library/Caches/Graft` |
+
+Keychain items are found and removed by their service and account only, and
+nothing is asked of the keychain while it's locked. If you use ipatool or
+UnfairPlay on their own, they use the same sign-in, components and model, and
+removing them affects those too.
+
+Never removed, and listed under "Not removed": anything `config.yaml` points
+to outside these folders (`cache_dir`, `built_dir`, `tweaks_dir`, `state_dir`,
+the signing files, the App Store Connect key and its profiles), a model folder
+set by `appstore.unfairplay_models` or `UNFAIRPLAY_MODEL_DIR`, a `graft` folder
+that is a link you made, and a `~/.local/bin/graft` that isn't Graft.app's (a
+pipx one is removed with `pipx uninstall graft-ipa`).
 
 If you set `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME` or
-`XDG_DATA_HOME`, the four `graft` folders are under those instead. The Mac App
-Store app you set up decryption with, and LiveContainer and the apps on your
-devices, are yours to keep or delete.
+`XDG_DATA_HOME`, the four `graft` folders are under those instead. Builds and
+tweaks Graft moved to the Trash stay there until you empty it. The Mac App
+Store app you set up decryption with, PlayCover and the apps you installed on
+this Mac with it, and LiveContainer and the apps on your devices, are yours to
+keep or delete.
+
+To do it by hand instead, delete what the table lists. For the keychain items,
+search Keychain Access for `ipatool-auth.service` or `graft`.
 
 ## Graft in Terminal
 
@@ -1121,7 +1186,8 @@ graft --delivery-state [--app example]   # would building now produce something 
 graft --reconcile [--app example]        # check the device first, then report
 ```
 
-`--dry-run` previews only a build, `--prune-builds` and `--init --account`.
+`--dry-run` previews only a build, `--prune-builds`, `--init --account` and
+`--remove-data --items`.
 Every other command refuses it, before doing anything, rather than running for
 real under a flag that said it wouldn't.
 
@@ -1163,6 +1229,9 @@ graft --set-portal --asc-key-id ABCDE12345 \
 graft --setup-portal                # the same key, with questions
 graft --clear-portal                # remove it (the .p8 stays)
 graft --check-update                # is a newer Graft out? (asks GitHub; downloads nothing)
+graft --download-update             # download it into Graft's cache and check it (installs nothing)
+graft --remove-data                 # what Graft keeps outside Graft.app, with sizes
+graft --remove-data --items all     # remove it (see Removing Graft); add --dry-run to preview
 ```
 
 `--set-settings --signing-*` refuses on a free config rather than write part of

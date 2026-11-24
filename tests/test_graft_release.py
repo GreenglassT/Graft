@@ -145,11 +145,11 @@ def test_the_release_build_uses_only_the_package_versions_it_resolved():
 # --- 2.0.1: the private deny-list, the shared download cache, a phone's hotspot ---------------
 
 
-def _python_that_fails_at(root: Path, tmp_path: Path, step: str | None) -> Path:
+def _python_that_fails_at(root: Path, tmp_path: Path, step: str | None, code: int = 1) -> Path:
     """The stand-in venv Python, also logging the caches it was given, and
-    failing the call whose arguments hold `step`."""
+    exiting `code` from the call whose arguments hold `step`."""
     envlog = tmp_path / "env.log"
-    fail = f'case "$*" in *"{step}"*) exit 1;; esac\n' if step else ""
+    fail = f'case "$*" in *"{step}"*) exit {code};; esac\n' if step else ""
     py = root / ".venv" / "bin" / "python"
     py.write_text(f'#!/bin/sh\necho "python $*" >> "{tmp_path / "ran.log"}"\n'
                   f'echo "$* cache=${{GRAFT_BUNDLE_CACHE-unset}} work=${{GRAFT_BUNDLE_WORK-unset}}" >> "{envlog}"\n'
@@ -168,8 +168,9 @@ def test_before_building_it_checks_the_deny_list_scans_the_tracked_files_and_ask
     proc, ran = run(str(tmp_path / "out"))
     assert proc.returncode != 0, "this checkout has no Xcode project to build"
     steps = [r.split(maxsplit=2)[1:] for r in ran]
-    assert [Path(s[0]).name for s in steps] == ["graft_bundle.py", "denylist.py", "denylist.py", "graft_bundle.py"]
-    assert [s[1] for s in steps] == ["check-python", "check", f"tracked {root} {head}", "hotspot-check"]
+    assert [Path(s[0]).name for s in steps] == ["graft_bundle.py", *["denylist.py"] * 4, "graft_bundle.py"]
+    assert [s[1] for s in steps] == ["check-python", "check", f"tracked {root} {head}", "devices check",
+                                     f"devices tracked {root} {head}", "hotspot-check"]
     assert Path(steps[2][0]).parent.parent != root, "the scan runs from the export of the commit"
     assert not [r for r in ran if r.split()[0] in TRIPPED]
     hotspot = envlog.read_text().splitlines()[-1]
@@ -177,13 +178,42 @@ def test_before_building_it_checks_the_deny_list_scans_the_tracked_files_and_ask
     assert f"work={root}/build/bundle-work" in hotspot
 
 
-@pytest.mark.parametrize("step", ["denylist.py check", "denylist.py tracked", "hotspot-check"])
+@pytest.mark.parametrize("step", ["denylist.py check", "denylist.py tracked", "devices check", "devices tracked",
+                                  "hotspot-check"])
 def test_a_missing_list_a_deny_listed_name_or_a_no_on_the_hotspot_stops_it_there(release, tmp_path, step):
     root, run = release
     _python_that_fails_at(root, tmp_path, step)
     proc, ran = run(str(tmp_path / "out"))
     assert proc.returncode == 1, proc.stderr
     assert step in ran[-1] and not [r for r in ran if r.split()[0] in TRIPPED]
+
+
+def test_with_no_profile_configured_the_device_scans_are_skipped_and_the_release_goes_on(release, tmp_path):
+    """`devices check` exits 3, having said so: no `devices tracked`, and on
+    to the hotspot check. Any other failure of it stops the release."""
+    root, run = release
+    _python_that_fails_at(root, tmp_path, "devices check", code=3)
+    proc, ran = run(str(tmp_path / "out"))
+    steps = [r.split(maxsplit=2)[2] for r in ran if len(r.split()) > 2]
+    assert "devices check" in steps and not [s for s in steps if s.startswith("devices tracked")]
+    assert steps[-1] == "hotspot-check", steps
+    (tmp_path / "ran.log").unlink()
+    _python_that_fails_at(root, tmp_path, "devices check", code=2)
+    proc, ran = run(str(tmp_path / "out"))
+    assert proc.returncode == 1 and ran[-1].endswith("devices check")
+
+
+def test_the_app_and_the_source_archive_are_scanned_for_the_owners_devices_and_a_hit_removes_the_zip():
+    script = (REPO / "scripts" / "graft-release").read_text()
+    verify = script.index('"$PY" "$EXPORT/scripts/verify-bundle" "$APP"')
+    app = script.index('denylist.py" devices app "$APP"')
+    sources = script.index('denylist.py" devices sources "$SOURCES"')
+    assert verify < app < script.index('graft_bundle.py" sources "$OUT_DIR/components.json"')
+    assert script.index('denylist.py" sources "$SOURCES"') < sources < script.index('rev-parse HEAD)" != "$HEAD_AT_START"')
+    for at in (app, sources):
+        assert 'if [[ "$DEVICE_SCAN" == 1 ]] && !' in script[at - 60:at] and 'rm -f "$ZIP"' in script[at:at + 200]
+    tail = script[script.index('echo "✓ $OUT_DIR/components.json"'):]
+    assert 'if [[ "$DEVICE_SCAN" == 1 ]]; then' in tail and "no device UDID scan" in tail
 
 
 def test_the_source_archive_is_scanned_and_a_hit_removes_the_zip():

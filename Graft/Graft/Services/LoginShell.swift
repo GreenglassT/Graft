@@ -29,10 +29,24 @@ import Foundation
 /// (`ProcessEnvironment.augmented`). Nothing here is worth an alert — the user
 /// did not ask for it, and the app still works without it.
 enum LoginShell {
-    /// How long the shell gets, end to end. An interactive zsh with a prompt
-    /// theme and a conda hook measured well under a second here; five is the
-    /// ceiling editors settle on, and the first CLI call waits at most this.
+    /// How long the shell gets once it is running. An interactive zsh with a
+    /// prompt theme and a conda hook measured well under a second here; five
+    /// is the ceiling editors settle on.
     static let timeout: TimeInterval = 5
+
+    /// How long the shell may take to start running at all, before `timeout`
+    /// starts. macOS checks a program that isn't Apple's (Homebrew's fish or
+    /// bash) the first time it runs it: the shell waits inside exec while
+    /// syspolicyd looks its notarization up online and XProtect scans it.
+    /// `Process.run()` has returned by then. That took about 0.8 s here, and
+    /// up to 3 s over a slow network, out of the five, so the startup files
+    /// of a shell that was fine every other time could run out of time
+    /// (`runProcess`). A shell still not running after this is abandoned, so
+    /// one that never starts can't hold the first CLI launch for ever.
+    static let startLimit: TimeInterval = 15
+
+    /// How often `waitForAnswer` looks whether the shell has started.
+    static let startPollInterval: TimeInterval = 0.02
 
     /// Runs a shell and hands back what it wrote to stdout between the two
     /// markers — or nil when it could not be started or did not get there in
@@ -200,10 +214,29 @@ enum LoginShell {
     /// **The reader owns the read end and closes it**, polling so it can be
     /// told to stop: a writer outside the group (one that called `setsid`)
     /// survives the kill, and a blocking `read` would wait on it forever.
+    ///
+    /// **`timeout` runs from when the shell starts running**, not from
+    /// `process.run()`: macOS's first-run check of a shell that isn't Apple's
+    /// happens in between (`startLimit`). The shell has started once it has
+    /// run any code of its own (`hasRun`), or written anything.
     @Sendable
     static func runProcess(
         shell: String, arguments: [String], markers: Markers,
         environment: [String: String]?, timeout: TimeInterval
+    ) async -> Data? {
+        await runProcess(
+            shell: shell, arguments: arguments, markers: markers, environment: environment,
+            timeout: timeout, startLimit: startLimit, hasStarted: hasRun
+        )
+    }
+
+    /// `runProcess`, with how long the shell may take to start, and how it
+    /// is seen to have started, passed in: a seam for the tests, which can't
+    /// make macOS hold a shell in exec.
+    static func runProcess(
+        shell: String, arguments: [String], markers: Markers,
+        environment: [String: String]?, timeout: TimeInterval,
+        startLimit: TimeInterval, hasStarted: @escaping @Sendable (pid_t) -> Bool
     ) async -> Data? {
         await withCheckedContinuation { (cont: CheckedContinuation<Data?, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -232,8 +265,10 @@ enum LoginShell {
                     try? reader.close()
                     finished.signal()
                 }
-                let timedOut = finished.wait(timeout: .now() + timeout) == .timedOut
                 let pid: pid_t = process.processIdentifier
+                let timedOut = waitForAnswer(finished, timeout: timeout, startLimit: startLimit) {
+                    collected.receivedAny || hasStarted(pid)
+                }
                 if timedOut {
                     stop.set()
                     // Descendants first, while the shell is alive to be walked:
@@ -262,6 +297,41 @@ enum LoginShell {
                 cont.resume(returning: timedOut ? nil : collected.data)
             }
         }
+    }
+
+    /// Wait for `finished`, the reader's end: no more than `startLimit` for
+    /// the shell to start (`started`), then `timeout` from when it did.
+    /// Whether it timed out. Each look at `started` is
+    /// `startPollInterval` apart, so the timeout starts at most that late.
+    static func waitForAnswer(
+        _ finished: DispatchSemaphore, timeout: TimeInterval, startLimit: TimeInterval,
+        started: () -> Bool
+    ) -> Bool {
+        let startBy = DispatchTime.now() + startLimit
+        while !started() {
+            let now = DispatchTime.now()
+            if now >= startBy { return true }
+            if finished.wait(timeout: min(now + startPollInterval, startBy)) == .success { return false }
+        }
+        return finished.wait(timeout: .now() + timeout) == .timedOut
+    }
+
+    /// Whether `pid` has run any code of its own: its user CPU time is above
+    /// zero. A child Process starts with posix_spawn, so it runs nothing in
+    /// user space before exec, and while macOS checks a program on its first
+    /// run the child waits inside exec with none (measured: zero until the
+    /// check ends, 0.7 to 0.9 s on a fresh script, then above zero at once).
+    /// One that can't be asked about, gone already, has nothing left to wait
+    /// for to start.
+    @Sendable
+    static func hasRun(_ pid: pid_t) -> Bool {
+        var usage = rusage_info_v2()
+        let result = withUnsafeMutablePointer(to: &usage) { pointer in
+            pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) {
+                proc_pid_rusage(pid, RUSAGE_INFO_V2, $0)
+            }
+        }
+        return result != 0 || usage.ri_user_time > 0
     }
 
     /// Read `fd` into `output` until EOF, the end marker, the cap, or `stop`.
@@ -295,7 +365,8 @@ enum LoginShell {
 /// to nothing" stay different states: a launch that arrives first waits for
 /// the answer instead of racing ahead with launchd's environment and running
 /// against the wrong config directory. The wait is bounded, because the
-/// resolution is — `LoginShell.timeout`.
+/// resolution is: `LoginShell.timeout` once the shell is running, after at most
+/// `LoginShell.startLimit` for it to start.
 ///
 /// **Re-resolvable, when asked.** The setup screen's Check again is pressed by
 /// someone who just changed their setup in Terminal — `pipx ensurepath`, a
@@ -319,18 +390,37 @@ final class ShellEnvironment: @unchecked Sendable {
     /// the last ask gets.
     static let minimumRefreshInterval: TimeInterval = 10
 
+    /// Said beside Check again or Re-run when `refresh()` kept the last
+    /// answer: otherwise a second press soon after saving a startup file
+    /// looked as if the shell had been asked and the new line was wrong (the
+    /// try14 delta audit's D14-APP-3).
+    static let askedTooRecentlyNote =
+        "Graft asked your shell less than \(Int(minimumRefreshInterval)) seconds ago, so it used "
+        + "that answer. If you just saved a change to a startup file, wait a few seconds and try again."
+
+    /// Seconds on a clock that only moves forward and keeps counting while
+    /// the Mac sleeps (CLOCK_MONOTONIC). Not the wall clock: one set back
+    /// after launch, by hand or by a time server, made the interval since
+    /// the last ask negative, and every refresh was refused until the wall
+    /// clock caught up again, however long that was (D14-APP-3).
+    static func monotonicNow() -> TimeInterval {
+        TimeInterval(clock_gettime_nsec_np(CLOCK_MONOTONIC)) / 1_000_000_000
+    }
+
     private let resolve: @Sendable () async -> [String: String]?
     private let minimumInterval: TimeInterval
-    private let now: @Sendable () -> Date
+    private let now: @Sendable () -> TimeInterval
     private let lock = NSLock()
     private var task: Task<[String: String]?, Never>
-    /// When the shell was last asked.
-    private var askedAt: Date
+    /// When the shell was last asked, on `now`'s clock.
+    private var askedAt: TimeInterval
+    /// Whether the last `refresh()` kept the last answer for the interval.
+    private var tooSoon = false
 
     /// `now` and `minimumInterval` are for the tests of the interval.
     init(
         minimumInterval: TimeInterval = ShellEnvironment.minimumRefreshInterval,
-        now: @escaping @Sendable () -> Date = { Date() },
+        now: @escaping @Sendable () -> TimeInterval = { ShellEnvironment.monotonicNow() },
         resolve: @escaping @Sendable () async -> [String: String]?
     ) {
         self.resolve = resolve
@@ -373,7 +463,11 @@ final class ShellEnvironment: @unchecked Sendable {
         let resolve = self.resolve
         return lock.withLock {
             let at = now()
-            guard at.timeIntervalSince(askedAt) >= minimumInterval else { return false }
+            let since = at - askedAt
+            // Backward only with a clock that isn't the default one: read as
+            // long enough rather than refusing until it catches up.
+            tooSoon = since >= 0 && since < minimumInterval
+            guard !tooSoon else { return false }
             askedAt = at
             let previous = task
             task = Task.detached(priority: .userInitiated) { () -> [String: String]? in
@@ -383,6 +477,11 @@ final class ShellEnvironment: @unchecked Sendable {
             return true
         }
     }
+
+    /// Whether the last `refresh()` kept the answer it already had, because
+    /// the shell was asked less than `minimumInterval` before
+    /// (`askedTooRecentlyNote`). False before any refresh.
+    var lastRefreshWasTooSoon: Bool { lock.withLock { tooSoon } }
 
     /// The app's one resolution, started the first time anything asks —
     /// `GraftApp.init`, so it runs while the window is still being built.
@@ -407,6 +506,7 @@ final class MarkedOutput: @unchecked Sendable {
     private var buffer = Data()
     private var foundStart = false
     private var overflowed = false
+    private var anything = false
     private let lock = NSLock()
 
     init(markers: LoginShell.Markers, cap: Int) {
@@ -419,6 +519,7 @@ final class MarkedOutput: @unchecked Sendable {
     /// has arrived, or the cap was passed.
     func append(_ chunk: Data) -> Bool {
         lock.lock(); defer { lock.unlock() }
+        if !chunk.isEmpty { anything = true }
         guard !overflowed else { return true }
         buffer.append(chunk)
         if !foundStart {
@@ -447,6 +548,13 @@ final class MarkedOutput: @unchecked Sendable {
     var data: Data {
         lock.lock(); defer { lock.unlock() }
         return foundStart && !overflowed ? buffer : Data()
+    }
+
+    /// Whether the shell has written anything at all, marker or not: then it
+    /// is running (`LoginShell.waitForAnswer`).
+    var receivedAny: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return anything
     }
 
     /// How many bytes are held right now — for the test that the cap holds.

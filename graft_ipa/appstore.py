@@ -86,6 +86,33 @@ REFUSED_UNVERIFIED = "unverified"
 REFUSED_NEEDS_LICENSE = "needs-license"
 # `--appstore-claim` on an app that isn't free. Same fields.
 REFUSED_PAID = "paid"
+# `--appstore-claim --expect-email` while ipatool is signed in as another
+# Apple ID. The event carries `email`, the one signed in now; the app says
+# the Apple ID changed and reads status again. Nothing is purchased.
+REFUSED_ACCOUNT_CHANGED = "account-changed"
+
+
+class AccountChanged(AppStoreError):
+    """ipatool is signed in as `email`, not the Apple ID `--expect-email`
+    named (the try14 delta audit's D14-APP-1 and F5)."""
+
+    def __init__(self, email: str, expected: str) -> None:
+        super().__init__(
+            f"ipatool is now signed in to the App Store as {email}, not {expected}, so Graft "
+            "didn't add the app to either Apple ID's purchases",
+            hint=(
+                f"sign in as {expected} first ({ipatool.LOGIN_COMMAND}), or leave out "
+                "--expect-email to get it for the Apple ID signed in now"
+            ),
+        )
+        self.email = email
+
+
+def same_apple_id(one: str, other: str) -> bool:
+    """Whether two Apple ID emails name the same account. Apple IDs aren't
+    case-sensitive, and `auth info` may print one in another case than the
+    status the app read it from."""
+    return one.strip().casefold() == other.strip().casefold()
 
 # A working directory older than this belongs to a run that was killed outright
 # (SIGKILL, power loss) rather than stopped — the only exits that skip the
@@ -756,10 +783,15 @@ def _ipatool_path(tools: AppStoreToolsConfig) -> Path:
     return path
 
 
-def _require_signed_in(tools: AppStoreToolsConfig, path: Path) -> str:
+def _require_signed_in(
+    tools: AppStoreToolsConfig, path: Path, *, expect_email: str | None = None
+) -> str:
     """Not a known-bad ipatool, and signed in. Shared by `fetched` and
     `claim`, so neither starts anything with an ipatool that can't finish it.
     Returns the ipatool's source.
+
+    With `expect_email` (a claim's `--expect-email`), signed in as that
+    Apple ID, else `AccountChanged`, before anything is deleted or bought.
 
     A 1.x sign-in is refused without asking ipatool, which would show a
     Keychain dialog (`appstore_account`), and a Keychain refusal is said as
@@ -802,7 +834,7 @@ def _require_signed_in(tools: AppStoreToolsConfig, path: Path) -> str:
         raise ipatool.graft_signin_error(path, source)
     found = ipatool.account(path)
     if found.refused:
-        raise ipatool.KeychainRefusal(refused=True, path=path)
+        raise ipatool.KeychainRefusal(refused=True, path=path, source=source)
     if found.unknown == ipatool.UNKNOWN_KEYCHAIN:
         raise AppStoreError(ipatool.KEYCHAIN_UNKNOWN, hint=ipatool.KEYCHAIN_UNKNOWN_HINT)
     account = found.signed_in
@@ -816,6 +848,19 @@ def _require_signed_in(tools: AppStoreToolsConfig, path: Path) -> str:
         )
     if not account:
         raise AppStoreError("ipatool is not signed in to the App Store", hint=ipatool.SIGN_IN_HINT)
+    if expect_email is not None:
+        # Graft.app's Get (free) confirmation named an Apple ID, from a status
+        # read made as the button was pressed. The purchase goes to whoever
+        # ipatool is signed in as now, and a sign-in changed in Terminal while
+        # the confirmation was open would otherwise get it.
+        if found.email is None:
+            raise AppStoreError(
+                f"couldn't tell which Apple ID ipatool is signed in as (`auth info` gave no email), "
+                f"so Graft didn't add the app to {expect_email}'s purchases",
+                hint=f"run `{shlex.quote(str(path))} auth info` in Terminal to see why, then try again",
+            )
+        if not same_apple_id(found.email, expect_email):
+            raise AccountChanged(found.email, expect_email)
     device = appstore_account.foreign_device(source)
     if device is None:
         raise AppStoreError(
@@ -1081,7 +1126,10 @@ def report_already_staged(
     say(f"  to download it again anyway: graft --appstore-get --app {shlex.quote(app_name)} --again")
 
 
-def claim(cfg: Config, app_name: str, *, emitter: JsonEmitter | None, say: Say) -> bool:
+def claim(
+    cfg: Config, app_name: str, *, emitter: JsonEmitter | None, say: Say,
+    expect_email: str | None = None,
+) -> bool:
     """Get `app_name`'s free license for the signed-in Apple ID. Returns
     whether it already had one.
 
@@ -1089,12 +1137,21 @@ def claim(cfg: Config, app_name: str, *, emitter: JsonEmitter | None, say: Say) 
     says the price is 0. An unknown price is refused too: "free" is never
     assumed. It does nothing else: the app starts the get itself afterward,
     so a claim can't half-finish a download.
+
+    With `expect_email` (`--expect-email`, which Graft.app sends with
+    the Apple ID its confirmation named), it also refuses unless ipatool is
+    signed in as that Apple ID: the `account-changed` refusal.
     """
     app = cfg.get_app(app_name)
     _refuse_apples_own(app)
     tools = cfg.appstore
     path = _ipatool_path(tools)
-    source = _require_signed_in(tools, path)
+    try:
+        source = _require_signed_in(tools, path, expect_email=expect_email)
+    except AccountChanged as e:
+        if emitter:
+            emitter.emit("appstore-refused", app=app_name, reason=REFUSED_ACCOUNT_CHANGED, email=e.email)
+        raise
     listing = _listing(app)
     if listing is None or listing.price is None:
         raise AppStoreError(

@@ -200,7 +200,8 @@ def test_every_failed_sign_in_reason_reaches_the_sheet_as_the_cli_s_sentence() -
 # --- The update check ---------------------------------------------------------
 #
 # `update-check` decodes into `UpdateCheckRecord` (BuildEvent.swift). The app
-# reads `latest`, `url` and `update_available` for the banner and the alert,
+# reads `latest` and `update_available` for the banner and the alert (and
+# builds the release page from `latest`: it decodes `url` and never opens it),
 # `current` to know the answer is about this copy, and `message` for a failed
 # Check for Updates…. A key spelled differently there is never filled, and a
 # non-optional one the CLI sends as null drops the whole line, so the check

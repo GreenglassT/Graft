@@ -39,6 +39,7 @@ import tempfile
 import time
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable
@@ -893,34 +894,95 @@ _COPYLEFT_TITLES = (("AGPL", "GNU AFFERO GENERAL PUBLIC LICENSE"), ("LGPL", "GNU
                     ("EUPL", "EUROPEAN UNION PUBLIC LICENCE"))
 
 
+#: What may follow a copyleft title on its line further down a file: its
+#: version ("Version 3", "- v 2.0", "v. 1.2"), as a title line has it.
+_TITLE_VERSION = re.compile(r",?\s*(?:-\s*)?(?:VERSION|V\.?)\s*\d")
+
+
 def licence_text_family(text: str) -> str | None:
-    """The copyleft family a license text's title (its first 800 characters)
-    names, or None for any other license."""
+    """The copyleft family a license text's title names, or None for any
+    other license. The title is looked for in the first 800 characters,
+    where a license text puts it, and then on any line that starts with it,
+    in capitals or with its version after it, as a text after a long
+    preamble has it (the delta audit's d14-bundle-2: retry.v1's title sits at
+    129, but one past 800 was missed). Never anywhere in the text: MPL-2.0's
+    own names the GPL, the LGPL and the AGPL in its body, and the LGPL's
+    names the GPL."""
     head = " ".join(text.split())[:800].upper()
-    return next((family for family, title in _COPYLEFT_TITLES if title in head), None)
+    found = next((family for family, title in _COPYLEFT_TITLES if title in head), None)
+    if found is not None:
+        return found
+    for line in text.splitlines():
+        words = " ".join(line.split())
+        upper = words.upper()
+        for family, title in _COPYLEFT_TITLES:
+            if upper.startswith(title) and (words == upper or _TITLE_VERSION.match(upper, len(title))):
+                return family
+    return None
+
+
+#: Words only a permissive license's text has: what lets a license file
+#: beside a copyleft one count as a choice (`permissive_text`).
+_PERMISSIVE_TEXTS = (("MIT", "permission is hereby granted, free of charge"),
+                     ("BSD", "redistribution and use in source and binary forms"),
+                     ("Apache-2.0", "apache license version 2.0"), ("Apache-2.0", "apache license, version 2.0"),
+                     ("ISC", "permission to use, copy, modify, and/or distribute this software for any purpose"),
+                     ("ISC", "permission to use, copy, modify, and distribute this software for any purpose"),
+                     ("Unlicense", "this is free and unencumbered software released into the public domain"),
+                     ("CC0-1.0", "cc0 1.0 universal"), ("BSL-1.0", "boost software license"),
+                     ("Zlib", "altered source versions must be plainly marked as such"))
+
+
+def permissive_text(text: str) -> str | None:
+    """The permissive license a text is, by words only its text has, or
+    None: for a copyleft text, and for one nothing here recognizes, which
+    can't be called permissive."""
+    if licence_text_family(text) is not None:
+        return None
+    flat = " ".join(text.split()).lower()
+    return next((name for name, words in _PERMISSIVE_TEXTS if words in flat), None)
+
+
+#: The files at a module's root that can offer a license of their own
+#: (LICENSE-MIT beside a GPL LICENSE): a NOTICE, PATENTS, COPYRIGHT, LEGAL
+#: or COPYLEFT file adds to a module's license, never offers another one.
+_LICENCE_CHOICE = re.compile(r"(UN)?LICEN[CS]E|COPYING", re.IGNORECASE)
 
 
 def licence_names(family: str, licence: str) -> bool:
-    """Whether an SPDX expression names a license of `family` (GPL, not LGPL)."""
-    return re.search(rf"(?<![A-Za-z]){family}(?![A-Za-z])", licence) is not None
+    """Whether an SPDX expression names a license of `family` (GPL, not
+    LGPL) in every choice it offers, read clause by clause
+    (`licence_expression`): "MIT OR GPL-3.0-only" lets the GPL be chosen
+    away, so it doesn't. One that doesn't parse names nothing."""
+    tree = licence_expression(licence)
+    return tree is not None and not licence_offers(
+        tree, lambda lic: re.search(rf"(?<![A-Za-z]){family}(?![A-Za-z])", lic) is None)
 
 
 def go_copyleft_problems(notices: Path, licence: str) -> list[str]:
     """Each Go module in `notices` (<module>@<version>/, its license files)
     under a copyleft license with no permissive choice, which `licence`, the
-    expression components.json gives its tool, doesn't name (review 2.0,
-    bundle #9). Go modules state no SPDX license, so the text tells. Their
-    source is in the source archive whatever the license (go_module_problems)."""
+    expression components.json gives its tool, doesn't name in every choice
+    it offers (review 2.0, bundle #9). Go modules state no SPDX license, so
+    the text tells. Their source is in the source archive whatever the
+    license (go_module_problems).
+
+    A choice is a license file (`_LICENCE_CHOICE`) whose text is a
+    permissive license's (`permissive_text`). Any other file with license
+    text used to count as one, so a GPL module with a NOTICE, COPYRIGHT or
+    PATENTS file passed (the delta audit's d14-bundle-2)."""
     problems = []
     for folder in sorted({f.parent for f in notices.rglob("*") if f.is_file() and "@" in f.parent.name}):
-        texts = [g.read_text(errors="replace") for g in folder.iterdir()
+        texts = [(g.name, g.read_text(errors="replace")) for g in folder.iterdir()
                  if g.is_file() and is_licence_name(g.name) and _is_licence_text(g.read_bytes())]
-        families = {licence_text_family(t) for t in texts}
-        if texts and None not in families:
-            for family in sorted(families):
-                if not licence_names(family, licence):
-                    problems.append(f"{folder.relative_to(notices).as_posix()}: {family}, which its tool's license "
-                                    f"({licence}) doesn't name")
+        families = {family for _, t in texts if (family := licence_text_family(t)) is not None}
+        if not families or any(_LICENCE_CHOICE.match(name) and permissive_text(t) for name, t in texts):
+            continue
+        for family in sorted(families):
+            if not licence_names(family, licence):
+                named = re.search(rf"(?<![A-Za-z]){family}(?![A-Za-z])", licence) is not None
+                problems.append(f"{folder.relative_to(notices).as_posix()}: {family}, which its tool's license "
+                                f"({licence}) " + ("names only as one choice" if named else "doesn't name"))
     return problems
 
 
@@ -1583,7 +1645,79 @@ WHEEL_TARGET = ("--platform", f"macosx_{MACOS_MIN.replace('.', '_')}_arm64", "--
 _PIP = ("-I", "-m", "pip")
 # --retries and --timeout: pip's defaults (5, 15 s) gave up on a slow or
 # briefly dropped network and ended the whole build.
-_QUIET_PIP = ("--no-cache-dir", "--disable-pip-version-check", "--retries", "10", "--timeout", "60")
+_QUIET_PIP = ("--disable-pip-version-check", "--retries", "10", "--timeout", "60")
+
+
+def pip_cache(cache: Path | None = None) -> Path:
+    """pip's own cache (`--cache-dir`) for the locked wheels, in the
+    downloads cache (`cache`, CACHE unless given), so a release downloads
+    each wheel once per machine. With --no-cache-dir every build fetched
+    each one twice: hash-checking mode makes `pip install --dry-run` download
+    whole wheels (pip 26's _fetch_metadata_only skips metadata-only fetching
+    when hashes are required), and `pip download` fetched them again.
+
+    It trusts nothing new. pip checks every file against the lock's
+    --require-hashes, whether it came from the network or from here
+    (operations/prepare.py, get_http_url), and refuses a mismatch. Only
+    wheels are fetched (--only-binary=:all:), so pip's cache of wheels it
+    built from source stays empty. CACHE is read at call time, so a test
+    can point it elsewhere."""
+    return (cache or CACHE) / "pip"
+
+
+#: Which locked wheels pip's cache holds, by SHA-256, written after each
+#: locked install from that install's plan. The hotspot check reads it
+#: offline, before pip has resolved anything.
+WHEEL_RECORD = "graft-wheels.json"
+
+
+def pip_cache_body(cache_dir: Path, url: str) -> Path:
+    """Where pip keeps the body of the file it fetched from `url`: under
+    http-v2/, named by the SHA-224 of the URL with its scheme and host
+    lowercased and its fragment dropped. pip 26's SafeFileCache and its
+    vendored cachecontrol's CacheController.cache_url; the bundled Python's
+    pip is pinned with it (pins.toml's [python]), and a pip that keeps them
+    elsewhere only makes the plan count those wheels as still to download."""
+    parts = urllib.parse.urlsplit(url)
+    key = f"{parts.scheme.lower()}://{parts.netloc.lower()}{parts.path or '/'}" + (
+        f"?{parts.query}" if parts.query else "")
+    hashed = hashlib.sha224(key.encode()).hexdigest()
+    return cache_dir / "http-v2" / Path(*hashed[:5]) / f"{hashed}.body"
+
+
+def cached_wheels(cache_dir: Path | None = None) -> dict[str, dict]:
+    """SHA-256 -> {name, version, url, mb} of each wheel the record lists
+    whose body pip's cache still holds."""
+    cache_dir = cache_dir or pip_cache()
+    try:
+        record = json.loads((cache_dir / WHEEL_RECORD).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    return {sha: e for sha, e in record.items()
+            if isinstance(e, dict) and isinstance(e.get("url"), str) and pip_cache_body(cache_dir, e["url"]).is_file()}
+
+
+def record_cached_wheels(plan: Path, cache_dir: Path | None = None) -> int:
+    """Add each file a locked install's `plan` (its --dry-run report) chose,
+    and pip's cache now holds, to the record; returns how many it holds.
+    Written whole and then renamed: two releases may stage at once."""
+    cache_dir = cache_dir or pip_cache()
+    known = cached_wheels(cache_dir)
+    for item in json.loads(plan.read_text())["install"]:
+        info = item["download_info"]
+        sha = ((info.get("archive_info") or {}).get("hashes") or {}).get("sha256")
+        body = pip_cache_body(cache_dir, info["url"])
+        if sha and body.is_file():
+            known[sha] = {"name": _norm(item["metadata"]["name"]), "version": item["metadata"]["version"],
+                          "url": info["url"], "mb": round(body.stat().st_size / 1e6, 2)}
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    fd, raw = tempfile.mkstemp(prefix=f"{WHEEL_RECORD}.", suffix=".part", dir=cache_dir)
+    with os.fdopen(fd, "w") as f:
+        json.dump(known, f, indent=1, sort_keys=True)
+    os.replace(raw, cache_dir / WHEEL_RECORD)
+    return len(known)
 
 
 def _report_files(report: Path) -> dict[str, tuple[str, str]]:
@@ -1610,19 +1744,35 @@ def install_locked(py: Path, lock: Path, plan: Path, scratch: Path, env: dict[st
     pip resolves the lock for that platform (`--dry-run`, its report is
     `plan`, which components.json is made from), downloads those files, then
     installs from them alone, with no index; the files installed must be the
-    plan's."""
+    plan's.
+
+    The two steps that reach the index share pip's cache (`pip_cache`), so
+    the download takes what the plan's resolution fetched, and a later build
+    takes both from it; the install from the downloaded files needs none.
+    Every step keeps --require-hashes."""
     target = [*WHEEL_TARGET, "--only-binary=:all:", "--require-hashes", "--no-deps"]
     scratch.mkdir(parents=True, exist_ok=True)
     wheels = scratch / "wheels"
-    subprocess.run([str(py), *_PIP, "install", *_QUIET_PIP, "--dry-run", "--ignore-installed", "--report", str(plan),
-                    *target, "-r", str(lock)], check=True, env=env)
-    subprocess.run([str(py), *_PIP, "download", *_QUIET_PIP, "-d", str(wheels), *target, "-r", str(lock)],
-                   check=True, env=env)
+    cache = pip_cache()
+    cached = ("--cache-dir", str(cache))
+    try:
+        subprocess.run([str(py), *_PIP, "install", *_QUIET_PIP, *cached, "--dry-run", "--ignore-installed",
+                        "--report", str(plan), *target, "-r", str(lock)], check=True, env=env)
+        subprocess.run([str(py), *_PIP, "download", *_QUIET_PIP, *cached, "-d", str(wheels), *target,
+                        "-r", str(lock)], check=True, env=env)
+    except subprocess.CalledProcessError as e:
+        # pip never swaps a file that fails its hash for a fresh download, so
+        # a damaged cached wheel stops every build until the cache goes.
+        raise BundleError(f"pip couldn't resolve or download {lock.name} (its output is above). If it says a file "
+                          f"doesn't match its hash, and the lock is right, delete pip's cache, {cache}, "
+                          "and build again") from e
     installed = scratch / "installed.json"
-    subprocess.run([str(py), *_PIP, "install", *_QUIET_PIP, "--no-warn-script-location", "--no-compile",
-                    "--no-index", "--find-links", str(wheels), "--only-binary=:all:", "--require-hashes",
-                    "--no-deps", "--report", str(installed), "-r", str(lock)], check=True, env=env)
+    subprocess.run([str(py), *_PIP, "install", *_QUIET_PIP, "--no-cache-dir", "--no-warn-script-location",
+                    "--no-compile", "--no-index", "--find-links", str(wheels), "--only-binary=:all:",
+                    "--require-hashes", "--no-deps", "--report", str(installed), "-r", str(lock)],
+                   check=True, env=env)
     check_same_files(plan, installed)
+    record_cached_wheels(plan, cache)
 
 
 def stage_python(pins: dict[str, Pin], contents: Path, reports: Path | None = None) -> Path:
@@ -2882,16 +3032,16 @@ def graft_source_tar(dest: Path, prefix: str, repo: Path = REPO, commit: str | N
     git("archive", "--format=tar", f"--prefix={prefix}", "-o", str(dest), commit, "--", ".",
         *(f":(exclude){p}" for p in SOURCE_EXCLUDES))
     tree, files = archived_tree(repo, commit)
-    check_archived_tree(files, dest, prefix)
+    check_archived_tree(files, dest, prefix, git("rev-parse", "--show-object-format").strip())
     return tree, int(when)
 
 
-def archived_tree(repo: Path, commit: str) -> tuple[str, set[str]]:
-    """The git tree of `commit` without SOURCE_EXCLUDES, and its files: the
-    tree a public export of the commit, made with the same exclusions,
-    commits, so `git rev-parse HEAD^{tree}` there gives the same hash.
-    Written into a throwaway index and object folder: nothing is added to
-    `repo`."""
+def archived_tree(repo: Path, commit: str) -> tuple[str, dict[str, tuple[str, str]]]:
+    """The git tree of `commit` without SOURCE_EXCLUDES, and its files, each
+    path -> (mode, object id): the tree a public export of the commit, made
+    with the same exclusions, commits, so `git rev-parse HEAD^{tree}` there
+    gives the same hash. Written into a throwaway index and object folder:
+    nothing is added to `repo`."""
     common = subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
                             check=True, capture_output=True, text=True).stdout.strip()
     with tempfile.TemporaryDirectory(prefix="graft-tree-") as tmp:
@@ -2905,26 +3055,54 @@ def archived_tree(repo: Path, commit: str) -> tuple[str, set[str]]:
         git("read-tree", commit)
         git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", *SOURCE_EXCLUDES)
         tree = git("write-tree").strip()
-        files = {line.split("\t", 1)[1] for line in git("ls-tree", "-r", "-z", "--full-tree", tree).split("\0")
-                 if "\t" in line}
+        files = {}
+        for line in git("ls-tree", "-r", "-z", "--full-tree", tree).split("\0"):
+            if "\t" in line:
+                meta, path = line.split("\t", 1)
+                mode, _, oid = meta.split()
+                files[path] = (mode, oid)
     return tree, files
 
 
-def check_archived_tree(files: set[str], tar: Path, prefix: str) -> None:
-    """The archive holds exactly the tree's files, by name: a .gitattributes
-    export-ignore, which drops a file, makes them differ, and is refused.
+def git_blob_id(data: bytes, object_format: str = "sha1") -> str:
+    """The id git gives a blob holding `data`, in the repository's object
+    format (sha1, or sha256)."""
+    return hashlib.new(object_format, b"blob %d\0" % len(data) + data).hexdigest()
 
-    Names only, not contents. An export-subst, which rewrites a file's
-    contents (git's Format placeholders, which can expand to the commit),
-    keeps every name and passes this check. None is set today (there is no
-    .gitattributes, and no placeholder in the tree), and keeping it so is
-    what keeps the archive's contents the tree SOURCES.md names (the delta
-    audit's d14-bundle-4)."""
+
+def check_archived_tree(files: dict[str, tuple[str, str]], tar: Path, prefix: str, object_format: str = "sha1") -> None:
+    """The archive holds exactly the tree's files (`archived_tree`), each
+    with the tree's contents and mode, so it is the tree SOURCES.md names.
+
+    By name: an export-ignore, which drops a file, makes them differ. By
+    contents: an export-subst, which rewrites a file's git Format
+    placeholders and can expand one to the private commit, keeps every name
+    and used to pass (the delta audit's d14-bundle-4). git archive applies
+    it from a committed .gitattributes and from the checkout's own
+    .git/info/attributes, which nothing reviews; a smudge filter or an
+    end-of-line conversion would differ the same way. Each regular file's
+    bytes are hashed as a git blob, each symlink's target too, and compared
+    with the tree's object ids; the executable bit with its mode."""
+    archived: dict[str, tuple[str, str]] = {}
     with tarfile.open(tar) as tf:
-        archived = {m.name.removeprefix(prefix) for m in tf.getmembers() if not m.isdir()}
-    if archived != files:
+        for m in tf.getmembers():
+            if m.isdir():
+                continue
+            if m.issym():
+                got = ("120000", git_blob_id(m.linkname.encode(), object_format))
+            elif m.isfile():
+                got = ("100755" if m.mode & 0o111 else "100644", git_blob_id(tf.extractfile(m).read(), object_format))
+            else:
+                got = ("not a file", "")
+            archived[m.name.removeprefix(prefix)] = got
+    if archived.keys() != files.keys():
         raise BundleError(f"git archive wrote other files than the tree holds (an export-ignore?): "
-                          f"{sorted(archived ^ files)[:10]}")
+                          f"{sorted(archived.keys() ^ files.keys())[:10]}")
+    changed = sorted(path for path, entry in files.items() if archived[path] != entry)
+    if changed:
+        raise BundleError(f"git archive wrote {len(changed)} file(s) whose contents or mode aren't the tree's (an "
+                          "export-subst, in .gitattributes or .git/info/attributes, can put the private commit "
+                          f"in them; or a filter, or an end-of-line conversion): {changed[:10]}")
 
 
 def lock_hashes(lock: Path) -> dict[str, tuple[str, set[str]]]:
@@ -3216,10 +3394,110 @@ def _anonymous(info: tarfile.TarInfo, mtime: int) -> tarfile.TarInfo:
     return info
 
 
+#: An SPDX license expression's operators and parentheses, which split it
+#: into its licenses. Cargo's old "MIT/Apache-2.0" is an OR. A word only
+#: counts as an operator on its own: GPL-3.0-or-later is one license.
+_SPDX_TOKEN = re.compile(r"\s*(\(|\)|/|(?<![\w.+-])(?:AND|OR|WITH)(?![\w.+-]))\s*", re.IGNORECASE)
+
+#: A parsed expression: one license (its id, or the free text a license's
+#: place holds), or ("and" | "or", the parts).
+Licence = str | tuple[str, list["Licence"]]
+
+
+def licence_expression(licence: str) -> Licence | None:
+    """`licence` read clause by clause, or None when it isn't an expression
+    (an empty part, a parenthesis left open). WITH binds tightest and
+    AND before OR, as SPDX has it. Cargo's "/" binds tighter than AND here:
+    "A/B AND C" is read as "(A OR B) AND C", which never makes C optional.
+    An exception after WITH is dropped: it grants more, never asks for more.
+    Free text with no operator ("GNU General Public License v3") stays one
+    license, so `is_copyleft` sees it whole."""
+    parts = _SPDX_TOKEN.split(licence)
+    tokens = [(p.upper() if p.isalpha() else p) if i % 2 else p.strip() for i, p in enumerate(parts)]
+    tokens = [t for i, t in enumerate(tokens) if i % 2 or t]
+    at = 0
+
+    def peek() -> str | None:
+        return tokens[at] if at < len(tokens) else None
+
+    def take() -> str:
+        nonlocal at
+        if at >= len(tokens):
+            raise ValueError("the expression ends early")
+        at += 1
+        return tokens[at - 1]
+
+    def operator(token: str | None) -> bool:
+        return token in ("(", ")", "/", "AND", "OR", "WITH")
+
+    def joined(kind: str, parts: list[Licence]) -> Licence:
+        return parts[0] if len(parts) == 1 else (kind, parts)
+
+    def atom() -> Licence:
+        token = take()
+        if token == "(":
+            inner = either()
+            if take() != ")":
+                raise ValueError("a parenthesis left open")
+            return inner
+        if operator(token):
+            raise ValueError(f"{token} where a license goes")
+        return token
+
+    def with_exception() -> Licence:
+        lic = atom()
+        if peek() == "WITH":
+            take()
+            if operator(take()):
+                raise ValueError("WITH without an exception")
+        return lic
+
+    def chain(kind: str, op: str, part: Callable[[], Licence]) -> Licence:
+        parts = [part()]
+        while peek() == op:
+            take()
+            parts.append(part())
+        return joined(kind, parts)
+
+    def slashed() -> Licence:
+        return chain("or", "/", with_exception)
+
+    def both() -> Licence:
+        return chain("and", "AND", slashed)
+
+    def either() -> Licence:
+        return chain("or", "OR", both)
+
+    try:
+        tree = either()
+        if at != len(tokens):
+            raise ValueError(f"{tokens[at]} out of place")
+    except ValueError:
+        return None
+    return tree
+
+
+def licence_offers(tree: Licence, ok: Callable[[str], bool]) -> bool:
+    """Whether the expression `tree` can be met with only licenses that are
+    `ok`: an OR by any of its parts, an AND by all of them."""
+    if isinstance(tree, str):
+        return ok(tree)
+    kind, parts = tree
+    return (any if kind == "or" else all)(licence_offers(p, ok) for p in parts)
+
+
 def copyleft_only(licence: str) -> bool:
-    """A crate's license that offers no permissive choice: copyleft, with no
-    OR (Cargo's old "MIT/Apache-2.0" spelling is an OR too)."""
-    return is_copyleft(licence) and not re.search(r"\bOR\b|/", licence)
+    """A crate's license that offers no permissive choice: an expression
+    that can't be met without a copyleft license, read clause by clause, so
+    "(MIT OR Apache-2.0) AND MPL-2.0" is copyleft-only and "MPL-2.0 OR MIT"
+    isn't. An OR anywhere used to count as a choice, which let a copyleft
+    license ANDed beside one through (the delta audit's d14-bundle-3). One
+    that doesn't parse, and names a copyleft license, is copyleft-only: its
+    source is then archived, or the stage refuses it."""
+    if not is_copyleft(licence):
+        return False
+    tree = licence_expression(licence)
+    return tree is None or not licence_offers(tree, lambda lic: not is_copyleft(lic))
 
 
 def core_crate_sources(lock: Path = IPATOOL_CORE_CRATES) -> list[tuple[str, str, str]]:
@@ -3369,6 +3647,10 @@ APPROX_MB = {"go": 65, "openssl": 53, "python": 25, "cyan": 9, "ipatool": 6, "cc
 #: source distributions came to 96 MB, 369 crates to 54 MB).
 GO_MODULES_MB = {"ipatool": 100, "unfairplay": 1}
 SDIST_MB, CRATE_MB = 1.0, 0.15
+#: An average locked wheel, for one pip's cache doesn't hold: the two locks'
+#: 105 wheels came to about 100 MB for 2.0.1, a few large (cryptography,
+#: pydantic-core) and most small.
+WHEEL_MB = 1.0
 
 
 @dataclass(frozen=True)
@@ -3397,18 +3679,32 @@ def _go_build_done(tool: str, pins: dict[str, Pin], work: Path) -> bool:
         return False
 
 
+def uncached_wheels(locks: tuple[Path, ...], cache: Path | None = None) -> list[str]:
+    """`name version` of each package the `locks` pin with no wheel in pip's
+    cache: none the record (`cached_wheels`) lists, with its body still
+    there, has a SHA-256 the lock allows for it."""
+    have = set(cached_wheels(pip_cache(cache)))
+    wanted: dict[tuple[str, str], set[str]] = {}
+    for lock in locks:
+        for name, (version, hashes) in lock_hashes(lock).items():
+            wanted.setdefault((name, version), set()).update(hashes)
+    return [f"{n} {v}" for (n, v), hashes in sorted(wanted.items()) if not hashes & have]
+
+
 def download_plan(pins: dict[str, Pin], cache: Path | None = None, work: Path | None = None,
-                  lock: Path = RUNTIME_LOCK, crates: Path = IPATOOL_CORE_CRATES) -> list[Download]:
+                  lock: Path = RUNTIME_LOCK, crates: Path = IPATOOL_CORE_CRATES,
+                  build_lock: Path = BUILD_LOCK) -> list[Download]:
     """What a release would still download, worked out offline from what
     `cache` (CACHE) and `work` (WORK) hold: each pinned file not cached (or
     cached with another hash); each Go tool's modules, unless its build is
     cached or an earlier build of the same source recorded them all in the
     module cache; the source archive's source distributions (one per package
     in the runtime lock, matched by name and version) and the crates
-    ipatool's 1Password SDK core pins. And the Python wheels, which every
-    stage downloads again (pip runs with --no-cache-dir). Not counted: small
-    lookups (PyPI's JSON, the Swift packages Xcode resolves, UnfairPlay's
-    tag) and the crates named only in a wheel's SBOM, known after staging."""
+    ipatool's 1Password SDK core pins; and the wheels of the build and
+    runtime locks that pip's cache doesn't hold (`uncached_wheels`). Not
+    counted: small lookups (PyPI's JSON and index pages, the Swift packages
+    Xcode resolves, UnfairPlay's tag) and the crates named only in a wheel's
+    SBOM, known after staging."""
     cache, work = cache or CACHE, work or WORK
     plan = []
     for name, pin in pins.items():
@@ -3427,7 +3723,10 @@ def download_plan(pins: dict[str, Pin], cache: Path | None = None, work: Path | 
     missing = sorted(f"{c} {v}" for c, v in pinned_crates(crates) if not (cache / "crates" / f"{c}-{v}.crate").is_file())
     if missing:
         plan.append(Download(f"{len(missing)} Rust crate(s) for their licenses", len(missing) * CRATE_MB))
-    plan.append(Download("the Python wheels the app bundles (every build downloads them again)", None, kept=False))
+    wheels = uncached_wheels((build_lock, lock), cache)
+    if wheels:
+        plan.append(Download(f"{len(wheels)} Python wheel(s) the app bundles: " + ", ".join(wheels[:5])
+                             + (", ..." if len(wheels) > 5 else ""), len(wheels) * WHEEL_MB))
     return plan
 
 
@@ -3456,7 +3755,8 @@ def check_hotspot(pins: dict[str, Pin], *, interactive: bool | None = None,
     still to download, it says what and roughly how much, then asks; with
     GRAFT_ALLOW_HOTSPOT=1 it goes on, and with no terminal to ask on it
     stops. On any other network, or with everything cached but what every
-    build fetches anyway, it goes on, saying so on a hotspot."""
+    build fetches anyway (`Download.kept`), it goes on, saying so on a
+    hotspot. The wheels are cached too now (`pip_cache`), so they count."""
     route = default_route()
     if route is None or route[0] != HOTSPOT_GATEWAY:
         return True
@@ -3465,14 +3765,14 @@ def check_hotspot(pins: dict[str, Pin], *, interactive: bool | None = None,
     big = [d for d in plan if d.kept]
     if not big:
         every = "; ".join(d.what for d in plan)
-        print(f"note: this Mac is on a phone's hotspot ({on}); everything is cached but {every}", file=sys.stderr)
+        print(f"note: this Mac is on a phone's hotspot ({on}); everything is cached"
+              + (f" but {every}" if every else ""), file=sys.stderr)
         return True
     known = sum(d.mb for d in big if d.mb is not None)
     unknown = sum(d.mb is None for d in big)
     lines = [f"warning: this Mac is on a phone's hotspot ({on}), and this release still has to download:",
              *(f"  {_mb(d.mb)}  {d.what}" for d in plan),
-             f"  about {known:.0f} MB in all" + (f", plus {unknown} of a size not known" if unknown else "")
-             + ", plus the wheels.",
+             f"  about {known:.0f} MB in all" + (f", plus {unknown} of a size not known" if unknown else "") + ".",
              f"  What it downloads stays in {CACHE} for the next release."]
     print("\n".join(lines), file=sys.stderr)
     if os.environ.get(ALLOW_HOTSPOT_ENV) == "1":

@@ -85,9 +85,9 @@ final class AppStoreClaimTests: XCTestCase {
         XCTAssertEqual(runs.filter { !$0.contains("--appstore-check") }, [
             "--json --appstore-get --app example",
             "--json --appstore-status",
-            "--json --appstore-claim --app example",
+            "--json --appstore-claim --app example --expect-email a@example.invalid",
             "--json --appstore-get --app example",
-        ], "status is read again before the confirmation, so before the claim")
+        ], "status is read again before the confirmation, so before the claim, which names its Apple ID")
         XCTAssertNil(store.licenseNeeded["example"])
         XCTAssertNil(store.errors["example"])
     }
@@ -110,7 +110,7 @@ final class AppStoreClaimTests: XCTestCase {
         XCTAssertEqual(try argv(dir).filter { !$0.contains("--appstore-check") }, [
             "--json --appstore-get --app example --again",
             "--json --appstore-status",
-            "--json --appstore-claim --app example",
+            "--json --appstore-claim --app example --expect-email a@example.invalid",
             "--json --appstore-get --app example --again",
         ])
     }
@@ -383,6 +383,7 @@ final class AppStoreClaimTests: XCTestCase {
         who=$(/bin/cat '\(dir.path)/who')
         case "$*" in
           *--appstore-status*)
+            if [ -e '\(dir.path)/status-slow' ]; then /bin/sleep 2; fi
             if [ "$who" = signed-out ]; then
               printf '%s\\n' '{"type":"appstore-status","ipatool":{"path":"/i","present":true,"version":"2.8.0","signed_in":false,"warning":null,"legacy_signin":false,"source":"bundled"},"unfairplay":{"path":"/u","present":true,"version":"v0.4.0","enrolled":true,"model_dir":"/m"},"setup_commands":[]}'
             elif [ "$who" = no-answer ]; then
@@ -402,14 +403,27 @@ final class AppStoreClaimTests: XCTestCase {
             echo "error: this Apple ID doesn't own com.example.app yet" >&2
             exit 20 ;;
           *--appstore-claim*)
+            # As the CLI does: `--expect-email` naming anyone but who is
+            # signed in now buys nothing.
+            expected=""; previous=""
+            for arg in "$@"; do
+              [ "$previous" = --expect-email ] && expected=$arg
+              previous=$arg
+            done
+            if [ -n "$expected" ] && [ "$expected" != "$who" ]; then
+              printf '{"type":"appstore-refused","app":"example","reason":"account-changed","email":"%s"}\\n' "$who"
+              echo "error: ipatool is now signed in to the App Store as $who, not $expected" >&2
+              exit 20
+            fi
             printf '%s\\n' '{"type":"appstore-claimed","app":"example","bundle_id":"com.example.app","already_owned":false}' ;;
-          *--appstore-logout*)
-            echo signed-out > '\(dir.path)/who'
-            printf '%s\\n' '{"type":"appstore-logout","signed_out":true}' ;;
           *--appstore-login*)
+            if [ -e '\(dir.path)/login-hangs' ]; then exec /bin/sleep 30; fi
             IFS= read -r id; IFS= read -r pw
             printf '%s\\n' "$id" > '\(dir.path)/who'
             printf '{"type":"appstore-login","state":"signed-in","email":"%s"}\\n' "$id" ;;
+          *--appstore-logout*)
+            echo signed-out > '\(dir.path)/who'
+            printf '%s\\n' '{"type":"appstore-logout","signed_out":true}' ;;
         esac
         """.write(to: file, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
@@ -760,6 +774,115 @@ final class AppStoreClaimTests: XCTestCase {
         XCTAssertEqual(unnamed.errors["example"], AppStoreStore.ClaimRefusal.switched(to: "b@example.invalid").message)
         XCTAssertNil(unnamed.licenseNeeded["example"], "its license answer was about the other one")
         XCTAssertEqual(try claims(dir) + claims(dir2), 0)
+    }
+
+    // MARK: The Apple ID changed while the confirmation was open (try14 delta audit, D14-APP-1 and F5)
+
+    /// The dialog named a@; with it still open, ipatool was signed in as b@
+    /// in Terminal, and nothing in the app read status. The claim names a@
+    /// (`--expect-email`), the CLI refuses it, nothing is bought, and the
+    /// banner says the Apple ID changed, from a status read again.
+    @MainActor
+    func test_a_sign_in_changed_while_the_confirmation_is_open_buys_nothing() async throws {
+        let (runner, dir) = try accountCLI()
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        await store.loadStatus()
+        await refusedFree(store)
+        await store.checkBeforeClaim(app: "example")
+        let asked = try XCTUnwrap(store.claimConfirmations["example"])
+        XCTAssertEqual(asked.email, "a@example.invalid")
+
+        try who("b@example.invalid", in: dir)
+        XCTAssertTrue(store.startClaim(app: "example", confirmed: asked), "premise: the app's status is still a@")
+        await eventually { !store.isBusy("example") }
+
+        let claim = try XCTUnwrap(try argv(dir).first { $0.contains("--appstore-claim") })
+        XCTAssertEqual(claim, "--json --appstore-claim --app example --expect-email a@example.invalid")
+        XCTAssertEqual(store.errors["example"], AppStoreStore.ClaimRefusal.switched(to: "b@example.invalid").message)
+        XCTAssertNil(store.licenseNeeded["example"], "its license answer was about a@")
+        XCTAssertEqual(AppStoreSourceRow.primaryAction(license: store.licenseNeeded["example"]), .getLatest)
+        XCTAssertEqual(store.status?.ipatool.email, "b@example.invalid", "status read again")
+        XCTAssertEqual(try argv(dir).filter { $0.contains("--appstore-get") }.count, 1, "and no get after it")
+    }
+
+    /// A confirmation that named nobody (signed in, no email) has nothing to
+    /// expect: the claim goes as before.
+    @MainActor
+    func test_a_confirmation_that_named_nobody_expects_no_apple_id() async throws {
+        let (runner, dir) = try accountCLI()
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        try who("no-email", in: dir)
+        await refusedFree(store)
+        await tryClaim(store, true)
+        await eventually { (try? self.claims(dir)) == 1 }
+        XCTAssertEqual(try argv(dir).first { $0.contains("--appstore-claim") }, "--json --appstore-claim --app example")
+        store.stopGet(app: "example")
+        await eventually { !store.isBusy("example") }
+    }
+
+    /// Get (free) pressed, then another app picked while status was read:
+    /// the pane gives the check up (`cancelClaim`, from AppDetailView's
+    /// `onChange(of: app.id)`), so no dialog waits to open by itself when
+    /// the user comes back.
+    @MainActor
+    func test_a_check_given_up_on_asks_nothing_when_it_ends() async throws {
+        let (runner, dir) = try accountCLI()
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        await refusedFree(store)
+        // A status read slow enough to leave the app during.
+        let slow = dir.appending(path: "status-slow")
+        try Data().write(to: slow)
+        let check = Task { await store.checkBeforeClaim(app: "example") }
+        await eventually { store.checkingClaim.contains("example") }
+        store.cancelClaim(app: "example")
+        XCTAssertFalse(store.checkingClaim.contains("example"), "the row is back on Get (free) at once")
+        await check.value
+        XCTAssertNil(store.claimConfirmations["example"], "nothing is asked")
+        XCTAssertNil(store.errors["example"].flatMap { $0.hasPrefix("Not claimed") ? $0 : nil })
+        XCTAssertEqual(store.licenseNeeded["example"]?.offersClaim, true, "still on offer")
+        XCTAssertEqual(try claims(dir), 0)
+
+        // Pressed again on coming back, it asks as before.
+        try FileManager.default.removeItem(at: slow)
+        await store.checkBeforeClaim(app: "example")
+        XCTAssertEqual(store.claimConfirmations["example"]?.email, "a@example.invalid")
+    }
+
+    /// Confirmed, but a sign-in started in Settings meanwhile: not claimed,
+    /// and the banner says why rather than nothing happening.
+    @MainActor
+    func test_a_confirmed_claim_that_must_wait_says_why() async throws {
+        let (runner, dir) = try accountCLI()
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        await refusedFree(store)
+        await store.checkBeforeClaim(app: "example")
+        let asked = try XCTUnwrap(store.claimConfirmations["example"])
+        try Data().write(to: dir.appending(path: "login-hangs"))
+        var password = Array("example-password".utf8)
+        XCTAssertTrue(store.account.startSignIn(
+            email: "a@example.invalid", password: &password, expectedIpatool: "/i"
+        ))
+        XCTAssertFalse(store.startClaim(app: "example", confirmed: asked))
+        XCTAssertEqual(store.errors["example"], AppStoreStore.accountBusyReason)
+        XCTAssertEqual(try claims(dir), 0)
+        store.account.cancelSignIn()
+        await eventually { !store.account.isSigningIn }
+    }
+
+    @MainActor
+    func test_the_account_changed_refusal_is_read_off_a_failed_claim() throws {
+        let events: [BuildEvent] = [
+            .appStoreRefused(AppStoreRefusalRecord(app: "example", reason: "account-changed", email: "b@example.invalid")),
+        ]
+        let found = try XCTUnwrap(CLIRunner.Refusal.appStoreClaim.error(events) as? ClaimAccountChanged)
+        XCTAssertEqual(found, ClaimAccountChanged(email: "b@example.invalid"))
+        XCTAssertEqual(found.localizedDescription, AppStoreStore.ClaimRefusal.switched(to: "b@example.invalid").message)
+        XCTAssertEqual(CLIContract.AppStoreRefusal.accountChanged, "account-changed")
+        XCTAssertEqual(
+            AppStoreStore.claimArgs(app: "example", expectEmail: "a@example.invalid"),
+            ["--json", "--appstore-claim", "--app", "example", "--expect-email", "a@example.invalid"]
+        )
+        XCTAssertEqual(AppStoreStore.claimArgs(app: "example"), ["--json", "--appstore-claim", "--app", "example"])
     }
 
     func test_the_confirmation_names_the_app_the_apple_id_and_that_it_is_permanent_and_free() {

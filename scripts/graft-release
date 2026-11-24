@@ -48,10 +48,19 @@
 # GRAFT_SKIP_DENYLIST=1, and then says on every scan, and at the end, that
 # nothing was checked.
 #
+# Nor may it carry a UDID of the owner's devices: the same three are
+# scanned for every UDID the provisioning profiles Graft's config names
+# provision (`denylist.py devices`; GRAFT_RELEASE_PROFILES names profiles
+# instead, and set empty names none). It prints where one was found, never
+# the UDID. With no profile configured it says so, skips those scans, and
+# says again at the end that they didn't run.
+#
 # Downloads are cached per user in ~/Library/Caches/graft-release (or
 # GRAFT_BUNDLE_CACHE), shared by every checkout and worktree; Go's modules
-# too. On a phone's hotspot it lists what isn't cached yet and asks before
-# downloading it; GRAFT_ALLOW_HOTSPOT=1 goes ahead without asking.
+# too, and the locked Python wheels, in pip's own cache there (pip still
+# checks each against the lock's hashes). On a phone's hotspot it lists what
+# isn't cached yet and asks before downloading it; GRAFT_ALLOW_HOTSPOT=1
+# goes ahead without asking.
 #
 # Unlike scripts/graft-install (a developer build that installs into
 # /Applications and records this checkout so the app can rebuild itself), a
@@ -95,6 +104,17 @@ git -C "$REPO_ROOT" archive --format=tar "$HEAD_AT_START" | tar -x -C "$EXPORT"
 echo "→ building commit $HEAD_AT_START, from an export of it"
 echo "→ scanning the tracked files a public export carries for deny-listed names…"
 "$PY" "$EXPORT/scripts/denylist.py" tracked "$REPO_ROOT" "$HEAD_AT_START"
+# The owner's devices, from the profiles Graft's config names: exit 3 is
+# "no profile configured", said, and the device scans are skipped.
+echo "→ scanning the tracked files for your devices' UDIDs…"
+DEVICE_SCAN=1
+"$PY" "$EXPORT/scripts/denylist.py" devices check || case $? in
+  3) DEVICE_SCAN=0 ;;
+  *) exit 1 ;;
+esac
+if [[ "$DEVICE_SCAN" == 1 ]]; then
+  "$PY" "$EXPORT/scripts/denylist.py" devices tracked "$REPO_ROOT" "$HEAD_AT_START"
+fi
 # The stage's builds are keyed by content hashes, so the checkout's build
 # cache serves the export. Its downloads need nothing set: they are cached
 # per user, outside every checkout (graft_bundle.default_download_cache), so
@@ -241,6 +261,11 @@ if ! "$PY" "$EXPORT/scripts/verify-bundle" "$APP"; then
   echo "error: verify-bundle failed, so the zip was removed; the app is left at $APP to look at" >&2
   exit 1
 fi
+if [[ "$DEVICE_SCAN" == 1 ]] && ! "$PY" "$EXPORT/scripts/denylist.py" devices app "$APP"; then
+  rm -f "$ZIP"
+  echo "error: the app holds a UDID of one of your devices, so the zip was removed" >&2
+  exit 1
+fi
 
 VERSION="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist")"
 SOURCES="$OUT_DIR/Graft-$VERSION-sources.tar.gz"
@@ -256,6 +281,11 @@ echo "→ scanning the source archive for deny-listed names…"
 if ! "$PY" "$EXPORT/scripts/denylist.py" sources "$SOURCES"; then
   rm -f "$ZIP"
   echo "error: the source archive names something on the private deny-list, so the zip was removed" >&2
+  exit 1
+fi
+if [[ "$DEVICE_SCAN" == 1 ]] && ! "$PY" "$EXPORT/scripts/denylist.py" devices sources "$SOURCES"; then
+  rm -f "$ZIP"
+  echo "error: the source archive holds a UDID of one of your devices, so the zip was removed" >&2
   exit 1
 fi
 
@@ -277,5 +307,10 @@ if [[ "${GRAFT_SKIP_DENYLIST:-}" == 1 ]]; then
   echo "  tweak, bundle id or owner names. Don't publish it until a release with the list passes."
 else
   echo "✓ no deny-listed name in the tracked files, the app or the source archive"
+fi
+if [[ "$DEVICE_SCAN" == 1 ]]; then
+  echo "✓ no UDID of your devices in the tracked files, the app or the source archive"
+else
+  echo "⚠ no device UDID scan: no provisioning profile is configured (GRAFT_RELEASE_PROFILES can name them)"
 fi
 echo "  $((SECONDS / 60))m $((SECONDS % 60))s"

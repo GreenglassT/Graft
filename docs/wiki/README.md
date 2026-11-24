@@ -27,8 +27,8 @@ tweaks, and sends it to your iPhone or iPad. It works with a free Apple ID.
 - [Configuration & Files](configuration.md): Graft stores its settings and each app's options in `config.yaml`, and its other files in folders of its own.
 - [What Graft Downloads](downloads.md): when Graft goes online and what it downloads, including the one-time downloads on the first App Store action.
 - [What Graft Connects To](../network.md): every host Graft and its tools contact, why, when, and what is sent.
-- [Updating Graft](updating.md): Graft tells you when a newer version is out, and you install it by hand from GitHub Releases.
+- [Updating Graft](updating.md): Graft downloads and checks a newer version by itself, and installs it when you restart or quit.
 - [Changelog](../../CHANGELOG.md): what changed in each release of Graft, newest first.
 - [Troubleshooting](troubleshooting.md): common symptoms and error messages, and their likely cause.
-- [Removing Graft](removing.md): what to delete to remove Graft, and what it made outside the app.
+- [Removing Graft](removing.md): what Graft keeps outside the app, and how to remove it from the Help menu or in Terminal.
 - [Building from Source](building-from-source.md): you can build Graft.app from the repository with xcodegen and Xcode, and run its tests there.

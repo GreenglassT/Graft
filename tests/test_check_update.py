@@ -138,13 +138,46 @@ def test_the_v_prefix_is_optional_and_not_shown(github: FakeGitHub, tag: str, sh
     assert _check()["latest"] == shown
 
 
-def test_a_release_page_off_the_project_falls_back_to_its_releases(github: FakeGitHub) -> None:
-    """The app opens `url` in the browser, so it is only ever a page of this
-    project's releases."""
-    github.body = release(html_url="https://example.invalid/phish")
+@pytest.mark.parametrize("html_url", [
+    "https://example.invalid/phish",
+    None,
+    201,
+    "",
+    # Under the releases, but not this release's page: `..` climbs out of
+    # them in a browser, whether spelled out or percent-encoded.
+    "https://github.com/GreenglassT/Graft/releases/../../../example/phish",
+    "https://github.com/GreenglassT/Graft/releases/tag/v2.0.1/../../../../../example/phish",
+    "https://github.com/GreenglassT/Graft/releases/%2e%2e/%2e%2e/%2e%2e/example/phish",
+    "https://github.com/GreenglassT/Graft/releases/tag/..%2f..%2f..%2fexample",
+    "https://github.com/GreenglassT/Graft/releases/tag/v2.0.1?next=https://example.invalid",
+    "https://github.com/GreenglassT/Graft/releases/tag/v2.0.1#x",
+    "https://github.com/GreenglassT/Graft/releases/tag/v9.9.9",
+    "https://github.com/GreenglassT/Graft/releases/latest/../tag/v2.0.1",
+    # Another host, however close.
+    "https://github.com.example.invalid/GreenglassT/Graft/releases/tag/v2.0.1",
+    "https://github.com@example.invalid/GreenglassT/Graft/releases/tag/v2.0.1",
+    "https://github.com:8443/GreenglassT/Graft/releases/tag/v2.0.1",
+    "https://github.com\\@example.invalid/GreenglassT/Graft/releases/tag/v2.0.1",
+    "http://github.com/GreenglassT/Graft/releases/tag/v2.0.1",
+    " https://github.com/GreenglassT/Graft/releases/tag/v2.0.1",
+])
+def test_anything_but_this_releases_own_page_falls_back_to_the_releases(
+    github: FakeGitHub, html_url: Any
+) -> None:
+    """Terminal prints `url` and the update hints name it, so it is only ever
+    a page of this project's releases. (Graft.app builds its own link from
+    `latest`, and never opens this one.)"""
+    github.body = release(html_url=html_url)
     assert _check()["url"] == "https://github.com/GreenglassT/Graft/releases/latest"
-    github.body = release(html_url=None)
-    assert _check()["url"] == "https://github.com/GreenglassT/Graft/releases/latest"
+
+
+@pytest.mark.parametrize(("tag", "page"), [
+    ("v2.0.1", PAGE + "v2.0.1"),
+    ("2.0.1", PAGE + "2.0.1"),
+])
+def test_this_releases_own_page_is_kept(github: FakeGitHub, tag: str, page: str) -> None:
+    github.body = release(tag, html_url=page)
+    assert _check()["url"] == page
 
 
 # --- How it fails: quietly, with a reason -----------------------------------
@@ -253,6 +286,26 @@ def test_the_system_proxy_is_still_used(github: FakeGitHub, monkeypatch: pytest.
     _check()
     (_, kwargs), = github.sent
     assert kwargs["proxies"].get("https") == "http://proxy.example.invalid:3128"
+
+
+def test_the_check_never_asks_this_macs_own_proxy_settings(
+    github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """conftest's `_no_real_proxy_settings`. With no proxy in the
+    environment, urllib asks SystemConfiguration, which leaves native threads
+    running in the test process: every later fork in the run then warned
+    "multi-threaded process". These tests were the first to reach it."""
+    import urllib.request
+
+    asked: list[str] = []
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.setattr(urllib.request, "_get_proxies", lambda: asked.append("proxies") or {}, raising=False)
+    monkeypatch.setattr(
+        urllib.request, "_get_proxy_settings", lambda: asked.append("bypass") or {}, raising=False
+    )
+    assert _check()["latest"] == "2.0.1"
+    assert asked == []
 
 
 # --- The verb ---------------------------------------------------------------

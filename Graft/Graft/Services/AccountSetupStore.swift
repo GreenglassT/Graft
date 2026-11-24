@@ -162,7 +162,10 @@ final class AccountSetupStore {
         let args = Self.paidArguments(
             p12: form.p12Path, profile: form.profilePath, dryRun: true, replace: replacing
         )
-        let result = await run(args, stdin: password, doing: "Check the signing files")
+        // Its stop is Cancel's: Quit Anyway stops a review as Cancel does.
+        let result = await run(args, stdin: password, doing: "Check the signing files") { [weak self] in
+            self?.stopReview()
+        }
         reviewTask = nil
         // Canceled, or reset meanwhile: the form has already moved on.
         guard generation == started, !Task.isCancelled else { return }
@@ -236,10 +239,16 @@ final class AccountSetupStore {
 
     /// One `--init` run: its steps into `progress`, its result back, or nil
     /// with the CLI's reason in `error`.
-    private func run(_ args: [String], stdin: String?, doing: String) async -> InitResultRecord? {
+    ///
+    /// `stop` is how Quit Anyway stops it: a review's Cancel. Nil for a run
+    /// that writes, which has no Stop (`cancel`): Quit Anyway waits for it
+    /// to finish, and the quit question says Graft quits when it does
+    /// (`QuitQuestion.waitingDetail`).
+    private func run(
+        _ args: [String], stdin: String?, doing: String, stop: (@MainActor () -> Void)? = nil
+    ) async -> InitResultRecord? {
         isRunning = true
-        // No stop: a write has no Stop (`cancel`), so Quit Anyway only waits.
-        let ticket = hold.begin(TerminationHold.settingUp, stop: nil)
+        let ticket = hold.begin(TerminationHold.settingUp, stop: stop)
         defer {
             hold.end(ticket)
             isRunning = false

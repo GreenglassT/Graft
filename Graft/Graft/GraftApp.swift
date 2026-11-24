@@ -32,10 +32,15 @@ struct GraftApp: App {
     /// use this, so nothing runs it, and its runner is built without `forApp`,
     /// whose `ShellEnvironment.shared` would start asking the login shell.
     @State private var store: ConfigStore
-    /// Whether a newer Graft is out: the window's banner and daily check, and
-    /// Help › Check for Updates…. Here rather than in `ContentView` because
-    /// the menu needs it. The same runner as `store`'s.
+    /// Whether a newer Graft is out, and updating to it: the window's banner
+    /// and daily check, Help › Check for Updates…, and the install on the
+    /// way out (`GraftAppDelegate`). Here rather than in `ContentView`
+    /// because the menu and the delegate need it. The same runner as
+    /// `store`'s.
     @State private var updates: UpdateStore
+    /// Help › Remove Graft's Data…: its sheet, over the main window. Here
+    /// because the menu reaches it. The same runner as `store`'s.
+    @State private var removeData: RemoveDataStore
     /// Set Up Decryption's administrator prompt: in-process NSAppleScript,
     /// and osascript only when that machinery can't run at all.
     private let adminShell: PrivilegedShell = FallbackAdminShell(
@@ -58,7 +63,18 @@ struct GraftApp: App {
         _store = State(initialValue: ConfigStore(runner: runner, notify: { BuildNotifier.post($0) }))
         _updates = State(initialValue: UpdateStore(
             runner: runner, defaults: .standard, now: Date.init,
-            appVersion: AboutGraft.version(of: .main), open: { NSWorkspace.shared.open($0) }
+            appVersion: AboutGraft.version(of: .main), open: { NSWorkspace.shared.open($0) },
+            host: SelfUpdateHost.running()
+        ))
+        _removeData = State(initialValue: RemoveDataStore(
+            runner: runner, hold: .shared,
+            // The app's own preferences, which the CLI only lists. Never in a
+            // test host, which is this app under its real bundle id.
+            removeAppSettings: {
+                guard !AdminShell.insideTests, let domain = Bundle.main.bundleIdentifier else { return }
+                UserDefaults.standard.removePersistentDomain(forName: domain)
+            },
+            quit: { NSApp.terminate(nil) }
         ))
         // An Intel Mac gets `AppleSiliconGate`'s one screen and nothing else:
         // not even the login shell is asked. Nor does a test host.
@@ -94,6 +110,12 @@ struct GraftApp: App {
                                 NSWorkspace.shared.openApplication(at: $0, configuration: NSWorkspace.OpenConfiguration())
                             }
                         )
+                        // A quit installs a checked update on the way out
+                        // (`UpdateStore.handOver`). Here, not in the
+                        // delegate's init, which `NSApplicationDelegateAdaptor`
+                        // calls with no arguments; and not in a test host,
+                        // whose window is the placeholder above.
+                        .task { appDelegate.handOverQuits(to: updates) }
                         // What's New, once after an update. Not in a test
                         // host, which is this app under its real bundle id:
                         // it would record the test build's version in the
@@ -102,6 +124,12 @@ struct GraftApp: App {
                             defaults: AdminShell.insideTests ? nil : .standard,
                             version: AboutGraft.version(of: .main)
                         ))
+                        // Help › Remove Graft's Data…, over the setup
+                        // screen as over the panes: someone who gave up
+                        // during setup may want it most.
+                        .sheet(isPresented: $removeData.isPresented) {
+                            RemoveDataSheet(store: removeData)
+                        }
                     } else {
                         // Not an overlay: while a rebuild is running the app is
                         // about to be replaced and quit, so letting ContentView
@@ -187,6 +215,12 @@ struct GraftApp: App {
                     if let folder = BundledLicenses.installed { NSWorkspace.shared.open(folder) }
                 }
                 .disabled(BundledLicenses.installed == nil)
+                Divider()
+                // What Graft keeps outside Graft.app, before moving it to the
+                // Trash. Not on an Intel Mac, which runs no CLI, nor while a
+                // rebuild replaces the app.
+                Button(RemoveDataSheet.menuTitle) { removeData.open() }
+                    .disabled(!AppleSilicon.thisMac || rebuild.phase != .ready)
             }
         }
 
@@ -216,6 +250,32 @@ final class GraftAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         quitGuard.shouldTerminate()
+    }
+
+    /// What a quit does on the way out, once nothing is held: an update's
+    /// install (`QuitHandover`).
+    func handOverQuits(to handover: QuitHandover) {
+        quitGuard.handover = handover
+    }
+}
+
+extension SelfUpdateHost {
+    /// This app, when it may replace itself: a release build, on Apple
+    /// silicon, outside a test host, and not one `graft-install` built from
+    /// source (`SourceWatch.repoRoot`), which its own rebuild replaces. Nil
+    /// otherwise, and the banner links the release page instead.
+    static func running() -> SelfUpdateHost? {
+        #if DEBUG
+        return nil
+        #else
+        guard AppleSilicon.thisMac, !AdminShell.insideTests, SourceWatch.repoRoot == nil else { return nil }
+        return SelfUpdateHost(
+            appPath: Bundle.main.bundleURL.path,
+            pid: ProcessInfo.processInfo.processIdentifier,
+            hold: .shared,
+            terminate: { NSApp.terminate(nil) }
+        )
+        #endif
     }
 }
 

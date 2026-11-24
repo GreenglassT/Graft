@@ -3,7 +3,8 @@
 One GET to GitHub's latest-release API, which already leaves out drafts and
 prereleases. Graft.app runs it at most once a day while it is open (Settings
 turns that off), and when you choose Help › Check for Updates…. It downloads
-nothing and installs nothing.
+nothing and installs nothing: `app_update` does that, from the same answer
+(`latest_release_json`).
 
 It sends as little as a request can: a generic User-Agent, which GitHub's API
 requires, and nothing else that names the person, the Mac, an account or this
@@ -25,7 +26,9 @@ from typing import Any
 from .errors import GraftError
 
 LATEST_RELEASE_URL = "https://api.github.com/repos/GreenglassT/Graft/releases/latest"
-#: Every release's page starts with this; the app opens only such a page.
+#: Graft's releases. The events' `url` is this release's page under it, or
+#: `/latest` (`release_page`). Graft.app doesn't open that `url`: it builds
+#: its own link from `latest` (`UpdateStore.releasePage`).
 RELEASES_PAGE = "https://github.com/GreenglassT/Graft/releases"
 #: Generic on purpose: GitHub's API refuses a request without one.
 USER_AGENT = "Graft"
@@ -83,6 +86,13 @@ def is_newer(latest: str, current: str) -> bool:
 def latest_release() -> Release:
     """The latest published release, as GitHub's API names it. Raises
     `UpdateCheckError`."""
+    return release_from(latest_release_json())
+
+
+def latest_release_json() -> dict[str, Any]:
+    """GitHub's answer about the latest published release, whole: the
+    check reads its tag and page (`release_from`), and `app_update` its
+    `assets` too. Raises `UpdateCheckError`."""
     # Function-local, as in every module here that speaks HTTP
     # (tests/test_lazy_imports.py): `cli.py` imports this one at module scope.
     import requests
@@ -111,7 +121,7 @@ def latest_release() -> Release:
             f"GitHub answered the update check with HTTP {resp.status_code}. Try again later.",
             reason=HTTP, status=resp.status_code,
         )
-    return _release(_json(resp))
+    return _json(resp)
 
 
 def _json(resp: Any) -> dict[str, Any]:
@@ -131,7 +141,9 @@ def _malformed() -> UpdateCheckError:
     )
 
 
-def _release(data: dict[str, Any]) -> Release:
+def release_from(data: dict[str, Any]) -> Release:
+    """The release `data` names, or `UpdateCheckError` (malformed) when it
+    names no published version."""
     # The endpoint never answers with either; one that did isn't an offer.
     if data.get("draft") or data.get("prerelease"):
         raise _malformed()
@@ -139,10 +151,25 @@ def _release(data: dict[str, Any]) -> Release:
     if parse_version(tag) is None:
         raise _malformed()
     assert isinstance(tag, str)
-    url = data.get("html_url")
-    if not (isinstance(url, str) and url.startswith(RELEASES_PAGE + "/")):
-        url = RELEASES_PAGE + "/latest"
-    return Release(version=tag.strip().lstrip("vV"), url=url)
+    return Release(version=tag.strip().lstrip("vV"), url=release_page(data.get("html_url"), tag.strip()))
+
+
+def release_page(url: object, tag: str) -> str:
+    """`url` when it is exactly `tag`'s page under `RELEASES_PAGE`, else the
+    releases' `/latest` page. Terminal prints it and the update hints name
+    it, so it is only ever a page of this project's releases.
+
+    Equal to the page, not just starting with `RELEASES_PAGE`: a prefix let
+    `…/releases/../../../elsewhere` through, which a browser resolves to
+    another page on github.com. And compared whole rather than parsed and
+    normalized: `%2e%2e`, a backslash, `user@host` or a stray port are each
+    read one way by a parser here and another by a browser, and an exact
+    match has nothing to read. `tag` has passed `parse_version` (ASCII digits
+    and dots, and a "v"), so the page needs no quoting."""
+    page = f"{RELEASES_PAGE}/tag/{tag}"
+    if isinstance(url, str) and url == page:
+        return url
+    return RELEASES_PAGE + "/latest"
 
 
 def event(

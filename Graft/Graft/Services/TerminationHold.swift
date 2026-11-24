@@ -42,12 +42,16 @@ extension ProcessInfo: TerminationControl {}
 /// of work to stop through the `stop` its `begin` named, which is that work's
 /// own Stop, so the CLI unwinds and cleans up as it does when the user
 /// presses Stop. It then waits up to `QuitGuard.stopGrace` for the hold to
-/// clear, and quits.
+/// clear, and quits. That grace outlasts `cliStopGrace`, after which the
+/// runner SIGKILLs a stopped CLI that is still running, and its children:
+/// Graft is still there to do it.
+///
+/// Work with no Stop (`begin`'s nil `stop`: an `--init` setup that writes,
+/// Remove Graft's Data) can't be stopped partway, so Quit Anyway waits for
+/// it to finish however long that takes, and the question says so.
 ///
 /// What it still doesn't stop: a Force Quit, a kill or a crash, which no app
-/// can answer. Work that hasn't ended within the grace is left to finish its
-/// cleanup without Graft. The `--init` setup has no Stop, so Quit Anyway only
-/// waits for it.
+/// can answer.
 final class TerminationHold: @unchecked Sendable {
     /// The app's one hold, on the real `ProcessInfo`. Reaches nothing past
     /// this process, so stores default to it; a test passes its own.
@@ -62,6 +66,7 @@ final class TerminationHold: @unchecked Sendable {
     static let liveContainer = "Graft is changing LiveContainer on a device"
     static let reinstalling = "Graft is re-installing a build on a device"
     static let decrypting = "Graft is decrypting an app from a device"
+    static let removingData = "Graft is removing its data"
 
     /// Each reason in the words the quit question uses: "Quit while Graft
     /// is …?" (`QuitQuestion`).
@@ -75,6 +80,7 @@ final class TerminationHold: @unchecked Sendable {
         liveContainer: "changing LiveContainer on a device",
         reinstalling: "re-installing a build on a device",
         decrypting: "decrypting an app from a device",
+        removingData: "removing its data",
     ]
 
     /// One `begin`, which `end` takes back.
@@ -135,6 +141,17 @@ final class TerminationHold: @unchecked Sendable {
         lock.withLock { !held.isEmpty }
     }
 
+    /// The reasons of what runs with no stop (`begin`'s nil `stop`), oldest
+    /// first: work Quit Anyway can only wait for.
+    var reasonsWithoutStop: [String] {
+        lock.withLock { held.filter { $0.stop == nil }.map(\.ticket.reason) }
+    }
+
+    /// Something with no stop is running.
+    var holdsWithoutStop: Bool {
+        lock.withLock { held.contains { $0.stop == nil } }
+    }
+
     /// Ask every piece of work that holds to stop, through the `stop` it gave
     /// `begin`. The stops run outside the lock: one may end its own hold
     /// before it returns.
@@ -177,16 +194,46 @@ struct QuitQuestion: Equatable {
         + "Keep Working cancels the quit, and any logout or restart, so it can finish. "
         + "If it finishes while this message is open, Graft quits then."
 
+    /// For work with no words of its own that can't be stopped.
+    static let unnamedWork = "what it's doing"
+
+    /// The detail when some of the work has no Stop (`waiting`, in
+    /// `TerminationHold.activities`' words): Quit Anyway can't stop it, so
+    /// Graft quits once it's done (`QuitGuard`). `others`: something else
+    /// runs too, which Quit Anyway does stop.
+    static func waitingDetail(_ waiting: String, others: Bool) -> String {
+        "Graft can't stop \(waiting) partway. With \(quitAnyway), Graft "
+            + (others ? "stops everything else, leaving it unfinished, and " : "")
+            + "will quit when \(others ? waiting : "it") finishes. "
+            + "\(keepWorking) cancels the quit, and any logout or restart."
+    }
+
     let title: String
     let detail: String
 
     /// The question for `reasons` (`TerminationHold.reasons`): each in
-    /// `TerminationHold.activities`' words, once, in order.
-    init(reasons: [String]) {
+    /// `TerminationHold.activities`' words, once, in order. `withoutStop` is
+    /// the reasons among them with no stop (`reasonsWithoutStop`): with any,
+    /// the detail says Graft waits for them.
+    init(reasons: [String], withoutStop: [String] = []) {
+        title = "Quit while Graft is \(Self.words(reasons) ?? Self.working)?"
+        guard !withoutStop.isEmpty else {
+            detail = Self.detail
+            return
+        }
+        // `withoutStop` is some of `reasons`: any more, and something runs
+        // that Quit Anyway does stop.
+        detail = Self.waitingDetail(
+            Self.words(withoutStop) ?? Self.unnamedWork, others: reasons.count > withoutStop.count
+        )
+    }
+
+    /// `reasons` in `TerminationHold.activities`' words, each once, in
+    /// order; nil when none has words.
+    private static func words(_ reasons: [String]) -> String? {
         var seen = Set<String>()
         let doing = reasons.compactMap { TerminationHold.activities[$0] }.filter { seen.insert($0).inserted }
-        title = "Quit while Graft is \(doing.isEmpty ? Self.working : Self.list(doing))?"
-        detail = Self.detail
+        return doing.isEmpty ? nil : list(doing)
     }
 
     /// "a", "a and b", "a, b, and c".
@@ -206,6 +253,19 @@ enum QuitAnswer: Equatable {
     case quitAnyway
 }
 
+/// Something to do on the way out, once a quit is going ahead with nothing
+/// held: an update that installs when Graft quits (`UpdateStore`).
+@MainActor
+protocol QuitHandover: AnyObject {
+    /// The quit is going ahead and no work is held. Return false to quit
+    /// now. Return true when this started something that ends with `done`,
+    /// called later and never from inside this call: `done(true)` quits,
+    /// `done(false)` cancels the quit.
+    func handOver(_ done: @escaping @MainActor (Bool) -> Void) -> Bool
+    /// The quit was canceled before anything was handed over (Keep Working).
+    func quitCanceled()
+}
+
 /// Answers macOS's quit, whether ⌘Q's or the one a logout, restart or
 /// shutdown sends (`TerminationHold`, "A quit that is asked for").
 ///
@@ -215,10 +275,19 @@ enum QuitAnswer: Equatable {
 /// - Keep Working: false, so macOS cancels the quit, and a logout or restart
 ///   with it.
 /// - Quit Anyway: `TerminationHold.stopAll()` first, then true once the hold
-///   has cleared, or after `stopGrace` if it hasn't.
+///   has cleared, or after `stopGrace` if it hasn't. Work with no stop is
+///   waited for to its end, past `stopGrace`: the question said so.
 /// - The work ends by itself while the question is up: the question comes
 ///   down and the reply is true at once. The quit was asked for, and nothing
 ///   is left that asking was about.
+///
+/// **On the way out** (`handover`). A quit that goes ahead with nothing
+/// held, at once or after the question, is first offered to the handover:
+/// an update ready to install starts its helper there, and the reply waits
+/// for that (`UpdateStore.handOver`). Until it replies, a second quit is
+/// refused like one during the question, so it can't skip the install. A
+/// quit that Quit Anyway forces while work still holds hands nothing over:
+/// nothing is installed while work runs.
 ///
 /// The question, the reply and the clock are all handed in, so a test drives
 /// every path without an alert or a real quit.
@@ -235,9 +304,23 @@ final class QuitGuard {
     /// Runs `block` once, `delay` seconds from now.
     typealias Schedule = @MainActor (_ delay: TimeInterval, _ block: @escaping @MainActor () -> Void) -> Void
 
-    /// How long Quit Anyway waits for the stopped work to end. A stopped
-    /// build's cleanup took 2 to 3 seconds for a real app (`cliStopGrace`).
-    static let stopGrace: TimeInterval = 5
+    /// How long Quit Anyway waits for the stopped work to end: past
+    /// `cliStopGrace`, when the runner SIGKILLs a stopped CLI still running
+    /// and its children, plus time for that to land and for the hold to
+    /// clear. GCD may run the SIGKILL up to a tenth of its delay late
+    /// (`asyncAfter`'s leeway), a second here, and the runner then waits up
+    /// to half a second a pipe for its output. A stopped CLI usually ends in
+    /// 2 to 3 seconds, and Graft quits then; only one that ignores its
+    /// SIGTERM costs the whole wait.
+    ///
+    /// Not a shorter wait with a reaper left behind to SIGKILL the CLI after
+    /// Graft has quit. Such a reaper has only pid numbers: once those
+    /// processes exit, launchd reaps them and the numbers go to whatever
+    /// starts next, so its SIGKILL could land on another program. The
+    /// runner's own SIGKILL walks the tree from a `Process` Foundation hasn't
+    /// reaped yet (`ProcessHandle.stop`), which can't, and Graft staying
+    /// until it has fired is all it needs.
+    static let stopGrace: TimeInterval = cliStopGrace + 3
     /// How often the hold is looked at, while the question is up and while
     /// Quit Anyway waits.
     static let checkEvery: TimeInterval = 0.1
@@ -255,6 +338,10 @@ final class QuitGuard {
     /// From `.terminateLater` until its `reply`.
     private var pending = false
 
+    /// What happens on the way out, when anything does. Set once the window
+    /// is up (`GraftApp`); weak, since the store is the app's.
+    weak var handover: QuitHandover?
+
     init(
         hold: TerminationHold, present: @escaping Present,
         reply: @escaping @MainActor (Bool) -> Void, schedule: @escaping Schedule
@@ -270,15 +357,26 @@ final class QuitGuard {
         // and the first goes on waiting for its answer.
         guard !pending else { return .terminateCancel }
         let reasons = hold.reasons
-        guard !reasons.isEmpty else { return .terminateNow }
+        guard !reasons.isEmpty else {
+            // Pending before the offer, so its reply always finds it set.
+            pending = true
+            guard handOver() else {
+                pending = false
+                return .terminateNow
+            }
+            return .terminateLater
+        }
         pending = true
         let asked = Asking()
         asking = asked
-        asked.takeDown = present(QuitQuestion(reasons: reasons)) { [weak self, weak asked] answer in
+        let question = QuitQuestion(reasons: reasons, withoutStop: hold.reasonsWithoutStop)
+        asked.takeDown = present(question) { [weak self, weak asked] answer in
             guard let self, let asked, self.asking === asked else { return }
             self.asking = nil
             switch answer {
-            case .keepWorking: self.finish(quit: false)
+            case .keepWorking:
+                self.handover?.quitCanceled()
+                self.finish(quit: false)
             case .quitAnyway: self.quitAnyway()
             }
         }
@@ -292,21 +390,36 @@ final class QuitGuard {
             guard let self, let asked, self.asking === asked else { return }
             guard !self.hold.isHolding else { return self.watch(asked) }
             self.asking = nil
-            guard let takeDown = asked.takeDown else { return self.finish(quit: true) }
-            takeDown { [weak self] in self?.finish(quit: true) }
+            guard let takeDown = asked.takeDown else { return self.leave() }
+            takeDown { [weak self] in self?.leave() }
         }
     }
 
     /// Stop everything that holds, then quit once the hold has cleared, or
-    /// once `stopGrace` has passed.
+    /// once `stopGrace` has passed and nothing with no stop is left.
     private func quitAnyway() {
         hold.stopAll()
         wait(checksLeft: Int((Self.stopGrace / Self.checkEvery).rounded(.up)))
     }
 
     private func wait(checksLeft: Int) {
-        guard hold.isHolding, checksLeft > 0 else { return finish(quit: true) }
+        // Work with no stop wasn't asked to stop, and the question said
+        // Graft quits when it finishes: no deadline for it. Quitting under it
+        // would leave its CLI running until its next write found no reader.
+        guard hold.isHolding, checksLeft > 0 || hold.holdsWithoutStop else { return leave() }
         schedule(Self.checkEvery) { [weak self] in self?.wait(checksLeft: checksLeft - 1) }
+    }
+
+    /// The quit goes ahead: through the handover, if it takes it, else now.
+    private func leave() {
+        guard handOver() else { return finish(quit: true) }
+    }
+
+    /// Offer the way out to the handover, with nothing held. True when it
+    /// took it, and will finish the quit itself.
+    private func handOver() -> Bool {
+        guard !hold.isHolding, let handover else { return false }
+        return handover.handOver { [weak self] quit in self?.finish(quit: quit) }
     }
 
     private func finish(quit: Bool) {

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import plistlib
 import re
 import shlex
 import subprocess
@@ -67,6 +68,47 @@ def unicorn_failure(error: str) -> AppStoreError | None:
     if not any(words in error for words in UNICORN_FAILURES):
         return None
     return AppStoreError(UNICORN_FIRST_USE, hint=f"ipatool said: {error}")
+
+
+#: ipatool 2.8.0 takes the App Store's frameworks, the first time a Mac
+#: needs them, from one macOS restore image at an address its source fixes
+#: (internal/sap/assets/assets.go:16-19: macOS 27.0.1, 26A434). It reads
+#: only the parts it needs, by HTTP range requests, and fetches the key to
+#: the image's encrypted parts from wkms-public.apple.com (aea.go). Each of
+#: the seven files it takes is checked against a size and SHA-256 its source
+#: pins, and its emulator runs only those exact files (internal/store/
+#: emulator/runtime.go), so no other image can stand in: moving to another
+#: takes a newer ipatool, and so a newer Graft.
+#:
+#: These are the words its errors carry when that file is gone or changed.
+#: An HTTP refusal of the image or of its key (http_range.go:39 and :124,
+#: aea.go:276): Apple's host is an S3 origin, which answers a missing file
+#: with 403 Forbidden rather than 404 (checked against a made-up path on
+#: 2026-11-24). Or an image whose parts are no longer the pinned ones
+#: (remote.go:146 and :152, assets.go:237 and :241). A dropped connection
+#: or a server error is left out on purpose: trying again can fix those,
+#: and a newer Graft can't.
+_RESTORE_IMAGE_GONE = re.compile(
+    r"(?:open remote image|read remote image range|download Apple FCS key): server returned (?:403|404|410)\b"
+    r"|restore image does not contain "
+    r"|restore member \S+ does not match the pinned image"
+    r"|apple SAP asset \S+ (?:failed integrity verification|has size \d+, expected)",
+    re.IGNORECASE,
+)
+RESTORE_IMAGE_GONE = (
+    "ipatool couldn't download the App Store components it needs: Apple no longer serves the "
+    "macOS 27.0.1 (26A434) restore image that ipatool 2.8.0 takes them from. A newer Graft will "
+    "fix this, and Graft's update notice says when one is out (Help › Check for Updates…, or "
+    "`graft --check-update`)."
+)
+
+
+def restore_image_failure(error: str) -> AppStoreError | None:
+    """The error to raise when ipatool's `error` says its pinned restore
+    image is gone or no longer the one it pins, else None."""
+    if _RESTORE_IMAGE_GONE.search(error) is None:
+        return None
+    return AppStoreError(RESTORE_IMAGE_GONE, hint=f"ipatool said: {error}")
 
 
 def run_ipatool(
@@ -148,35 +190,49 @@ KEYCHAIN_UNKNOWN_HINT = (
 )
 
 
-def keychain_refused_text(path: Path) -> tuple[str, str]:
+def keychain_refused_text(path: Path, source: str | None = None) -> tuple[str, str]:
     """The message and hint for the Keychain refusing the ipatool at `path`
     an item that is there. Graft.app's own ipatool gets `KEYCHAIN_REFUSED`:
     its sign-in deletes that item first. Any other (config.yaml's, or one on
     PATH) deletes only the items Graft's record vouches for, and this isn't
     one, so its sign-in saves over the item and macOS may ask; it is named,
     as status names it (`appstore.status`, its `elif legacy:` branch). The
-    try14 delta audit, signin-B."""
+    try14 delta audit, signin-B.
+
+    Graft.app's Settings › App Store is offered too only where Graft.app
+    would sign in with this same ipatool: one set in config.yaml, which
+    Graft.app reads too (`source`, when the caller knows it; inside
+    Graft.app no other ipatool can be the one refused). A pipx `graft`'s
+    from PATH or ~/.local/bin isn't Graft.app's: there, Graft.app signs in
+    with its own, which deletes the item instead of saving over it, and this
+    ipatool still can't read the new one (the try15 delta audit's d15-py-3).
+    """
     if is_bundled(path):
         return KEYCHAIN_REFUSED, KEYCHAIN_REFUSED_HINT
+    graft_app_runs_it = source == tools.SOURCE_CONFIG or (
+        source is None and tools.bundled_tools_dir() is not None
+    )
+    how = LOGIN_HINT if graft_app_runs_it else f"sign in again with it, in Terminal: {LOGIN_COMMAND}"
     return (
         f"macOS's Keychain didn't let the ipatool at {path} read the App Store sign-in "
         "in your login keychain",
         "ipatool calls this \"not found\", but the sign-in is there: a Keychain dialog was "
         "denied, or another ipatool made it, and macOS lets only that one read it without "
-        f"asking. {LOGIN_HINT}; that saves over it, and macOS may ask for your login "
-        "keychain password while it does",
+        f"asking. {how[0].upper()}{how[1:]}; that saves over it, and macOS may ask for your "
+        "login keychain password while it does",
     )
 
 
 class KeychainRefusal(AppStoreError):
     """ipatool's "not found" that isn't one: `refused` when the item is there
     (a denied dialog, or another program's item), else `security` couldn't
-    say whether it is. `path` is the ipatool that was refused
+    say whether it is. `path` is the ipatool that was refused, and `source`
+    the rung it was found on, when the caller knows it
     (`keychain_refused_text`)."""
 
-    def __init__(self, *, refused: bool, path: Path) -> None:
+    def __init__(self, *, refused: bool, path: Path, source: str | None = None) -> None:
         if refused:
-            message, hint = keychain_refused_text(path)
+            message, hint = keychain_refused_text(path, source)
             super().__init__(message, hint=hint)
         else:
             super().__init__(KEYCHAIN_UNKNOWN, hint=KEYCHAIN_UNKNOWN_HINT)
@@ -184,9 +240,64 @@ class KeychainRefusal(AppStoreError):
 
 
 def is_bundled(path: Path) -> bool:
-    """Whether `path` is Graft.app's own ipatool (`tools.bundled_tools_dir`)."""
+    """Whether `path` is Graft.app's own ipatool (`graft_app_ipatool`)."""
+    return graft_app_ipatool(path) is not None
+
+
+#: Graft.app's bundle identifier. How a `graft` outside the app knows an
+#: ipatool inside some Graft.app is that app's own (`graft_app_ipatool`).
+GRAFT_APP_BUNDLE_ID = "com.greenglasst.graft"
+
+
+def _same_file(one: Path, other: Path) -> bool:
+    try:
+        return os.path.samefile(one, other)
+    except OSError:
+        return False
+
+
+def _bundle_id(app: Path) -> str | None:
+    try:
+        with (app / "Contents" / "Info.plist").open("rb") as f:
+            info = plistlib.load(f)
+    except Exception:
+        # Any way a plist fails to load, a binary one by recursing too, is
+        # an app that names no identifier.
+        return None
+    found = info.get("CFBundleIdentifier") if isinstance(info, dict) else None
+    return found if isinstance(found, str) else None
+
+
+def graft_app_ipatool(path: Path) -> Path | None:
+    """Graft.app's own ipatool, by the path Graft runs it by, when `path` is
+    that file; else None. The same binary made Graft's items, and the
+    Keychain lets it read them, however it is reached.
+
+    - **Inside Graft.app**: the same file as its bundled ipatool, by device
+      and inode (`os.path.samefile`). A link to it, a hard link, a spelling
+      in another case and the /System/Volumes/Data spelling are all it;
+      comparing realpaths missed the last three (the try15 delta audit's
+      d15-py-2).
+    - **Outside it** (a pipx `graft`, which has no app of its own): the
+      ipatool of the Graft.app that `path` really lies in, named by its
+      bundle identifier. Graft.app counts that path as its own, and the two
+      share the state folder, so a pipx `graft` that didn't deleted Graft's
+      items at each sign-in, and Graft.app deleted that one's in turn
+      (d15-py-1). A hard link outside the app can't be traced back to it
+      from here, and stays what its rung says.
+    """
     bundled = tools.bundled_tools_dir()
-    return bundled is not None and Path(path) == bundled / "ipatool"
+    if bundled is not None:
+        own = bundled / "ipatool"
+        return own if present(own) and _same_file(Path(path), own) else None
+    real = Path(os.path.realpath(path))
+    app = next((p for p in real.parents if p.suffix.lower() == ".app"), None)
+    if app is None:
+        return None
+    own = app / "Contents" / "Helpers" / "bin" / "ipatool"
+    if present(own) and _same_file(real, own) and _bundle_id(app) == GRAFT_APP_BUNDLE_ID:
+        return own
+    return None
 
 
 def keychain_refusal(error: str, path: Path) -> KeychainRefusal | None:
@@ -270,13 +381,15 @@ def _resolve(configured: Path, explicit: bool) -> tools.Resolved:
     another way counted as what it is.
 
     A configured path, or one found on PATH or in ~/.local/bin, that is
-    Graft.app's bundled ipatool by its realpath (its own path, as
-    `--appstore-status` prints it, or a link to it) runs the same binary,
-    which the Keychain lets read the items it made. So it is the bundled
-    rung, run by its own path. Counted by the rung instead, Graft's own
-    items were another program's to it: status and a Get refused them, and
-    a sign-in deleted them (the delta audit's signin-A). A copy elsewhere
-    is another program to the Keychain, and stays what it is.
+    Graft.app's own ipatool (`graft_app_ipatool`: its own path, as
+    `--appstore-status` prints it, or another way to the same file) runs the
+    same binary, which the Keychain lets read the items it made. So it is
+    the bundled rung, run by its own path, from Graft.app and from a pipx
+    `graft` alike. Counted by the rung instead, Graft's own items were
+    another program's to it: status and a Get refused them, and a sign-in
+    deleted them (the delta audit's signin-A). A copy elsewhere stays what
+    its rung says: whether the Keychain takes it for the same program
+    depends on its signature, which isn't checked here.
     """
     # PATH is searched by absolute entries only (`tools.which`): the binary
     # found there is handed the signed-in Apple ID's session, and a relative
@@ -284,11 +397,10 @@ def _resolve(configured: Path, explicit: bool) -> tools.Resolved:
     r = tools.resolve(
         "ipatool", configured=configured if explicit else None, default=default_path()
     )
-    bundled = tools.bundled_tools_dir()
-    if r.source == tools.SOURCE_BUNDLED or r.path is None or bundled is None:
+    if r.source == tools.SOURCE_BUNDLED or r.path is None:
         return r
-    own = bundled / "ipatool"
-    if present(own) and os.path.realpath(r.path) == os.path.realpath(own):
+    own = graft_app_ipatool(r.path)
+    if own is not None:
         return tools.Resolved("ipatool", own, tools.SOURCE_BUNDLED)
     return r
 
@@ -577,7 +689,7 @@ def _renewal_needs_code(error: str, *, hint: str) -> AppStoreError:
 
 def explain_purchase(error: str, *, bundle_id: str, path: Path) -> AppStoreError:
     """ipatool's `purchase` errors, in words (pkg/appstore/appstore_purchase.go)."""
-    if (first_use := unicorn_failure(error)) is not None:
+    if (first_use := unicorn_failure(error) or restore_image_failure(error)) is not None:
         return first_use
     lower = error.lower()
     if "paid apps" in lower:
@@ -654,7 +766,7 @@ def explain(error: str, *, bundle_id: str, path: Path, reported_version: str | N
     keyring lookup's "could not be found in the keyring"), which are stable
     across 2.x but wrapped differently by different commands.
     """
-    if (first_use := unicorn_failure(error)) is not None:
+    if (first_use := unicorn_failure(error) or restore_image_failure(error)) is not None:
         return first_use
     lower = error.lower()
     if AUTH_CODE_REQUIRED in lower:

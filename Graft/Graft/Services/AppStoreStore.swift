@@ -222,7 +222,11 @@ final class AppStoreStore {
     var getBlockedReason: String? { account.isBusy ? Self.accountBusyReason : nil }
 
     static func statusArgs() -> [String] { [Flag.json, Flag.appstoreStatus] }
-    static func claimArgs(app: String) -> [String] { [Flag.json, Flag.appstoreClaim, Flag.app, app] }
+    /// `expectEmail` is the Apple ID the confirmation named: the CLI then
+    /// refuses to buy for any other (`ClaimAccountChanged`).
+    static func claimArgs(app: String, expectEmail: String? = nil) -> [String] {
+        [Flag.json, Flag.appstoreClaim, Flag.app, app] + (expectEmail.map { [Flag.expectEmail, $0] } ?? [])
+    }
     static func checkArgs(app: String) -> [String] { [Flag.json, Flag.appstoreCheck, Flag.app, app] }
     static func getArgs(app: String, allowUnverified: Bool = false, again: Bool = false) -> [String] {
         [Flag.json, Flag.appstoreGet, Flag.app, app]
@@ -495,9 +499,10 @@ final class AppStoreStore {
     /// What an app's Get (free) confirmation names: the Apple ID a status read
     /// made as the button was pressed said is signed in. ipatool claims for
     /// whoever is signed in when it runs, so the email shown is that read's,
-    /// never one cached from earlier in the session: an Apple ID changed in
-    /// Terminal since would otherwise get a purchase the dialog put another
-    /// name on.
+    /// never one cached from earlier in the session, and the claim passes it
+    /// as `--expect-email`: an Apple ID changed in Terminal while the dialog
+    /// was open is refused by the CLI rather than given a purchase the dialog
+    /// put another name on (the try14 delta audit's D14-APP-1 and F5).
     struct ClaimConfirmation: Equatable {
         /// nil when status says signed in but `auth info` gave no email:
         /// the dialog then says "this Apple ID".
@@ -506,6 +511,10 @@ final class AppStoreStore {
 
     /// Apps whose Get (free) is reading status before it asks.
     private(set) var checkingClaim: Set<String> = []
+    /// Each app's status read for Get (free), by number, until it ends or is
+    /// abandoned (`cancelClaim`). A read whose number is gone asks nothing.
+    private var claimChecks: [String: Int] = [:]
+    private var claimCheckSerial = 0
     /// Each app's confirmation, from that read, until it is answered.
     private(set) var claimConfirmations: [String: ClaimConfirmation] = [:]
 
@@ -569,18 +578,33 @@ final class AppStoreStore {
     /// (`claimConfirmations[app]`). A read that failed, nobody signed in, an
     /// Apple ID status can't name, or one other than the last status named
     /// (changed in Terminal since) is refused in words, and nothing is asked.
+    ///
+    /// A read the pane gave up on (`cancelClaim`, when it moves to another
+    /// app) asks nothing when it ends: its dialog would otherwise open by
+    /// itself when the user came back to the app, maybe hours later, naming
+    /// that read's Apple ID (the try14 delta audit's D14-APP-1).
     func checkBeforeClaim(app: String) async {
         guard activity[app] == nil, licenseNeeded[app]?.offersClaim == true, claimBlockedReason == nil,
               !checkingClaim.contains(app) else { return }
+        claimCheckSerial += 1
+        let mine = claimCheckSerial
+        claimChecks[app] = mine
         checkingClaim.insert(app)
         claimConfirmations[app] = nil
         let before = lastAccount
         await loadStatus()
+        guard claimChecks[app] == mine else { return }
+        claimChecks[app] = nil
         checkingClaim.remove(app)
-        // A drop started meanwhile, or the banner was closed: nothing to ask.
+        // A drop started meanwhile: nothing to ask.
         guard activity[app] == nil else { return }
-        let switched = before.flatMap { old in status.map { Self.isSwitch(from: old, to: Self.account(of: $0)) } }
-        if let refusal = Self.claimRefusal(status: status, statusError: statusError, switched: switched ?? false) {
+        let switched = before.flatMap { old in status.map { Self.isSwitch(from: old, to: Self.account(of: $0)) } } ?? false
+        // The offer is gone, and not because this read saw a switch (which
+        // `forgetLicences` answers by dropping it, and which is said): a
+        // drop finished and staged meanwhile, or the banner was closed.
+        // Nothing to ask, and no "Not claimed" over a staged IPA either.
+        guard licenseNeeded[app]?.offersClaim == true || switched else { return }
+        if let refusal = Self.claimRefusal(status: status, statusError: statusError, switched: switched) {
             refuseClaim(app: app, refusal)
             return
         }
@@ -588,16 +612,21 @@ final class AppStoreStore {
         claimConfirmations[app] = ClaimConfirmation(email: status?.ipatool.email)
     }
 
-    /// The confirmation's Cancel, or the dialog closing.
+    /// The confirmation's Cancel, or the dialog closing, or the pane moving
+    /// to another app: no dialog, and a status read still running for it
+    /// asks nothing when it ends.
     func cancelClaim(app: String) {
         claimConfirmations[app] = nil
+        if claimChecks.removeValue(forKey: app) != nil { checkingClaim.remove(app) }
     }
 
     /// Get (free), confirmed: the $0 purchase, then, once it worked, the get
     /// itself. The CLI refuses anything but a free app; this asks only for
     /// one the get's refusal said was free, and that no claim has failed for
     /// since, and only while status still names the Apple ID `confirmed`
-    /// named: one changed since is refused in words.
+    /// named: one changed since is refused in words. Status can be minutes
+    /// old by the time the dialog is answered, so the CLI checks again as it
+    /// runs, against `confirmed.email` (`--expect-email`).
     @discardableResult
     func startClaim(app: String, confirmed: ClaimConfirmation) -> Bool {
         claimConfirmations[app] = nil
@@ -608,20 +637,26 @@ final class AppStoreStore {
             refuseClaim(app: app, refusal)
             return false
         }
-        guard licenseNeeded[app]?.offersClaim == true, claimBlockedReason == nil else { return false }
+        guard licenseNeeded[app]?.offersClaim == true else { return false }
+        if let claimBlockedReason {
+            // Confirmed, but a sign-in or another action started meanwhile:
+            // said, not silently dropped.
+            errors[app] = claimBlockedReason
+            return false
+        }
         activity[app] = .claiming
         errors[app] = nil
-        tasks[app] = Task { [weak self] in await self?.runClaim(app: app) }
+        tasks[app] = Task { [weak self] in await self?.runClaim(app: app, expectEmail: confirmed.email) }
         return true
     }
 
-    private func runClaim(app: String) async {
+    private func runClaim(app: String, expectEmail: String?) async {
         var failure: Error?
         var alreadyOwned = false
         let ticket = hold.begin(TerminationHold.claiming) { [weak self] in self?.stopGet(app: app) }
         do {
             let events = try await runner.streamEvents(
-                Self.claimArgs(app: app), failing: "Get (free)", refusal: .appStoreClaim
+                Self.claimArgs(app: app, expectEmail: expectEmail), failing: "Get (free)", refusal: .appStoreClaim
             )
             alreadyOwned = events.contains { event in
                 if case let .appStoreClaimed(record) = event { return record.alreadyOwned }
@@ -631,10 +666,24 @@ final class AppStoreStore {
             failure = error
         }
         hold.end(ticket)
+        if failure is ClaimAccountChanged, !Task.isCancelled {
+            // The CLI saw another Apple ID than the dialog named. Read status
+            // now, while the row still says claiming, so Settings and the
+            // next Get (free) know who is signed in; `forgetLicences` then
+            // leaves this app alone, and the banner below is the one shown.
+            await loadStatus()
+        }
         let cancelled = Task.isCancelled
         activity[app] = nil
         tasks[app] = nil
         guard !cancelled else { return }
+        if let changed = failure as? ClaimAccountChanged {
+            errors[app] = changed.localizedDescription
+            // Its license answer was about the other Apple ID, as with a
+            // switch status saw (`refuseClaim`): back to Get latest.
+            licenseNeeded[app] = nil
+            return
+        }
         if let failure {
             errors[app] = failure.localizedDescription
             let earlier = licenseNeeded[app]

@@ -108,7 +108,8 @@ keep the config in a dotfiles repository and symlink it, add
 ~/.cache/graft/
 ├── ipas/                # staged decrypted IPAs (never pruned)
 ├── built/               # archived builds (newest archive_keep per app version)
-└── artwork/             # cached app icons
+├── artwork/             # cached app icons
+└── updates/             # a newer Graft, downloaded and checked, until it's installed
 
 ~/.local/state/graft/
 ├── log.sqlite           # build history and delivery records
@@ -123,8 +124,12 @@ These four `graft` directories are owner-only (0700): Graft creates them that
 way and tightens them on every run if they aren't. Staged IPAs, archived
 builds, build logs and the `.p12` and profile the setup copies are written
 0600. Graft changes nothing outside these directories, and leaves alone a
-`graft` that is a symlink you made.
+`graft` that is a symlink you made. The one exception is updating itself: it
+replaces its own Graft.app, moves the old one to the Trash, and writes what it
+did to `~/Library/Logs/Graft/update.log`.
 
 Outside them, the App Store tools keep their own files: ipatool's sign-in in
-your login keychain and its downloads in `~/Library/Caches/ipatool`, and
-UnfairPlay's model in `~/Library/Application Support/unfairplay/models`.
+your login keychain, its session cookies in `~/.ipatool` and its downloads in
+`~/Library/Caches/ipatool`, and UnfairPlay's model in
+`~/Library/Application Support/unfairplay/models`. [Removing
+Graft](removing.md) lists everything.

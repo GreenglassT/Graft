@@ -21,6 +21,9 @@ struct SetupView: View {
     let need: SetupNeed
     let isChecking: Bool
     let onCheckAgain: () -> Void
+    /// Said under Check again when the last one used the login shell's last
+    /// answer (`ConfigStore.shellAskedTooRecently`); nil otherwise.
+    var checkAgainNote: String? = nil
     /// Step 3's way past it, for a user who wants to look around before
     /// installing everything. Only that step offers it: without the CLI or a
     /// config nothing in the app can work, but without one tool most of it
@@ -271,6 +274,18 @@ struct SetupView: View {
     // MARK: Check again
 
     private var checkAgain: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            checkAgainButton
+            if let checkAgainNote {
+                Text(checkAgainNote)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var checkAgainButton: some View {
         HStack(spacing: Metrics.controlGap) {
             Button(action: onCheckAgain) {
                 if isChecking {

@@ -540,11 +540,18 @@ def test_the_check_names_symbols_the_frameworks_have() -> None:
 class _FakeSecurityFramework:
     """The four calls the lock check makes, as `keychain._KeychainAPI` has
     them, answering as told and recording what was asked. Never the real
-    framework: no test asks it about the real login keychain."""
+    framework: no test asks it about the real login keychain.
 
-    def __init__(self, *, opened: int = 0, default: int = 0, status: int = 0, state: int = 1) -> None:
+    The default keychain's reference is 102 and the login keychain file's
+    101, each with its own lock state, so a test can make them differ, as
+    they do when another keychain has been made the default."""
+
+    def __init__(
+        self, *, opened: int = 0, default: int = 0, status: int = 0,
+        state: int = 1, default_state: int | None = None,
+    ) -> None:
         self.answers = {"open": opened, "default": default, "status": status}
-        self.state = state
+        self.states = {101: state, 102: state if default_state is None else default_state}
         self.asked: list[tuple] = []
 
     def open(self, path):
@@ -557,7 +564,7 @@ class _FakeSecurityFramework:
 
     def get_status(self, ref):
         self.asked.append(("status", ref))
-        return self.answers["status"], self.state
+        return self.answers["status"], self.states[ref]
 
     def release(self, ref):
         self.asked.append(("release", ref))
@@ -577,34 +584,73 @@ def test_the_login_keychain_is_found_by_the_account_s_home_never_home(monkeypatc
     assert keychain.login_keychain_path() == tmp_path / "account/Library/Keychains/login.keychain-db"
 
 
-@pytest.mark.parametrize(("state", "locked"), [(2, True), (0, True), (1, False), (3, False), (7, False)])
-def test_the_login_keychain_file_is_opened_and_its_unlocked_bit_read(tmp_path, state: int, locked: bool) -> None:
-    """SecKeychainOpen on the file (it never unlocks or asks), not the
-    default keychain; locked unless kSecUnlockStateStatus (1) is set, so a
-    readable-only 2 is locked. The reference is released."""
+def _login_file(tmp_path):
     login = tmp_path / "login.keychain-db"
     login.write_bytes(b"kych")
+    return login
+
+
+@pytest.mark.parametrize(("state", "locked"), [(2, True), (0, True), (1, False), (3, False), (7, False)])
+def test_both_keychains_are_read_by_their_unlocked_bit(tmp_path, state: int, locked: bool) -> None:
+    """The default keychain (SecKeychainCopyDefault) and the login keychain
+    file (SecKeychainOpen), neither of which unlocks or asks; locked unless
+    kSecUnlockStateStatus (1) is set, so a readable-only 2 is locked. Each
+    reference is released."""
+    login = _login_file(tmp_path)
     api = _FakeSecurityFramework(state=state)
     assert keychain._keychain_locked(api, login) is locked
-    assert api.asked == [("open", login), ("status", 101), ("release", 101)]
+    assert api.asked == [
+        ("default",), ("status", 102), ("release", 102),
+        ("open", login), ("status", 101), ("release", 101),
+    ]
 
 
-def test_with_no_login_keychain_file_the_default_one_is_read(tmp_path) -> None:
-    api = _FakeSecurityFramework(state=2)
-    assert keychain._keychain_locked(api, tmp_path / "missing.keychain-db") is True
+def test_a_locked_default_keychain_that_isn_t_login_is_locked(tmp_path) -> None:
+    """The try14 delta audit's kc-path: ipatool adds its items to the
+    default keychain, and someone made another keychain the default. With
+    that one locked and the login keychain unlocked, reading only the login
+    keychain said unlocked, and ipatool then touched a locked keychain."""
+    api = _FakeSecurityFramework(state=1, default_state=2)
+    assert keychain._keychain_locked(api, _login_file(tmp_path)) is True
+
+
+def test_a_locked_login_keychain_beside_an_unlocked_default_is_locked(tmp_path) -> None:
+    """A lookup that names no keychain searches the whole search list, the
+    login keychain included, so a locked one there can still ask."""
+    api = _FakeSecurityFramework(state=2, default_state=1)
+    assert keychain._keychain_locked(api, _login_file(tmp_path)) is True
+
+
+@pytest.mark.parametrize("state", [1, 2])
+def test_with_no_default_keychain_the_login_keychain_answers(tmp_path, state: int) -> None:
+    """A test's temporary HOME has no default keychain (-25307): the login
+    keychain, found by the account's home, still answers (the owner's try13
+    run, where the opt-in check couldn't tell)."""
+    api = _FakeSecurityFramework(default=-25307, state=state)
+    assert keychain._keychain_locked(api, _login_file(tmp_path)) is (state == 2)
+    assert ("release", 102) not in api.asked
+
+
+@pytest.mark.parametrize("state", [1, 2])
+def test_with_no_login_keychain_file_the_default_one_answers(tmp_path, state: int) -> None:
+    api = _FakeSecurityFramework(state=state)
+    assert keychain._keychain_locked(api, tmp_path / "missing.keychain-db") is (state == 2)
     assert api.asked == [("default",), ("status", 102), ("release", 102)]
 
 
 @pytest.mark.parametrize("fails", ["open", "status"])
-def test_a_call_that_fails_is_can_t_tell(tmp_path, fails: str) -> None:
-    login = tmp_path / "login.keychain-db"
-    login.write_bytes(b"kych")
-    api = _FakeSecurityFramework(**{"opened" if fails == "open" else "status": -25294})
+def test_a_call_that_fails_on_both_is_can_t_tell(tmp_path, fails: str) -> None:
+    login = _login_file(tmp_path)
+    api = _FakeSecurityFramework(**{"opened" if fails == "open" else "status": -25294}, default=-25307)
     assert keychain._keychain_locked(api, login) is None
-    assert ("default",) not in api.asked, "the file is there: never the $HOME-dependent default"
     assert api.asked.count(("release", 101)) == (fails == "status")
 
 
-def test_no_default_keychain_is_can_t_tell(tmp_path) -> None:
+def test_an_unreadable_login_keychain_leaves_the_default_s_answer(tmp_path) -> None:
+    api = _FakeSecurityFramework(opened=-25294, state=1)
+    assert keychain._keychain_locked(api, _login_file(tmp_path)) is False
+
+
+def test_no_default_keychain_and_no_login_file_is_can_t_tell(tmp_path) -> None:
     api = _FakeSecurityFramework(default=-25307)
     assert keychain._keychain_locked(api, tmp_path / "missing.keychain-db") is None

@@ -217,6 +217,8 @@ class Lookup:
     exists: bool | None
     created: str | None = None
     no_answer: bool = False
+    #: The item's account, from `first_account` only.
+    account: str | None = None
 
 
 #: `find-generic-password`'s creation-date line, without `-g`: on stdout,
@@ -335,13 +337,11 @@ class _KeychainAPI:
         self._release(self._ctypes.c_void_p(ref))
 
 
-def _keychain_locked(api: Any, login: Path) -> bool | None:
-    """Whether the keychain at `login` is locked: `SecKeychainOpen` on it
-    (which never unlocks it or asks anything), or, only when that file isn't
-    there, `SecKeychainCopyDefault`; then `SecKeychainGetStatus`. Locked
-    unless its kSecUnlockStateStatus bit is set (a status of 2, readable
-    alone, is locked). None when a call fails: it can't tell."""
-    found, ref = api.open(login) if login.is_file() else api.copy_default()
+def _ref_locked(api: Any, found: int, ref: int | None) -> bool | None:
+    """`SecKeychainGetStatus` on a reference `SecKeychainOpen` or
+    `SecKeychainCopyDefault` answered with, then released. Locked unless its
+    kSecUnlockStateStatus bit is set (a status of 2, readable alone, is
+    locked). None when either call failed: it can't tell."""
     if found != 0 or not ref:
         return None
     try:
@@ -351,11 +351,42 @@ def _keychain_locked(api: Any, login: Path) -> bool | None:
         api.release(ref)
 
 
+def _keychain_locked(api: Any, login: Path) -> bool | None:
+    """Whether a keychain ipatool and `security` would use is locked.
+
+    Two are read, and neither read unlocks anything or asks anything:
+    - **The default keychain** (`SecKeychainCopyDefault`), where ipatool
+      adds its items: it opens its keyring with no keychain named. Found
+      through $HOME, as `security` and ipatool find it, since both inherit
+      this process's HOME (`child_env`).
+    - **The login keychain at `login`** (`SecKeychainOpen` on the file),
+      found by the account's home and never $HOME. A lookup with no
+      keychain named searches the whole search list, the login keychain
+      included, so a locked one there can ask too.
+
+    Usually they are the same keychain. They differ when someone has made
+    another keychain the default (Keychain Access › Make Keychain Default):
+    reading only the login keychain then said "unlocked" over a locked
+    default, and ipatool asked (the try14 delta audit's kc-path). Under a
+    test's temporary HOME the default is "none" (-25307), and the login
+    keychain's answer stands alone.
+
+    True when either is locked, False when neither is and at least one
+    could be read, and None when neither could: it can't tell.
+    """
+    answers = [_ref_locked(api, *api.copy_default())]
+    if login.is_file():
+        answers.append(_ref_locked(api, *api.open(login)))
+    if True in answers:
+        return True
+    return False if False in answers else None
+
+
 def _default_keychain_locked() -> bool | None:
-    """Whether the login keychain (where ipatool's items are) is locked,
-    from the Security framework (`_keychain_locked`), which shows no UI for
-    it. Deprecated calls, but the only ones that read the lock without
-    trying it. None when it can't tell."""
+    """Whether the default keychain or the login keychain (where ipatool's
+    items are) is locked, from the Security framework (`_keychain_locked`),
+    which shows no UI for it. Deprecated calls, but the only ones that read
+    the lock without trying it. None when it can't tell."""
     try:
         api = _KeychainAPI()
     except (OSError, AttributeError):
@@ -369,8 +400,9 @@ _lock_probe: Any = _default_keychain_locked
 
 
 def login_keychain_locked() -> bool:
-    """True only when the login keychain is known to be locked: then nothing
-    asks it anything (status, a Get or claim, a sign-in or sign-out). False
+    """True only when the login keychain, or a default keychain that isn't
+    it, is known to be locked (`_keychain_locked`): then nothing asks the
+    Keychain anything (status, a Get or claim, a sign-in or sign-out). False
     when it is unlocked, or the check can't tell, and the lookups' own
     answers decide. With `GRAFT_NO_KEYCHAIN=1` the real check never runs."""
     probe = _lock_probe
@@ -380,6 +412,44 @@ def login_keychain_locked() -> bool:
         return probe() is True
     except Exception:
         return False
+
+
+#: `find-generic-password`'s account line, when the account is plain text:
+#:     "acct"<blob>="p12-ABCDE12345"
+#: An account with a byte outside printable ASCII is printed as hex first,
+#: and doesn't match: Graft's own accounts never have one.
+_ACCT_LINE = re.compile(r'^\s*"acct"<blob>="(?P<account>[^"\n]*)"\s*$', re.M)
+
+
+def first_account(service: str) -> Lookup:
+    """The first item under `service`, with its account, never reading its
+    secret.
+
+    `find-generic-password -s <service>` with no `-a`: `security` answers
+    with the first item it finds under that service, attributes only, as
+    `find_item` asks (no `-g`, no `-w`, so no access dialog). This is how
+    `remove_data` finds Graft's own items it has no record of, one at a
+    time: it deletes each by service and account (`delete_item`) and asks
+    again. `account` is None when there is no item, when `security`
+    couldn't say, or when the account isn't printed as plain text.
+    """
+    try:
+        proc = _call(
+            ["security", "find-generic-password", "-s", service],
+            capture_output=True, check=False,
+        )
+    except FileNotFoundError:
+        return Lookup(None)
+    except KeychainNoAnswer:
+        return Lookup(None, no_answer=True)
+    if proc.returncode == _ITEM_NOT_FOUND:
+        return Lookup(False)
+    if proc.returncode != 0:
+        return Lookup(None)
+    out = proc.stdout or b""
+    text = out.decode("utf-8", "replace") if isinstance(out, bytes) else str(out)
+    match = _ACCT_LINE.search(text)
+    return Lookup(True, _created(text), account=match.group("account") if match else None)
 
 
 def item_exists(service: str, account: str) -> bool | None:

@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 from graft_ipa import appstore, host, ipatool, itunes
 from graft_ipa import cli as cli_mod
 from graft_ipa.errors import ITunesError
-from tests.appstore_fakes import FakeTools, itunes_offline
+from tests.appstore_fakes import FAKE_EMAIL, FakeTools, itunes_offline
 
 
 @pytest.fixture(autouse=True)
@@ -303,3 +303,70 @@ def test_claim_takes_no_other_verbs_flags(config: Path) -> None:
     result = _run(["--json", "--appstore-claim", "--app", "example", "--allow-unverified"])
     assert result.exit_code != 0
     assert "--allow-unverified is not valid with --appstore-claim" in " ".join(result.output.split())
+
+
+# --- --expect-email: the Apple ID the app's confirmation named (D14-APP-1, F5) --
+
+
+def test_the_claim_goes_ahead_for_the_apple_id_the_confirmation_named(
+    config: Path, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Compared ignoring case and spaces at the ends: Apple IDs aren't
+    case-sensitive."""
+    _listing(monkeypatch, 0.0, "Free")
+    result = _run(["--json", "--appstore-claim", "--app", "example", "--expect-email", f" {FAKE_EMAIL.upper()} "])
+    assert result.exit_code == 0, result.output
+    assert len(_purchases(fakes)) == 1
+
+
+def test_another_apple_id_signed_in_since_is_refused_before_anything_is_bought(
+    config: Path, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The try14 delta audit's F5: the confirmation named a@x, and with it
+    still open ipatool was signed in as b@y in Terminal. The claim is refused
+    as data, with the Apple ID signed in now, and nothing is purchased, nor
+    the price even looked up."""
+    asked = _listing(monkeypatch, 0.0, "Free")
+    result = _run(["--json", "--appstore-claim", "--app", "example", "--expect-email", "someone-else@example.com"])
+    assert result.exit_code == 20
+    assert _purchases(fakes) == []
+    assert asked == []
+    assert {
+        "type": "appstore-refused", "app": "example", "reason": "account-changed", "email": FAKE_EMAIL,
+    } in _events(result)
+    said = " ".join(result.output.split())
+    assert f"signed in to the App Store as {FAKE_EMAIL}, not someone-else@example.com" in said
+
+
+def test_a_sign_in_whose_email_auth_info_doesn_t_give_is_refused_when_one_is_expected(
+    config: Path, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fakes.set(auth_raw='{"level": "info", "success": true}')
+    _listing(monkeypatch, 0.0, "Free")
+    result = _run(["--json", "--appstore-claim", "--app", "example", "--expect-email", FAKE_EMAIL])
+    assert result.exit_code == 20
+    assert _purchases(fakes) == []
+    assert "couldn't tell which Apple ID" in " ".join(result.output.split())
+    assert not [e for e in _events(result) if e["type"] == "appstore-refused"]
+
+
+def test_an_empty_expected_email_is_refused(config: Path, fakes: FakeTools) -> None:
+    result = _run(["--json", "--appstore-claim", "--app", "example", "--expect-email", " "])
+    assert result.exit_code != 0
+    assert _purchases(fakes) == []
+
+
+def test_expect_email_belongs_to_the_claim_only(config: Path) -> None:
+    result = _run(["--json", "--appstore-get", "--app", "example", "--expect-email", FAKE_EMAIL])
+    assert result.exit_code != 0
+    assert "--expect-email is not valid with --appstore-get" in " ".join(result.output.split())
+
+
+def test_the_account_changed_word_is_the_one_the_app_reads() -> None:
+    from tests.cli_ast import contract_swift_source
+
+    match = re.search(
+        r'enum AppStoreRefusal \{.*?static let accountChanged = "([^"\\]*)"', contract_swift_source(), re.S
+    )
+    assert match, "CLIContract.AppStoreRefusal.accountChanged is gone"
+    assert match.group(1) == appstore.REFUSED_ACCOUNT_CHANGED

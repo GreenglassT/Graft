@@ -1562,7 +1562,10 @@ def test_the_keychain_undo_puts_back_what_was_there_while_it_holds_this_runs(
 
 import errno as _errno  # noqa: E402
 
-PRIVACY = "allow Graft in System Settings › Privacy & Security › Files and Folders"
+PRIVACY = "allow Graft (or Terminal, if you ran graft there) in System Settings › Privacy & Security › Files and Folders"
+#: The start of the hint for plain permissions (EACCES), which no privacy
+#: setting changes (the try14 delta audit's d14-cli-5).
+OWNER = "your user can't read"
 
 
 def _refused_open(monkeypatch, target: Path, code: int) -> None:
@@ -1578,21 +1581,35 @@ def _refused_open(monkeypatch, target: Path, code: int) -> None:
     monkeypatch.setattr(os, "open", fake)
 
 
-@pytest.mark.parametrize("code", [_errno.EPERM, _errno.EACCES])
-def test_a_chosen_file_macos_wont_let_graft_read_names_the_setting(tmp_path, monkeypatch, code) -> None:
+def test_a_chosen_file_macos_wont_let_graft_read_names_the_setting(tmp_path, monkeypatch) -> None:
     """The app hands the CLI the path of a .p12 or profile the user picked;
     one in Downloads, Desktop or iCloud raises a privacy prompt, and Deny
-    left an EPERM with no next step (the whole-diff review's app-2)."""
+    left an EPERM with no next step (the whole-diff review's app-2). Run
+    from Terminal, macOS asks for Terminal, so that is named too."""
     chosen = tmp_path / "Downloads" / "dist.p12"
     chosen.parent.mkdir()
     chosen.write_bytes(b"p12")
-    _refused_open(monkeypatch, chosen, code)
+    _refused_open(monkeypatch, chosen, _errno.EPERM)
     with pytest.raises(ConfigError) as e:
         account_setup.read_chosen_file(chosen, ".p12")
     assert e.value.hint == (
         f"macOS didn't let Graft read {chosen}: {PRIVACY}, or move the file out of "
         "Downloads/Desktop/Documents and choose it again"
     )
+
+
+def test_a_chosen_file_your_user_cant_read_says_to_check_its_owner(tmp_path, monkeypatch) -> None:
+    """The try14 delta audit's d14-cli-5: a .p12 copied with sudo is root's,
+    mode 0600, and EACCES. The privacy setting and a move out of Downloads
+    change neither."""
+    chosen = tmp_path / "dist.p12"
+    chosen.write_bytes(b"p12")
+    _refused_open(monkeypatch, chosen, _errno.EACCES)
+    with pytest.raises(ConfigError) as e:
+        account_setup.read_chosen_file(chosen, ".p12")
+    assert e.value.hint.startswith(f"{OWNER} {chosen}: it may belong to another user, root for one")
+    assert "Get Info" in e.value.hint
+    assert "Privacy & Security" not in e.value.hint
 
 
 def test_a_chosen_file_with_no_read_permission_gets_the_hint_for_real(tmp_path) -> None:
@@ -1604,7 +1621,7 @@ def test_a_chosen_file_with_no_read_permission_gets_the_hint_for_real(tmp_path) 
             account_setup.read_chosen_file(chosen, "provisioning profile")
     finally:
         chosen.chmod(0o600)
-    assert PRIVACY in (e.value.hint or "")
+    assert (e.value.hint or "").startswith(OWNER), "mode 000 is EACCES: permissions, not privacy"
 
 
 def test_another_open_failure_gets_no_privacy_hint(tmp_path, monkeypatch) -> None:
@@ -1737,9 +1754,13 @@ def test_a_stop_held_through_an_undo_that_couldnt_finish_keeps_the_report(
     assert report.hint
 
 
-def test_a_stop_held_through_an_undo_that_finished_says_nothing_more(
+def test_a_stop_held_through_an_undo_that_finished_keeps_why_the_setup_failed(
     paid_config: Path, tmp_path: Path, fake_keychain: FakeSecurity, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Everything was put back, so there is no undo report. But the setup
+    had failed for a reason of its own before the Stop, and the bare stop
+    dropped it (the try14 delta audit's d14-cli-6): it rides on the Stop
+    too (`setup_failed`)."""
     from graft_ipa import lc_manage
     from graft_ipa.errors import Stopped
 
@@ -1758,6 +1779,54 @@ def test_a_stop_held_through_an_undo_that_finished_says_nothing_more(
         _replace(paid_config, make_identity(tmp_path / "new", password=NEW_PASSWORD))
     assert getattr(e.value, "undo_incomplete", None) is None
     assert _snapshot(paid_config, fake_keychain) == before
+    report = e.value.setup_failed
+    assert isinstance(report, GraftError)
+    assert report.message == "the setup failed ([Errno 28] full); everything it changed was put back"
+
+
+def test_a_setup_that_was_stopped_and_then_stopped_again_says_no_failure(
+    paid_config: Path, tmp_path: Path, fake_keychain: FakeSecurity, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop is no failure (C-STOP): a second one held through the undo
+    carries nothing to say."""
+    from graft_ipa import lc_manage
+    from graft_ipa.errors import Stopped
+
+    monkeypatch.setattr(account_setup, "replace_signing",
+                        lambda *a, **k: (_ for _ in ()).throw(Stopped(signal.SIGTERM)))
+    real_write = keychain.write_p12_password
+
+    def write(team, pw):
+        if pw == PASSWORD:
+            os.kill(os.getpid(), signal.SIGTERM)
+        return real_write(team, pw)
+
+    monkeypatch.setattr(keychain, "write_p12_password", write)
+    with lc_manage.exit_on_termination(), pytest.raises(Stopped) as e:
+        _replace(paid_config, make_identity(tmp_path / "new", password=NEW_PASSWORD))
+    assert getattr(e.value, "setup_failed", None) is None
+    assert getattr(e.value, "undo_incomplete", None) is None
+
+
+@pytest.mark.parametrize("attribute", ["setup_failed", "undo_incomplete"])
+def test_the_cli_says_a_held_stop_s_report_before_it_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], attribute: str,
+) -> None:
+    from graft_ipa import cli
+    from graft_ipa.errors import Stopped
+
+    def stopped(*_a, **_k):
+        stop = Stopped(signal.SIGTERM)
+        setattr(stop, attribute, GraftError("the setup failed (the .p12 doesn't open); everything it "
+                                            "changed was put back", hint="check the password"))
+        raise stop
+
+    monkeypatch.setattr(account_setup, "setup_account", stopped)
+    with pytest.raises(Stopped):
+        cli._do_init_account(tmp_path / "config.yaml", account="paid", p12=None, profile=None,
+                             dry_run=False, emitter=None)
+    said = " ".join(capsys.readouterr().err.split())
+    assert "the setup failed (the .p12 doesn't open); everything it changed was put back: check the password" in said
 
 
 def test_security_run_while_signals_are_held_gets_them_unblocked(tmp_path, monkeypatch) -> None:

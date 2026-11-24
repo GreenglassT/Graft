@@ -219,6 +219,38 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "canister-result",
         "canister-search-end",
         "cli-contract",
+        # --- What Graft keeps outside Graft.app (`remove_data`) ---
+        #
+        # `--remove-data`'s listing: one `data-item` per place, in order,
+        # every one whether anything is there or not:
+        # - `id` (what `--items` takes), `group` and `group_title` (the
+        #   heading it is listed under), `title`, `detail` (what it is, in a
+        #   sentence or two), `note` (a caution, such as another program
+        #   sharing it) and `how` (how to remove it by hand, for one this
+        #   command doesn't remove), each null when there is none;
+        # - `paths` (strings) and `keychain` ([{service, account}]): where it
+        #   is. Never a secret;
+        # - `size_bytes`: the files' total, or null (keychain items, or not
+        #   checked); `present`: true, false, or null when the keychain was
+        #   locked or didn't answer, so it couldn't be checked;
+        # - `default`: chosen unless unchecked, and what `--items all` takes
+        #   (false for the passwords); `removable`: false for what the user
+        #   chose (group "kept") and for Graft.app's own settings
+        #   (`app-settings`), which the app removes itself.
+        "data-item",
+        # The listing's sentinel: `count`, `total_bytes` (of the removable
+        # items that are there) and `keychain`: "checked", "locked" or
+        # "no-answer" (then nothing more was asked of it).
+        "data-items-end",
+        # `--remove-data --items ...`: one per item named, after it was
+        # removed (or, under --dry-run, would be): `id`, `ok`, `dry_run`,
+        # `removed` (each path, and each keychain item as "<service>
+        # <account>", that went), `failed` ([{what, reason}] for each still
+        # there) and `freed_bytes`.
+        "data-removed",
+        # The removal's sentinel: `ok`, `dry_run`, `removed` and `failed`
+        # (item ids) and `freed_bytes`. Exit 1 when any failed.
+        "data-removal-end",
         "delivery-state",
         "device",
         # One connected device, from `--devices` (never `--brief`): `udid`,
@@ -464,6 +496,26 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # HTTP status, or null) and `message`, the sentence Help › Check for
         # Updates… shows. `release_check.event` builds it.
         "update-check",
+        # `--download-update`'s progress, the same keys every time: `step`
+        # ("download" or "verify"), `version` (the release's), `received` and
+        # `total` (bytes, while downloading; null while verifying) and `check`
+        # (while verifying: archive|bundle|signature|requirement|notarization,
+        # `app_update.CHECKS`; null while downloading).
+        "update-progress",
+        # `--download-update`'s answer, exactly once, worked or not (the same
+        # keys either way): `ok`; `current`, the version compared against;
+        # `version` and `app_path`, the verified Graft.app waiting in the
+        # cache (both null on a failure); `url`, the release's page, which the
+        # app links when it can't install; and on a failure `reason`
+        # (`app_update`'s names) and `message`. `app_update.download_event`
+        # builds it.
+        "update-download-end",
+        # `--install-update`'s answer, exactly once: `ok`; `version` and
+        # `log` (the helper's log file) once the helper is started, which
+        # waits for Graft to quit; `relaunch`; and on a failure, when nothing
+        # was started, `url`, `reason` and `message`.
+        # `app_update.install_event` builds it.
+        "update-install",
     }
 )
 

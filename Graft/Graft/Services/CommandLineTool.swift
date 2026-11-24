@@ -198,6 +198,10 @@ enum CommandLineTool {
         /// The login shell's PATH: the answer read at launch, or, with
         /// `askShellAgain`, a new one (the section's Check again).
         let loginPATH: (_ askShellAgain: Bool) async -> String?
+        /// After `loginPATH(true)`: whether the shell was asked too recently
+        /// to ask again, so the PATH is the last answer
+        /// (`ShellEnvironment.askedTooRecentlyNote`).
+        var askedTooRecently: () -> Bool = { false }
         /// Where this copy of the app runs from: a link into a temporary or
         /// read-only copy is not offered.
         var location: AppLocation = .settled
@@ -230,6 +234,7 @@ enum CommandLineTool {
                     if askShellAgain { environment.refresh() }
                     return await environment.value?["PATH"]
                 },
+                askedTooRecently: { environment.lastRefreshWasTooSoon },
                 location: AppLocation.of(bundleURL)
             )
         }
