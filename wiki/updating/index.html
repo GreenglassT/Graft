@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Updating Graft | Graft Docs</title>
-<meta name="description" content="Graft tells you when a newer version is out, and you install it by hand from GitHub Releases.">
+<meta name="description" content="Graft downloads and checks a newer version by itself, and installs it when you restart or quit.">
 <link rel="canonical" href="https://graftipa.com/wiki/updating/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="Updating Graft | Graft Docs">
-<meta property="og:description" content="Graft tells you when a newer version is out, and you install it by hand from GitHub Releases.">
+<meta property="og:description" content="Graft downloads and checks a newer version by itself, and installs it when you restart or quit.">
 <meta property="og:url" content="https://graftipa.com/wiki/updating/">
 <meta property="og:image" content="https://graftipa.com/screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -67,30 +67,50 @@
 <main class="wiki-content">
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
 <h1>Updating Graft</h1>
-<p>Graft tells you when a newer version is out, and you install it by hand from
-GitHub Releases.</p>
-<h2 id="when-a-new-version-is-out">When a new version is out</h2>
-<p>Once a day while it's open, Graft asks GitHub whether a newer version is out.
-If there is one, a banner at the bottom of the main window says so, and its
-<strong>Release Page</strong> button opens that release on GitHub. Help › Check for
-Updates… asks at any time.</p>
+<p>Graft downloads and checks a newer version by itself, and installs it when you
+restart or quit.</p>
+<h2 id="how-graft-updates">How Graft updates</h2>
+<p>Once a day while it's open (or when you choose Help › Check for Updates…),
+Graft asks GitHub whether a newer version is out. If one is, it downloads it
+in the background, then shows <strong>Restart to Update</strong> in a banner at the bottom
+of the main window. If you don't restart, it installs the update when you quit
+Graft.</p>
 <ul>
-<li>The check is one request to GitHub, with nothing that identifies you or
-your Mac. <a href="/wiki/network/">What Graft connects to</a> shows what it sends.</li>
-<li>It never downloads or installs anything. Graft doesn't update itself.</li>
-<li>Settings › Updates turns the daily check off. Help › Check for Updates…
-still asks when you choose it.</li>
-<li>In Terminal, <code>graft --check-update</code> asks the same question.</li>
-</ul>
-<h2 id="install-it">Install it</h2>
-<p>Download the new <code>Graft.zip</code> from
-<a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a> and replace
-the <code>Graft.app</code> in <code>/Applications</code>.</p>
-<ul>
+<li>Before it calls a download ready, Graft checks it: the SHA-256 GitHub lists
+for it, then that the app inside is Graft, newer than yours, signed by
+Graft's developer and notarized by Apple. A download that fails any check is
+deleted, and the banner links to the release page instead.</li>
+<li>The old Graft.app goes to the Trash, so you can put it back.</li>
+<li>Graft never installs while it's working (a build, an install, an App Store
+download and so on). It waits until that's done, or until you quit.</li>
 <li>Your config, apps and builds carry over, and so does your App Store
 sign-in.</li>
 <li>The Terminal command points into the app, so it updates too.</li>
+<li>The check and the download send nothing that identifies you or your Mac.
+<a href="/wiki/network/">What Graft connects to</a> shows what they send.</li>
 </ul>
+<h2 id="settings--updates">Settings › Updates</h2>
+<p>Settings › Updates has two switches, both on to start with:</p>
+<ul>
+<li><strong>Check for updates automatically</strong> is the daily check. With it off, Help ›
+Check for Updates… still asks when you choose it.</li>
+<li><strong>Download and install updates automatically</strong> is the background download.
+With it off, the banner offers <strong>Update</strong>, which downloads, checks and
+restarts when you choose it.</li>
+</ul>
+<h2 id="when-graft-cant-update-itself">When Graft can't update itself</h2>
+<p>Graft can't update itself when it runs straight from Downloads (macOS runs a
+read-only copy of an app it hasn't moved), or from a folder your account
+can't change. The banner then says so and links to
+<a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>: download the
+new <code>Graft.zip</code> there and replace the <code>Graft.app</code> in <code>/Applications</code>.</p>
+<p>If an update can't be installed, Graft keeps the version you have, says so the
+next time it opens, and writes what happened to
+<code>~/Library/Logs/Graft/update.log</code>.</p>
+<h2 id="in-terminal">In Terminal</h2>
+<p><code>graft --check-update</code> asks GitHub whether a newer Graft is out, and downloads
+nothing. <code>graft --download-update</code> downloads it into Graft's cache and checks
+it, and installs nothing.</p>
 <h2 id="whats-new">What's new</h2>
 <p>Help › What's New… shows what changed in each release. It also opens by
 itself once, the first time a new version of Graft starts. The

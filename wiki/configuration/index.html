@@ -168,7 +168,8 @@ keep the config in a dotfiles repository and symlink it, add
 ~/.cache/graft/
 ├── ipas/                # staged decrypted IPAs (never pruned)
 ├── built/               # archived builds (newest archive_keep per app version)
-└── artwork/             # cached app icons
+├── artwork/             # cached app icons
+└── updates/             # a newer Graft, downloaded and checked, until it's installed
 
 ~/.local/state/graft/
 ├── log.sqlite           # build history and delivery records
@@ -182,10 +183,14 @@ keep the config in a dotfiles repository and symlink it, add
 way and tightens them on every run if they aren't. Staged IPAs, archived
 builds, build logs and the <code>.p12</code> and profile the setup copies are written
 0600. Graft changes nothing outside these directories, and leaves alone a
-<code>graft</code> that is a symlink you made.</p>
+<code>graft</code> that is a symlink you made. The one exception is updating itself: it
+replaces its own Graft.app, moves the old one to the Trash, and writes what it
+did to <code>~/Library/Logs/Graft/update.log</code>.</p>
 <p>Outside them, the App Store tools keep their own files: ipatool's sign-in in
-your login keychain and its downloads in <code>~/Library/Caches/ipatool</code>, and
-UnfairPlay's model in <code>~/Library/Application Support/unfairplay/models</code>.</p>
+your login keychain, its session cookies in <code>~/.ipatool</code> and its downloads in
+<code>~/Library/Caches/ipatool</code>, and UnfairPlay's model in
+<code>~/Library/Application Support/unfairplay/models</code>. <a href="/wiki/removing/">Removing
+Graft</a> lists everything.</p>
 <nav class="pager"><a rel="prev" href="/wiki/ai-agents/">← AI Agents</a><a rel="next" href="/wiki/downloads/">What Graft Downloads →</a></nav>
 </main>
 </div>

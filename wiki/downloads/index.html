@@ -68,11 +68,11 @@
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
 <h1>What Graft Downloads</h1>
 <p>When Graft goes online and what it downloads, including the one-time downloads on the first App Store action.</p>
-<p>Graft has no telemetry, analytics or crash reporting, and it doesn't update
-itself. Graft.app makes no connections of its own: its CLI does, for something
-you asked for or a pane you opened, to look up the icon of an app that has
-none yet, at launch and when the app list changes, and once a day to ask
-GitHub whether a newer Graft is out (Settings › Updates turns that off).
+<p>Graft has no telemetry, analytics or crash reporting. Graft.app makes no
+connections of its own: its CLI does, for something you asked for or a pane
+you opened, to look up the icon of an app that has none yet, at launch and
+when the app list changes, once a day to ask GitHub whether a newer Graft is
+out, and to download that newer Graft (Settings › Updates turns either off).
 Device UDIDs never leave your Mac.</p>
 <div class="table-wrap"><table>
 <thead>
@@ -102,6 +102,11 @@ Device UDIDs never leave your Mac.</p>
 <td>Once a day while Graft is open, unless Settings › Updates turns it off, and when you choose Help › Check for Updates…</td>
 <td>GitHub (<code>api.github.com</code>), with nothing that identifies you or your Mac</td>
 <td>Whether a newer Graft is out</td>
+</tr>
+<tr>
+<td>A newer Graft is out, unless Settings › Updates turns automatic updates off (then when you choose Update)</td>
+<td>GitHub's release files (<code>github.com</code>), with nothing that identifies you or your Mac</td>
+<td>The new <code>Graft.zip</code>, about 150 MB, once</td>
 </tr>
 <tr>
 <td>A paid account with an App Store Connect key makes a profile</td>

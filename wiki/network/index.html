@@ -67,18 +67,18 @@
 <main class="wiki-content">
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
 <h1>What Graft connects to</h1>
-<p>Every host that Graft.app, the <code>graft</code> CLI, or a tool bundled in the app contacts: why, when, and what it sends. It was gathered by reading the code (<code>graft_ipa/</code>, <code>Graft/Graft/</code>, the bundled Python packages), the pinned sources of ipatool 2.8.0 and UnfairPlay 0.4.0, and the bundled binaries' strings. It covers Graft 2.0.1.</p>
+<p>Every host that Graft.app, the <code>graft</code> CLI, or a tool bundled in the app contacts: why, when, and what it sends. It was gathered by reading the code (<code>graft_ipa/</code>, <code>Graft/Graft/</code>, the bundled Python packages), the pinned sources of ipatool 2.8.0 and UnfairPlay 0.4.0, and the bundled binaries' strings. It covers Graft 2.0.2.</p>
 <p><strong>Short version:</strong></p>
 <ul>
-<li>Graft has no telemetry, analytics or crash reporting, and it doesn't update itself.</li>
-<li>It does check for updates: once a day while the app is open, the CLI asks GitHub for Graft's latest release, sending nothing that identifies you or your Mac (<code>api.github.com</code>, below). Settings › Updates turns that off.</li>
+<li>Graft has no telemetry, analytics or crash reporting.</li>
+<li>It checks for updates: once a day while the app is open, the CLI asks GitHub for Graft's latest release, sending nothing that identifies you or your Mac (<code>api.github.com</code>, below). When there's a newer one, the CLI downloads its Graft.zip from GitHub (<code>github.com</code>, below), checks it, and installs it when you quit Graft. Settings › Updates turns either off.</li>
 <li>The app makes no connections of its own. Everything goes through the CLI and the tools it runs.</li>
 <li>Your Apple ID, your password and the 2FA code, if Apple asks for one, go only to Apple, through the bundled ipatool. You type them into Graft's sign-in sheet (Settings › App Store › Sign In…), or <code>graft --appstore-login</code> asks for them in Terminal. Graft passes them over stdin to ipatool's own prompts and never stores them. ipatool keeps the sign-in, including the password, in your login keychain.</li>
 <li>The first App Store action on a Mac (usually the first sign-in) downloads ipatool's Unicorn emulator from PyPI and about 320 MB of App Store components from Apple, once.</li>
 <li>Device UDIDs never leave your Mac.</li>
 </ul>
 <h2 id="grafts-own-requests">Graft's own requests</h2>
-<p>The CLI sends <code>User-Agent: graft/&lt;version&gt; (+https://github.com/GreenglassT/Graft)</code> with every request it makes through <code>requests</code>. There are two exceptions. Downloading icon images (<code>--artwork</code>, and the icons of <code>--appstore-search</code> results) sends the library's default User-Agent. The update check sends <code>User-Agent: Graft</code>, without the version.</p>
+<p>The CLI sends <code>User-Agent: graft/&lt;version&gt; (+https://github.com/GreenglassT/Graft)</code> with every request it makes through <code>requests</code>. There are two exceptions. Downloading icon images (<code>--artwork</code>, and the icons of <code>--appstore-search</code> results) sends the library's default User-Agent. The update check and the update download send <code>User-Agent: Graft</code>, without the version.</p>
 <p><strong>Bold</strong> marks user data.</p>
 <div class="table-wrap"><table>
 <thead>
@@ -128,9 +128,15 @@
 </tr>
 <tr>
 <td><code>api.github.com</code> (<code>/repos/GreenglassT/Graft/releases/latest</code>)</td>
-<td>CLI: <code>--check-update</code></td>
-<td><strong>On its own</strong>, at most once a day while the app is open: at launch, and every hour after, the app runs it if the last successful check was more than 24 hours ago or there hasn't been one. A failed check is tried again an hour later. Turn it off in Settings › Updates (Check for a newer Graft once a day). Also when you choose Help › Check for Updates…, whether that's on or off.</td>
-<td>The request only, with <code>User-Agent: Graft</code>: no version, account, cookie or device data, and not a <code>~/.netrc</code> login. It compares the answer with the app's version on your Mac. Graft downloads and installs nothing; the banner links to the release page.</td>
+<td>CLI: <code>--check-update</code>, <code>--download-update</code></td>
+<td><code>--check-update</code> runs <strong>on its own</strong>, at most once a day while the app is open: at launch, and every hour after, the app runs it if the last successful check was more than 24 hours ago or there hasn't been one. A failed check is tried again an hour later. Turn it off in Settings › Updates (Check for updates automatically). Also when you choose Help › Check for Updates…, whether that's on or off. <code>--download-update</code> asks again, for the release's files and their SHA-256s, right before it downloads (next row).</td>
+<td>The request only, with <code>User-Agent: Graft</code>: no version, account, cookie or device data, and not a <code>~/.netrc</code> login. It compares the answer with the app's version on your Mac.</td>
+</tr>
+<tr>
+<td><code>github.com</code> (<code>/GreenglassT/Graft/releases/download/&lt;tag&gt;/Graft.zip</code>), redirecting to GitHub's file host (<code>release-assets.githubusercontent.com</code>)</td>
+<td>CLI: <code>--download-update</code></td>
+<td><strong>On its own</strong>, when a check (the daily one, or Help › Check for Updates…) found a newer Graft and Settings › Updates' Download and install updates automatically is on (it is by default): once per new version each time Graft is open, and not again on its own for a version that failed its checks. With that off, only when you choose Update on the banner or in Check for Updates…. Not when Graft can't replace itself where it is (a copy macOS runs from Downloads, or a folder your account can't change); the banner then links to the release page. About 150 MB, kept in Graft's cache (<code>~/.cache/graft/updates</code>) until it's installed.</td>
+<td>The request only, with <code>User-Agent: Graft</code>, and not a <code>~/.netrc</code> login. Before it calls the download ready, Graft checks that it matches the SHA-256 GitHub lists for it, then that the app inside is Graft (its bundle id), newer than yours, signed by the same developer as your Graft (its Developer ID team) and notarized by Apple, with macOS's <code>codesign</code> and <code>spctl</code>. A download that fails any check is deleted. <code>spctl</code> is Gatekeeper, which may ask Apple whether that signature or ticket has been revoked, as it does when you open any newly downloaded app. Installing it needs no connection.</td>
 </tr>
 <tr>
 <td><code>github.com</code>, <code>api.github.com</code>, and <code>release-assets.githubusercontent.com</code>, where GitHub redirects the release files (the LiveContainer project's)</td>
@@ -190,6 +196,7 @@
 <ul>
 <li>Unicorn isn't in Graft.app. The bundled ipatool downloads it from PyPI as upstream ipatool does, and Graft builds ipatool unpatched. It checks the wheel's and the library's SHA-256 against the ones its source pins, and the library's again before each load. As with upstream ipatool, other code running as you could swap the cached library between that last check and the load. PyPI sees your IP address and ipatool's User-Agent, nothing else.</li>
 <li>Offline, that first action fails with &quot;ipatool needs to download its App Store emulator (Unicorn, from PyPI) the first time; connect to the internet and try again.&quot;</li>
+<li>ipatool checks every file it takes from the restore image against a size and SHA-256 its source pins, so only that one image will do. If Apple stops serving it, that first action fails with &quot;Apple no longer serves the macOS 27.0.1 (26A434) restore image that ipatool 2.8.0 takes them from&quot;; a newer Graft, whose ipatool uses an image Apple still serves, fixes it.</li>
 <li>A first sign-in can take several minutes while these download; the sign-in sheet says so.</li>
 </ul>
 <p>What stays on the Mac:</p>
@@ -263,6 +270,7 @@
 <li>Graft's releases page on GitHub (<code>github.com/GreenglassT/Graft/releases</code>), from the link under the license notice in Graft › About Graft;</li>
 <li>a newer Graft's release page on GitHub, from Release Page on the main window's update banner, or Open Release Page after Help › Check for Updates…;</li>
 <li>a page a link in Help › What's New… points to: Graft's releases, or a page of its documentation, on <code>github.com</code>;</li>
+<li>the new Graft, once Restart to Update has installed it: the update's helper opens it (<code>open</code>), as Finder would;</li>
 <li>the guides the free-account setup's device steps link, each from its Open button: <code>sidestore.io</code>, iloader on <code>github.com</code>, and LiveContainer's installation guide on <code>livecontainer.github.io</code>;</li>
 <li>an app's <code>apps.apple.com</code> page, from Open in App Store on an app's pane, or the Mac App Store when Graft has no page for the app;</li>
 <li>the Mac App Store, from Open the Mac App Store in Set Up Decryption.</li>
@@ -297,7 +305,7 @@
 <tr>
 <td><code>pypi.org</code>, <code>files.pythonhosted.org</code></td>
 <td>pip, in <code>graft_bundle.py</code>; pip-compile, in <code>scripts/lock-bundle</code>; <code>graft_bundle.py sources</code></td>
-<td>The packages in <code>bundle/requirements.lock</code> and <code>bundle/build-requirements.lock</code>: wheels only, <code>--require-hashes</code>, chosen for macOS 14 on arm64. graft and cyan install with <code>--no-index</code>. And, for the source archive and the Rust crates' licenses, each package's JSON at <code>pypi.org/pypi/&lt;name&gt;/&lt;version&gt;/json</code> and its source distribution, checked against the lock. Unicorn isn't fetched: the app doesn't carry it.</td>
+<td>The packages in <code>bundle/requirements.lock</code> and <code>bundle/build-requirements.lock</code>: wheels only, <code>--require-hashes</code>, chosen for macOS 14 on arm64, each downloaded once per Mac into pip's cache under <code>~/Library/Caches/graft-release</code> and checked against the lock's hashes on every use. graft and cyan install with <code>--no-index</code>. And, for the source archive and the Rust crates' licenses, each package's JSON at <code>pypi.org/pypi/&lt;name&gt;/&lt;version&gt;/json</code> and its source distribution, checked against the lock. Unicorn isn't fetched: the app doesn't carry it.</td>
 </tr>
 <tr>
 <td><code>static.crates.io</code></td>

@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Removing Graft | Graft Docs</title>
-<meta name="description" content="What to delete to remove Graft, and what it made outside the app.">
+<meta name="description" content="What Graft keeps outside the app, and how to remove it from the Help menu or in Terminal.">
 <link rel="canonical" href="https://graftipa.com/wiki/removing/">
 <meta property="og:type" content="article">
 <meta property="og:title" content="Removing Graft | Graft Docs">
-<meta property="og:description" content="What to delete to remove Graft, and what it made outside the app.">
+<meta property="og:description" content="What Graft keeps outside the app, and how to remove it from the Help menu or in Terminal.">
 <meta property="og:url" content="https://graftipa.com/wiki/removing/">
 <meta property="og:image" content="https://graftipa.com/screenshot.png">
 <meta name="twitter:card" content="summary_large_image">
@@ -67,75 +67,118 @@
 <main class="wiki-content">
 <nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
 <h1>Removing Graft</h1>
-<p>What to delete to remove Graft, and what it made outside the app.</p>
+<p>What Graft keeps outside the app, and how to remove it from the Help menu or in
+Terminal.</p>
 <p>Dragging Graft.app to the Trash removes the app and everything inside it. What
-it made outside the app stays until you remove it:</p>
+it made outside the app stays until you remove it.</p>
+<h2 id="in-the-app">In the app</h2>
+<p>Help › Remove Graft's Data… lists all of it, with sizes. Check what to remove,
+then press Remove…. It waits while Graft is building, installing, downloading
+or setting something up. When it's done, it says what it removed: quit Graft,
+then move Graft.app to the Trash. Removing can't be undone.</p>
+<h2 id="in-terminal">In Terminal</h2>
+<pre><code class="language-bash">graft --remove-data                          # list it all, with sizes; removes nothing
+graft --remove-data --items all --dry-run    # what --items all would remove
+graft --remove-data --items all              # every item marked &quot;removed with all&quot;
+graft --remove-data --items all,passwords    # and your passwords
+graft --remove-data --items cache,temp       # only these
+</code></pre>
+<h2 id="what-it-removes">What it removes</h2>
+<p>This is the whole list, by the name <code>--items</code> takes:</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
+<th>Item</th>
 <th>What</th>
 <th>Where</th>
-<th>To remove it</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Your App Store sign-in</td>
-<td>three items in your login keychain, service <code>ipatool-auth.service</code></td>
-<td>Before you remove the app, Settings › App Store › <strong>Sign Out</strong>. Then delete any of the three that's left in Keychain Access (search for <code>ipatool-auth.service</code>), or in Terminal: <code>security delete-generic-password -s ipatool-auth.service -a account</code>, and the same with <code>-a anisette-v4</code> and <code>-a kbsync-v1</code>, unless you use ipatool on its own: it keeps its sign-in in the same three items.</td>
-</tr>
-<tr>
-<td>Your <code>.p12</code> and SSH passwords</td>
-<td>login keychain items with the service <code>graft</code> (<code>p12-&lt;team id&gt;</code>, <code>ssh-&lt;device UDID&gt;</code>), or <code>tweak-build</code> from before Graft's rename</td>
-<td>Keychain Access: search for <code>graft</code>, and delete them.</td>
-</tr>
-<tr>
-<td>The decryption model</td>
-<td><code>~/Library/Application Support/unfairplay</code></td>
-<td><code>rm -rf ~/Library/Application\ Support/unfairplay</code>, unless you use UnfairPlay on its own.</td>
-</tr>
-<tr>
-<td>ipatool's App Store components and Unicorn</td>
-<td><code>~/Library/Caches/ipatool</code> (about 320 MB)</td>
-<td><code>rm -rf ~/Library/Caches/ipatool</code>, unless you use ipatool on its own.</td>
-</tr>
-<tr>
-<td>Your config, <code>.p12</code>, profiles, App Store Connect key and tweaks</td>
+<td><code>config</code></td>
+<td>Your setup: <code>config.yaml</code>, the <code>.p12</code> and profile Graft copied in when you set it up, your App Store Connect key and the profiles made with it, and your tweaks. The files you picked during setup stay where they were.</td>
 <td><code>~/.config/graft</code></td>
-<td><code>rm -rf ~/.config/graft</code></td>
 </tr>
 <tr>
-<td>Staged IPAs and archived builds, which can take several GB</td>
+<td><code>cache</code></td>
+<td>Staged IPAs, archived builds and app icons, often several GB</td>
 <td><code>~/.cache/graft</code></td>
-<td><code>rm -rf ~/.cache/graft</code></td>
 </tr>
 <tr>
-<td>Build history and logs, repository caches, the App Store sign-in record</td>
+<td><code>state</code></td>
+<td>Build history and logs, repository indexes, earlier versions of tweaks you updated, and Graft's record of its App Store sign-in</td>
 <td><code>~/.local/state/graft</code></td>
-<td><code>rm -rf ~/.local/state/graft</code></td>
 </tr>
 <tr>
-<td>frida-ios-dump, and tools a pipx install uses</td>
+<td><code>data</code></td>
+<td>frida-ios-dump, and tools a pipx install of Graft uses</td>
 <td><code>~/.local/share/graft</code></td>
-<td><code>rm -rf ~/.local/share/graft</code></td>
 </tr>
 <tr>
-<td><code>graft</code> for Terminal</td>
-<td><code>~/.local/bin/graft</code>, a link into the app</td>
-<td><code>rm ~/.local/bin/graft</code>, if <code>ls -l ~/.local/bin/graft</code> shows it points into Graft.app (a pipx <code>graft</code> there is removed with <code>pipx uninstall graft-ipa</code>).</td>
+<td><code>legacy</code></td>
+<td><code>tweak-build</code> folders from before Graft's rename that Graft left beside its own, because both held files. Only when you name it.</td>
+<td><code>~/.config/tweak-build</code> and the like</td>
 </tr>
 <tr>
-<td>The app's own settings</td>
-<td>its preferences, <code>com.greenglasst.graft</code></td>
-<td><code>defaults delete com.greenglasst.graft</code></td>
+<td><code>appstore-signin</code></td>
+<td>Your App Store sign-in: three items in your login keychain (service <code>ipatool-auth.service</code>, accounts <code>account</code>, <code>anisette-v4</code> and <code>kbsync-v1</code>) and ipatool's session cookies. Off when another ipatool made the sign-in.</td>
+<td>the keychain, and <code>~/.ipatool</code> (or <code>$XDG_STATE_HOME/ipatool</code>)</td>
+</tr>
+<tr>
+<td><code>ipatool-cache</code></td>
+<td>ipatool's App Store components and its Unicorn emulator, about 320 MB</td>
+<td><code>~/Library/Caches/ipatool</code>, and <code>ipatool-*</code> folders in your temp folder</td>
+</tr>
+<tr>
+<td><code>unfairplay-model</code></td>
+<td>The decryption model Set Up Decryption made</td>
+<td><code>~/Library/Application Support/unfairplay</code></td>
+</tr>
+<tr>
+<td><code>passwords</code></td>
+<td>Your <code>.p12</code> and SSH passwords. Only when you name it.</td>
+<td>your login keychain, service <code>graft</code> (or <code>tweak-build</code> from before Graft's rename), accounts <code>p12-&lt;team id&gt;</code> and <code>ssh-&lt;device UDID&gt;</code></td>
+</tr>
+<tr>
+<td><code>graft-link</code></td>
+<td><code>graft</code> for Terminal, when it's a link into Graft.app</td>
+<td><code>~/.local/bin/graft</code></td>
+</tr>
+<tr>
+<td><code>app-settings</code></td>
+<td>The app's own settings. The app removes these; in Terminal, <code>defaults delete com.greenglasst.graft</code>.</td>
+<td><code>~/Library/Preferences/com.greenglasst.graft.plist</code></td>
+</tr>
+<tr>
+<td><code>temp</code></td>
+<td>Temporary folders a stopped build, signing or install left behind, more than an hour old, and the rebuild marker of an app built from source</td>
+<td>your temp folder (<code>$TMPDIR</code>), <code>~/Library/Caches/Graft</code></td>
 </tr>
 </tbody>
 </table>
 </div>
+<p>Keychain items are found and removed by their service and account only, and
+nothing is asked of the keychain while it's locked. If you use ipatool or
+UnfairPlay on their own, they use the same sign-in, components and model, and
+removing them affects those too.</p>
+<h2 id="what-stays">What stays</h2>
+<p>Never removed, and listed under &quot;Not removed&quot;: anything <code>config.yaml</code> points
+to outside these folders (<code>cache_dir</code>, <code>built_dir</code>, <code>tweaks_dir</code>, <code>state_dir</code>,
+the signing files, the App Store Connect key and its profiles), a model folder
+set by <code>appstore.unfairplay_models</code> or <code>UNFAIRPLAY_MODEL_DIR</code>, a <code>graft</code> folder
+that is a link you made, and a <code>~/.local/bin/graft</code> that isn't Graft.app's (a
+pipx one is removed with <code>pipx uninstall graft-ipa</code>).</p>
 <p>If you set <code>XDG_CONFIG_HOME</code>, <code>XDG_CACHE_HOME</code>, <code>XDG_STATE_HOME</code> or
-<code>XDG_DATA_HOME</code>, the four <code>graft</code> folders are under those instead. The Mac App
-Store app you set up decryption with, and LiveContainer and the apps on your
-devices, are yours to keep or delete.</p>
+<code>XDG_DATA_HOME</code>, the four <code>graft</code> folders are under those instead. Builds and
+tweaks Graft moved to the Trash stay there until you empty it. The Mac App
+Store app you set up decryption with, PlayCover and the apps you installed on
+this Mac with it, and LiveContainer and the apps on your devices, are yours to
+keep or delete.</p>
+<p>The list also leaves out <code>~/Library/Logs/Graft</code>, where Graft writes the log of
+the updates it installs. Delete that folder yourself.</p>
+<h2 id="by-hand">By hand</h2>
+<p>To do it by hand instead, delete what the table lists. For the keychain items,
+search Keychain Access for <code>ipatool-auth.service</code> or <code>graft</code>.</p>
 <nav class="pager"><a rel="prev" href="/wiki/troubleshooting/">← Troubleshooting</a><a rel="next" href="/wiki/building-from-source/">Building from Source →</a></nav>
 </main>
 </div>

@@ -189,9 +189,9 @@ graft --prune-builds [--keep 1]     # apply it now
 graft --delivery-state [--app example]   # would building now produce something different?
 graft --reconcile [--app example]        # check the device first, then report
 </code></pre>
-<p><code>--dry-run</code> previews only a build, <code>--prune-builds</code> and <code>--init --account</code>.
-Every other command refuses it, before doing anything, rather than running for
-real under a flag that said it wouldn't.</p>
+<p><code>--dry-run</code> previews only a build, <code>--prune-builds</code>, <code>--init --account</code> and
+<code>--remove-data --items</code>. Every other command refuses it, before doing
+anything, rather than running for real under a flag that said it wouldn't.</p>
 <h2 id="livecontainer">LiveContainer</h2>
 <pre><code class="language-bash">graft --lc-status                     # LiveContainers on each device, who manages them, upstream version
 graft --lc-install                    # paid only: install or update all three (default device, or --device)
@@ -221,7 +221,13 @@ graft --set-portal --asc-key-id ABCDE12345 \
 graft --setup-portal                # the same key, with questions
 graft --clear-portal                # remove it (the .p8 stays)
 graft --check-update                # is a newer Graft out? (asks GitHub; downloads nothing)
+graft --download-update             # download it into Graft's cache and check it (installs nothing)
+graft --remove-data                 # what Graft keeps outside Graft.app, with sizes
+graft --remove-data --items all     # remove it (see Removing Graft); add --dry-run to preview
 </code></pre>
+<p>Graft.app installs a download it checked with <code>--install-update</code>, which it
+runs as it quits; see <a href="/wiki/updating/">Updating Graft</a>.
+<a href="/wiki/removing/#what-it-removes">Removing Graft</a> lists every item <code>--items</code> takes.</p>
 <p><code>--set-settings --signing-*</code> refuses on a free config rather than write part of
 a <code>signing:</code> section, which would leave a config that no longer loads. To
 switch account in Terminal, run <code>graft --init</code> again: on a free config it
