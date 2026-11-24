@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building &amp; Delivery | Graft Docs</title>
+<meta name="description" content="Build an app with its tweaks, push it into LiveContainer or, with a paid account, install it as a normal app, and keep track of past builds and deliveries.">
+<link rel="canonical" href="https://graftipa.com/wiki/building-and-delivery/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Building &amp; Delivery | Graft Docs">
+<meta property="og:description" content="Build an app with its tweaks, push it into LiveContainer or, with a paid account, install it as a normal app, and keep track of past builds and deliveries.">
+<meta property="og:url" content="https://graftipa.com/wiki/building-and-delivery/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/" aria-current="page">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
+<h1>Building &amp; Delivery</h1>
+<p>Build an app with its tweaks, push it into LiveContainer or, with a paid
+account, install it as a normal app, and keep track of past builds and
+deliveries.</p>
+<p>Press <strong>Build &amp; Install</strong>.</p>
+<ul>
+<li><strong>LiveContainer delivery:</strong> Graft pushes the IPA into LiveContainer's
+Documents. Open LiveContainer on the device and import it from there. That's
+when LiveContainer signs it and the tweaks start loading.</li>
+<li><strong>Sideload delivery (paid only):</strong> Graft signs the IPA with your
+certificate and installs it as a normal app.</li>
+</ul>
+<p>Builds lists every build, with its log and archive. See <a href="#building">Building</a>.</p>
+<h2 id="delivery">Delivery</h2>
+<p>Each app has a delivery mode, LiveContainer or Sideload. An app added without
+one is LiveContainer with a free Apple ID and Sideload with a paid account.
+Graft writes the mode whenever it adds an app, so an app keeps its mode if the
+config later changes account. Change it in the app's Edit sheet.</p>
+<h3 id="livecontainer-recommended">LiveContainer (recommended)</h3>
+<p>LiveContainer delivery builds the tweaked IPA unsigned and pushes it into
+LiveContainer's <code>Documents</code> folder over USB or Wi-Fi. You then import it
+inside LiveContainer, which runs it as a guest app.</p>
+<p>Why this is the main path: a guest app keeps its <strong>original bundle id</strong>, and
+some apps tie sign-in to their original bundle id. It also needs no
+provisioning profile of its own, so zsign, the profile and the
+device-in-profile checks are skipped for these builds.</p>
+<p>How a delivery works:</p>
+<ol>
+<li>Build &amp; Install pushes <code>Documents/&lt;name&gt;.ipa</code> into LiveContainer.</li>
+<li>On the device, open LiveContainer. The IPA is in its Documents; import it
+as an app. LiveContainer signs it on import, and that is when the tweaks
+start loading.</li>
+<li>Optionally remove the pushed IPAs afterward, with Clean up in the device's
+LiveContainer section.</li>
+</ol>
+<p>Delivering is not installing: Graft can see what it put in Documents, not
+whether you imported it. See <a href="#delivery-state">Delivery state</a>.</p>
+<h3 id="sideload-paid-only">Sideload (paid only)</h3>
+<p>Sideload delivery signs the IPA with zsign, using your <code>.p12</code> and profile, and
+installs it on the device as a normal top-level app. The device's UDID must be
+in the profile. Use this for apps that don't care about their bundle id or
+signing team.</p>
+<p>On a free Apple ID, building, re-installing or adding a sideload app is
+refused.</p>
+<h2 id="building">Building</h2>
+<p>Build &amp; Install runs this pipeline. Build options (beside it) picks the
+device and can build without installing.</p>
+<ol>
+<li><strong>Pre-flight.</strong> Tools, signing files, password, device, and that the device
+is in the profile. Only what the delivery mode needs is checked.</li>
+<li><strong>Source IPA.</strong> The decrypted IPA staged in <code>~/.cache/graft/ipas/</code>.</li>
+<li><strong>Decryption check.</strong> The load commands of every Mach-O. Any that is still
+encrypted is reported as a warning naming the binary, and the build carries
+on.</li>
+<li><strong>Inject.</strong> cyan, with the app's tweaks and options. The original bundle id
+is kept by default. cyan's output is meant to be re-signed: its modified
+binaries carry stale signatures until then. Every delivery re-signs before
+anything runs: zsign for Sideload, LiveContainer on import, SideStore or
+PlayCover on install. A LiveContainer build that isn't installed is for one
+of those signers.</li>
+<li><strong>Sign</strong> (Sideload only). zsign with your <code>.p12</code> and profile.</li>
+<li><strong>Archive.</strong> Copy the result to <code>~/.cache/graft/built/</code>.</li>
+<li><strong>Deliver.</strong> Push into LiveContainer, or install on the device.</li>
+<li><strong>Record.</strong> Write the build to <code>~/.local/state/graft/log.sqlite</code> and apply
+archive retention.</li>
+</ol>
+<p><strong>Stop</strong> ends the build where it is. A stopped build shows as Stopped, not as
+a failure, and adds no row to Builds.</p>
+<h2 id="build-history-and-retention">Build history and retention</h2>
+<p><strong>Builds</strong> lists every build, with its saved log (View log…). A build's
+archive can be delivered again without rebuilding (Re-install…), or shown in
+Finder (Reveal in Finder).</p>
+<p>A re-install goes out the way the archive was built: an unsigned LiveContainer
+archive is never installed as a top-level app, and a zsign-signed one is never
+pushed into LiveContainer. If the app's delivery mode has changed since,
+rebuild it. For a build recorded before Graft 1.1 noted the mode, the archive
+itself says (zsign's embedded profile).</p>
+<p>After each successful build, all but the newest <code>archive_keep</code> archives <strong>per
+app version</strong> go to the Trash (default 2; <code>0</code> keeps only the build just made).</p>
+<ul>
+<li>Grouping by version means rebuilds of one version never push out the last
+build of an older version, so you can always roll back to a version you
+shipped.</li>
+<li>Builds you can re-install are kept first. An archive left by a build whose
+install failed only keeps a slot none of those needs.</li>
+<li>Archives go to the Trash, not straight to deletion, so the space comes back
+when you empty it. Staged source IPAs are never pruned.</li>
+</ul>
+<p><strong>Clean up old builds…</strong> in Builds does the same at your <code>archive_keep</code>: it
+says how many archives would go to the Trash, and moves them when you confirm.
+Useful after lowering the setting. The button is disabled while a build runs.</p>
+<p>A clean-up never moves an archive that is still in use.</p>
+<ul>
+<li>A build holds a lock from the moment it archives its IPA until its history
+entry is written, and a re-install holds it until the archive is delivered.</li>
+<li>A Mac install copies a built archive under the lock and hands PlayCover the
+copy, since PlayCover reads the file after Graft has returned.</li>
+<li>A clean-up you start waits up to 30 seconds for them to finish, then stops
+with an error and moves nothing. A build's own clean-up doesn't wait: if
+another build is delivering, it skips this time and says so, and the next
+build catches up. Two clean-ups at once take turns.</li>
+</ul>
+<h2 id="delivery-state">Delivery state</h2>
+<p>The app list and each app's pane say whether building now would produce
+something different from what was last delivered.</p>
+<p>On every delivery Graft records a SHA-256 over what determines the build: the
+source IPA's bundle id and version, each tweak's filename and contents, the
+cyan options and the delivery mode. Comparing that with what the config would
+produce now gives one of:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Means</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>never</code></td>
+<td>Nothing has been delivered for this app.</td>
+</tr>
+<tr>
+<td><code>stale</code></td>
+<td>Something changed since the last delivery; the reasons say what (for example <code>some-tweak.deb rebuilt since delivery</code> or <code>app version changed: 1.2.3 → 1.3.0</code>).</td>
+</tr>
+<tr>
+<td><code>current</code></td>
+<td>Matches the last delivery.</td>
+</tr>
+<tr>
+<td><code>unknown</code></td>
+<td>Graft can't tell (for example a tweak file it can't read, or no staged IPA), and says so instead of guessing.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Tweak contents are hashed, not just names, because a tweak rebuilt from source
+keeps its filename. The source IPA is identified, not hashed.</p>
+<p>Limits worth knowing:</p>
+<ul>
+<li><strong>Delivered is not installed.</strong> For LiveContainer, Graft knows it wrote the
+file, not whether you imported it. Checking the device lists LiveContainer's
+Documents and can only downgrade a state: a missing file means the record is
+out of date, but a present file doesn't prove an import.</li>
+<li>Checking the device leaves sideload apps alone.</li>
+<li>A re-install of an archive that a recorded push shipped, byte for byte
+(usually the newest build), is compared like that push. Any other
+re-installed archive reads <code>stale</code>, because what went into it wasn't
+recorded.</li>
+</ul>
+<p>None of this blocks a build.</p>
+<h2 id="running-builds-on-this-mac">Running builds on this Mac</h2>
+<p>On an Apple silicon Mac, an app's pane has <strong>Build for this Mac</strong>, which makes
+the build loadable under PlayCover and hands it to PlayCover. A staged IPA or
+an archived build can be handed over too.</p>
+<p>Some tweak libraries import iOS private frameworks that macOS doesn't have;
+for these Mac builds Graft bundles a minimal stand-in instead. Phone builds
+are never changed this way.</p>
+<p>Graft.app carries that stand-in prebuilt, so a Mac build needs no Xcode. A
+<code>graft</code> installed with pipx builds it on demand and needs full Xcode for that;
+see <a href="/wiki/cli-install/#the-cli-without-the-app-pipx">The CLI without the app</a>.</p>
+<nav class="pager"><a rel="prev" href="/wiki/tweaks/">← Tweaks</a><a rel="next" href="/wiki/livecontainer/">LiveContainer →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

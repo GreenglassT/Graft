@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Getting Started | Graft Docs</title>
+<meta name="description" content="Install Graft, see what it needs, and follow the five steps from setting up your Apple account to installing an app.">
+<link rel="canonical" href="https://graftipa.com/wiki/getting-started/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Getting Started | Graft Docs">
+<meta property="og:description" content="Install Graft, see what it needs, and follow the five steps from setting up your Apple account to installing an app.">
+<meta property="og:url" content="https://graftipa.com/wiki/getting-started/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/" aria-current="page">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
+<h1>Getting Started</h1>
+<p>Install Graft, see what it needs, and follow the five steps from setting up
+your Apple account to installing an app.</p>
+<h2 id="install">Install</h2>
+<ol>
+<li>Download <code>Graft.zip</code> from <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>.</li>
+<li>Unzip it, move <code>Graft.app</code> to <code>/Applications</code>, and open it.</li>
+</ol>
+<p>Graft.app carries everything it needs:</p>
+<ul>
+<li>the <code>graft</code> CLI, with its own Python;</li>
+<li>cyan, zsign, ldid, ipatool, UnfairPlay and the other helpers.</li>
+</ul>
+<p>You don't need Homebrew, pipx, Python, Go, Xcode or libimobiledevice. The
+one exception is decrypting on a jailbroken device, which still needs
+libimobiledevice's <code>iproxy</code> and tools you install yourself (see
+<a href="/wiki/getting-an-ipa/#decrypt-on-a-jailbroken-device">Decrypt on a jailbroken device</a>).</p>
+<p>Coming from Graft 1.x? See <a href="/wiki/upgrading/">Upgrading from Graft 1.x</a>.</p>
+<h2 id="requirements">Requirements</h2>
+<ul>
+<li><strong>A Mac with Apple silicon and macOS 14 or later.</strong> On an Intel Mac,
+Graft.app opens to a screen that says: &quot;Graft 2.0 needs a Mac with Apple
+silicon. Graft 1.1 may work on an Intel Mac running macOS 15 or later, but
+it was never tested there.&quot; Graft 1.1 needs macOS 15; to install it, see
+<a href="/wiki/upgrading/#going-back-to-11">Going back to 1.1</a>, whose pipx command
+pins it with <code>@v1.1</code>.</li>
+<li><strong>An iPhone or iPad</strong> paired with this Mac, connected by USB, or on the
+same network with Wi-Fi sync turned on.</li>
+<li><strong>An Apple account,</strong> of one of two kinds. The first run asks which you
+have, and Settings switches later.
+<ul>
+<li>A <strong>free Apple ID</strong>, with LiveContainer on the device. Graft builds
+unsigned IPAs and pushes them into LiveContainer, which signs them when
+you import them. Graft never signs anything itself on this account.</li>
+<li>A <strong>paid Apple Developer Program membership</strong>, with a development
+certificate exported as a <code>.p12</code> and a provisioning profile (a wildcard
+profile is simplest) that includes your device.</li>
+</ul>
+</li>
+</ul>
+<h3 id="what-each-feature-needs">What each feature needs</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>To</th>
+<th>You need</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Build and push into LiveContainer</td>
+<td>LiveContainer on the device. With a free Apple ID, install it with SideStore, AltStore, iloader or Impactor, which also refresh it every 7 days.</td>
+</tr>
+<tr>
+<td>Install an app as a normal app (Sideload)</td>
+<td>A paid membership, its <code>.p12</code> and a profile that includes the device.</td>
+</tr>
+<tr>
+<td>Install or update LiveContainer from Graft</td>
+<td>A paid membership and an App Store Connect API key.</td>
+</tr>
+<tr>
+<td>Make each app's provisioning profile automatically</td>
+<td>A paid membership and an App Store Connect API key.</td>
+</tr>
+<tr>
+<td>Search the App Store</td>
+<td>Nothing. No Apple ID is involved.</td>
+</tr>
+<tr>
+<td>Download from the App Store</td>
+<td>An Apple ID signed in in Graft. Any Apple ID works, free or paid; it's separate from the account above. The app must be one that Apple ID owns, or a free one Graft can get for it.</td>
+</tr>
+<tr>
+<td>Decrypt App Store downloads</td>
+<td>An iPhone or iPad app installed on this Mac from the Mac App Store, with the same Apple ID, and opened once. Any free one will do.</td>
+</tr>
+<tr>
+<td>Decrypt on a jailbroken device</td>
+<td>A jailbroken iPhone or iPad with frida-server 16.x and OpenSSH, plus tools you install yourself (see <a href="/wiki/getting-an-ipa/#decrypt-on-a-jailbroken-device">Decrypt on a jailbroken device</a>).</td>
+</tr>
+<tr>
+<td>Run a build on this Mac</td>
+<td><a href="https://github.com/PlayCover/PlayCover">PlayCover</a>.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="the-five-steps">The five steps</h2>
+<p>Each step has its own page:</p>
+<ol>
+<li><a href="/wiki/apple-account/">Set up your Apple account</a></li>
+<li><a href="/wiki/adding-apps/">Add an app</a></li>
+<li><a href="/wiki/getting-an-ipa/">Give it a decrypted IPA</a></li>
+<li><a href="/wiki/tweaks/">Attach tweaks</a></li>
+<li><a href="/wiki/building-and-delivery/">Build and install</a></li>
+</ol>
+<nav class="pager"><a rel="prev" href="/wiki/">← Graft Docs</a><a rel="next" href="/wiki/apple-account/">Your Apple Account →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

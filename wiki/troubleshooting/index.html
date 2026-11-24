@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Troubleshooting | Graft Docs</title>
+<meta name="description" content="Common symptoms and error messages, and their likely cause.">
+<link rel="canonical" href="https://graftipa.com/wiki/troubleshooting/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Troubleshooting | Graft Docs">
+<meta property="og:description" content="Common symptoms and error messages, and their likely cause.">
+<meta property="og:url" content="https://graftipa.com/wiki/troubleshooting/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/" aria-current="page">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
+<h1>Troubleshooting</h1>
+<p>Common symptoms and error messages, and their likely cause.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ApplicationVerificationFailed</code></td>
+<td>The <code>.p12</code> and profile are from different teams, or the device's UDID isn't in the profile.</td>
+</tr>
+<tr>
+<td><code>MismatchedApplicationIdentifierEntitlement</code></td>
+<td>The profile doesn't allow this bundle id; use a wildcard profile. Installing LiveContainer: delete an old zsign-signed copy on the device first.</td>
+</tr>
+<tr>
+<td><code>DeviceLocked</code></td>
+<td>Unlock the device.</td>
+</tr>
+<tr>
+<td><code>wrong password</code> from zsign</td>
+<td>The <code>.p12</code> password is wrong.</td>
+</tr>
+<tr>
+<td><code>Library not loaded: @rpath/libexample.dylib</code></td>
+<td>Add a copy of that library to the app's tweaks; see <a href="/wiki/tweaks/#shared-libraries">Shared libraries</a>.</td>
+</tr>
+<tr>
+<td><code>couldn't extract some-tweak.deb</code></td>
+<td>The download is probably an HTML error page; fetch it again.</td>
+</tr>
+<tr>
+<td>A guest app in LiveContainer doesn't remember its login</td>
+<td>LiveContainer was signed with a wildcard profile's entitlements (for example by zsign). Reinstall it from Graft with a paid account.</td>
+</tr>
+<tr>
+<td>A dump from a jailbroken device times out</td>
+<td>Check the device's Decrypt card. Usually the frida majors differ, SSH to the device is down, or the app couldn't be brought to the foreground.</td>
+</tr>
+<tr>
+<td><code>no LiveContainer found on the device</code></td>
+<td>LiveContainer isn't installed, or not under a bundle id starting <code>com.kdt.livecontainer</code>. With a free Apple ID, install it through SideStore or iloader; see <a href="/wiki/apple-account/#free-apple-id">Set up your Apple account</a>. With a paid account, Graft can install it too.</td>
+</tr>
+<tr>
+<td><code>the device listed no apps at all, which is how a locked phone answers</code></td>
+<td>The phone is locked, or hasn't been unlocked since it restarted. Unlock it, stay on the home screen, and try again.</td>
+</tr>
+<tr>
+<td><code>... already has a Documents/&lt;app&gt;.ipa that Graft did not push</code></td>
+<td>LiveContainer's Documents already holds a file with the name the push uses, and neither a record nor its bytes say Graft put it there (it may be your own copy). Rename or remove it in the Files app (On My iPhone &gt; LiveContainer), then build again.</td>
+</tr>
+<tr>
+<td><code>lc_bundle_id ... is not installed</code></td>
+<td>The app is pinned to a LiveContainer that isn't on the device. Pick one in the LiveContainer picker in the app's Edit sheet, or Automatic to drop the pin.</td>
+</tr>
+<tr>
+<td><code>couldn't reach usbmuxd</code></td>
+<td>macOS's service for talking to iPhones didn't answer. Reconnect the phone; if it persists, restart the Mac.</td>
+</tr>
+<tr>
+<td><code>N LiveContainers are installed and Graft will not guess which to use</code></td>
+<td>There is no single primary: two LiveContainers installed by two Apple IDs, say, or a jailbreak's plain <code>com.kdt.livecontainer</code> next to an installer's <code>com.kdt.livecontainer.&lt;TEAMID&gt;</code>. Pin the app to one of the ids the error lists, in the LiveContainer picker in its Edit sheet.</td>
+</tr>
+<tr>
+<td><code>... needs a paid Apple Developer Program membership</code></td>
+<td>The config has no <code>signing:</code> section, so it is set up for a free Apple ID, and the action needs a paid one. Use LiveContainer delivery, or, with a paid membership, Settings › Add a paid account…; it keeps your apps.</td>
+</tr>
+<tr>
+<td>Settings › App Store says &quot;signed in by another ipatool (Graft 1's?): sign in again&quot;, or, with your own ipatool set in <code>config.yaml</code>, &quot;a sign-in this ipatool can't read (another ipatool's?): sign in again&quot;</td>
+<td>Your sign-in was made by an ipatool this one can't read: with Graft's own, such as yours under Graft 1; with your own, Graft.app's or another. Press Sign In…; see <a href="/wiki/upgrading/#your-app-store-sign-in">Upgrading from Graft 1.x</a>.</td>
+</tr>
+<tr>
+<td>A decrypt fails as the wrong model or the wrong Apple ID</td>
+<td>Decryption was set up with another Apple ID. Use the same Apple ID in Graft as in the Mac App Store, then press Set Up Again… in Settings › App Store.</td>
+</tr>
+<tr>
+<td>Set Up Decryption… or Set Up Again… stops with &quot;canonical input has no SIDB state&quot;</td>
+<td>This Mac's App Store state, which UnfairPlay reads, isn't there right now: macOS sometimes clears it, even for an app you've already opened. Open the app you picked once, then set up again. The sheet says the same.</td>
+</tr>
+<tr>
+<td>The first sign-in, or the first App Store action, fails while it downloads ipatool's App Store components, with an error naming the macOS 27.0.1 (26A434) restore image (for example &quot;server returned 404 Not Found&quot;)</td>
+<td>A known issue in 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and if Apple removes that file, a Mac that hasn't downloaded them yet can't get them. A Mac whose ipatool already did (in <code>~/Library/Caches/ipatool</code>, a 1.x ipatool's included) isn't affected. Graft 2.0 has no update check, so look on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a> for a later Graft, whose ipatool will use an image Apple still serves.</td>
+</tr>
+<tr>
+<td>Settings › App Store says &quot;couldn't tell… your login keychain is locked&quot;</td>
+<td>Unlock the login keychain in Keychain Access, then refresh. Until then Settings offers neither Sign In… nor Sign Out, Get latest from App Store and Get (free) refuse, and so do <code>graft --appstore-login</code> and <code>--appstore-logout</code> in Terminal.</td>
+</tr>
+<tr>
+<td>&quot;Graft.app is damaged: part of it is missing.&quot;</td>
+<td>A file inside the app is missing. Download Graft again and replace this copy.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<nav class="pager"><a rel="prev" href="/wiki/upgrading/">← Upgrading from 1.x</a><a rel="next" href="/wiki/removing/">Removing Graft →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

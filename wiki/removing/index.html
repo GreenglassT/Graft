@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Removing Graft | Graft Docs</title>
+<meta name="description" content="What to delete to remove Graft, and what it made outside the app.">
+<link rel="canonical" href="https://graftipa.com/wiki/removing/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Removing Graft | Graft Docs">
+<meta property="og:description" content="What to delete to remove Graft, and what it made outside the app.">
+<meta property="og:url" content="https://graftipa.com/wiki/removing/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/" aria-current="page">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
+<h1>Removing Graft</h1>
+<p>What to delete to remove Graft, and what it made outside the app.</p>
+<p>Dragging Graft.app to the Trash removes the app and everything inside it. What
+it made outside the app stays until you remove it:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>What</th>
+<th>Where</th>
+<th>To remove it</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Your App Store sign-in</td>
+<td>three items in your login keychain, service <code>ipatool-auth.service</code></td>
+<td>Before you remove the app, Settings › App Store › <strong>Sign Out</strong>. Then delete any of the three that's left in Keychain Access (search for <code>ipatool-auth.service</code>), or in Terminal: <code>security delete-generic-password -s ipatool-auth.service -a account</code>, and the same with <code>-a anisette-v4</code> and <code>-a kbsync-v1</code>, unless you use ipatool on its own: it keeps its sign-in in the same three items.</td>
+</tr>
+<tr>
+<td>Your <code>.p12</code> and SSH passwords</td>
+<td>login keychain items with the service <code>graft</code> (<code>p12-&lt;team id&gt;</code>, <code>ssh-&lt;device UDID&gt;</code>), or <code>tweak-build</code> from before Graft's rename</td>
+<td>Keychain Access: search for <code>graft</code>, and delete them.</td>
+</tr>
+<tr>
+<td>The decryption model</td>
+<td><code>~/Library/Application Support/unfairplay</code></td>
+<td><code>rm -rf ~/Library/Application\ Support/unfairplay</code>, unless you use UnfairPlay on its own.</td>
+</tr>
+<tr>
+<td>ipatool's App Store components and Unicorn</td>
+<td><code>~/Library/Caches/ipatool</code> (about 320 MB)</td>
+<td><code>rm -rf ~/Library/Caches/ipatool</code>, unless you use ipatool on its own.</td>
+</tr>
+<tr>
+<td>Your config, <code>.p12</code>, profiles, App Store Connect key and tweaks</td>
+<td><code>~/.config/graft</code></td>
+<td><code>rm -rf ~/.config/graft</code></td>
+</tr>
+<tr>
+<td>Staged IPAs and archived builds, which can take several GB</td>
+<td><code>~/.cache/graft</code></td>
+<td><code>rm -rf ~/.cache/graft</code></td>
+</tr>
+<tr>
+<td>Build history and logs, repository caches, the App Store sign-in record</td>
+<td><code>~/.local/state/graft</code></td>
+<td><code>rm -rf ~/.local/state/graft</code></td>
+</tr>
+<tr>
+<td>frida-ios-dump, and tools a pipx install uses</td>
+<td><code>~/.local/share/graft</code></td>
+<td><code>rm -rf ~/.local/share/graft</code></td>
+</tr>
+<tr>
+<td><code>graft</code> for Terminal</td>
+<td><code>~/.local/bin/graft</code>, a link into the app</td>
+<td><code>rm ~/.local/bin/graft</code>, if <code>ls -l ~/.local/bin/graft</code> shows it points into Graft.app (a pipx <code>graft</code> there is removed with <code>pipx uninstall graft-ipa</code>).</td>
+</tr>
+<tr>
+<td>The app's own settings</td>
+<td>its preferences, <code>com.greenglasst.graft</code></td>
+<td><code>defaults delete com.greenglasst.graft</code></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>If you set <code>XDG_CONFIG_HOME</code>, <code>XDG_CACHE_HOME</code>, <code>XDG_STATE_HOME</code> or
+<code>XDG_DATA_HOME</code>, the four <code>graft</code> folders are under those instead. The Mac App
+Store app you set up decryption with, and LiveContainer and the apps on your
+devices, are yours to keep or delete.</p>
+<nav class="pager"><a rel="prev" href="/wiki/troubleshooting/">← Troubleshooting</a><a rel="next" href="/wiki/building-from-source/">Building from Source →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

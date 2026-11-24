@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Building from Source | Graft Docs</title>
+<meta name="description" content="How to build Graft.app and run its tests from the repository.">
+<link rel="canonical" href="https://graftipa.com/wiki/building-from-source/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Building from Source | Graft Docs">
+<meta property="og:description" content="How to build Graft.app and run its tests from the repository.">
+<meta property="og:url" content="https://graftipa.com/wiki/building-from-source/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/" aria-current="page">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
+<h1>Building from Source</h1>
+<p>How to build Graft.app and run its tests from the repository.</p>
+<pre><code class="language-bash">brew install xcodegen
+cd Graft &amp;&amp; xcodegen generate
+open Graft.xcodeproj
+</code></pre>
+<p>Or from the command line:</p>
+<pre><code class="language-bash">xcodebuild -project Graft/Graft.xcodeproj -scheme Graft -configuration Debug \
+  -destination 'platform=macOS' build
+</code></pre>
+<p>Build Debug: it runs the <code>graft</code> it finds on your PATH, and its setup screen
+first shows the commands that install the CLI, each with a Copy button.
+Release builds come from <code>scripts/graft-release</code>, below. A plain Xcode Release
+build has no CLI inside it, so it opens on a screen saying so.</p>
+<p>Tests:</p>
+<pre><code class="language-bash">python3 -m venv .venv &amp;&amp; .venv/bin/pip install -e '.[dev]'
+.venv/bin/python -m pytest
+cd Graft &amp;&amp; TEST_RUNNER_PATH=&quot;$PWD/../.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin&quot; \
+  xcodebuild test -scheme Graft -destination 'platform=macOS'
+</code></pre>
+<p>The app is SwiftUI. It runs the <code>graft</code> CLI as a subprocess for every action
+and reads its <code>--json</code> events. Both share <code>config.yaml</code> and <code>log.sqlite</code>, and
+there's no daemon.</p>
+<ul>
+<li>A release build carries the CLI and its own Python inside the app.</li>
+<li>A build from Xcode runs the CLI it finds on your PATH, such as the repo's
+venv.</li>
+</ul>
+<p><code>scripts/graft-release</code> builds the distributable app: everything bundled
+(arm64, with a universal app executable that shows Intel Macs a &quot;needs Apple
+silicon&quot; screen), signed with a Developer ID identity and zipped. Then
+<code>scripts/verify-bundle</code> checks the sealed app. See
+<a href="https://github.com/GreenglassT/Graft/blob/main/Graft/README.md">Graft/README.md</a>, and <a href="/wiki/network/">docs/network.md</a> for
+every host Graft and its tools contact, including what a release build
+downloads.</p>
+<nav class="pager"><a rel="prev" href="/wiki/removing/">← Removing Graft</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

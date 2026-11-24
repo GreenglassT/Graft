@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Graft Docs</title>
+<meta name="description" content="Graft takes a decrypted IPA, injects .deb or .dylib tweaks into it, and delivers the result to your iPhone or iPad over USB or Wi-Fi.">
+<link rel="canonical" href="https://graftipa.com/wiki/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Graft Docs">
+<meta property="og:description" content="Graft takes a decrypted IPA, injects .deb or .dylib tweaks into it, and delivers the result to your iPhone or iPad over USB or Wi-Fi.">
+<meta property="og:url" content="https://graftipa.com/wiki/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/" aria-current="page">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<h1>Graft Docs</h1>
+<p>Graft takes a decrypted IPA, injects <code>.deb</code> or <code>.dylib</code> tweaks into it, and
+delivers the result to your iPhone or iPad over USB or Wi-Fi.</p>
+<h2 id="user-guide">User Guide</h2>
+<ul>
+<li><a href="/wiki/getting-started/">Getting Started</a>: install Graft, see what it needs, and follow the five steps from setting up your Apple account to installing an app.</li>
+<li><a href="/wiki/apple-account/">Your Apple Account</a>: set Graft up for a free Apple ID or a paid Apple Developer account, and switch later.</li>
+<li><a href="/wiki/adding-apps/">Adding Apps</a>: add an app from an App Store search, its App Store URL, or a name and bundle id.</li>
+<li><a href="/wiki/getting-an-ipa/">Getting an IPA</a>: the three ways to get the decrypted IPA a build needs.</li>
+<li><a href="/wiki/app-store/">App Store Downloads</a>: sign in and set up decryption once, then download and decrypt apps your Apple ID owns or can get for free.</li>
+<li><a href="/wiki/tweaks/">Tweaks</a>: find tweaks on Canister or in APT repositories, and attach them to an app.</li>
+<li><a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>: build an app with its tweaks, push it into LiveContainer or, with a paid account, install it as a normal app, and keep track of past builds and deliveries.</li>
+<li><a href="/wiki/livecontainer/">LiveContainer</a>: use the LiveContainer on your device, or install and update one from Graft with a paid account, and see which one a build pushes into.</li>
+</ul>
+<h2 id="terminal">Terminal</h2>
+<ul>
+<li><a href="/wiki/cli-install/">Installing the CLI</a>: put the <code>graft</code> command on your Mac, either from Graft.app or with pipx.</li>
+<li><a href="/wiki/cli-quick-start/">Quick Start</a>: the commands for a first build from Terminal, with a free Apple ID or a paid Apple Developer account.</li>
+<li><a href="/wiki/cli-reference/">CLI Reference</a>: the <code>graft</code> commands, grouped by what they do.</li>
+<li><a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>: drive <code>graft</code> from a script with <code>--json</code>, and see which environment variables it reads, including the ones for a proxy.</li>
+</ul>
+<h2 id="reference">Reference</h2>
+<ul>
+<li><a href="/wiki/configuration/">Configuration &amp; Files</a>: what <code>config.yaml</code> holds, and where Graft keeps its files.</li>
+<li><a href="/wiki/downloads/">What Graft Downloads</a>: when Graft goes online and what it downloads, including the one-time downloads on the first App Store action.</li>
+<li><a href="/wiki/network/">What Graft Connects To</a>: every host Graft and its tools contact, why, when, and what is sent.</li>
+<li><a href="/wiki/updating/">Updating Graft</a>: how to move to a new version of Graft.app.</li>
+<li><a href="/wiki/upgrading/">Upgrading from 1.x</a>: what happens to your config, pipx <code>graft</code>, Homebrew tools and App Store sign-in, and how to go back to 1.1.</li>
+<li><a href="/wiki/troubleshooting/">Troubleshooting</a>: common symptoms and error messages, and their likely cause.</li>
+<li><a href="/wiki/removing/">Removing Graft</a>: what to delete to remove Graft, and what it made outside the app.</li>
+<li><a href="/wiki/building-from-source/">Building from Source</a>: how to build Graft.app and run its tests from the repository.</li>
+</ul>
+<nav class="pager"><a rel="next" href="/wiki/getting-started/">Getting Started →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

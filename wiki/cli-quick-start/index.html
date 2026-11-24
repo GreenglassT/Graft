@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quick Start | Graft Docs</title>
+<meta name="description" content="The commands for a first build from Terminal, once with a free Apple ID and once with a paid Apple Developer account.">
+<link rel="canonical" href="https://graftipa.com/wiki/cli-quick-start/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Quick Start | Graft Docs">
+<meta property="og:description" content="The commands for a first build from Terminal, once with a free Apple ID and once with a paid Apple Developer account.">
+<meta property="og:url" content="https://graftipa.com/wiki/cli-quick-start/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/" aria-current="page">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Terminal</nav>
+<h1>Quick Start</h1>
+<p>The commands for a first build from Terminal, once with a free Apple ID and
+once with a paid Apple Developer account.</p>
+<h2 id="with-a-free-apple-id">With a free Apple ID</h2>
+<p>Do the device steps under
+<a href="/wiki/apple-account/#free-apple-id">Set up your Apple account</a> first.</p>
+<pre><code class="language-bash">graft --init                        # answer no to the paid-membership question
+graft --check                       # tools, the device, and LiveContainer on it
+graft --appstore-search &quot;example&quot;   # find it: name, developer, price, bundle id
+graft --add-app https://apps.apple.com/app/id123456789   # delivery: livecontainer
+graft --provide-ipa ~/Downloads/Example.ipa --app example
+graft --attach-tweak some-tweak.deb --app example
+graft example                       # build and push into LiveContainer
+</code></pre>
+<h2 id="with-a-paid-apple-developer-account">With a paid Apple Developer account</h2>
+<pre><code class="language-bash">graft --init                        # answer yes: asks for the .p12 and profile, copies
+                                    # them into ~/.config/graft/ and writes config.yaml
+graft --set-p12-password            # store the .p12 password in the Keychain
+graft --check
+graft --add-app https://apps.apple.com/app/id123456789 --delivery livecontainer
+graft --list                        # shows the name it was added under, e.g. &quot;example&quot;
+graft --provide-ipa ~/Downloads/Example.ipa --app example
+graft --search &quot;some tweak&quot;
+graft --fetch com.example.sometweak         # downloads into ~/.config/graft/tweaks/
+graft --attach-tweak some-tweak.deb --app example
+graft example
+</code></pre>
+<h3 id="if---init-couldnt-read-the-team-id">If <code>--init</code> couldn't read the team id</h3>
+<p>If <code>--init</code> couldn't read the team id from the profile, it writes
+<code>team_id: REPLACEME</code>. Set the real one with
+<code>graft --set-settings --signing-team-id &lt;TEAM&gt;</code> before <code>--set-p12-password</code>:
+the Keychain entry is keyed by team id, so <code>--set-p12-password</code> refuses until
+it's set.</p>
+<p>Instead of the Keychain, you can export the variable named by <code>signing.cert_password_env</code>. When that
+variable is set and not empty, builds use it rather than the Keychain's
+password, so unset it once you store a new password in the Keychain.</p>
+<h2 id="running---init-without-the-questions">Running --init without the questions</h2>
+<p><code>graft --init --account free</code> and
+<code>graft --init --account paid --p12 &lt;file&gt; --profile &lt;file&gt;</code> do what answering
+the questions does, and are what the app runs.</p>
+<ul>
+<li>The paid one reads the <code>.p12</code> password from stdin (one line), or asks for it
+without echo in Terminal, and makes the same checks as the app.</li>
+<li>Neither touches a config that doesn't parse.</li>
+<li>On a paid config, <code>--account paid</code> refuses unless given <code>--replace</code> (the
+app's Replace certificate and profile…), and <code>--account free</code> switches it
+to a free Apple ID (the app's Switch to a free Apple ID…): it removes the
+<code>signing:</code> section and keeps the apps, repos and settings. On a free config,
+<code>--account paid</code> adds the paid account (Add a paid account…).</li>
+<li><code>--dry-run</code> checks everything and writes nothing.</li>
+<li>The interactive <code>--init</code> copies the files it's given as they are, so an
+expired profile shows up in <code>--check</code>, and a certificate the profile doesn't
+list only when the phone refuses the install.</li>
+<li><code>--config &lt;path&gt;</code> works with any of these, for a config somewhere else. The
+app always uses the default one.</li>
+</ul>
+<nav class="pager"><a rel="prev" href="/wiki/cli-install/">← Installing the CLI</a><a rel="next" href="/wiki/cli-reference/">CLI Reference →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Getting an IPA | Graft Docs</title>
+<meta name="description" content="A build needs a decrypted IPA of the app. There are three ways to get one.">
+<link rel="canonical" href="https://graftipa.com/wiki/getting-an-ipa/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Getting an IPA | Graft Docs">
+<meta property="og:description" content="A build needs a decrypted IPA of the app. There are three ways to get one.">
+<meta property="og:url" content="https://graftipa.com/wiki/getting-an-ipa/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/" aria-current="page">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
+<h1>Getting an IPA</h1>
+<p>A build needs a decrypted IPA of the app. There are three ways to get one.</p>
+<ul>
+<li><strong>From the App Store.</strong> Once you've signed in and set up decryption (see
+<a href="/wiki/app-store/">App Store Downloads</a>), the app's Source IPA section
+has <strong>Get latest from App Store</strong>. Graft downloads the app, decrypts it on
+this Mac, and stages it.</li>
+<li><strong>An IPA you already have.</strong> Drop it on the app's pane.</li>
+<li><strong>A dump from your own jailbroken device</strong>, from the device's Decrypt card.
+See <a href="#decrypt-on-a-jailbroken-device">Decrypt on a jailbroken device</a>.</li>
+</ul>
+<p>These are for <strong>personal use</strong>: your own Apple ID, apps you own or get for
+free, on your own devices. Don't redistribute decrypted or modified IPAs.</p>
+<h2 id="other-ways-to-get-an-ipa">Other ways to get an IPA</h2>
+<p>A build needs a <strong>decrypted</strong> IPA of the app, staged in
+<code>~/.cache/graft/ipas/</code>. Graft checks every Mach-O binary in it before
+injecting and warns if any is still encrypted; the build carries on, but the
+app will most likely not launch. With nothing staged, the build stops and
+lists the ways to get one.</p>
+<p>The App Store route has its own page,
+<a href="/wiki/app-store/">App Store Downloads</a>.</p>
+<h3 id="bring-your-own">Bring your own</h3>
+<p>Drop the IPA on the app's pane, or choose it in Add App's Manual mode. Graft
+checks that the IPA's bundle id matches the app's and stages it under its
+canonical name.</p>
+<p>An IPA that is still encrypted (straight from the App Store) is decrypted with
+UnfairPlay on the way in if decryption is set up, and refused if it isn't.</p>
+<h3 id="decrypt-on-a-jailbroken-device">Decrypt on a jailbroken device</h3>
+<p>The device's Decrypt card dumps an installed app off your own jailbroken
+iPhone or iPad, and <strong>Add as app</strong> turns the dump into an app. This path needs
+tools Graft.app doesn't include, which you install yourself:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Used for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><a href="https://frida.re">frida</a> 16.x on the device</td>
+<td>Both backends. The device's frida-server must be 16.x, the major frida-ios-dump's virtualenv installs. Graft has no frida of its own: it asks frida-ios-dump's (<code>graft_ipa/frida_probe.py</code>), so until frida-ios-dump is set up, the decrypt check can't reach frida-server and says so.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/AloneMonkey/frida-ios-dump">frida-ios-dump</a></td>
+<td>One backend. Clone it to <code>~/.local/share/graft/frida-ios-dump</code>, check out <code>56e99b2</code> (its last release for frida 16; the current one needs frida 17), and create a <code>.venv</code> there with <code>pip install 'frida==16.*' paramiko scp tqdm</code>, or set <code>GRAFT_FRIDA_IOS_DUMP</code>. The decrypt check prints these commands when it isn't set up. Needs OpenSSH on the device.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/ChiChou/bagbak">bagbak</a></td>
+<td>The other backend. <code>npm install -g bagbak@4.0.3</code> for a 16.x frida-server.</td>
+</tr>
+<tr>
+<td><code>iproxy</code>, from libimobiledevice</td>
+<td>The SSH tunnel to the device. <code>brew install libimobiledevice</code>, or from MacPorts, <code>sudo port install libimobiledevice</code>.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The card checks what, if anything, is blocking a dump right now. Unless you
+choose a backend, Graft picks the one that can run, preferring frida-ios-dump:</p>
+<ul>
+<li><strong>frida-ios-dump</strong> attaches to the running app. Graft brings it to the
+foreground first, launching it if needed. It copies the bundle over SSH:
+store the device's root password with <strong>Set root password…</strong>, or set
+<code>GRAFT_SSH_KEY</code> (and <code>GRAFT_SSH_USER</code> if it isn't <code>root</code>).</li>
+<li><strong>bagbak</strong> spawns the app itself. bagbak 4.x (the version that works with a
+16.x frida-server) also copies the bundle over SSH, using the same stored
+root password; it can't use <code>GRAFT_SSH_KEY</code>.</li>
+</ul>
+<p>A dump is always of the whole app, which is what gets verified and staged. A
+dump that leaves app extensions encrypted (an extension built for a newer iOS
+than the device runs) drops them and stages the rest, and says what it
+removed. The app keeps working, minus those widgets and share extensions.</p>
+<h3 id="staged-ipas">Staged IPAs</h3>
+<p><strong>Cache</strong> lists every staged IPA, and marks the one a build uses when a bundle
+id has more than one. From there you can add a dump as an app, install it on
+this Mac with PlayCover, or delete it. Staged IPAs are never pruned.</p>
+<nav class="pager"><a rel="prev" href="/wiki/adding-apps/">← Adding Apps</a><a rel="next" href="/wiki/app-store/">App Store Downloads →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

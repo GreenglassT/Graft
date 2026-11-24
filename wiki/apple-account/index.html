@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Your Apple Account | Graft Docs</title>
+<meta name="description" content="Set Graft up for a free Apple ID or a paid Apple Developer account, and switch between the two later in Settings.">
+<link rel="canonical" href="https://graftipa.com/wiki/apple-account/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Your Apple Account | Graft Docs">
+<meta property="og:description" content="Set Graft up for a free Apple ID or a paid Apple Developer account, and switch between the two later in Settings.">
+<meta property="og:url" content="https://graftipa.com/wiki/apple-account/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/" aria-current="page">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
+<h1>Your Apple Account</h1>
+<p>Set Graft up for a free Apple ID or a paid Apple Developer account, and switch
+between the two later in Settings.</p>
+<p>The first time it opens, Graft asks &quot;Do you have a paid Apple Developer
+account?&quot;</p>
+<h2 id="free-apple-id">Free Apple ID</h2>
+<p><strong>No, I have a free Apple ID.</strong> That's all on the Mac. Graft lists the steps
+to do on the iPhone or iPad, with your free Apple ID:</p>
+<ol>
+<li>Install <a href="https://sidestore.io">SideStore</a>, or use
+<a href="https://github.com/nab138/iloader">iloader</a>.</li>
+<li>Install LiveContainer
+(<a href="https://livecontainer.github.io/docs/installation/lc_sidestore">guide</a>).
+The LiveContainer+SideStore build uses one app slot for both.</li>
+<li>In LiveContainer, open Settings and tap Import Certificate from SideStore, so
+it can sign the apps you import. iloader doesn't do this for you, and on
+iOS 26 every app fails its first launch with &quot;JITLess mode is required since
+iOS 26&quot; until it's done.</li>
+</ol>
+<p>Graft finds LiveContainer on the device by its bundle id, so there is no team
+id to set up.</p>
+<h2 id="paid-apple-developer-account">Paid Apple Developer account</h2>
+<p><strong>Yes.</strong></p>
+<ol>
+<li>Choose your <code>.p12</code>.</li>
+<li>Type its password (leave it empty if you set none).</li>
+<li>Choose your provisioning profile.</li>
+</ol>
+<p>Graft shows the team and the devices the profile covers before it sets
+anything up. It keeps the password in your login keychain, never in a file,
+and copies both files into its config folder.</p>
+<h2 id="switching-later">Switching later</h2>
+<p>The Account row in Settings switches between the two, with <strong>Add a paid
+account…</strong> or <strong>Switch to a free Apple ID…</strong>, and keeps your apps, repos and
+settings either way.</p>
+<p>With a paid account, <strong>Replace certificate and profile…</strong> swaps in a new pair
+when the old one expires, which happens every year.</p>
+<nav class="pager"><a rel="prev" href="/wiki/getting-started/">← Getting Started</a><a rel="next" href="/wiki/adding-apps/">Adding Apps →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

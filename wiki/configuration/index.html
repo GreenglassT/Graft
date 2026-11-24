@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Configuration &amp; Files | Graft Docs</title>
+<meta name="description" content="What config.yaml holds, and where Graft keeps its files.">
+<link rel="canonical" href="https://graftipa.com/wiki/configuration/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Configuration &amp; Files | Graft Docs">
+<meta property="og:description" content="What config.yaml holds, and where Graft keeps its files.">
+<meta property="og:url" content="https://graftipa.com/wiki/configuration/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/" aria-current="page">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
+<h1>Configuration &amp; Files</h1>
+<p>What <code>config.yaml</code> holds, and where Graft keeps its files.</p>
+<p>Settings holds what most people change: the default device, how many archives
+to keep, the signing files on a paid account, the App Store Connect key, the
+App Store sign-in, and the paths Graft uses. Each app's Edit sheet holds its
+options. Everything is stored in <code>~/.config/graft/config.yaml</code>
+(<code>$XDG_CONFIG_HOME/graft</code> if set), which you can also edit by hand. A
+configured app looks like this:</p>
+<pre><code class="language-yaml">signing:                                # paid only; leave it out for a free Apple ID
+  cert: ~/.config/graft/AppleDevelopment.p12
+  cert_password_env: GRAFT_P12_PASS     # when set, used instead of the Keychain's
+  profile: ~/.config/graft/wildcard.mobileprovision
+  team_id: ABCDE12345
+
+cache_dir: ~/.cache/graft/ipas
+tweaks_dir: ~/.config/graft/tweaks
+archive_keep: 2                         # archived builds kept per app version
+# default_device_udid: &lt;UDID&gt;
+
+apps:
+  example:
+    bundle_id: com.example.app
+    preferred_version: latest
+    delivery: livecontainer             # or sideload
+    store_country: &quot;GB&quot;                 # the App Store it's looked up in
+    # lc_bundle_id: com.kdt.LiveContainer2.ABCDE12345   # pin a LiveContainer
+    tweaks:
+      - some-tweak.deb                  # files in tweaks_dir
+    cyan:
+      display_name: Example
+      keep_bundle_id: true              # some apps tie sign-in to their original bundle id
+      strip_extensions: false
+      strip_supported_devices: true
+      compression_level: 6
+</code></pre>
+<p>The app re-reads your config each time its window comes back to the front, so
+a change made in an editor or in Terminal shows without a relaunch. If
+<code>config.yaml</code> doesn't parse, Settings says so at the top, shows the default
+paths and saves nothing until it's fixed. Fix it in an editor, and the notice
+clears when you come back to the window.</p>
+<p><strong>Free or paid.</strong> A config with no <code>signing:</code> section (or an empty one) is a
+free Apple ID. <code>signing:</code> keys that end up at the top level (lost
+indentation) are an error naming them, not a free config.</p>
+<ul>
+<li><strong>Add a paid account…</strong> asks only for the <code>.p12</code> and the profile, then adds
+a <code>signing:</code> section to the config and keeps its apps, repos and settings.
+With a paid account an app with no delivery mode is a sideload app, so Graft
+writes LiveContainer delivery into each such app and says which. Nothing
+moves until you change one.</li>
+<li><strong>Switch to a free Apple ID…</strong> removes the <code>signing:</code> section and keeps
+everything else. Apps with no delivery mode then go into LiveContainer. One
+set to Sideload stays set, and won't build until you switch it to
+LiveContainer.</li>
+<li><strong>Replace certificate and profile…</strong> swaps in a new pair, its Keychain
+password and the <code>signing:</code> section, keeps everything else, and puts the old
+ones back if any step fails. When the new pair belongs to another team, the
+old team's Keychain password is removed.</li>
+<li>The paid setup checks that the <code>.p12</code> opens with its password and that the
+profile lists its certificate and hasn't expired. It copies both files into
+the config folder (0600, never through a link).</li>
+</ul>
+<p><strong>Bundle id.</strong> Some apps tie sign-in to their original bundle id;
+<code>keep_bundle_id: true</code> (the default) preserves it. With <code>keep_bundle_id: false</code>
+cyan renames it (to <code>new_bundle_id</code>, or the original plus <code>.plus</code>) in both
+delivery modes, LiveContainer included. Renaming the bundle id also removes any
+Apple Watch app, which can't install under a new id.</p>
+<p><strong>Per-app profiles (paid only).</strong> &quot;Create the provisioning profile
+automatically&quot; in an app's Edit sheet (<code>auto_profile: true</code>) has Graft create
+and cache a profile for the app through the App Store Connect API;
+<code>profile: &lt;path&gt;</code> points one app at a specific profile. Both apply to sideload
+builds only, and the option is locked on a LiveContainer app, which uses no
+profile.</p>
+<ul>
+<li>Make an API key at
+<a href="https://appstoreconnect.apple.com/access/integrations/api">App Store Connect</a>,
+then give it to Graft in Settings › App Store Connect. Graft checks the key
+by listing your devices, and only then copies the <code>.p8</code> beside
+<code>config.yaml</code>.</li>
+<li>Setting a key replaces only the key and its devices. A <code>profile_cache_dir</code>
+you set by hand stays, and <code>device_udids</code> is refreshed every time with every
+enabled iPhone, iPad and iPod touch App Store Connect lists. To keep a list
+you curated, add <code>device_udids_pinned: true</code> to the <code>app_store_connect:</code>
+section.</li>
+</ul>
+<p><strong>The lock file.</strong> Graft takes a lock on <code>config.yaml.lock</code> beside the config
+while it edits it, so the app and the CLI never write over each other. If you
+keep the config in a dotfiles repository and symlink it, add
+<code>config.yaml.lock</code> to that repository's <code>.gitignore</code>.</p>
+<h2 id="files">Files</h2>
+<pre><code>~/.config/graft/
+├── config.yaml
+├── config.yaml.lock
+├── AppleDevelopment.p12
+├── wildcard.mobileprovision
+├── AuthKey_&lt;KEY_ID&gt;.p8  # App Store Connect API key
+├── profiles/            # profiles made through that API
+└── tweaks/              # .deb and .dylib files
+
+~/.cache/graft/
+├── ipas/                # staged decrypted IPAs (never pruned)
+├── built/               # archived builds (newest archive_keep per app version)
+└── artwork/             # cached app icons
+
+~/.local/state/graft/
+├── log.sqlite           # build history and delivery records
+├── build-logs/          # saved event log of each --json build (so every build from the app)
+├── repos/               # cached APT repository indexes
+└── tweak-rollback/      # previous versions kept when a tweak is updated
+
+~/.local/share/graft/    # tools you install for Graft (frida-ios-dump; UnfairPlay, for a pipx install)
+</code></pre>
+<p>These four <code>graft</code> directories are owner-only (0700): Graft creates them that
+way and tightens them on every run if they aren't. Staged IPAs, archived
+builds, build logs and the <code>.p12</code> and profile the setup copies are written
+0600. Graft changes nothing outside these directories, and leaves alone a
+<code>graft</code> that is a symlink you made.</p>
+<p>Outside them, the App Store tools keep their own files: ipatool's sign-in in
+your login keychain and its downloads in <code>~/Library/Caches/ipatool</code>, and
+UnfairPlay's model in <code>~/Library/Application Support/unfairplay/models</code>.</p>
+<nav class="pager"><a rel="prev" href="/wiki/cli-scripting/">← Scripting &amp; Environment</a><a rel="next" href="/wiki/downloads/">What Graft Downloads →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

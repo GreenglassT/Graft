@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tweaks | Graft Docs</title>
+<meta name="description" content="Find tweaks on Canister or in APT repositories, keep them in your tweaks library, and attach them to an app.">
+<link rel="canonical" href="https://graftipa.com/wiki/tweaks/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Tweaks | Graft Docs">
+<meta property="og:description" content="Find tweaks on Canister or in APT repositories, keep them in your tweaks library, and attach them to an app.">
+<meta property="og:url" content="https://graftipa.com/wiki/tweaks/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/" aria-current="page">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
+<h1>Tweaks</h1>
+<p>Find tweaks on Canister or in APT repositories, keep them in your tweaks
+library, and attach them to an app.</p>
+<ol>
+<li>Find tweaks under <strong>Canister</strong> or in your <strong>Repos</strong>.</li>
+<li>Download them into <strong>Tweaks</strong>.</li>
+<li>Press <strong>Attach…</strong> on the app's pane.</li>
+</ol>
+<p>A <code>.deb</code> or <code>.dylib</code> you already have goes into the tweaks folder too.</p>
+<h2 id="canister-repos-and-tweaks">Canister, Repos and Tweaks</h2>
+<ul>
+<li><strong>Canister</strong> searches canister.me. A download by package id is checked
+against Canister's published SHA-256, when Canister has one.</li>
+<li><strong>Repos</strong> adds APT repositories and lists their packages. Free repositories
+only; repos that need a login or payment aren't supported.</li>
+<li><strong>Tweaks</strong> lists your library (<code>~/.config/graft/tweaks/</code>), checks it for
+newer published versions when you ask, and updates a tweak, re-pointing the
+apps that use it. Deleting one an app still uses asks first, and offers
+Detach and Delete. Deleted tweaks go to the Trash.</li>
+</ul>
+<h2 id="shared-libraries">Shared libraries</h2>
+<p>cyan bundles ElleKit as CydiaSubstrate and adds a few common frameworks when a
+tweak links them, but not every shared library a tweak may link against
+(color or settings libraries, for example).</p>
+<p>If a build fails with <code>Library not loaded: @rpath/libexample.dylib</code>, put a
+sandbox-compatible copy of that library in the tweaks folder and attach it to
+the app, as you would a <code>.deb</code>.</p>
+<h2 id="rootless-tweaks-only">Rootless tweaks only</h2>
+<p>Tweaks built for RootHide depend on <code>libroothide.dylib</code>, which doesn't exist
+outside a jailbreak. Use the rootless build from the developer's own
+repository or releases.</p>
+<nav class="pager"><a rel="prev" href="/wiki/app-store/">← App Store Downloads</a><a rel="next" href="/wiki/building-and-delivery/">Building &amp; Delivery →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

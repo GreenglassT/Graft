@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What Graft connects to | Graft Docs</title>
+<meta name="description" content="Every host that Graft.app, the graft CLI, or a tool bundled in the app contacts: why, when, and what it sends. It was gathered by reading the code (graft_ipa/,…">
+<link rel="canonical" href="https://graftipa.com/wiki/network/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="What Graft connects to | Graft Docs">
+<meta property="og:description" content="Every host that Graft.app, the graft CLI, or a tool bundled in the app contacts: why, when, and what it sends. It was gathered by reading the code (graft_ipa/,…">
+<meta property="og:url" content="https://graftipa.com/wiki/network/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/" aria-current="page">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
+<h1>What Graft connects to</h1>
+<p>Every host that Graft.app, the <code>graft</code> CLI, or a tool bundled in the app contacts: why, when, and what it sends. It was gathered by reading the code (<code>graft_ipa/</code>, <code>Graft/Graft/</code>, the bundled Python packages), the pinned sources of ipatool 2.8.0 and UnfairPlay 0.4.0, and the bundled binaries' strings. It covers Graft 2.0.</p>
+<p><strong>Short version:</strong></p>
+<ul>
+<li>Graft has no telemetry, analytics, crash reporting or update check. It doesn't update itself.</li>
+<li>The app makes no connections of its own. Everything goes through the CLI and the tools it runs.</li>
+<li>Your Apple ID, your password and the 2FA code, if Apple asks for one, go only to Apple, through the bundled ipatool. You type them into Graft's sign-in sheet (Settings › App Store › Sign In…), or <code>graft --appstore-login</code> asks for them in Terminal. Graft passes them over stdin to ipatool's own prompts and never stores them. ipatool keeps the sign-in, including the password, in your login keychain.</li>
+<li>The first App Store action on a Mac (usually the first sign-in) downloads ipatool's Unicorn emulator from PyPI and about 320 MB of App Store components from Apple, once. The components are skipped if a 1.x ipatool already downloaded them.</li>
+<li>Device UDIDs never leave your Mac.</li>
+</ul>
+<h2 id="grafts-own-requests">Graft's own requests</h2>
+<p>The CLI sends <code>User-Agent: graft/&lt;version&gt; (+https://github.com/GreenglassT/Graft)</code> with every request it makes through <code>requests</code>. The exception is downloading icon images (<code>--artwork</code>, and the icons of <code>--appstore-search</code> results), which send the library's default User-Agent.</p>
+<p><strong>Bold</strong> marks user data.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Host</th>
+<th>Contacted by</th>
+<th>When</th>
+<th>What's sent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>itunes.apple.com</code> (<code>/lookup</code>)</td>
+<td>CLI: <code>--add-app</code>, <code>--appstore-check</code>, <code>--artwork</code>, and the free-price check before <code>--appstore-claim</code></td>
+<td><code>--add-app</code>: when you add an app. The app also runs the other two <strong>on its own</strong>: <code>--appstore-check</code> when an app's detail pane opens; <code>--artwork</code> at launch, when the app list changes, and after a build or App Store get, but only for apps with no icon cached or in a cached IPA. The price check: when a get is refused for want of a license, and before Get (free).</td>
+<td>The App Store id from the URL you gave, or the app's <strong>bundle id</strong>, and the two-letter store the app came from (the one Search asked, or the one its URL names; else this Mac's region's store, then the US store if that one doesn't sell it). No account.</td>
+</tr>
+<tr>
+<td><code>itunes.apple.com</code> (<code>/search</code>)</td>
+<td>CLI: <code>--appstore-search</code></td>
+<td>When you type in Add App › Search: once you pause for half a second, for 2 or more characters, and only for a term not already searched in that sheet. Never on its own.</td>
+<td><strong>The search term</strong>, and a two-letter country code (the sheet's Store picker, which starts at this Mac's region; or <code>--country</code>). No account.</td>
+</tr>
+<tr>
+<td>Apple's artwork CDN (whatever image URL the lookup returns)</td>
+<td>CLI: <code>--artwork</code>, <code>--appstore-search</code></td>
+<td>After a lookup that found an icon; and for each search result's small icon not already cached (kept a week)</td>
+<td>The request only</td>
+</tr>
+<tr>
+<td><code>api.canister.me</code></td>
+<td>CLI: <code>--search</code> (Canister), <code>--fetch &lt;package id&gt;</code>, <code>--tweak-updates</code> (the Tweaks update check), <code>--update-tweak</code></td>
+<td>When you search, fetch or check for tweak updates. The app never checks for tweak updates on its own.</td>
+<td><strong>Search terms</strong>; the <strong>package ids of tweaks in your library</strong> that the cached repo indexes don't cover</td>
+</tr>
+<tr>
+<td>APT repository hosts (whichever repos you add, or the one Canister names for a package)</td>
+<td>CLI: <code>--add-repo</code> (<code>Release</code>, <code>Packages.*</code>), <code>--repo-packages</code> (on a cache miss or <code>--refresh</code>), <code>--fetch &lt;URL&gt;</code>, <code>--update-tweak</code>, and the <code>.deb</code> download after a Canister result</td>
+<td>When you add or refresh a repo, or fetch or update a tweak. Redirects are followed.</td>
+<td>The request only</td>
+</tr>
+<tr>
+<td><code>api.appstoreconnect.apple.com</code></td>
+<td>CLI, paid accounts only: Settings › App Store Connect (<code>--set-portal</code>), <code>--setup-portal</code>, a sideload build with automatic provisioning, paid <code>--lc-install</code></td>
+<td>During setup, and when a build has to create or refresh a provisioning profile</td>
+<td>An ES256 <strong>JWT signed with your App Store Connect API key</strong> (.p8), naming its issuer and key id; <strong>bundle ids</strong> (or wildcard patterns) and profile names. Graft reads the team's device list and matches UDIDs on the Mac; it never uploads one.</td>
+</tr>
+<tr>
+<td><code>github.com</code>, <code>api.github.com</code>, and <code>release-assets.githubusercontent.com</code>, where GitHub redirects the release files (the LiveContainer project's)</td>
+<td>CLI: <code>--lc-status</code>, <code>--lc-install</code></td>
+<td><code>--lc-status</code> runs <strong>on its own</strong> when a device's pane opens, and in Edit App for a LiveContainer app. <code>--lc-install</code> runs when you install LiveContainer.</td>
+<td>The request only</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="through-the-bundled-ipatool">Through the bundled ipatool</h2>
+<p>Graft runs ipatool 2.8.0 for everything that needs your Apple ID. ipatool 2.8 runs every App Store request through an emulator that runs Apple's own Store framework on Unicorn. Its source pins every host it signs in to and talks to with your session: an authenticated request goes only to <code>apple.com</code>, <code>*.apple.com</code>, <code>*.mzstatic.com</code> or <code>*.cdn-apple.com</code> (<code>internal/store/emulator/client.go</code>). A download goes to whatever URL Apple's answer names.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>What</th>
+<th>When</th>
+<th>Hosts</th>
+<th>What's sent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sign in (<code>--appstore-login</code>, which runs <code>ipatool auth login</code>)</td>
+<td>When you press Sign In… in Settings › App Store, or run <code>graft --appstore-login</code>. Never on its own.</td>
+<td>Apple's sign-in hosts, among them <code>init.itunes.apple.com</code> (the store's configuration), <code>auth.itunes.apple.com</code> and <code>gsa.apple.com</code> (sign-in, and this Mac's device provisioning), <code>*-buy.itunes.apple.com</code>, and <code>www.apple.com</code> (Apple's root certificate, for the sign-in connection)</td>
+<td>Your <strong>Apple ID, password and 2FA code</strong>, to Apple only, and a machine identifier ipatool derives from this Mac</td>
+</tr>
+<tr>
+<td>Get (<code>--appstore-get</code>, which runs <code>ipatool download -b &lt;bundle id&gt;</code>)</td>
+<td>When you press Get latest from App Store, and when you press Add in Add App › Search with &quot;Get it from the App Store after adding&quot; checked (it starts checked for a free app, and is shown only once the App Store is set up)</td>
+<td>Apple's App Store hosts, among them <code>init.itunes.apple.com</code>, <code>*-buy.itunes.apple.com</code>, <code>uclient-api.itunes.apple.com</code>, <code>apps.apple.com</code> and <code>downloaddispatch.itunes.apple.com</code>, then the download URL Apple returns</td>
+<td>Your <strong>Apple ID session</strong> (the token ipatool keeps in the keychain), the <strong>bundle id</strong>, and the machine identifier. If Apple has expired the session, ipatool signs in again with the password it keeps.</td>
+</tr>
+<tr>
+<td>Get (free) (<code>--appstore-claim</code>, which runs <code>ipatool purchase -b &lt;bundle id&gt;</code>)</td>
+<td>When you press Get (free) on an app's pane and confirm. Only for an app the iTunes lookup says is free; ipatool refuses a paid one too. Graft then starts the get.</td>
+<td>As for a get</td>
+<td>As for a get. This adds the app to your Apple ID's purchases, at no cost.</td>
+</tr>
+<tr>
+<td><code>updates.cdn-apple.com</code> (a macOS restore image, read in parts) and <code>wkms-public.apple.com</code> (the key for its encrypted parts)</td>
+<td>The first App Store action on a Mac, while <code>~/Library/Caches/ipatool</code> lacks the Store framework the emulator runs: about 320 MB, kept there afterward (so skipped if a 1.x ipatool already downloaded it). The image's address is fixed in ipatool's source (<code>internal/sap/assets/assets.go</code>), for macOS 27.0.1 (26A434).</td>
+<td>as named</td>
+<td>The request only</td>
+</tr>
+<tr>
+<td><code>files.pythonhosted.org</code> (Unicorn 2.1.4's macOS wheel)</td>
+<td>The first App Store action on a Mac, while <code>~/Library/Caches/ipatool/unicorn/</code> lacks the library the emulator runs on; again only for a new Unicorn version</td>
+<td>as named</td>
+<td>The request only, with <code>User-Agent: ipatool Unicorn runtime downloader</code></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>About the first-use downloads:</p>
+<ul>
+<li>Unicorn isn't in Graft.app. The bundled ipatool downloads it from PyPI as upstream ipatool does, and Graft builds ipatool unpatched. It checks the wheel's and the library's SHA-256 against the ones its source pins, and the library's again before each load. As with upstream ipatool, other code running as you could swap the cached library between that last check and the load. PyPI sees your IP address and ipatool's User-Agent, nothing else.</li>
+<li>Offline, that first action fails with &quot;ipatool needs to download its App Store emulator (Unicorn, from PyPI) the first time; connect to the internet and try again.&quot;</li>
+<li>A first sign-in can take several minutes while these download; the sign-in sheet says so.</li>
+</ul>
+<p>What stays on the Mac:</p>
+<ul>
+<li><code>--appstore-status</code> (Settings › App Store, and Add App › Search once you pick a result it could offer to get; never when the sheet opens, and never while you type) runs <code>ipatool auth info</code>. From ipatool's source, that only reads its keychain item; it doesn't contact Apple.</li>
+<li>Sign Out (<code>--appstore-logout</code>, <code>ipatool auth revoke</code>) only deletes keychain items.</li>
+<li>Graft asks <code>security</code> whether ipatool's keychain items exist, and deletes some of them, since reading another program's is a Keychain dialog. With Graft.app's own ipatool, it deletes the ones Graft's record doesn't show it made: another ipatool's (Graft 1.x's, or one you use in Terminal). With any other ipatool, it deletes only the ones Graft's record shows Graft.app's own made; a sign-in a third ipatool made is saved over instead, and macOS may ask for your login keychain password while it is. Before a sign-in, that is any of its three items. Before every Get and Get (free), whichever ipatool runs, it is the download cache, <code>kbsync-v1</code>, which ipatool fills again. That's local too.</li>
+</ul>
+<h2 id="your-iphone-or-ipad">Your iPhone or iPad</h2>
+<p>Over USB or the local network, never the internet.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>What</th>
+<th>Contacted by</th>
+<th>When</th>
+<th>What's sent</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Your iPhone or iPad, through macOS's usbmuxd</td>
+<td>CLI: device features (pymobiledevice3)</td>
+<td>Whenever a device feature runs: listing, installing, pushing into LiveContainer, reading apps and icons</td>
+<td>Commands and files for the device</td>
+</tr>
+<tr>
+<td>A jailbroken device, over SSH and frida</td>
+<td>CLI: <code>--decrypt</code>, <code>--decrypt-frontmost</code>, <code>--decrypt-check</code> (SSH through a local <code>iproxy</code> port forward, frida over USB)</td>
+<td>When you dump an app, or the Decrypt card checks the device</td>
+<td>Commands to the device, and the <strong>device's SSH password</strong>, sent only to the device</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h2 id="the-bundled-tools">The bundled tools</h2>
+<ul>
+<li>
+<p><strong>ipatool 2.8.0:</strong> as above. It is built from its pinned source, unpatched, and its only entitlements are <code>allow-jit</code> and <code>disable-library-validation</code>, which its emulator needs.</p>
+</li>
+<li>
+<p><strong>UnfairPlay 0.4.0:</strong> no network code. It is built from its pinned source, unpatched, with no entitlements. Its Go build info lists only cobra, pflag and a plist library, with cgo off, and it imports no socket calls. Graft runs <code>unfairplay --version</code> and <code>unfairplay decrypt</code>, and Set Up Decryption runs <code>unfairplay setup</code> as root, offline.</p>
+</li>
+<li>
+<p><strong>zsign 1.1.3:</strong> offline as Graft runs it (<code>-k -p -m -o</code>). It has an OCSP certificate check behind <code>-C/--check</code>, which Graft never passes.</p>
+</li>
+<li>
+<p><strong>cyan</strong> and its helpers (ldid, insert_dylib, lipo, install_name_tool, otool): no network code.</p>
+</li>
+<li>
+<p><strong>pymobiledevice3:</strong> everything Graft calls is local, through usbmuxd:</p>
+<ul>
+<li>device listing and lockdown values;</li>
+<li>InstallationProxy, AFC, HouseArrest and SpringBoardServices.</li>
+</ul>
+<p>The library's own network code isn't on any path Graft calls: personalization (TSS to <code>gs.apple.com</code>), developer disk image downloads, restore, activation and tunnels. Graft never mounts a developer image.</p>
+</li>
+<li>
+<p><strong>frida:</strong> not bundled. Graft asks frida-ios-dump's own frida (<code>graft_ipa/frida_probe.py</code>) about local and USB devices only. Graft never uses remote frida.</p>
+</li>
+<li>
+<p><strong>Python and the other packages:</strong> nothing connects on import, and nothing checks for updates.</p>
+</li>
+</ul>
+<h2 id="the-app-itself">The app itself</h2>
+<p>Graft.app has no networking code: no <code>URLSession</code>, web views or remote images. It runs the bundled CLI, and the rows above are those CLI runs. Search results' icons, too, are downloaded by the CLI and drawn from its cache.</p>
+<p>It opens these only when you click them, in your browser or in the app that handles them:</p>
+<ul>
+<li>App Store Connect's API keys page, from Settings › App Store Connect;</li>
+<li>the upgrade guide's &quot;Going back to 1.1&quot; section on GitHub, from How to install Graft 1.1 on the screen an Intel Mac shows;</li>
+<li>Graft's releases page on GitHub (<code>github.com/GreenglassT/Graft/releases</code>), from the link under the license notice in Graft › About Graft;</li>
+<li>the guides the free-account setup's device steps link, each from its Open button: <code>sidestore.io</code>, iloader on <code>github.com</code>, and LiveContainer's installation guide on <code>livecontainer.github.io</code>;</li>
+<li>an app's <code>apps.apple.com</code> page, from Open in App Store on an app's pane, or the Mac App Store when Graft has no page for the app;</li>
+<li>the Mac App Store, from Open the Mac App Store in Set Up Decryption.</li>
+</ul>
+<p>Help › Licenses opens a folder inside the app. Other URLs in Graft, such as install hints, only appear as text you can copy. Graft never fetches any of these pages.</p>
+<h2 id="building-a-release">Building a release</h2>
+<p><code>scripts/graft-release</code> and the scripts it runs download all of this. None of it happens on a user's Mac.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Host</th>
+<th>By</th>
+<th>What for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>github.com</code>, redirecting to GitHub's download hosts, and <code>raw.githubusercontent.com</code></td>
+<td><code>scripts/graft_bundle.py</code></td>
+<td>Every GitHub artifact in <code>bundle/pins.toml</code>, each checked against its SHA-256: python-build-standalone and its source (for license texts), zsign, the cyan archive, the sources of ipatool, UnfairPlay, OpenSSL, libplist, ldid, cctools-port and insert_dylib, and CPython's HACL* file (for its license). And, with <code>git fetch --depth=1</code>, UnfairPlay's v0.4.0 tag, for the commit its build info records (git runs with no configuration and no credential helper)</td>
+</tr>
+<tr>
+<td><code>go.dev</code></td>
+<td><code>scripts/graft_bundle.py</code></td>
+<td>The Go 1.26.5 toolchain ipatool and UnfairPlay are built with, checked against its SHA-256</td>
+</tr>
+<tr>
+<td><code>proxy.golang.org</code>, <code>sum.golang.org</code></td>
+<td>Go, in <code>graft_bundle.py</code></td>
+<td>ipatool's and UnfairPlay's Go modules (<code>go mod vendor</code>), each checked against its go.sum and the checksum database</td>
+</tr>
+<tr>
+<td><code>pypi.org</code>, <code>files.pythonhosted.org</code></td>
+<td>pip, in <code>graft_bundle.py</code>; pip-compile, in <code>scripts/lock-bundle</code>; <code>graft_bundle.py sources</code></td>
+<td>The packages in <code>bundle/requirements.lock</code> and <code>bundle/build-requirements.lock</code>: wheels only, <code>--require-hashes</code>, chosen for macOS 14 on arm64. graft and cyan install with <code>--no-index</code>. And, for the source archive and the Rust crates' licenses, each package's JSON at <code>pypi.org/pypi/&lt;name&gt;/&lt;version&gt;/json</code> and its source distribution, checked against the lock. Unicorn isn't fetched: the app doesn't carry it.</td>
+</tr>
+<tr>
+<td><code>static.crates.io</code></td>
+<td><code>graft_bundle.py</code></td>
+<td>For its license, each Rust crate in pydantic_core's, qh3's and cryptography's SBOMs and in bcrypt's Cargo.lock, checked against its Cargo.lock checksum, and each one ipatool's 1Password SDK core shows it holds, checked against <code>bundle/ipatool-core-crates.lock</code>; and for the source archive, the one of those under MPL-2.0 only (nom-supreme)</td>
+</tr>
+<tr>
+<td><code>github.com</code></td>
+<td>xcodebuild (Swift Package Manager)</td>
+<td>The app's package dependencies, when they aren't already cached</td>
+</tr>
+<tr>
+<td><code>timestamp.apple.com</code></td>
+<td><code>codesign --timestamp</code></td>
+<td>A secure timestamp for each signed file</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Notarization (<code>xcrun notarytool</code>) is a separate, manual step, and it uploads the zip to Apple.</p>
+<nav class="pager"><a rel="prev" href="/wiki/downloads/">← What Graft Downloads</a><a rel="next" href="/wiki/updating/">Updating Graft →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>App Store Downloads | Graft Docs</title>
+<meta name="description" content="Sign in and set up decryption once, and Graft downloads, decrypts and stages the apps your Apple ID owns or can get for free.">
+<link rel="canonical" href="https://graftipa.com/wiki/app-store/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="App Store Downloads | Graft Docs">
+<meta property="og:description" content="Sign in and set up decryption once, and Graft downloads, decrypts and stages the apps your Apple ID owns or can get for free.">
+<meta property="og:url" content="https://graftipa.com/wiki/app-store/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/" aria-current="page">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
+<h1>App Store Downloads</h1>
+<p>Sign in and set up decryption once, and Graft downloads, decrypts and stages
+the apps your Apple ID owns or can get for free.</p>
+<p>Graft downloads the App Store's IPA with ipatool and decrypts it with
+UnfairPlay, both inside Graft.app. It only downloads apps your Apple ID
+already owns, or free ones it gets for that Apple ID; a paid app is bought in
+the App Store, never by Graft. Everything happens on your own Mac, for your
+own devices.</p>
+<p>There are two one-time steps, both in Settings › App Store:
+<a href="#sign-in">Sign in</a> and <a href="#set-up-decryption">Set up decryption</a>.</p>
+<p>Settings is the last item in the sidebar, under Activity: Graft has no
+separate Settings window, so ⌘, opens nothing.</p>
+<h2 id="sign-in">Sign in</h2>
+<ol>
+<li>Press <strong>Sign In…</strong>.</li>
+<li>Type your Apple ID (email or phone) and password.</li>
+<li>Type the 6-digit code if Apple asks for one (it doesn't always).</li>
+</ol>
+<p>About signing in:</p>
+<ul>
+<li>Graft types your Apple ID, password and code into the bundled ipatool's own
+prompts. They go only to
+Apple, through that ipatool. Graft never saves them, and never puts them on
+a command line, in the environment or in a log.</li>
+<li>ipatool, which comes with Graft, keeps your sign-in, including your
+password, in your login Keychain, as it does when you use it on its own.</li>
+<li>The first App Store action on a Mac (usually the first sign-in) downloads
+ipatool's App Store components (about 320 MB, skipped if a 1.x ipatool
+already downloaded them) and its Unicorn emulator, and can take several
+minutes. Later ones take under a minute. See <a href="/wiki/downloads/">What Graft Downloads</a>.</li>
+<li>If you signed in with your own ipatool under Graft 1, the sheet says so
+first: signing in here removes that sign-in, and your own ipatool will need
+to sign in again if you still use it in Terminal. See
+<a href="/wiki/upgrading/#your-app-store-sign-in">Upgrading from Graft 1.x</a>.</li>
+</ul>
+<p>While you're signed in, <strong>Sign In Again…</strong> sits beside <strong>Sign Out</strong>. Use it
+when Apple has ended the session: a get then says so, and names the button.
+<strong>Sign Out</strong> signs ipatool out.</p>
+<h2 id="set-up-decryption">Set up decryption</h2>
+<ol>
+<li>Install any free iPhone or iPad app from the Mac App Store (only an Apple
+silicon Mac can), signed in there with <strong>the same Apple ID</strong> you use in
+Graft, and open it once.</li>
+<li>Press <strong>Set Up Decryption…</strong>. In the sheet, pick that app (the first one
+is already picked) and press <strong>Set Up Decryption…</strong> again. Graft then
+explains what will happen; press <strong>Continue</strong>.</li>
+<li>macOS's dialog usually names Graft and asks you to allow it administrator
+access (&quot;Allow administrator access for “Graft”?&quot;). On a Mac with Touch ID
+it offers Touch ID or <strong>Use Password…</strong>; on one without, it asks for your
+password. If Graft has to start this step through osascript instead, the
+dialog names osascript. <strong>Cancel</strong> stops here. Graft never sees the
+password.</li>
+</ol>
+<p>If your macOS account isn't an administrator, macOS's dialog asks for an
+administrator's name and password instead, so someone who administers this
+Mac has to type them. The rest is the same: Graft never sees them, and the
+decryption model it sets up is yours.</p>
+<p>What happens:</p>
+<ul>
+<li>Graft explains the step before macOS's dialog appears, and shows the exact
+command under &quot;The exact command, run as root&quot;.</li>
+<li>Root works only in a folder of its own, on its own copy of the app, and runs
+its own copy of UnfairPlay. In a Graft.app signed with a developer team, as
+releases are, root checks that copy against Graft.app's team before it runs
+it, and when Graft.app is signed with Developer ID, the copy must be too. A
+copy nothing can check is shown as a warning, and runs only if you
+press &quot;Run Unchecked Copy as Root…&quot;.</li>
+<li>UnfairPlay saves a private decryption model, which Graft then moves into
+your own folder, as you.</li>
+<li>Cancel is always safe. The step also stops by itself if it runs far longer
+than expected (15 minutes for most apps, longer for a very large one).</li>
+</ul>
+<p>Decryption then works only for apps downloaded with that Apple ID. If you
+switch Apple ID, in Graft or in the Mac App Store, press <strong>Set Up Again…</strong>
+with an app installed under the new one.</p>
+<h2 id="get-an-app">Get an app</h2>
+<p>On the app's pane, <strong>Get latest from App Store</strong> downloads, decrypts and
+stages the App Store's latest version. <strong>Stop</strong> cancels it and deletes the
+download.</p>
+<ul>
+<li>If your Apple ID doesn't have the app yet and it's free, the button becomes
+<strong>Get (free)</strong>. Graft asks first, then adds the app to your Apple ID's
+purchases at no cost, as Get in the App Store would, and downloads it.</li>
+<li>A paid app shows <strong>Open in App Store</strong> instead. Buy it there, then get it
+in Graft.</li>
+<li>Add App's Search offers &quot;Get it from the App Store after adding&quot; once the
+App Store is set up.</li>
+</ul>
+<h2 id="privacy">Privacy</h2>
+<p>The downloaded IPA carries your Apple ID and your license for the app. Graft
+keeps it in a private temporary directory, deletes it afterward, and runs
+UnfairPlay with <code>--strip-account-data</code>. It doesn't rely on that flag.</p>
+<p>Every IPA Graft stages, from any source, has <code>iTunesMetadata.plist</code> (your
+Apple ID and account ids) and every <code>SC_Info/</code> license directory removed, and
+is checked for them before it goes into the cache.</p>
+<ul>
+<li>An IPA staged by an earlier version is cleaned the first time a build uses
+it, and so is anything a re-install or a Mac install hands over.</li>
+<li>If the cache can't be written (a full or read-only disk), the build warns
+and goes on from a cleaned copy instead. Only when no clean copy can be made
+does it stop, rather than ship the data.</li>
+<li>A sideload archive keeps the license files its signature seals, since
+removing them would break the install. Rebuild it to get rid of them.</li>
+</ul>
+<p>What gets staged, built and put on a device doesn't identify you.</p>
+<h2 id="decrypts-unfairplay-cant-verify">Decrypts UnfairPlay can't verify</h2>
+<p>UnfairPlay checks the decrypted pages against Apple's own hashes. If it can't
+(some older apps), Graft refuses the IPA and offers <strong>Use it anyway…</strong>, which
+says what that risks, then runs the same get or drop again. If such an app
+crashes at launch, the decrypt is the likely cause.</p>
+<nav class="pager"><a rel="prev" href="/wiki/getting-an-ipa/">← Getting an IPA</a><a rel="next" href="/wiki/tweaks/">Tweaks →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

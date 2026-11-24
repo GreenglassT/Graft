@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Installing the CLI | Graft Docs</title>
+<meta name="description" content="Put the graft command on your Mac, either from Graft.app or with pipx. Graft in Terminal is optional; everything in the User Guide works without it.">
+<link rel="canonical" href="https://graftipa.com/wiki/cli-install/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Installing the CLI | Graft Docs">
+<meta property="og:description" content="Put the graft command on your Mac, either from Graft.app or with pipx. Graft in Terminal is optional; everything in the User Guide works without it.">
+<meta property="og:url" content="https://graftipa.com/wiki/cli-install/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/" aria-current="page">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Terminal</nav>
+<h1>Installing the CLI</h1>
+<p>Put the <code>graft</code> command on your Mac, either from Graft.app or with pipx.
+Graft in Terminal is optional; everything in the User Guide works without it.</p>
+<h2 id="install-graft-for-terminal">Install graft for Terminal</h2>
+<p>In Graft.app, open Settings › Command-line tool and press <strong>Install graft for
+Terminal</strong>. It links the app's own <code>graft</code> into <code>~/.local/bin</code>.</p>
+<ul>
+<li>If <code>~/.local/bin</code> isn't on your shell's PATH, the section shows the line to
+add to your shell's startup file, with a Copy button. Open a new Terminal
+window afterward.</li>
+<li>The command runs the CLI inside the app, so it updates with the app, and
+Terminal and the app can't drift apart.</li>
+<li>If another <code>graft</code> is already in <code>~/.local/bin</code> (a pipx install, say), the
+section says where it points and offers <strong>Replace it…</strong>. If a <code>graft</code> earlier
+on your PATH would win, it says that one is what Terminal runs.</li>
+<li>Move Graft.app to Applications first: the button won't link a copy running
+from a disk image or from where macOS put a downloaded app it moved aside.</li>
+</ul>
+<h2 id="the-cli-without-the-app-pipx">The CLI without the app (pipx)</h2>
+<p>To use Graft without the app, or to run it from source, install the CLI with
+pipx:</p>
+<pre><code class="language-bash">pipx install git+https://github.com/GreenglassT/Graft     # brew install pipx, if you need it
+pipx ensurepath
+</code></pre>
+<p><code>pipx ensurepath</code> adds <code>~/.local/bin</code> to your PATH, so open a new terminal
+afterward for the <code>graft</code> command to be found.</p>
+<ul>
+<li>It needs Python 3.11 or later (the test suite passes on 3.11, 3.12, 3.13
+and 3.14).</li>
+<li>Graft.app never uses a pipx install. It always runs the copy inside it.</li>
+<li>To update it, run <code>pipx reinstall graft-ipa</code>. Once a new version is tagged on
+GitHub, <code>pipx upgrade graft-ipa</code> works too.</li>
+</ul>
+<h3 id="tools-a-pipx-install-needs">Tools a pipx install needs</h3>
+<p>A pipx install doesn't include the tools Graft.app carries. Install the ones
+you use yourself:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Used for</th>
+<th>Install</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cyan</code> (<a href="https://github.com/asdfzxcvbn/pyzule-rw">pyzule-rw</a>)</td>
+<td>injecting tweaks</td>
+<td><code>pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/04a40f2aa65ec9cb36127f74d52ae4ef71377c50.zip</code> (the commit tagged v1.4.4, the release Graft is tested with)</td>
+</tr>
+<tr>
+<td><code>zsign</code></td>
+<td>signing, for Sideload delivery (paid only)</td>
+<td><code>brew install zsign</code></td>
+</tr>
+<tr>
+<td><a href="https://github.com/majd/ipatool">ipatool</a> 2.8.0</td>
+<td>App Store downloads</td>
+<td><code>graft --appstore-status</code> prints the commands that download the release for your Mac's processor and put it at <code>~/.local/bin/ipatool</code>. Use 2.8.0: 2.8.1 has a download bug, and Graft refuses it.</td>
+</tr>
+<tr>
+<td><a href="https://github.com/DrWhax/unfairplay">UnfairPlay</a> v0.4.0</td>
+<td>decrypting App Store downloads, on Apple silicon</td>
+<td>A Go program, built from source to <code>~/.local/share/graft/unfairplay/unfairplay</code>. <code>graft --appstore-status</code> prints the clone, checkout and <code>go build</code> commands.</td>
+</tr>
+<tr>
+<td>Full Xcode, selected (<code>sudo xcode-select -s /Applications/Xcode.app/Contents/Developer</code>)</td>
+<td>a PlayCover build whose tweak links an iOS private framework</td>
+<td>The stand-in framework is compiled with Xcode's iOS SDK, which the Command Line Tools don't have. Only such a build needs it, and only at that step; <code>--check</code> doesn't look for it.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p><code>graft --check</code> lists each missing tool with the command that installs it, and
+only the tools your apps' delivery modes use: zsign only when some app
+sideloads (or, on a paid config with no apps yet, since a new app sideloads by
+default). The <code>brew</code> commands need <a href="https://brew.sh">Homebrew</a>, and <code>--check</code>
+says so when it isn't installed. Neither kind of install needs
+libimobiledevice or the Xcode Command Line Tools for phone builds: Graft reads
+binaries and installs apps itself, through pymobiledevice3.</p>
+<h3 id="where-each-tool-comes-from">Where each tool comes from</h3>
+<ul>
+<li><strong>cyan and zsign:</strong> Graft.app's own copy, then your PATH. config.yaml has no
+setting for either.</li>
+<li><strong>ipatool and UnfairPlay:</strong> a path you set in config.yaml, then Graft.app's
+copy, then their usual install location, then your PATH (so a Homebrew
+ipatool is found too).
+<ul>
+<li>Set them in an <code>appstore:</code> section (<code>ipatool:</code>, <code>unfairplay:</code>,
+<code>unfairplay_models:</code>), as full paths starting with <code>/</code> or <code>~/</code>. A relative
+one is ignored, with a warning each time Graft runs, and read as not set.</li>
+<li>A path you set that points at nothing (you removed that ipatool, say):
+Graft.app, and the <code>graft</code> it links for Terminal, run their own copy
+instead, and <code>--appstore-status</code> notes the setting it passed over. Remove
+the key to stop the note. A pipx <code>graft</code> reports the tool as missing at
+that path.</li>
+<li>An <code>appstore.ipatool</code> of <code>~/.local/bin/ipatool</code>, or an
+<code>appstore.unfairplay</code> of <code>~/.local/share/graft/unfairplay/unfairplay</code>, is
+the 1.x default written out. It counts as not set, so Graft.app's copy
+still comes first. <code>--appstore-status</code> says so for ipatool, and marks the
+UnfairPlay that runs &quot;(bundled)&quot;. To make your own ipatool win, put it
+somewhere else and set the path.</li>
+<li>Without <code>unfairplay_models:</code>, Graft uses UnfairPlay's own default:
+<code>UNFAIRPLAY_MODEL_DIR</code> if set, else
+<code>~/Library/Application Support/unfairplay/models</code>.</li>
+<li>Setting up decryption in Graft.app always uses Graft.app's own UnfairPlay,
+because that step runs it as root.</li>
+</ul>
+</li>
+</ul>
+<p><code>--check</code> and <code>--appstore-status</code> say which copy they found, and mark
+Graft.app's own &quot;(bundled)&quot;.</p>
+<h2 id="troubleshooting-a-pipx-install">Troubleshooting a pipx install</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Symptom</th>
+<th>Likely cause</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>killed: 9</code> from zsign</td>
+<td>Quarantine attribute on a zsign you installed: <code>xattr -cr &quot;$(which zsign)&quot;</code>.</td>
+</tr>
+<tr>
+<td>A PlayCover build stops saying it needs Xcode</td>
+<td>The tweak links an iOS private framework, and the pipx CLI builds its stand-in with Xcode's iOS SDK. Install and select full Xcode, or build from Graft.app, which carries the stand-in.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<nav class="pager"><a rel="prev" href="/wiki/livecontainer/">← LiveContainer</a><a rel="next" href="/wiki/cli-quick-start/">Quick Start →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

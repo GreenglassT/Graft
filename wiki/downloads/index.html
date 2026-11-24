@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What Graft Downloads | Graft Docs</title>
+<meta name="description" content="When Graft goes online and what it downloads, including the one-time downloads on the first App Store action.">
+<link rel="canonical" href="https://graftipa.com/wiki/downloads/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="What Graft Downloads | Graft Docs">
+<meta property="og:description" content="When Graft goes online and what it downloads, including the one-time downloads on the first App Store action.">
+<meta property="og:url" content="https://graftipa.com/wiki/downloads/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/" aria-current="page">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Reference</nav>
+<h1>What Graft Downloads</h1>
+<p>When Graft goes online and what it downloads, including the one-time downloads on the first App Store action.</p>
+<p>Graft has no telemetry, analytics, crash reporting or update check, and it
+doesn't update itself. Graft.app makes no
+connections of its own: its CLI does, for something you asked for or a pane
+you opened, and to look up the icon of an app that has none yet, at launch
+and when the app list changes. Device UDIDs never leave your Mac.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>When</th>
+<th>Who it contacts</th>
+<th>What for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>You search the App Store, add an app, or open an app's pane; for an app with no icon yet, at launch, when the app list changes, and after a build or App Store get</td>
+<td>Apple's iTunes lookup and search, and its artwork CDN</td>
+<td>The app's version, price and icon</td>
+</tr>
+<tr>
+<td>You search, fetch or update tweaks</td>
+<td>canister.me, and the repos you add</td>
+<td>Tweak listings and downloads</td>
+</tr>
+<tr>
+<td>A device's pane opens, Edit App opens for a LiveContainer app, or you install LiveContainer</td>
+<td>GitHub</td>
+<td>LiveContainer's releases</td>
+</tr>
+<tr>
+<td>A paid account with an App Store Connect key makes a profile</td>
+<td>Apple's App Store Connect API</td>
+<td>Provisioning profiles</td>
+</tr>
+<tr>
+<td>You sign in, get an app, or get a free one</td>
+<td>Apple's App Store, through the bundled ipatool</td>
+<td>Your sign-in, the license, the IPA</td>
+</tr>
+<tr>
+<td>The first App Store action on a Mac (usually the first sign-in)</td>
+<td>PyPI (<code>files.pythonhosted.org</code>), and Apple's software CDN</td>
+<td>ipatool's Unicorn emulator (a few MB) and its App Store components (about 320 MB, skipped if a 1.x ipatool already downloaded them), once</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>About that first App Store action:</p>
+<ul>
+<li>Graft.app doesn't include Unicorn. The bundled ipatool downloads Unicorn
+2.1.4 from PyPI on first use, as upstream ipatool does, and checks it
+against the SHA-256 its source pins.</li>
+<li>Both downloads are cached in <code>~/Library/Caches/ipatool</code>, so they happen
+once, and again only for a new version.</li>
+<li>Offline, that first App Store action stops with &quot;ipatool needs to download its App
+Store emulator (Unicorn, from PyPI) the first time; connect to the internet
+and try again.&quot;</li>
+</ul>
+<p>UnfairPlay has no network code, and talking to your iPhone or iPad stays on
+your Mac and your local network. <a href="/wiki/network/">What Graft connects to</a>
+lists every host, when, and what is sent.</p>
+<nav class="pager"><a rel="prev" href="/wiki/configuration/">← Configuration &amp; Files</a><a rel="next" href="/wiki/network/">What Graft Connects To →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

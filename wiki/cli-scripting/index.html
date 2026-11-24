@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scripting &amp; Environment | Graft Docs</title>
+<meta name="description" content="Drive graft from a script with --json, and see which environment variables it reads, including the ones for running behind a proxy.">
+<link rel="canonical" href="https://graftipa.com/wiki/cli-scripting/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Scripting &amp; Environment | Graft Docs">
+<meta property="og:description" content="Drive graft from a script with --json, and see which environment variables it reads, including the ones for running behind a proxy.">
+<meta property="og:url" content="https://graftipa.com/wiki/cli-scripting/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/" aria-current="page">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › Terminal</nav>
+<h1>Scripting &amp; Environment</h1>
+<p>Drive <code>graft</code> from a script with <code>--json</code>, and see which environment variables
+it reads, including the ones for running behind a proxy.</p>
+<h2 id="scripting">Scripting</h2>
+<p><code>--json</code> turns a command's output into newline-delimited JSON events on
+stdout. Every stdout line is one JSON object, and any command's narration and
+warnings go to stderr. This is how the Mac app talks to the CLI.</p>
+<ul>
+<li>Notices from before the command runs (a directory moved to its new name, an
+old environment variable still set) are <code>log</code> events with
+<code>&quot;source&quot;: &quot;startup&quot;</code>.</li>
+<li><code>--list</code> starts with one <code>account</code> event, <code>{&quot;type&quot;:&quot;account&quot;,&quot;account&quot;:&quot;free&quot;}</code>
+or <code>&quot;paid&quot;</code>, even when no apps are configured. The <code>app</code> events after it and
+the <code>preflight-end</code> event from <code>--check</code> carry the same <code>account</code> field.</li>
+<li><code>graft --describe</code> prints the contract the app relies on: every flag and
+every event type. <code>--help</code> doesn't list it.</li>
+</ul>
+<p>A few commands don't answer in events. <code>--init</code> without <code>--account</code> refuses
+<code>--json</code>. <code>--version</code>, <code>--setup-portal</code> and the password prompts ignore it,
+and so do three whose output is fixed already: <code>--build-log</code> prints the saved
+log as it is (JSON Lines, since only builds run with <code>--json</code> save one),
+<code>--describe</code> always prints JSON, and <code>--reveal-build</code> prints nothing.</p>
+<h2 id="environment-variables">Environment variables</h2>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>the one named by <code>signing.cert_password_env</code></td>
+<td><code>.p12</code> password: when set and not empty, used instead of the Keychain's</td>
+</tr>
+<tr>
+<td><code>GRAFT_SSH_USER</code>, <code>GRAFT_SSH_PASS</code>, <code>GRAFT_SSH_KEY</code></td>
+<td>SSH to a jailbroken device, for a dump</td>
+</tr>
+<tr>
+<td><code>GRAFT_FRIDA_IOS_DUMP</code></td>
+<td>where frida-ios-dump is cloned</td>
+</tr>
+<tr>
+<td><code>UNFAIRPLAY_MODEL_DIR</code></td>
+<td>UnfairPlay's own: where its model lives</td>
+</tr>
+<tr>
+<td><code>XDG_CONFIG_HOME</code>, <code>XDG_CACHE_HOME</code>, <code>XDG_STATE_HOME</code>, <code>XDG_DATA_HOME</code></td>
+<td>move Graft's directories</td>
+</tr>
+<tr>
+<td><code>HTTPS_PROXY</code>, <code>HTTP_PROXY</code>, <code>NO_PROXY</code> (and the lower-case forms)</td>
+<td>send Graft's requests through a proxy</td>
+</tr>
+<tr>
+<td><code>REQUESTS_CA_BUNDLE</code>, <code>SSL_CERT_FILE</code>, <code>CURL_CA_BUNDLE</code>, <code>SSL_CERT_DIR</code></td>
+<td>trust another CA, such as a TLS-inspecting proxy's root</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Graft.app reads these from your login shell when it starts, and again when you
+press Check again (on the setup screen or beside Settings' PATH line) or Re-run
+in Preflight, at most once every 10 seconds.</p>
+<ul>
+<li>It runs the shell as an interactive login shell, given 5 seconds. csh and
+tcsh run as interactive shells, which read <code>~/.tcshrc</code> or <code>~/.cshrc</code> but not
+<code>~/.login</code>.</li>
+<li>So a variable exported in <code>~/.zshrc</code> or <code>~/.zprofile</code> reaches the CLI it
+runs, as do your <code>PATH</code> additions and <code>XDG_*</code> directories.</li>
+<li><code>PYTHON*</code> variables and the color switches (<code>FORCE_COLOR</code>, <code>TTY_COMPATIBLE</code>,
+<code>TTY_INTERACTIVE</code>, <code>PY_COLORS</code>, <code>CLICOLOR_FORCE</code>) are never passed on.</li>
+<li>If the shell doesn't answer, the app carries on without them (or, on a later
+Check again, with what it read before), and a startup file that hangs is
+stopped along with everything it started.</li>
+<li>On a Mac without the Xcode Command Line Tools, a startup file that runs one
+of their commands (<code>git</code>, say) can make macOS offer to install them when
+Graft starts, as opening a Terminal window would. Graft doesn't need them:
+cancel, or install them.</li>
+</ul>
+<h3 id="behind-a-proxy">Behind a proxy</h3>
+<p>Graft's own requests (iTunes lookups, Canister, repos, LiveContainer's
+releases) honor the proxy variables. Graft.app's bundled Python trusts the CA
+certificates it ships (certifi) and <code>/etc/ssl/cert.pem</code>, never the macOS
+Keychain, so a proxy that re-signs TLS needs its root named in a CA variable:
+export <code>REQUESTS_CA_BUNDLE=/path/to/corp-ca.pem</code> (a PEM file holding the
+proxy's root, plus the public roots if you want the rest of the internet too).</p>
+<p>In Graft.app, and in the <code>graft</code> it links into <code>~/.local/bin</code>, each of
+<code>REQUESTS_CA_BUNDLE</code>, <code>SSL_CERT_FILE</code> and <code>CURL_CA_BUNDLE</code> is used only when
+it names an existing, readable file by an absolute path, and <code>SSL_CERT_DIR</code>
+only when it names an existing folder. Otherwise it's ignored, so a stale
+export can't break every connection. <code>OPENSSL_CONF</code> and <code>OPENSSL_ENGINES</code>
+are always ignored there: they're meant for another OpenSSL. The pipx CLI
+passes all of these through untouched. ipatool and UnfairPlay are Go programs
+and use the macOS trust settings, Keychain included.</p>
+<nav class="pager"><a rel="prev" href="/wiki/cli-reference/">← CLI Reference</a><a rel="next" href="/wiki/configuration/">Configuration &amp; Files →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

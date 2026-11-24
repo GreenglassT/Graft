@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adding Apps | Graft Docs</title>
+<meta name="description" content="Add an app to Graft from an App Store search, its App Store URL, or a name and bundle id, and see which App Store Graft looks it up in.">
+<link rel="canonical" href="https://graftipa.com/wiki/adding-apps/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Adding Apps | Graft Docs">
+<meta property="og:description" content="Add an app to Graft from an App Store search, its App Store URL, or a name and bundle id, and see which App Store Graft looks it up in.">
+<meta property="og:url" content="https://graftipa.com/wiki/adding-apps/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/" aria-current="page">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
+<h1>Adding Apps</h1>
+<p>Add an app to Graft from an App Store search, its App Store URL, or a name and
+bundle id, and see which App Store Graft looks it up in.</p>
+<ol>
+<li>Press <strong>+</strong> at the top of the sidebar. Add App opens on <strong>Search</strong>.</li>
+<li>Type an app's name, and pick it from the results.</li>
+<li>Choose its delivery, and press <strong>Add</strong>.</li>
+</ol>
+<p>You can also paste its App Store URL, or fill in a name and bundle id by hand.</p>
+<h2 id="add-app">Add App</h2>
+<p>Add App (<strong>+</strong> at the top of the sidebar) has three ways in.</p>
+<h3 id="search">Search</h3>
+<p><strong>Search</strong> is the default. Type an app's name, and the App Store's iPhone apps
+that match appear as you type, each with its icon, developer and price.</p>
+<ul>
+<li>Results come from the store in the sheet's Store picker. It starts at this
+Mac's region (System Settings › General › Language &amp; Region). A territory
+such as Puerto Rico or Réunion uses the store its people shop in (US,
+France), and a region with no App Store uses the US store and says so.</li>
+<li>Pick one with the mouse or the arrow keys, choose its delivery, and press
+<strong>Add</strong> (or Return). That adds it exactly as its App Store URL would.</li>
+<li>A paid app shows its price, and a listing that gives none says &quot;Price
+unknown&quot;, never &quot;Free&quot;.</li>
+<li>A result already in your config says so, and names the app it was added as.</li>
+<li>Apple's own apps can be found but not got: iOS ships them, and only Apple
+can sign them.</li>
+<li>Apple limits how often one Mac can search. A term you already searched
+while the sheet is open is answered from memory, and if Apple does say no,
+the sheet says to try again shortly.</li>
+</ul>
+<h3 id="from-app-store-url">From App Store URL</h3>
+<p>Paste the app's <code>apps.apple.com</code> link.</p>
+<h3 id="manual">Manual</h3>
+<p>A name and a bundle id, and optionally an IPA you already have.</p>
+<h2 id="which-store-an-app-is-looked-up-in">Which store an app is looked up in</h2>
+<p>Graft remembers the store an app came from (<code>store_country</code> in config.yaml),
+and checks its updates, its icon and its price there. Edit App shows it under
+App Store and can change it.</p>
+<ul>
+<li>An app added from a URL keeps the store the URL names
+(<code>apps.apple.com/gb/...</code>, or the older <code>itunes.apple.com/gb/...</code>).</li>
+<li>An app with no store (one added in Graft 1.x, from a URL that names none, or
+by hand) is looked up in the store of this Mac's region, then in the US
+store, the one 1.x always asked. The first that sells it answers, and
+nothing is written. When neither has it, the error names both stores.</li>
+<li>A hand-written <code>store_country</code> that isn't an App Store is ignored, with a
+warning; <code>UK</code> is read as <code>GB</code>.</li>
+</ul>
+<nav class="pager"><a rel="prev" href="/wiki/apple-account/">← Your Apple Account</a><a rel="next" href="/wiki/getting-an-ipa/">Getting an IPA →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiveContainer | Graft Docs</title>
+<meta name="description" content="Use the LiveContainer already on your device, or install and update one from Graft with a paid account, and see which LiveContainer a build pushes into.">
+<link rel="canonical" href="https://graftipa.com/wiki/livecontainer/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="LiveContainer | Graft Docs">
+<meta property="og:description" content="Use the LiveContainer already on your device, or install and update one from Graft with a paid account, and see which LiveContainer a build pushes into.">
+<meta property="og:url" content="https://graftipa.com/wiki/livecontainer/">
+<meta property="og:image" content="https://graftipa.com/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/wiki/wiki.css">
+<script src="/wiki/wiki.js" defer></script>
+<script>document.documentElement.classList.add("js")</script>
+</head>
+<body>
+<div class="wrap">
+<header class="bar">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="28" height="28">Graft</a>
+      <nav aria-label="Site">
+        <a href="/#build">How it works</a>
+        <a href="/#install">Install</a>
+        <a href="/wiki/" aria-current="page">Docs</a>
+        <a href="https://github.com/GreenglassT/Graft">GitHub</a>
+        <a href="https://ko-fi.com/greenglasst">Ko-fi</a>
+      </nav>
+    </header>
+<div class="wiki-layout">
+<button class="wiki-nav-toggle" aria-expanded="false" aria-controls="wiki-sidebar">Contents</button>
+<aside id="wiki-sidebar" class="wiki-sidebar">
+<input type="search" class="search-input" placeholder="Search docs" aria-label="Search docs" autocomplete="off">
+<div class="search-results" role="listbox" aria-label="Search results"></div>
+<a href="/wiki/">Graft Docs</a>
+<p class="sidebar-label">User Guide</p>
+<a href="/wiki/getting-started/">Getting Started</a>
+<a href="/wiki/apple-account/">Your Apple Account</a>
+<a href="/wiki/adding-apps/">Adding Apps</a>
+<a href="/wiki/getting-an-ipa/">Getting an IPA</a>
+<a href="/wiki/app-store/">App Store Downloads</a>
+<a href="/wiki/tweaks/">Tweaks</a>
+<a href="/wiki/building-and-delivery/">Building &amp; Delivery</a>
+<a href="/wiki/livecontainer/" aria-current="page">LiveContainer</a>
+<p class="sidebar-label">Terminal</p>
+<a href="/wiki/cli-install/">Installing the CLI</a>
+<a href="/wiki/cli-quick-start/">Quick Start</a>
+<a href="/wiki/cli-reference/">CLI Reference</a>
+<a href="/wiki/cli-scripting/">Scripting &amp; Environment</a>
+<p class="sidebar-label">Reference</p>
+<a href="/wiki/configuration/">Configuration &amp; Files</a>
+<a href="/wiki/downloads/">What Graft Downloads</a>
+<a href="/wiki/network/">What Graft Connects To</a>
+<a href="/wiki/updating/">Updating Graft</a>
+<a href="/wiki/upgrading/">Upgrading from 1.x</a>
+<a href="/wiki/troubleshooting/">Troubleshooting</a>
+<a href="/wiki/removing/">Removing Graft</a>
+<a href="/wiki/building-from-source/">Building from Source</a>
+</aside>
+<main class="wiki-content">
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/wiki/">Docs</a> › User Guide</nav>
+<h1>LiveContainer</h1>
+<p>Use the LiveContainer already on your device, or install and update one from
+Graft with a paid account, and see which LiveContainer a build pushes into.</p>
+<p>If LiveContainer is already on the device through SideStore, AltStore,
+iloader or Impactor, Graft uses it as it is. With a paid account Graft can
+also install and update LiveContainer itself, signed with your certificate so
+that guest apps keep their logins.</p>
+<h2 id="the-devices-livecontainer-section">The device's LiveContainer section</h2>
+<p>A device's pane has a LiveContainer section. It lists what is installed and
+who manages it, on either account.</p>
+<ul>
+<li><strong>Install / Update LiveContainer</strong> and <strong>Put certificate on device</strong> are
+paid only. With a free Apple ID they're disabled, and the section points you
+at the store that installed LiveContainer.</li>
+<li><strong>Clean up</strong> is there whenever the device has a LiveContainer, whoever
+installed it.</li>
+</ul>
+<h2 id="side-by-side-livecontainers">Side-by-side LiveContainers</h2>
+<p>Up to three LiveContainers can be installed side by side, as
+<code>com.kdt.livecontainer.&lt;TEAM&gt;</code> (the primary), <code>com.kdt.LiveContainer2.&lt;TEAM&gt;</code>
+and <code>com.kdt.LiveContainer3.&lt;TEAM&gt;</code>.</p>
+<p>Every installer names them this way, with its team id, so Graft finds them on
+the device by bundle id: a ten-character team id after the name, whatever team
+it is, in any letter case. A free Apple ID needs no team id in the config.</p>
+<p>System apps count too, so a LiveContainer that TrollStore or a jailbreak
+installed (often as plain <code>com.kdt.livecontainer</code>) is found, and so is one an
+on-device re-signer gave some other suffix.</p>
+<h2 id="which-one-a-build-pushes-into">Which one a build pushes into</h2>
+<p>In this order:</p>
+<ol>
+<li>the app's pin (the LiveContainer picker in its Edit sheet, or
+<code>lc_bundle_id:</code> in config.yaml), in any letter case, or the id without its
+team suffix when that names exactly one. A pin that names nothing
+installed, or an app that isn't LiveContainer, stops the build with what
+was found; it's never quietly ignored;</li>
+<li>the only LiveContainer on the device, whatever its bundle id;</li>
+<li>with a paid account, the configured team's primary;</li>
+<li>the only primary (<code>com.kdt.livecontainer.&lt;TEAM&gt;</code>, or plain
+<code>com.kdt.livecontainer</code>).</li>
+</ol>
+<p>Anything else stops the build with a list of what was found. That includes
+plain <code>com.kdt.livecontainer</code> next to a <code>com.kdt.livecontainer.&lt;TEAM&gt;</code>: Graft
+can't tell which one you import from, so it asks you to pin one rather than
+guess.</p>
+<p>A build finds out before it injects anything: the push's target, and whether
+its <code>&lt;app&gt;.ipa</code> name is free there, are checked ahead of cyan. The sidebar
+names the LiveContainer a push would use, found the same way.</p>
+<h2 id="installing-livecontainer-from-graft">Installing LiveContainer from Graft</h2>
+<p>Installing LiveContainer needs an App Store Connect API key (Settings › App
+Store Connect) to fetch profiles. It also needs the App IDs above (plus the
+primary's extensions) registered at developer.apple.com with the App Groups
+capability and the group <code>group.com.SideStore.SideStore.&lt;TEAM&gt;</code> assigned.
+App groups can't be assigned through the API; if one is missing, the error
+names the App ID.</p>
+<p>On a device where AltStore or SideStore manages LiveContainer, Graft won't
+install over it, because replacing those copies would break every guest app
+signed through them. Update through AltStore or SideStore instead.</p>
+<h2 id="put-certificate-on-device">Put certificate on device</h2>
+<p><strong>Put certificate on device</strong> is for a LiveContainer Graft installed: it has
+no AltStore to take a certificate from, and its JIT-less mode needs one.
+Import it in LiveContainer's Settings, then remove it with <strong>Remove
+certificate</strong>. Until then the certificate sits where guest apps can read it.</p>
+<h2 id="files-in-livecontainers-documents">Files in LiveContainer's Documents</h2>
+<p>Graft never deletes or replaces a file in LiveContainer's Documents unless
+it knows the file is its own: a delivery record for that device and that
+LiveContainer, or, with no record (after a state reset, say), the file's
+SHA-256 matching one of that app's archived builds.</p>
+<ul>
+<li>Clean up removes only the IPAs Graft's deliveries recorded and a
+certificate it recorded pushing, and retires those records, so a file you
+later put there under the same name is yours.</li>
+<li>An <code>AppleDevelopment.p12</code> with no record (one pushed by Graft 1.0, or your
+own) is reported and left in place. Putting the certificate on the device
+replaces it only when its bytes are your configured <code>.p12</code>.</li>
+<li>A build whose IPA name (<code>&lt;app&gt;.ipa</code>) is already taken by a file that isn't
+Graft's stops instead of overwriting it. Rename or remove that file in the
+Files app, then build again. A re-push of Graft's own earlier delivery
+replaces it as before.</li>
+</ul>
+<nav class="pager"><a rel="prev" href="/wiki/building-and-delivery/">← Building &amp; Delivery</a><a rel="next" href="/wiki/cli-install/">Installing the CLI →</a></nav>
+</main>
+</div>
+<footer>
+      <p>Made by <a href="https://github.com/GreenglassT">GreenglassT</a>. Also free: <a href="https://m4bapp.com">M4B Converter</a> and <a href="https://github.com/GreenglassT/SpoolBridge">SpoolBridge</a>.</p>
+      <p>Graft is not affiliated with Apple Inc. Apple, iPhone, iPad, App Store and macOS are trademarks of Apple Inc.</p>
+    </footer>
+</div>
+</body>
+</html>
