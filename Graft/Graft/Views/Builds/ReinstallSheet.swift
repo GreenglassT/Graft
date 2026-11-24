@@ -121,15 +121,17 @@ struct ReinstallSheet: View {
     /// automatic termination held off from start to end, however it ends
     /// (the try14 delta audit, D14-APP-2). It pushes to the phone and records
     /// a delivery, as a build does, and a Graft that macOS ended halfway
-    /// would orphan the CLI mid-push (`TerminationHold`).
+    /// would orphan the CLI mid-push (`TerminationHold`). Its only Stop is
+    /// the sheet's task being canceled, so Quit Anyway cancels its own
+    /// (`TerminationHold.holding`).
     @MainActor
     static func reinstall(
         build id: Int, runner: CLIRunner, hold: TerminationHold,
         onEvent: @escaping @MainActor (BuildEvent) -> Void
     ) async throws -> CLIRunner.RunResult {
-        hold.begin(TerminationHold.reinstalling)
-        defer { hold.end(TerminationHold.reinstalling) }
-        return try await runner.stream(arguments: [Flag.json, Flag.reinstallBuild, String(id)], onEvent: onEvent)
+        try await hold.holding(TerminationHold.reinstalling) {
+            try await runner.stream(arguments: [Flag.json, Flag.reinstallBuild, String(id)], onEvent: onEvent)
+        }
     }
 
     @MainActor

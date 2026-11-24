@@ -156,6 +156,13 @@ enum CLIContract {
         // CanisterStore
         static let search = "--search"
 
+        // UpdateStore
+        /// Is a newer Graft published? One request to GitHub, made by the CLI
+        /// like every other: the app makes no connections of its own.
+        static let checkUpdate = "--check-update"
+        /// With `--check-update`: the version to compare against, the app's own.
+        static let currentVersion = "--current-version"
+
         // BuildsStore / BuildLogView / ReinstallSheet / AppDetailView
         static let builds = "--builds"
         static let buildsApp = "--builds-app"
@@ -274,13 +281,22 @@ enum CLIContract {
         /// Scoped with `--app`; this app only ever asks about one at a time.
         static let appstoreCheck = "--appstore-check"
         /// Requires `--app`. Streams `appstore-stage` as it goes, then
-        /// `ipa-provided` exactly as a drop does.
+        /// `ipa-provided` exactly as a drop does; or, when the App Store's
+        /// current version is already staged, only `appstore-already-staged`
+        /// (see `again`).
         static let appstoreGet = "--appstore-get"
         /// With `--appstore-get` or `--provide-ipa`: stage a decrypt UnfairPlay
         /// could not verify against Apple's page hashes. Sent only from "Use it
         /// anyway…", after a confirmation, to re-run a get or drop the CLI just
         /// refused with `appstore-refused` (C-UNVERIFIED). Never on a first try.
         static let allowUnverified = "--allow-unverified"
+        /// With `--appstore-get`: download, decrypt and stage the App Store's
+        /// current version even when it is already staged. Without it, a get
+        /// of a version already staged downloads nothing and answers
+        /// `appstore-already-staged`. Sent only from Get Again, after a
+        /// confirmation, and by the re-runs that answer a Get Again ("Use it
+        /// anyway…", the get after Get (free)).
+        static let again = "--again"
         /// Search the App Store for iPhone apps (`AppStoreSearchStore`). Sent
         /// attached, `--appstore-search=<term>`, so a term that starts with a
         /// dash is still the term.
@@ -371,11 +387,12 @@ enum CLIContract {
             deleteTweak,
             repos, addRepo, removeRepo, repoPackages, refresh, fetch, fetchSha,
             search,
+            checkUpdate, currentVersion,
             builds, buildsApp, buildsLimit, buildLog, revealBuild, reinstallBuild, pruneBuilds,
             devices, brief, deviceInfo, withIcons,
             lcStatus, lcInstall, lcPushCert, lcClean, instances, channel, certOnly,
             artwork, refreshArtwork,
-            appstoreStatus, appstoreCheck, appstoreGet, allowUnverified, appstoreSearch, country,
+            appstoreStatus, appstoreCheck, appstoreGet, allowUnverified, again, appstoreSearch, country,
             appstoreLogin, expectIpatool, appstoreLogout, appstoreClaim, appstoreEnrollCandidates, appstoreEnrollCommand,
             appstoreEnrollFinish, allowUnverifiedHelper,
             check, setP12Password, setSSHPassword,
@@ -462,8 +479,8 @@ enum CLIContract {
 
     /// The enrollment script's own exit statuses (`graft_ipa/enrollment.py`
     /// `EXIT_*`), as AppleScript reports them: the `do shell script` error
-    /// number. 67 and 68 both mean the trap removed root's folder and nothing
-    /// was changed.
+    /// number. 67, 68 and 69 all mean the trap removed root's folder and
+    /// nothing was changed.
     enum EnrolExit {
         static let notInApplications = 64
         static let notRoots = 65
@@ -472,6 +489,10 @@ enum CLIContract {
         static let stopped = 67
         /// The run reached `time_limit_seconds`.
         static let timedOut = 68
+        /// Neither folder UnfairPlay reads this Mac's FairPlay state from
+        /// holds an `SC Info.sidb`, so root stopped before it copied
+        /// anything. Opening the picked app once writes it again.
+        static let noFairPlayState = 69
     }
 
     /// `kind` on an `unverified-helper` refusal, and `unverified_kind` on the
@@ -798,6 +819,7 @@ enum CLIContract {
         "appstore-version",
         "appstore-stage",
         "appstore-decrypted",
+        "appstore-already-staged",
         "appstore-refused",
         "appstore-login",
         "appstore-logout",
@@ -811,6 +833,7 @@ enum CLIContract {
         "appstore-search-failed",
         "init-step",
         "init-result",
+        "update-check",
     ]
 
     /// Events the CLI emits that the GUI deliberately does *not* decode, each

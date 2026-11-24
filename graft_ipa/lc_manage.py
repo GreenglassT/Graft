@@ -76,9 +76,10 @@ CERT_STAYS_NOTE = (
 ALTSTORE_IDS = re.compile(
     r"(^|\.)(com\.rileytestut\.altstore|com\.sidestore\.sidestore)($|\.)", re.IGNORECASE
 )
-#: How long an install may run before we say why it might be stuck. iOS stages
+#: How long an update may run before we say why it might be stuck. iOS stages
 #: an install over a *running* LiveContainer and applies it only once the app
-#: is closed, and the install blocks until then.
+#: is closed, and the install blocks until then. A fresh install has nothing
+#: to wait for, so it is never told this (`_install_one`).
 WAIT_NOTICE_SECONDS = 20.0
 WAITING_MESSAGE = "close LiveContainer on the device to finish"
 
@@ -754,6 +755,7 @@ def _install_hint(output: str) -> str:
 def _install_one(
     device_ops: DeviceOps, *, udid: str, ipa: Path, instance: int,
     bundle_id: str, events: LcEvents, wait_notice_seconds: float,
+    updating: bool = True,
 ) -> None:
     """Install one prepared instance, saying so when it waits on the user.
 
@@ -762,7 +764,18 @@ def _install_one(
     nothing is moving, and the install keeps waiting: from then on installd's
     silence is the user's time, not a phone gone quiet (`waiting_on_user`,
     up to `device_install.PATIENT_SECONDS`; the whole-diff review's cli-1).
-    A Stop ends the wait here, on the main thread.
+
+    Only an update can be held that way: `updating` says `bundle_id` is
+    already on the device. A fresh install has no running copy for iOS to
+    wait on, so a slow one is just slow: no notice, and installd's silence
+    keeps the `SILENCE_SECONDS` limit and the dropped-connection hint
+    (d14-cli-1). A caller that can't tell leaves `updating` at True. A fresh
+    install taken for an update costs at most `PATIENT_SECONDS`, which a Stop
+    ends at any time; an update taken for a fresh install fails after a
+    minute while the user may still be closing LiveContainer, and fails the
+    same way on every retry.
+
+    Either way a Stop ends the wait here, on the main thread.
     """
     done = threading.Event()
     waiting_on_user = threading.Event()
@@ -778,10 +791,10 @@ def _install_one(
 
     worker = threading.Thread(target=work, name=f"lc-install-{instance}", daemon=True)
     worker.start()
-    if not done.wait(wait_notice_seconds):
+    if updating and not done.wait(wait_notice_seconds):
         waiting_on_user.set()
         events.waiting(udid=udid, instance=instance, bundle_id=bundle_id, message=WAITING_MESSAGE)
-        done.wait()
+    done.wait()
     worker.join()
     if failure:
         e = failure[0]
@@ -868,6 +881,10 @@ def install(
                 lc_instance.archive_payload(workdir / f"i{n}", out)
                 signed.append((n, prepared, out))
 
+        # Listed above, and never unknown here: a device whose apps couldn't
+        # be listed was refused before anything was fetched. Matched without
+        # regard to case, as discovery matches LiveContainers.
+        on_device = {b.lower() for b in apps if isinstance(b, str)}
         results = []
         for n, prepared, out in signed:
             events.progress(udid, n, "install", prepared.bundle_id)
@@ -875,6 +892,7 @@ def install(
                 device_ops, udid=udid, ipa=out, instance=n,
                 bundle_id=prepared.bundle_id, events=events,
                 wait_notice_seconds=wait_notice_seconds,
+                updating=prepared.bundle_id.lower() in on_device,
             )
             log.record_lc_install(udid=udid, bundle_id=prepared.bundle_id,
                                   version=release.version, channel=release.channel,

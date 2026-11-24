@@ -104,6 +104,17 @@ final class AppStoreRecordsTests: XCTestCase {
         XCTAssertEqual(record.stage, .other("verify"))
     }
 
+    func test_already_staged_decodes_the_staged_ipa() throws {
+        let line = #"{"type":"appstore-already-staged","app":"example","bundle_id":"com.example.app","version":"21.46.3","filename":"com.example.app_21.46.3.ipa","path":"/c/com.example.app_21.46.3.ipa"}"#
+        guard case let .appStoreAlreadyStaged(record) = try BuildEvent.decode(line: line) else {
+            return XCTFail("expected .appStoreAlreadyStaged")
+        }
+        XCTAssertEqual(record, AppStoreAlreadyStagedRecord(
+            app: "example", bundleId: "com.example.app", version: "21.46.3",
+            filename: "com.example.app_21.46.3.ipa", path: "/c/com.example.app_21.46.3.ipa"
+        ))
+    }
+
     func test_decrypted_decodes_the_verification() throws {
         let line = #"{"type":"appstore-decrypted","app":"example","encrypted_images":8,"decrypted_pages":51088,"plaintext_verified":true}"#
         guard case let .appStoreDecrypted(record) = try BuildEvent.decode(line: line) else {

@@ -5,8 +5,9 @@ import SwiftUI
 /// administrator prompt (`FallbackAdminShell` over `AppleScriptAdminShell` and
 /// `OsascriptAdminShell`), the user's login shell (`ShellEnvironment.shared`),
 /// the notification center (`BuildNotifier.post`), the rebuild installer and
-/// relaunch, the rebuild marker under Caches, the real UserDefaults, and the
-/// browser (`AppleSiliconGate`'s download button). A test that forgets a fake
+/// relaunch, the rebuild marker under Caches, the real UserDefaults, the clock
+/// and the browser (`AppleSiliconGate`'s download button, `UpdateStore`'s
+/// release page, What's New's links). A test that forgets a fake
 /// then doesn't compile; `NoRealDefaultsTests` keeps a default of any of them
 /// from coming back, outside this file.
 @main
@@ -20,19 +21,21 @@ struct GraftApp: App {
     /// `AdminShellTests`.
     private let shellImportsRemoved = AdminShell.removeShellImports()
 
+    /// Answers macOS's quit while Graft works (`GraftAppDelegate`).
+    @NSApplicationDelegateAdaptor(GraftAppDelegate.self) private var appDelegate
+
     @State private var rebuild = RebuildCoordinator(
         runInstaller: RebuildCoordinator.installFromRepo,
         relaunch: RebuildCoordinator.quitAndReopen
     )
     /// On an Intel Mac `AppleSiliconGate` stands in for every view that would
-    /// use this, so nothing runs it, and it is built without `forApp`, whose
-    /// `ShellEnvironment.shared` would start asking the login shell.
-    @State private var store = ConfigStore(
-        runner: AppleSilicon.thisMac
-            ? CLIRunner.forApp(shell: .shared)
-            : CLIRunner(executable: GraftExecutable.bundled(in: Bundle.main.bundleURL)),
-        notify: { BuildNotifier.post($0) }
-    )
+    /// use this, so nothing runs it, and its runner is built without `forApp`,
+    /// whose `ShellEnvironment.shared` would start asking the login shell.
+    @State private var store: ConfigStore
+    /// Whether a newer Graft is out: the window's banner and daily check, and
+    /// Help › Check for Updates…. Here rather than in `ContentView` because
+    /// the menu needs it. The same runner as `store`'s.
+    @State private var updates: UpdateStore
     /// Set Up Decryption's administrator prompt: in-process NSAppleScript,
     /// and osascript only when that machinery can't run at all.
     private let adminShell: PrivilegedShell = FallbackAdminShell(
@@ -40,9 +43,26 @@ struct GraftApp: App {
     )
 
     init() {
+        // After `shellImportsRemoved`, which as a stored property's initial
+        // value runs before this body.
+        // A test host is this app under its real bundle id and the real
+        // HOME, so its own window must run nothing: in a Debug build the
+        // lookup finds ~/.local/bin/graft first, the owner's real CLI, and
+        // its App Store status asked macOS for ipatool's keychain item
+        // (2.0.1). Its runner points nowhere, and its window is a placeholder.
+        let runner = AdminShell.insideTests
+            ? CLIRunner(executable: Self.testHostExecutable)
+            : AppleSilicon.thisMac
+            ? CLIRunner.forApp(shell: .shared)
+            : CLIRunner(executable: GraftExecutable.bundled(in: Bundle.main.bundleURL))
+        _store = State(initialValue: ConfigStore(runner: runner, notify: { BuildNotifier.post($0) }))
+        _updates = State(initialValue: UpdateStore(
+            runner: runner, defaults: .standard, now: Date.init,
+            appVersion: AboutGraft.version(of: .main), open: { NSWorkspace.shared.open($0) }
+        ))
         // An Intel Mac gets `AppleSiliconGate`'s one screen and nothing else:
-        // not even the login shell is asked.
-        guard AppleSilicon.thisMac else { return }
+        // not even the login shell is asked. Nor does a test host.
+        guard AppleSilicon.thisMac, !AdminShell.insideTests else { return }
         // Before any view reads a preference: settings saved while the app
         // was TweakBuild live under the old bundle id. See `LegacyDefaults`.
         LegacyDefaults.migrateOnLaunch(store: UserDefaults.standard)
@@ -54,6 +74,9 @@ struct GraftApp: App {
 
     var body: some Scene {
         WindowGroup("Graft") {
+            if AdminShell.insideTests {
+                TestHostWindow()
+            } else {
             // Outermost, so on an Intel Mac neither the app nor these tasks run.
             AppleSiliconGate(
                 isAppleSilicon: AppleSilicon.thisMac,
@@ -63,7 +86,22 @@ struct GraftApp: App {
             ) {
                 Group {
                     if rebuild.phase == .ready {
-                        ContentView(store: store, adminShell: adminShell)
+                        ContentView(
+                            store: store, adminShell: adminShell, updates: updates,
+                            // Set Up Decryption's "Open <App>", named here
+                            // like `openURL` above (`NoRealDefaultsTests`).
+                            openApp: {
+                                NSWorkspace.shared.openApplication(at: $0, configuration: NSWorkspace.OpenConfiguration())
+                            }
+                        )
+                        // What's New, once after an update. Not in a test
+                        // host, which is this app under its real bundle id:
+                        // it would record the test build's version in the
+                        // real preferences (as `LegacyDefaults` skips it).
+                        .modifier(OpensWhatsNewAfterUpdate(
+                            defaults: AdminShell.insideTests ? nil : .standard,
+                            version: AboutGraft.version(of: .main)
+                        ))
                     } else {
                         // Not an overlay: while a rebuild is running the app is
                         // about to be replaced and quit, so letting ContentView
@@ -125,6 +163,7 @@ struct GraftApp: App {
                 // at 600: the pane scrolls, and 560 keeps the header, meta
                 // strip and delivery card on screen without one.
                 .frame(minWidth: Metrics.windowMinWidth, minHeight: Metrics.windowMinHeight)
+            }
         }
         .windowResizability(.contentSize)
         .commands {
@@ -137,12 +176,120 @@ struct GraftApp: App {
                 }
             }
             CommandGroup(after: .help) {
+                // Says what it found in the window's alert (`UpdateStore.answer`).
+                // Not on an Intel Mac, which runs no CLI at all.
+                Button("Check for Updates…") {
+                    Task { await updates.checkNow() }
+                }
+                .disabled(!AppleSilicon.thisMac)
+                WhatsNewCommand()
                 Button("Licenses") {
                     if let folder = BundledLicenses.installed { NSWorkspace.shared.open(folder) }
                 }
                 .disabled(BundledLicenses.installed == nil)
             }
         }
+
+        // Help › What's New…: the changelog this copy carries. One window,
+        // which the menu opens or brings forward.
+        Window(WhatsNew.windowTitle, id: WhatsNew.windowID) {
+            WhatsNewView(changelog: Changelog.bundled, open: { NSWorkspace.shared.open($0) })
+                .preferredColorScheme(.dark)
+        }
+        .defaultSize(width: 680, height: 720)
+    }
+}
+
+/// The app's delegate, for one thing: answering macOS's quit, ⌘Q's and the
+/// one a logout, restart or shutdown sends, while Graft works
+/// (`QuitGuard`). Named here, with the real alert, the real reply and the
+/// real run loop, because `NSApplicationDelegateAdaptor` builds it with no
+/// arguments.
+@MainActor
+final class GraftAppDelegate: NSObject, NSApplicationDelegate {
+    private lazy var quitGuard = QuitGuard(
+        hold: .shared,
+        present: QuitAlert.present,
+        reply: { NSApp.reply(toApplicationShouldTerminate: $0) },
+        schedule: QuitAlert.afterDelay
+    )
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        quitGuard.shouldTerminate()
+    }
+}
+
+/// `QuitGuard`'s question as an app-modal alert, and its clock as run-loop
+/// timers.
+enum QuitAlert {
+    /// Runs `block` once, `delay` seconds from now, on a main run-loop timer
+    /// in the common modes. Not a `Task` or a main-queue block, for two
+    /// reasons. While macOS waits for `.terminateLater`'s reply it runs the
+    /// run loop in the modal-panel mode, one of the common ones. And an
+    /// alert run from inside a main-queue block keeps the main queue, and
+    /// every main-actor task with it (the running work's own), from running
+    /// until the alert closes; a timer's callout is not such a block.
+    static func afterDelay(_ delay: TimeInterval, _ block: @escaping @MainActor () -> Void) {
+        let timer = Timer(timeInterval: delay, repeats: false) { _ in
+            MainActor.assumeIsolated { block() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// The alert, once `applicationShouldTerminate` has returned, as
+    /// `QuitGuard.Present` asks. Keep Working is the default button, so
+    /// Return keeps Graft working.
+    ///
+    /// Never on screen in a test host (`AdminShell.insideTests`: a test's
+    /// safety can't rest on the code it tests): answered Quit Anyway, so the
+    /// host can still end.
+    @MainActor
+    static func present(
+        _ question: QuitQuestion, answer: @escaping @MainActor (QuitAnswer) -> Void
+    ) -> QuitGuard.TakeDown {
+        if AdminShell.insideTests {
+            afterDelay(0) { answer(.quitAnyway) }
+            return { then in then() }
+        }
+        let shown = Shown()
+        afterDelay(0) {
+            guard !shown.takenDown else { return }
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = question.title
+            alert.informativeText = question.detail
+            alert.addButton(withTitle: QuitQuestion.keepWorking)
+            alert.addButton(withTitle: QuitQuestion.quitAnyway).hasDestructiveAction = true
+            shown.alert = alert
+            NSApp.activate()
+            let response = alert.runModal()
+            shown.alert = nil
+            if let then = shown.afterTakeDown {
+                shown.afterTakeDown = nil
+                return then()
+            }
+            answer(response == .alertSecondButtonReturn ? .quitAnyway : .keepWorking)
+        }
+        return { then in
+            shown.takenDown = true
+            if let alert = shown.alert, NSApp.modalWindow === alert.window {
+                // Ended once `runModal` has returned, above: abortModal is
+                // the way out of a modal loop from a timer's callout.
+                shown.afterTakeDown = then
+                NSApp.abortModal()
+            } else {
+                then()
+            }
+        }
+    }
+
+    /// One alert's state, between the timer that shows it and the call
+    /// that takes it down.
+    @MainActor
+    private final class Shown {
+        var alert: NSAlert?
+        var takenDown = false
+        var afterTakeDown: (@MainActor () -> Void)?
     }
 }
 
@@ -210,5 +357,23 @@ enum BundledLicenses {
     static let installed: URL? = folder(resourceURL: Bundle.main.resourceURL) { path in
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+}
+
+extension GraftApp {
+    /// What a test host's runner points at: nothing, so a call from its own
+    /// window fails at once instead of running a real `graft`. Out here, so
+    /// `shellImportsRemoved` stays the first thing `GraftApp` declares.
+    static let testHostExecutable = URL(fileURLWithPath: "/var/empty/graft-test-host-runs-nothing")
+}
+
+/// The app's own window in a test host: what it says, and nothing else.
+/// No store loads, polls or asks anything here (`GraftApp.init`).
+struct TestHostWindow: View {
+    static let text = "Graft test host: this window runs nothing."
+
+    var body: some View {
+        Text(Self.text)
+            .frame(minWidth: 320, minHeight: 120)
     }
 }

@@ -66,10 +66,16 @@ final class AppStoreAccountStore {
     /// `shell` has no default: the real one comes from `GraftApp`, and a test
     /// passes a recording one (`NoRealDefaultsTests`). `hold` keeps macOS from
     /// ending the app during an enrollment (whole-diff review, app-3).
-    init(runner: CLIRunner, shell: PrivilegedShell, hold: TerminationHold = .shared) {
+    /// `openApp` opens an app in macOS (`openEnrolApp`): `GraftApp` passes
+    /// NSWorkspace's, a test a recording one, and the default opens nothing.
+    init(
+        runner: CLIRunner, shell: PrivilegedShell, hold: TerminationHold = .shared,
+        openApp: @escaping @MainActor (URL) -> Void = { _ in }
+    ) {
         self.runner = runner
         self.shell = shell
         self.hold = hold
+        self.openApp = openApp
     }
 
     private let hold: TerminationHold
@@ -260,6 +266,11 @@ final class AppStoreAccountStore {
         /// Ran past the script's time limit and stopped itself (exit 68),
         /// with nothing changed. The limit, in seconds, when the CLI said it.
         case timedOut(limitSeconds: Int?)
+        /// Root found none of this Mac's FairPlay state for UnfairPlay to
+        /// read and stopped before it copied anything (exit 69), with
+        /// nothing changed. `appName` is the app picked (`appName(for:)`),
+        /// which, opened once, writes that state again.
+        case noFairPlayState(appName: String)
         case failed(String)
     }
 
@@ -277,6 +288,23 @@ final class AppStoreAccountStore {
     private(set) var isStoppingEnrol = false
     /// Why a Cancel during the root run couldn't ask it to stop.
     private(set) var stopError: String?
+    /// Opens an app in macOS: the sheet's "Open <App>" (`openEnrolApp`).
+    let openApp: @MainActor (URL) -> Void
+
+    /// The name of the app `command` enrolls with, as the sheet lists it:
+    /// the candidate it was picked from, else its folder's own name.
+    func appName(for command: EnrollCommandRecord) -> String {
+        candidates.first { $0.path == command.app }?.name
+            ?? URL(fileURLWithPath: command.app).deletingPathExtension().lastPathComponent
+    }
+
+    /// Before the password: open the app the script in hand reads, so macOS
+    /// writes this Mac's App Store state again if it cleared it (a restart
+    /// did, in the owner's run). Only in `.ready`; it changes nothing here.
+    func openEnrolApp() {
+        guard case let .ready(command) = enrol else { return }
+        openApp(URL(fileURLWithPath: command.app))
+    }
 
     static func candidatesArgs() -> [String] { [Flag.json, Flag.appstoreEnrollCandidates] }
     static func enrollCommandArgs(app: String, allowUncheckedHelper: Bool = false) -> [String] {
@@ -405,8 +433,9 @@ final class AppStoreAccountStore {
         runningCommand = command
         isStoppingEnrol = false
         stopError = nil
-        hold.begin(TerminationHold.enrolling)
-        defer { hold.end(TerminationHold.enrolling) }
+        // Quit Anyway stops the root run as Cancel does, with the cancel file.
+        let ticket = hold.begin(TerminationHold.enrolling) { [weak self] in self?.stopEnrol() }
+        defer { hold.end(ticket) }
         do {
             let run: AdminRun
             do {
@@ -434,6 +463,8 @@ final class AppStoreAccountStore {
             enrol = .stopped
         } catch let error as AdminShellError where error.number == CLIContract.EnrolExit.timedOut {
             enrol = .timedOut(limitSeconds: command.timeLimitSeconds)
+        } catch let error as AdminShellError where error.number == CLIContract.EnrolExit.noFairPlayState {
+            enrol = .noFairPlayState(appName: appName(for: command))
         } catch {
             await onChange()
             enrol = .failed(error.localizedDescription)

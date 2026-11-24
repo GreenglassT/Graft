@@ -421,10 +421,9 @@ final class DeviceAppsStore {
     /// however it ends (the try14 delta audit, D14-APP-2): a dump takes
     /// minutes and stages an IPA, closing the window doesn't stop it, and a
     /// Graft that macOS ended halfway would orphan the CLI mid-dump
-    /// (`TerminationHold`).
+    /// (`TerminationHold`). A dump's only Stop is its task being canceled,
+    /// so Quit Anyway cancels its own (`TerminationHold.holding`).
     private func runDecrypt(_ args: [String], failing: String) async -> DecryptEndRecord? {
-        hold.begin(TerminationHold.decrypting)
-        defer { hold.end(TerminationHold.decrypting) }
         // Fresh slate: exactly one of lastDecrypt/lastError is set by the end of
         // this call, so the card can never show a prior run's success line
         // beside this run's error banner (or the reverse).
@@ -436,20 +435,23 @@ final class DeviceAppsStore {
             // `stream`, not `run`: the point of --verbose is seeing the
             // backend narrate *while* it works, and a collected result can only
             // ever show that after the fact.
-            let result = try await runner.stream(arguments: args) { [weak self] event in
-                // Only the transcript comes through the callback, where being a
-                // little late costs nothing. The *result* is read from
-                // `result.events` below, which `CLIRunner` collects
-                // synchronously — the callback's MainActor Tasks are not
-                // guaranteed to have run by the time this await returns, so a
-                // dump that really did stage an IPA could otherwise report
-                // nothing at all.
-                if case let .log(source, line) = event,
-                   source != CLIContract.startupLogSource {  // C-NOTICE: not the dump's
-                    if source == CLIContract.selfLogSource {
-                        self?.notes.append(line)
-                    } else {
-                        self?.transcript.append(line)
+            let runner = self.runner
+            let result = try await hold.holding(TerminationHold.decrypting) { [weak self] in
+                try await runner.stream(arguments: args) { [weak self] event in
+                    // Only the transcript comes through the callback, where
+                    // being a little late costs nothing. The *result* is read
+                    // from `result.events` below, which `CLIRunner` collects
+                    // synchronously — the callback's MainActor Tasks are not
+                    // guaranteed to have run by the time this await returns,
+                    // so a dump that really did stage an IPA could otherwise
+                    // report nothing at all.
+                    if case let .log(source, line) = event,
+                       source != CLIContract.startupLogSource {  // C-NOTICE: not the dump's
+                        if source == CLIContract.selfLogSource {
+                            self?.notes.append(line)
+                        } else {
+                            self?.transcript.append(line)
+                        }
                     }
                 }
             }

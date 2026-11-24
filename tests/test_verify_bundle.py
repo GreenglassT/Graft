@@ -1397,3 +1397,77 @@ def test_a_release_whose_certificate_isnt_read_as_developer_id_fails_the_require
     report = vb.Report()
     vb.check_unfairplay_requirement(_fake_app(tmp_path), report)
     assert [ok for _, ok in report.results] == [False]
+
+
+# ------------------------------------------------- the private deny-list (2.0.1)
+
+@pytest.fixture
+def denylist(tmp_path, monkeypatch):
+    """A placeholder list where the release reads the real one from."""
+    path = tmp_path / "private" / "scrub-denylist.txt"
+    path.parent.mkdir()
+    path.write_text("# placeholders only\nExample Game\ncom.example.thing\n")
+    monkeypatch.setenv("GRAFT_SCRUB_DENYLIST", str(path))
+    monkeypatch.delenv("GRAFT_SKIP_DENYLIST", raising=False)
+    return path
+
+
+def test_a_name_on_the_deny_list_anywhere_in_the_app_fails(tmp_path, denylist):
+    """A real iOS app's name sat in public code comments from 1.0 to 2.0:
+    the app is scanned for the list's terms, in names and contents."""
+    import zlib
+    app = _fake_app(tmp_path)
+    report = vb.Report()
+    vb.check_no_denylisted_names(app, report)
+    assert report.results == [(vb.DENYLIST_CHECK, True)]
+    (app / "Contents" / "Resources").mkdir()
+    (app / "Contents" / "Resources" / "x.bin").write_bytes(b"\0" + zlib.compress(b"for COM.EXAMPLE.THING\0" * 3))
+    vb.check_no_denylisted_names(app, report)
+    assert report.results[-1] == (vb.DENYLIST_CHECK, False)
+
+
+def test_without_the_list_the_check_fails_and_skipping_it_is_neither_pass_nor_fail(tmp_path, monkeypatch, capsys):
+    app = _fake_app(tmp_path)
+    monkeypatch.setenv("GRAFT_SCRUB_DENYLIST", str(tmp_path / "absent.txt"))
+    monkeypatch.delenv("GRAFT_SKIP_DENYLIST", raising=False)
+    report = vb.Report()
+    vb.check_no_denylisted_names(app, report)
+    assert report.results == [(vb.DENYLIST_CHECK, False)]
+    assert "no deny-list at" in capsys.readouterr().out
+    monkeypatch.setenv("GRAFT_SKIP_DENYLIST", "1")
+    report = vb.Report()
+    vb.check_no_denylisted_names(app, report)
+    assert report.results == [] and "SKIP" in capsys.readouterr().out
+
+
+def test_the_app_is_scanned_for_the_deny_list_beside_the_build_path_scan():
+    import inspect
+    body = inspect.getsource(vb.verify_app)
+    assert body.index("check_no_build_paths(app, report)") < body.index("check_no_denylisted_names(app, report)") \
+        < body.index("runtime_checks(")
+
+
+def test_others_files_in_the_app_are_not_scanned_and_graft_s_own_are_whole(tmp_path, denylist):
+    """CPython, the wheels, the tools and the license texts are pinned by
+    hash, and popular apps' names turn up in them as ordinary words, in their
+    contents and in upstream's own file and folder names alike (2.0.1's try1
+    failed on a Go module's folder and a lexer named for a game)."""
+    app = _fake_app(tmp_path)
+    site = app / "Contents" / "Resources" / "GraftPython" / "lib" / "python3.13" / "site-packages"
+    (site / "somelib").mkdir(parents=True)
+    (site / "somelib" / "words.py").write_text("# works with Example Game\n")
+    (app / "Contents" / "Helpers" / "bin").mkdir()
+    (app / "Contents" / "Helpers" / "bin" / "zsign").write_bytes(b"\0com.example.thing\0")
+    report = vb.Report()
+    vb.check_no_denylisted_names(app, report)
+    assert report.results == [(vb.DENYLIST_CHECK, True)]
+    (site / "somelib" / "Example Game.py").write_text("# Example Game")    # upstream's own name
+    vb.check_no_denylisted_names(app, report)
+    assert report.results[-1] == (vb.DENYLIST_CHECK, True)
+    for own in (site / "graft_ipa" / "cli.py", site / "graft_ipa" / "Example Game.py",
+                app / "Contents" / "Helpers" / "bin" / "cyan"):
+        own.parent.mkdir(parents=True, exist_ok=True)
+        own.write_text("# Example Game")
+        vb.check_no_denylisted_names(app, report)
+        assert report.results[-1] == (vb.DENYLIST_CHECK, False), own
+        own.unlink()

@@ -1,36 +1,49 @@
 #!/usr/bin/env python3
-"""Build final Graft logo assets from the approved raster icon."""
-import os, json
+"""Build every Graft logo asset from the splice artwork in splice.py.
+
+Writes the vector icons, the wordmark and the banner as SVG, then renders them
+with rsvg-convert:
+
+- assets/logo/png/icon-{128,256,512,1024}.png, the wordmark and the banner;
+- the app's AppIcon set, at every size its Contents.json lists. The 16 and
+  32 px images use the simpler small drawing; 64 px and up use the full one.
+
+Run from anywhere: `python3 assets/logo/finalize.py`. Needs rsvg-convert
+(Homebrew: librsvg).
+"""
+import json
+import os
+import shutil
+import subprocess
+
 import gen
+import splice
 
 S = gen.S
 OUT = os.path.dirname(os.path.abspath(__file__))
+PNG = os.path.join(OUT, "png")
 PROJ = os.path.abspath(os.path.join(OUT, "..", "..", "Graft", "Graft"))
 XCASSETS = os.path.join(PROJ, "Assets.xcassets")
 APPICON = os.path.join(XCASSETS, "AppIcon.appiconset")
 
+# The visible rounded square fills this share of the icon canvas.
+TILE_SHARE = splice.TILE[2] / S
 
-def macos_svg():
-    """Portable SVG wrapper around the approved 1024 px source artwork."""
-    return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{S}" height="{S}" '
-            f'viewBox="0 0 {S} {S}">'
-            f'<clipPath id="icon-clip"><rect width="{S}" height="{S}" rx="220"/></clipPath>'
-            f'<image href="png/icon-1024.png" width="{S}" height="{S}" '
-            f'clip-path="url(#icon-clip)"/>'
-            f'</svg>')
+
+def _icon_image(x, y, tile, href="png/icon-512.png"):
+    """An <image> of the icon whose rounded square lands on (x, y, tile, tile)."""
+    size = tile / TILE_SHARE
+    inset = splice.TILE[0] / S * size
+    return (f'<image href="{href}" x="{x - inset:.1f}" y="{y - inset:.1f}" '
+            f'width="{size:.1f}" height="{size:.1f}"/>')
 
 
 def wordmark_svg():
     H, ic, pad = 300, 232, 34
     tx = pad + ic + 34
-    href = "png/icon-256.png"
     return (f'<svg xmlns="http://www.w3.org/2000/svg" '
-            f'xmlns:xlink="http://www.w3.org/1999/xlink" '
             f'width="1180" height="{H}" viewBox="0 0 1180 {H}">'
-            f'<clipPath id="icon-clip"><rect x="{pad}" y="{(H-ic)//2}" '
-            f'width="{ic}" height="{ic}" rx="52"/></clipPath>'
-            f'<image href="{href}" x="{pad}" y="{(H-ic)//2}" width="{ic}" height="{ic}" '
-            f'clip-path="url(#icon-clip)"/>'
+            f'{_icon_image(pad, (H - ic) // 2, ic)}'
             f'<text x="{tx}" y="{H/2}" dominant-baseline="central" '
             f'font-family="SF Pro Display, Helvetica Neue, Arial, sans-serif" '
             f'font-size="150" font-weight="800" letter-spacing="-3">'
@@ -40,18 +53,13 @@ def wordmark_svg():
 def banner_svg():
     W, H, ic, pad = 1280, 340, 244, 48
     tx = pad + ic + 40
-    href = "png/icon-256.png"
     return (f'<svg xmlns="http://www.w3.org/2000/svg" '
-            f'xmlns:xlink="http://www.w3.org/1999/xlink" '
             f'width="{W}" height="{H}" viewBox="0 0 {W} {H}">{gen.defs()}'
             f'<rect width="{W}" height="{H}" rx="56" fill="url(#bg)"/>'
             f'<rect width="{W}" height="{H}" rx="56" fill="url(#glow)"/>'
             f'<rect x="2" y="2" width="{W-4}" height="{H-4}" rx="54" '
             f'fill="none" stroke="{gen.LINE}" stroke-width="2" stroke-opacity="0.7"/>'
-            f'<clipPath id="icon-clip"><rect x="{pad}" y="{(H-ic)//2}" '
-            f'width="{ic}" height="{ic}" rx="55"/></clipPath>'
-            f'<image href="{href}" x="{pad}" y="{(H-ic)//2}" width="{ic}" height="{ic}" '
-            f'clip-path="url(#icon-clip)"/>'
+            f'{_icon_image(pad, (H - ic) // 2, ic)}'
             f'<text x="{tx}" y="148" '
             f'font-family="SF Pro Display, Helvetica Neue, Arial, sans-serif" '
             f'font-size="128" font-weight="800" letter-spacing="-3">'
@@ -72,22 +80,41 @@ def appicon_contents():
     return {"images": images, "info": {"version": 1, "author": "xcode"}}
 
 
+def _render(svg_path, png_path, width, height=None):
+    subprocess.run(["rsvg-convert", "-w", str(width), "-h", str(height or width),
+                    svg_path, "-o", png_path], check=True)
+
+
 def main():
-    with open(os.path.join(OUT, "icon-macos.svg"), "w") as f:
-        f.write(macos_svg())
-    with open(os.path.join(OUT, "wordmark.svg"), "w") as f:
-        f.write(wordmark_svg())
-    with open(os.path.join(OUT, "banner.svg"), "w") as f:
-        f.write(banner_svg())
+    if not shutil.which("rsvg-convert"):
+        raise SystemExit("finalize.py needs rsvg-convert (brew install librsvg)")
+
+    full = os.path.join(OUT, "icon-macos.svg")
+    small = os.path.join(OUT, "icon-macos-small.svg")
+    files = {full: splice.icon_svg(), small: splice.icon_svg(small=True),
+             os.path.join(OUT, "wordmark.svg"): wordmark_svg(),
+             os.path.join(OUT, "banner.svg"): banner_svg()}
+    for path, text in files.items():
+        with open(path, "w") as f:
+            f.write(text)
+
+    os.makedirs(PNG, exist_ok=True)
+    for px in (128, 256, 512, 1024):
+        _render(full, os.path.join(PNG, f"icon-{px}.png"), px)
+    _render(os.path.join(OUT, "wordmark.svg"), os.path.join(PNG, "wordmark.png"), 1180, 300)
+    _render(os.path.join(OUT, "banner.svg"), os.path.join(PNG, "banner.png"), 1280, 340)
 
     os.makedirs(APPICON, exist_ok=True)
+    contents = appicon_contents()
     with open(os.path.join(APPICON, "Contents.json"), "w") as f:
-        json.dump(appicon_contents(), f, indent=2)
+        json.dump(contents, f, indent=2)
+    for px in sorted({int(e["filename"][5:-4]) for e in contents["images"]}):
+        _render(small if px <= 32 else full, os.path.join(APPICON, f"icon-{px}.png"), px)
     cat = os.path.join(XCASSETS, "Contents.json")
     if not os.path.exists(cat):
         with open(cat, "w") as f:
             json.dump({"info": {"version": 1, "author": "xcode"}}, f, indent=2)
-    print("wrote SVGs + appiconset JSON. APPICON =", APPICON)
+    print("wrote the logo SVGs and PNGs, and the AppIcon set in", APPICON)
 
 
 if __name__ == "__main__":

@@ -99,10 +99,17 @@ final class DeviceVitalsPollTests: XCTestCase {
     /// the record's udid is the udid that was requested. That is what the CLI
     /// does, and it keeps the device-switch case honest: a poll still querying
     /// the previous phone would file its readings under the previous phone.
+    ///
+    /// The stub is run once before it is returned, so that macOS's check of a
+    /// new executable is paid before a case's clock starts
+    /// (`warmUpFreshExecutable`). `GRAFT_STUB_WARM_UP` makes that run exit
+    /// before it logs anything. Without the warm-up, a 0.8 s window saw no
+    /// runs over a slow network.
     private func infoStore(log: URL) throws -> DeviceInfoStore {
         let path = NSTemporaryDirectory() + "device_info_stub_\(UUID().uuidString).sh"
         let script = """
         #!/bin/sh
+        [ -z "${GRAFT_STUB_WARM_UP-}" ] || exit 0
         line=""
         last=""
         for arg in "$@"; do line="$line $arg"; last="$arg"; done
@@ -112,6 +119,7 @@ final class DeviceVitalsPollTests: XCTestCase {
         try script.write(toFile: path, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path)
         addTeardownBlock { try? FileManager.default.removeItem(atPath: path) }
+        try warmUpFreshExecutable(path, environment: ["GRAFT_STUB_WARM_UP": "1"])
         return DeviceInfoStore(runner: CLIRunner(executable: URL(fileURLWithPath: path)))
     }
 

@@ -466,7 +466,7 @@ enum Symbols {
     /// app's smallest size at its quietest color.
     static let encrypted = Symbol(name: "lock.fill", weight: .medium)
 
-    /// A newer build of this tweak exists.
+    /// A newer build of this tweak exists, or a newer Graft (`UpdateNotice`).
     static let updateAvailable = Symbol(name: "arrow.up.circle.fill", weight: .regular)
 
     /// The backend chose a different route than asked — one line of "here is

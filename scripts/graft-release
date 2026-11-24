@@ -39,6 +39,20 @@
 # `ditto -c -k --keepParent Graft.app Graft.zip` (never `zip -r`, which stores
 # symlinks as files and breaks the seal), and run `verify-bundle --zip` on it.
 #
+# Nothing it publishes may name an app, tweak or bundle id Graft was used
+# with, or its owner: the tracked files, the app and the source archive (every
+# file name, and every file of Graft's own; others', pinned by hash, by name)
+# are scanned for the terms of the private scrub list the wiki build reads
+# (scripts/denylist.py: ~/OpenSource/release-notes/scrub-denylist.txt, or
+# GRAFT_SCRUB_DENYLIST). Without the list it stops before building, unless
+# GRAFT_SKIP_DENYLIST=1, and then says on every scan, and at the end, that
+# nothing was checked.
+#
+# Downloads are cached per user in ~/Library/Caches/graft-release (or
+# GRAFT_BUNDLE_CACHE), shared by every checkout and worktree; Go's modules
+# too. On a phone's hotspot it lists what isn't cached yet and asks before
+# downloading it; GRAFT_ALLOW_HOTSPOT=1 goes ahead without asking.
+#
 # Unlike scripts/graft-install (a developer build that installs into
 # /Applications and records this checkout so the app can rebuild itself), a
 # release build carries no repository path, so the app's rebuild-on-launch
@@ -68,6 +82,8 @@ if [[ -n "$(git -C "$REPO_ROOT" status --porcelain)" ]]; then
   git -C "$REPO_ROOT" status --porcelain | head -20 >&2
   exit 1
 fi
+# Before anything is built: a release that can't be scanned isn't one.
+"$PY" "$REPO_ROOT/scripts/denylist.py" check
 
 WORK="$(mktemp -d -t graft-release)"
 trap 'rm -rf "$WORK"' EXIT
@@ -77,9 +93,17 @@ EXPORT="$WORK/export"
 mkdir "$EXPORT"
 git -C "$REPO_ROOT" archive --format=tar "$HEAD_AT_START" | tar -x -C "$EXPORT"
 echo "→ building commit $HEAD_AT_START, from an export of it"
-# The stage's downloads and builds are keyed by content hashes, so the
-# checkout's caches serve the export.
-export GRAFT_BUNDLE_CACHE="$REPO_ROOT/build/bundle-cache" GRAFT_BUNDLE_WORK="$REPO_ROOT/build/bundle-work"
+echo "→ scanning the tracked files a public export carries for deny-listed names…"
+"$PY" "$EXPORT/scripts/denylist.py" tracked "$REPO_ROOT" "$HEAD_AT_START"
+# The stage's builds are keyed by content hashes, so the checkout's build
+# cache serves the export. Its downloads need nothing set: they are cached
+# per user, outside every checkout (graft_bundle.default_download_cache), so
+# a new worktree starts warm and no cache is ever copied into one.
+export GRAFT_BUNDLE_WORK="$REPO_ROOT/build/bundle-work"
+
+# Before anything is downloaded (Xcode's Swift packages come first): on a
+# phone's hotspot, what isn't cached yet is listed, and asked about.
+"$PY" "$EXPORT/scripts/graft_bundle.py" hotspot-check
 
 # The committed project is used as-is; regenerating would only churn its GUIDs.
 if [[ ! -d "$EXPORT/Graft/Graft.xcodeproj" ]]; then
@@ -228,6 +252,12 @@ if ! "$PY" "$EXPORT/scripts/graft_bundle.py" sources "$OUT_DIR/components.json" 
   echo "error: no source archive, so the zip was removed: the GPL download ships with its source" >&2
   exit 1
 fi
+echo "→ scanning the source archive for deny-listed names…"
+if ! "$PY" "$EXPORT/scripts/denylist.py" sources "$SOURCES"; then
+  rm -f "$ZIP"
+  echo "error: the source archive names something on the private deny-list, so the zip was removed" >&2
+  exit 1
+fi
 
 if [[ "$(git -C "$REPO_ROOT" rev-parse HEAD)" != "$HEAD_AT_START" ]]; then
   rm -f "$ZIP"
@@ -242,4 +272,10 @@ echo "✓ $APP ($(du -sh "$APP" | cut -f1), $SIGNED Mach-O files signed)"
 echo "✓ $ZIP ($(ls -l "$ZIP" | awk '{printf "%.1f MB", $5 / 1000000}'), not notarized)"
 echo "✓ $SOURCES ($(ls -l "$SOURCES" | awk '{printf "%.1f MB", $5 / 1000000}'))"
 echo "✓ $OUT_DIR/components.json"
+if [[ "${GRAFT_SKIP_DENYLIST:-}" == 1 ]]; then
+  echo "⚠ the deny-list scans were SKIPPED (GRAFT_SKIP_DENYLIST=1): nothing checked this release for app,"
+  echo "  tweak, bundle id or owner names. Don't publish it until a release with the list passes."
+else
+  echo "✓ no deny-listed name in the tracked files, the app or the source archive"
+fi
 echo "  $((SECONDS / 60))m $((SECONDS % 60))s"

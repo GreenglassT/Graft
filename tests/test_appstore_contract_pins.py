@@ -71,6 +71,7 @@ def test_the_enrolment_exit_statuses_are_the_numbers_the_app_reads() -> None:
         "writable": str(enrollment.EXIT_WRITABLE),
         "stopped": str(enrollment.EXIT_CANCELLED),
         "timedOut": str(enrollment.EXIT_TIME_LIMIT),
+        "noFairPlayState": str(enrollment.EXIT_NO_FAIRPLAY_STATE),
     }
 
 
@@ -87,10 +88,10 @@ from tests.cli_ast import REPO_ROOT, strip_swift_comments  # noqa: E402
 RECORDS_SWIFT = REPO_ROOT / "Graft" / "Graft" / "Models" / "AppStoreRecords.swift"
 
 
-def _swift_struct(name: str) -> str:
-    source = strip_swift_comments(RECORDS_SWIFT.read_text())
+def _swift_struct(name: str, path: Path = RECORDS_SWIFT) -> str:
+    source = strip_swift_comments(path.read_text())
     start = re.search(rf"\bstruct {re.escape(name)}\b[^{{]*\{{", source)
-    assert start, f"struct {name} is gone from AppStoreRecords.swift"
+    assert start, f"struct {name} is gone from {path.name}"
     depth, i = 1, start.end()
     while depth:
         depth += {"{": 1, "}": -1}.get(source[i], 0)
@@ -98,13 +99,13 @@ def _swift_struct(name: str) -> str:
     return source[start.end():i - 1]
 
 
-def _decoded(name: str) -> dict[str, bool]:
+def _decoded(name: str, path: Path = RECORDS_SWIFT) -> dict[str, bool]:
     """The JSON keys struct `name` decodes, each with whether the Swift type
     is optional (or has a default): its own stored properties, through its
     CodingKeys when it has them, not those of a struct nested in it."""
-    body = _swift_struct(name)
+    body = _swift_struct(name, path)
     for nested in re.finditer(r"\bstruct (\w+)\b", body):
-        body = body.replace(_swift_struct(nested[1]), "")
+        body = body.replace(_swift_struct(nested[1], path), "")
     props = {m[2]: m[3].strip().endswith("?") or m[4] is not None
              for m in re.finditer(r"^\s*(let|var) (\w+)\s*:\s*([^=\n]+?)\s*(=.*)?$", body, re.M)}
     keys = {p: p for p in props}
@@ -194,3 +195,61 @@ def test_every_failed_sign_in_reason_reaches_the_sheet_as_the_cli_s_sentence() -
     contract = contract_swift_source()
     for reason in ("unknown-prompt", "ipatool-changed", "keychain-locked"):
         assert f'"{reason}"' not in contract, f"{reason} has a Swift word now: pin it here"
+
+
+# --- The update check ---------------------------------------------------------
+#
+# `update-check` decodes into `UpdateCheckRecord` (BuildEvent.swift). The app
+# reads `latest`, `url` and `update_available` for the banner and the alert,
+# `current` to know the answer is about this copy, and `message` for a failed
+# Check for Updates…. A key spelled differently there is never filled, and a
+# non-optional one the CLI sends as null drops the whole line, so the check
+# would look like it never answered.
+
+EVENTS_SWIFT = REPO_ROOT / "Graft" / "Graft" / "Models" / "BuildEvent.swift"
+
+
+@pytest.mark.parametrize("worked", [True, False])
+def test_the_update_check_record_decodes_what_the_cli_sends(worked: bool) -> None:
+    from graft_ipa import release_check
+
+    if worked:
+        payload = release_check.event(
+            "2.0", release=release_check.Release(version="2.0.1", url=release_check.RELEASES_PAGE + "/latest")
+        )
+    else:
+        payload = release_check.event(
+            "2.0", error=release_check.UpdateCheckError("offline", reason=release_check.OFFLINE)
+        )
+    swift = _decoded("UpdateCheckRecord", EVENTS_SWIFT)
+    assert set(swift) == set(payload)
+    for key, optional in swift.items():
+        if not optional:
+            assert payload[key] is not None, f"update-check.{key} is non-optional in Swift but null here"
+
+
+def test_the_already_staged_record_decodes_every_key_the_cli_sends(tmp_path: Path) -> None:
+    """`appstore-already-staged`, a get that downloaded nothing: the app's
+    record (`AppStoreAlreadyStagedRecord`) reads exactly the keys the CLI
+    sends, and the CLI sends each one it can't do without, never null. A
+    line that failed to decode would leave the app with a get that "finished"
+    and said nothing."""
+    import json
+    from io import StringIO
+
+    from graft_ipa.ipa_cache import CachedIPA
+    from graft_ipa.json_output import EVENT_TYPES, GUI_EVENTS, JsonEmitter
+
+    assert "appstore-already-staged" in EVENT_TYPES and "appstore-already-staged" in GUI_EVENTS
+    buf = StringIO()
+    staged = CachedIPA(path=tmp_path / "com.example.app_1.0.ipa", bundle_id="com.example.app", version="1.0")
+    appstore.report_already_staged("example", staged, emitter=JsonEmitter(stream=buf), say=print)
+    (line,) = buf.getvalue().splitlines()
+    payload = json.loads(line)
+    assert payload.pop("type") == "appstore-already-staged"
+
+    swift = _decoded("AppStoreAlreadyStagedRecord")
+    assert set(swift) == set(payload)
+    for key, optional in swift.items():
+        if not optional:
+            assert payload[key] is not None, key

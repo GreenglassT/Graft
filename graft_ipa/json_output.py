@@ -84,6 +84,14 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # `decrypted_pages`, `plaintext_verified`. Emitted only for a decrypt
         # that was accepted — verified, or `--allow-unverified`.
         "appstore-decrypted",
+        # `--appstore-get` stopped before downloading, because the App Store's
+        # current version is already staged as a get stages it
+        # (`appstore.already_staged`): `app`, `bundle_id`, `version`,
+        # `filename` and `path` of that staged IPA. The whole output of such a
+        # get, which exits 0: no `appstore-stage`, no `ipa-provided`, nothing
+        # downloaded or changed. `--again` downloads anyway. A lookup that
+        # failed or named no version never ends a get here: it downloads.
+        "appstore-already-staged",
         # A get or an encrypted drop the CLI refused to stage, and why, as
         # data (C-UNVERIFIED): `app` and `reason`. Emitted just before the
         # refusal is raised, so the exit status and stderr are what they
@@ -448,6 +456,14 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "tweak-update",
         "tweak-updates-end",
         "tweak-updated",
+        # `--check-update`'s answer, exactly once, worked or not (the same
+        # keys either way): `ok`; `current`, the version compared against;
+        # `latest`, the latest published release's version without its "v",
+        # and `url`, its page (both null on a failure); `update_available`;
+        # and on a failure `reason` (offline|http|malformed), `status` (the
+        # HTTP status, or null) and `message`, the sentence Help › Check for
+        # Updates… shows. `release_check.event` builds it.
+        "update-check",
     }
 )
 

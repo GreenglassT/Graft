@@ -521,6 +521,11 @@ final class AppStoreSettingsTests: XCTestCase {
                        + "This Mac's App Store state, which UnfairPlay reads, isn't there right now: macOS sometimes "
                        + "clears it, even for an app you've already opened. Open the app you picked once, then set up again.",
                        "the row gives the sheet's advice too, once the sheet has closed, on a line of its own")
+        XCTAssertEqual(S.enrolOutcomeLine(.noFairPlayState(appName: "Example Game")),
+                       "Setting up decryption stopped before UnfairPlay ran: nothing was changed.\n"
+                       + "This Mac's App Store state, which UnfairPlay reads, isn't there right now: macOS sometimes "
+                       + "clears it, even for an app you've already opened. Open Example Game once, then set up again.",
+                       "root found no state before it copied anything (exit 69): the same advice, naming the app")
         for quiet in [AppStoreAccountStore.Enrol.idle, .preparing, .running, .done] {
             XCTAssertNil(S.enrolOutcomeLine(quiet), "\(quiet)")
         }

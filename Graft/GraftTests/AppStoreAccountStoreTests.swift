@@ -727,6 +727,110 @@ final class AppStoreAccountStoreTests: XCTestCase {
                        "any other failure is said as it is")
     }
 
+    // MARK: This Mac's FairPlay state, looked for before anything is copied
+
+    /// The CLI's enrollment verbs, with one app to pick, named "Example
+    /// Game": the name the sheet and Settings say.
+    private static func enrollingWithCandidate(_ dir: URL) -> String {
+        try? (commandLine + "\n").write(to: dir.appending(path: "command.json"), atomically: true, encoding: .utf8)
+        let candidate = #"{"type":"appstore-enroll-candidate","path":"/Applications/Example.app","name":"Example Game","bundle_id":"com.example.app","opened":true}"#
+        return """
+        case "$*" in
+          *--appstore-enroll-candidates*) printf '%s\\n' '\(candidate)' '{"type":"appstore-enroll-candidates-end","count":1}' ;;
+          *--appstore-enroll-command*) /bin/cat '\(dir.path)/command.json' ;;
+          *--appstore-enroll-finish*) printf '%s\\n' '{"type":"appstore-enrolled","model_dir":"/u/m","count":1}' ;;
+        esac
+        """
+    }
+
+    /// Root found no `SC Info.sidb` in either folder and stopped before it
+    /// copied anything (the script's exit 69). Its own outcome, naming the
+    /// app picked, with the advice UnfairPlay's own "no SIDB state" gets.
+    /// Nothing is moved in, and status isn't read again: nothing changed.
+    @MainActor
+    func test_no_fairplay_state_is_its_own_outcome_naming_the_picked_app() async throws {
+        let (runner, dir) = try cli(Self.enrollingWithCandidate)
+        let shell = RecordingShell()
+        shell.error = AdminShellError(
+            number: CLIContract.EnrolExit.noFairPlayState,
+            message: "graft: this Mac has no SC Info.sidb, the App Store state UnfairPlay reads"
+        )
+        let store = AppStoreAccountStore(runner: runner, shell: shell)
+        var reloads = 0
+        store.onChange = { reloads += 1 }
+        await store.loadCandidates()
+        await store.prepareEnrol(appPath: "/Applications/Example.app")
+
+        await store.confirmEnrol()
+
+        XCTAssertEqual(store.enrol, .noFairPlayState(appName: "Example Game"))
+        XCTAssertEqual(shell.scripts.count, 1)
+        XCTAssertFalse(try read(dir, "argv.txt").contains("--appstore-enroll-finish"))
+        XCTAssertEqual(reloads, 0)
+        let advice = AppStoreEnrollSheet.noStateAdvice(appName: "Example Game")
+        XCTAssertEqual(advice, AppStoreEnrollSheet.advice(for: AppStoreEnrollSheet.noSIDBState, appName: "Example Game"),
+                       "the same advice UnfairPlay's own words get")
+        XCTAssertTrue(advice.contains("Open Example Game once, then set up again."), advice)
+
+        // With no list of apps loaded, the app folder's own name.
+        let (bare, _) = try cli(Self.enrollingWithCandidate)
+        let unlisted = AppStoreAccountStore(runner: bare, shell: shell)
+        await unlisted.prepareEnrol(appPath: "/Applications/Example.app")
+        await unlisted.confirmEnrol()
+        XCTAssertEqual(unlisted.enrol, .noFairPlayState(appName: "Example"))
+    }
+
+    /// The sheet's "Open <App>" goes through the opener the store was
+    /// given, never NSWorkspace, and only for the script in hand.
+    @MainActor
+    func test_open_the_picked_app_goes_only_through_the_injected_opener() async throws {
+        let (runner, _) = try cli(Self.enrollingWithCandidate)
+        var opened: [URL] = []
+        let shell = RecordingShell()
+        let store = AppStoreAccountStore(runner: runner, shell: shell, openApp: { opened.append($0) })
+        store.openEnrolApp()
+        XCTAssertEqual(opened, [], "no script in hand: nothing to open")
+        await store.loadCandidates()
+        await store.prepareEnrol(appPath: "/Applications/Example.app")
+        guard case let .ready(command) = store.enrol else { return XCTFail("expected .ready, got \(store.enrol)") }
+        XCTAssertEqual(store.appName(for: command), "Example Game")
+
+        store.openEnrolApp()
+
+        XCTAssertEqual(opened, [URL(fileURLWithPath: "/Applications/Example.app")])
+        XCTAssertTrue(shell.scripts.isEmpty, "opening the app asks for no password")
+        XCTAssertEqual(store.enrol, .ready(command), "and changes nothing in the flow")
+    }
+
+    /// Before the password: a quiet line, and an "Open <App>" button that
+    /// opens the picked app through the injected opener (a click through the
+    /// window, as a real one).
+    @MainActor
+    func test_before_the_password_the_sheet_offers_to_open_the_picked_app() async throws {
+        try AccessibilityTree.requireServed()
+        let (runner, _) = try cli(Self.enrollingWithCandidate)
+        var opened: [URL] = []
+        let shell = RecordingShell()
+        let store = AppStoreStore(runner: runner, shell: shell, openApp: { opened.append($0) })
+        let account = store.account
+        let box = hosted(AppStoreEnrollSheet(account: account, store: store), size: NSSize(width: 480, height: 900))
+        await eventually({ account.hasLoadedCandidates }, "the sheet lists the apps it can use")
+        await account.prepareEnrol(appPath: "/Applications/Example.app")
+        guard case .ready = account.enrol else { return XCTFail("expected .ready, got \(account.enrol)") }
+        settle(box)
+        let texts = try AccessibilityTree.texts(in: box.window)
+        XCTAssertTrue(texts.contains(AppStoreEnrollSheet.openFirstLine(appName: "Example Game")), "\(texts)")
+        XCTAssertEqual(AppStoreEnrollSheet.openFirstLine(appName: "Example Game"),
+                       "Open Example Game once before you continue: macOS sometimes clears the App Store state setup reads, and opening the app writes it again.")
+
+        try clickButton(named: "Open Example Game", in: box.window)
+        await eventually({ !opened.isEmpty }, "the button opens the app")
+
+        XCTAssertEqual(opened, [URL(fileURLWithPath: "/Applications/Example.app")])
+        XCTAssertTrue(shell.scripts.isEmpty, "no password is asked for")
+        guard case .ready = account.enrol else { return XCTFail("still before the password: \(account.enrol)") }
+    }
+
     // MARK: Account actions against a running get (the review's critic)
 
     /// A get that runs until stopped, a sign-in that waits after reading its

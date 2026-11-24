@@ -86,6 +86,9 @@ struct AppStoreSettingsSection: View {
         case .cancelled: return "Setting up decryption was canceled: nothing was changed."
         case .stopped: return "Setting up decryption was stopped: nothing was changed."
         case let .timedOut(limit): return AppStoreEnrollSheet.timedOutLine(limitSeconds: limit)
+        case let .noFairPlayState(appName):
+            return "Setting up decryption stopped before UnfairPlay ran: nothing was changed.\n"
+                + AppStoreEnrollSheet.noStateAdvice(appName: appName)
         case let .failed(message):
             // The error first, after the colon, then the sheet's advice on a
             // line of its own, so neither reads as a sentence spliced in.

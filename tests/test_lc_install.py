@@ -12,12 +12,13 @@ from __future__ import annotations
 import io
 import json
 import threading
+import time
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from graft_ipa import device_install, lc_instance, lc_manage
+from graft_ipa import device_install, installer, lc_instance, lc_manage
 from graft_ipa.apple_portal import AppIdNotRegistered
 from graft_ipa.build_log import BuildLog
 from graft_ipa.errors import InstallError
@@ -302,7 +303,8 @@ def test_the_signing_summary_is_reported(tmp_path: Path, ipa: Path) -> None:
 def test_an_install_still_blocked_says_to_close_livecontainer_once(
     tmp_path: Path, ipa: Path
 ) -> None:
-    h = Harness(tmp_path, ipa)
+    # An update: only a LiveContainer already on the device can hold it.
+    h = Harness(tmp_path, ipa, device=FakeDevice({"com.example.app": {}, PRIMARY: {}}))
     h.device.install_gate = threading.Event()
     threading.Timer(0.3, h.device.install_gate.set).start()
 
@@ -328,6 +330,103 @@ def test_an_install_that_finishes_promptly_says_nothing_about_waiting(
     assert h.of("lc-install-waiting") == []
     (switch,) = h.device.waiting_on_user
     assert switch is not None and not switch.is_set(), "60 s of silence is still a phone gone"
+
+
+class _SlowDevice(FakeDevice):
+    """Every install runs past the notice, then finishes."""
+
+    def install_ipa(self, udid: str, ipa: Path, on_progress=None, waiting_on_user=None) -> None:
+        time.sleep(0.3)
+        super().install_ipa(udid, ipa, on_progress, waiting_on_user)
+
+
+@pytest.mark.parametrize("listed", [LC2, LC2.lower()], ids=["as-installed", "other-case"])
+def test_only_an_instance_already_on_the_device_waits_on_the_user(
+    tmp_path: Path, ipa: Path, listed: str
+) -> None:
+    """d14-cli-1: iOS can hold an install only over an app that is there.
+    Instance 2 is an update and gets the notice; instance 1 is new, and its
+    slow install is just slow. The listing is matched without regard to
+    case, as discovery matches it."""
+    h = Harness(tmp_path, ipa, device=_SlowDevice({"com.example.app": {}, listed: {}}))
+
+    h.install(instances=(1, 2), wait_notice_seconds=0.05)
+
+    assert [e["bundle_id"] for e in h.of("lc-install-waiting")] == [LC2]
+    assert [s.is_set() for s in h.device.waiting_on_user] == [False, True]
+    assert [e["bundle_id"] for e in h.of("lc-installed")] == [PRIMARY, LC2]
+
+
+# ---- d14-cli-1: a silent phone, through device_install's real limits ----
+#
+# `install_ipa` is the real one, down to pymobiledevice3's
+# InstallationProxyService; only the lockdown, AFC and upload are left out.
+# installd reports one stage, then says nothing with the connection open: a
+# phone gone to sleep, or iOS holding the install. Timers scaled.
+
+SILENCE = 0.5
+PATIENT = 2.0
+
+
+class _InstalldDevice(FakeDevice):
+    """A `FakeDevice` whose installs go through `UsbmuxDevice.install_ipa`."""
+
+    took: float | None = None
+
+    def install_ipa(self, udid: str, ipa: Path, on_progress=None, waiting_on_user=None) -> None:
+        self.waiting_on_user.append(waiting_on_user)
+        started = time.monotonic()
+        try:
+            lc_manage.UsbmuxDevice().install_ipa(udid, ipa, on_progress, waiting_on_user=waiting_on_user)
+        finally:
+            self.took = time.monotonic() - started
+
+
+@pytest.fixture
+def goes_silent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from .test_device_install_liveness import Installd, _proxy
+
+    monkeypatch.setattr(device_install, "SILENCE_SECONDS", SILENCE)
+    monkeypatch.setattr(device_install, "PATIENT_SECONDS", PATIENT)
+
+    async def install(ipa, udid, on_progress, on_trust_prompt, waiting_on_user=None):
+        installd = Installd([(0.05, {"Status": "InstallingApplication", "PercentComplete": 90})])
+        with device_install._quiet_progress_bars():
+            await device_install._install_until_silent(
+                _proxy(installd), "/PublicStaging/x.ipa", lambda *_: None,
+                waiting_on_user=waiting_on_user)
+
+    monkeypatch.setattr(device_install, "_install", install)
+
+
+def test_a_fresh_install_that_goes_silent_gets_the_silence_limit_and_the_connection_hint(
+    tmp_path: Path, ipa: Path, goes_silent
+) -> None:
+    """The finding's iPad: no LiveContainer on it, so nothing for iOS to
+    hold, and a notice timer that has long run out. Silence is a phone gone."""
+    h = Harness(tmp_path, ipa, device=_InstalldDevice({"com.example.app": {}}))
+
+    with pytest.raises(InstallError) as e:
+        h.install(instances=(1,), wait_notice_seconds=0.05)
+
+    assert h.of("lc-install-waiting") == []
+    assert SILENCE <= h.device.took < PATIENT, h.device.took
+    assert e.value.hint == installer.connection_hint("PhoneWentSilentError")
+    assert "LiveContainer" not in e.value.hint
+
+
+def test_an_update_that_goes_silent_waits_patiently_and_says_to_close_livecontainer(
+    tmp_path: Path, ipa: Path, goes_silent
+) -> None:
+    h = Harness(tmp_path, ipa, device=_InstalldDevice({"com.example.app": {}, PRIMARY: {}}))
+
+    with pytest.raises(InstallError) as e:
+        h.install(instances=(1,), wait_notice_seconds=0.05)
+
+    assert [w["message"] for w in h.of("lc-install-waiting")] == [lc_manage.WAITING_MESSAGE]
+    assert h.device.took >= PATIENT, h.device.took
+    assert e.value.hint == lc_manage._install_hint("StillWaitingError")
+    assert "close LiveContainer" in e.value.hint
 
 
 # ---- failures ----
@@ -627,11 +726,12 @@ def test_a_wait_past_the_longer_bound_says_to_close_livecontainer(tmp_path: Path
     assert "unlock" not in (e.value.hint or ""), "not the locked-phone hint"
 
 
-def test_a_stop_ends_an_install_waiting_on_the_user(tmp_path: Path, ipa: Path) -> None:
-    """The main thread waits in `done.wait()`, which a Stop interrupts."""
+@pytest.mark.parametrize("updating", [False, True], ids=["fresh", "update"])
+def test_a_stop_ends_an_install_waiting_on_the_user(tmp_path: Path, ipa: Path, updating: bool) -> None:
+    """The main thread waits in `done.wait()`, which a Stop interrupts,
+    whether or not the install could be waiting on the user."""
     import os
     import signal
-    import time
 
     from graft_ipa.errors import Stopped
 
@@ -644,7 +744,7 @@ def test_a_stop_ends_an_install_waiting_on_the_user(tmp_path: Path, ipa: Path) -
         started = time.monotonic()
         with pytest.raises(Stopped):
             lc_manage._install_one(device, udid="u1", ipa=ipa, instance=1, bundle_id=PRIMARY,
-                                   events=events, wait_notice_seconds=0.05)
+                                   updating=updating, events=events, wait_notice_seconds=0.05)
         assert time.monotonic() - started < 2
     gate.set()
 

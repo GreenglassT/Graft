@@ -47,11 +47,46 @@ from tests.appstore_fakes import FakeTools, make_ios_app
 
 TEAM = "TESTTEAM01"
 
+#: Where this Mac keeps its FairPlay state, written out here rather than
+#: read from the code under test: no script built in this file may name
+#: them (`real_fairplay_state`).
+REAL_STATE_FOLDERS = ("/private/var/db/fpsd", "/Users/Shared")
+#: What root says when neither folder holds that state (exit 69).
+NO_STATE = ("graft: this Mac has no SC Info.sidb, the App Store state UnfairPlay reads: "
+            "launch the app once, then set up again")
+
+
+@pytest.fixture(autouse=True)
+def real_fairplay_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> tuple[Path, ...]:
+    """Every script built here looks for this Mac's FairPlay state in temp
+    folders, never in the real ones (the fpsd one is root's alone, and no
+    test lists it). `place` puts the state in temp folders of its own; a
+    test without `place` gets a folder that isn't there.
+
+    A tripwire on the script's text, so no test's safety rests on the code
+    under test reading the setting: a built script that names a real
+    folder fails the test before anything runs it. Returns the code's own
+    setting, as it was, for the test that checks it."""
+    real = enrollment.FAIRPLAY_STATE_DIRS
+    monkeypatch.setattr(enrollment, "FAIRPLAY_STATE_DIRS", (tmp_path / "no-fairplay-state" / "SC Info",))
+    built = enrollment.enroll_command
+
+    def checked(*args, **kw) -> enrollment.EnrollCommand:
+        command = built(*args, **kw)
+        for folder in REAL_STATE_FOLDERS:
+            assert folder not in command.script, f"a script built in a test names {folder}"
+        return command
+
+    monkeypatch.setattr(enrollment, "enroll_command", checked)
+    return real
+
 
 @pytest.fixture
 def place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     """Temp stand-ins for /Applications (owned, here, by this user), root's
-    work folder, the user's model folder and the fake tools."""
+    work folder, the user's model folder and the fake tools; and for the
+    two folders that hold this Mac's FairPlay state: the first with its
+    `SC Info.sidb` in it, the second not there at all."""
     apps = (tmp_path / "Applications").resolve()
     apps.mkdir()
     work = (tmp_path / "var-tmp").resolve()
@@ -59,6 +94,10 @@ def place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     monkeypatch.setattr(enrollment, "TRUSTED_ROOT", apps)
     monkeypatch.setattr(enrollment, "TRUSTED_OWNER", os.getuid())
     monkeypatch.setattr(enrollment, "WORK_TEMPLATE", str(work / "graft-enroll.XXXXXXXX"))
+    state = ((tmp_path / "fpsd" / "SC Info").resolve(), (tmp_path / "shared" / "SC Info").resolve())
+    state[0].mkdir(parents=True)
+    (state[0] / "SC Info.sidb").write_bytes(b"sidb")
+    monkeypatch.setattr(enrollment, "FAIRPLAY_STATE_DIRS", state)
     # The user's temp folder, where the cancel file goes; and the folder the
     # scripts run in, where a name that ran a command would leave its file.
     (tmp_path / "user-tmp").mkdir()
@@ -75,6 +114,7 @@ def place(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         "models": tmp_path / "home" / "Library" / "Application Support" / "unfairplay" / "models",
         "fakes": fakes,  # type: ignore[dict-item]
         "up": fakes.unfairplay,
+        "state": state,  # type: ignore[dict-item]
     }
 
 
@@ -110,13 +150,18 @@ def test_every_value_in_the_script_is_a_single_quoted_literal(place) -> None:
     """Each value where root reads it, as literal text: the UnfairPlay to
     copy, the requirement, the app, the Applications folder the case
     pattern takes (review #31), the inner app, the work template, the cancel
-    file and uid:gid."""
+    file, the folders this Mac's FairPlay state is in, and uid:gid."""
     app = make_ios_app(place["apps"])
     command = _command(place, app, team=TEAM)
     script, apps = command.script, _plain(place["apps"])
+    fpsd, shared = (f"'{_plain(folder.parent)}/SC Info'" for folder in place["state"])
     for line in (
         f"D=$(/usr/bin/mktemp -d '{_plain(enrollment.WORK_TEMPLATE)}')",
         f"cancelled() {{ [ -e '{_plain(command.cancel_file)}' ]; }}",
+        f"for F in {fpsd}/* {shared}/*; do case \"${{F##*/}}\" in "
+        "[Ss][Cc]' '[Ii][Nn][Ff][Oo].[Ss][Ii][Dd][Bb]) "
+        "if [ ! -h \"$F\" ] && [ -f \"$F\" ]; then I=1; fi ;; esac; done",
+        f"[ -n \"$I\" ] || {{ echo '{NO_STATE}' >&2; exit 69; }}",
         f"/bin/cp '{_plain(place['up'])}' \"$D/unfairplay\"",
         "/usr/bin/codesign --verify --strict -R '=anchor apple generic and identifier \"unfairplay\" "
         "and certificate leaf[subject.OU] = \"TESTTEAM01\"' \"$D/unfairplay\"",
@@ -896,6 +941,45 @@ def test_the_size_counts_regular_files_and_never_follows_a_link(tmp_path: Path) 
     assert enrollment.app_bytes(inner) == 15
 
 
+def test_the_size_never_follows_an_inner_app_that_is_a_link(tmp_path: Path) -> None:
+    """Delta audit try13, #4: os.walk read its top through a link, so a
+    Wrapper/<X>.app that is a symlink was measured at its target, every
+    file under it walked, before root refused the link (65)."""
+    target = tmp_path / "elsewhere"
+    (target / "sub").mkdir(parents=True)
+    (target / "sub" / "big").write_bytes(b"z" * 5000)
+    (tmp_path / "Wrapper").mkdir()
+    inner = tmp_path / "Wrapper" / "In.app"
+    inner.symlink_to(target)
+    assert enrollment.app_bytes(target) == 5000, "premise: the target is measured"
+    assert enrollment.app_bytes(inner) == 0
+    assert enrollment.app_bytes(tmp_path / "not-there.app") == 0, "what can't be read counts as nothing"
+
+
+def test_an_inner_app_that_is_a_link_gets_the_plain_time_limit_and_root_still_refuses_it(
+    place, tmp_path: Path
+) -> None:
+    """`check` follows the link and accepts the app behind it; the size
+    doesn't, so the limit is the plain one, not the target's. What root runs
+    is the same script as ever, and it refuses the link on its copy."""
+    app = make_ios_app(place["apps"])
+    inner = app / "Wrapper" / "Example.app"
+    moved = tmp_path / "elsewhere" / "Example.app"
+    moved.parent.mkdir()
+    os.rename(inner, moved)
+    with open(moved / "big.pak", "wb") as f:
+        f.truncate(enrollment.LARGE_APP_BYTES + 1_000 * enrollment.SETUP_BYTES_PER_SECOND)
+    inner.symlink_to(moved)
+
+    command = _command(place, app)
+
+    assert command.time_limit_seconds == enrollment.TIME_LIMIT_SECONDS
+    run = _as_this_user(command.script)
+    assert run.returncode == enrollment.EXIT_NOT_ROOTS, run.stderr
+    assert run.stderr.strip() == "graft: root's copy of the app is not the system's"
+    assert place["fakes"].calls("unfairplay") == []
+
+
 def test_a_cancel_file_there_before_the_start_stops_at_once(place) -> None:
     """A Cancel pressed while macOS's password dialog is up: nothing runs."""
     command = _command(place, make_ios_app(place["apps"]))
@@ -985,8 +1069,18 @@ def test_a_reader_that_quits_before_a_refusal_still_leaves_nothing(place, tmp_pa
     assert list(place["work"].iterdir()) == []
 
 
-def test_unfairplay_s_own_exit_status_is_never_one_of_the_script_s(place) -> None:
-    place["fakes"].set(setup_error="UnfairPlay: something", setup_exit=67)
+#: The script's own exit statuses, written out: each means something to the
+#: app (`CLIContract.EnrolExit`), so UnfairPlay may never end with one.
+SCRIPT_STATUSES = [64, 65, 66, 67, 68, 69]
+
+
+def test_the_script_s_own_statuses_are_these() -> None:
+    assert sorted(v for k, v in vars(enrollment).items() if k.startswith("EXIT_")) == SCRIPT_STATUSES
+
+
+@pytest.mark.parametrize("status", SCRIPT_STATUSES)
+def test_unfairplay_s_own_exit_status_is_never_one_of_the_script_s(place, status: int) -> None:
+    place["fakes"].set(setup_error="UnfairPlay: something", setup_exit=status)
     run = _as_this_user(_command(place, make_ios_app(place["apps"])).script)
     assert run.returncode == 1, run.stderr
     assert "something" in run.stderr
@@ -1251,6 +1345,133 @@ def test_an_app_root_doesn_t_own_is_refused_by_root(place) -> None:
     assert run.stderr.strip() == "graft: the app is not the system's"
     assert place["fakes"].calls("unfairplay") == []
     assert list(place["work"].iterdir()) == []
+
+
+# --- This Mac's FairPlay state, looked for before anything is copied -------------
+#
+# The owner's run: after a restart, /private/var/db/fpsd/SC Info was empty,
+# and UnfairPlay failed only at its end ("normalize capture: canonical input
+# has no SIDB state"). Opening the picked app once wrote `SC Info.sidb`
+# again. UnfairPlay's capture looks in that folder and /Users/Shared/SC Info
+# for a file of that name, in any case. So root looks first, and stops with
+# exit 69 before it copies UnfairPlay or the app.
+
+
+def test_root_looks_where_fairplay_keeps_this_mac_s_state(real_fairplay_state: tuple[Path, ...]) -> None:
+    """The setting as the code has it; the folders themselves are never read."""
+    assert real_fairplay_state == (Path("/private/var/db/fpsd/SC Info"), Path("/Users/Shared/SC Info"))
+
+
+def test_root_looks_once_the_watchdog_runs_and_before_any_copy(place) -> None:
+    lines = _command(place, make_ios_app(place["apps"])).script.splitlines()
+    first_cancel = lines.index('if cancelled; then : >"$D/stop-67"; exit 67; fi')
+    watchdog_end = next(i for i, line in enumerate(lines) if line.startswith(") </dev/null >/dev/null 2>&1 &"))
+    look = next(i for i, line in enumerate(lines) if line.startswith("for F in "))
+    refuse = next(i for i, line in enumerate(lines) if line.startswith('[ -n "$I" ] || '))
+    first_copy = next(i for i, line in enumerate(lines) if line.startswith("/bin/cp "))
+    assert lines[look - 1] == "I="
+    assert first_cancel < watchdog_end < look < refuse < first_copy
+
+
+def _no_state(place, tmp_path: Path, how: str) -> None:
+    """Take the state `place` made away, `how`."""
+    fpsd, shared = place["state"]
+    (fpsd / "SC Info.sidb").unlink()
+    if how == "neither-folder":
+        fpsd.rmdir()
+    elif how == "empty-folders":
+        shared.mkdir(parents=True)
+    elif how == "a-folder-by-that-name":
+        (fpsd / "SC Info.sidb").mkdir()
+    elif how == "a-link-to-one":
+        (tmp_path / "elsewhere.sidb").write_bytes(b"sidb")
+        (fpsd / "SC Info.sidb").symlink_to(tmp_path / "elsewhere.sidb")
+    elif how == "other-names":
+        (fpsd / "SC Info.sidf").write_bytes(b"x")
+        shared.mkdir(parents=True)
+        (shared / "SC Info.sidb.bak").write_bytes(b"x")
+        (shared / "[Ss][Cc] [Ii][Nn][Ff][Oo].[Ss][Ii][Dd][Bb]").write_bytes(b"x")  # the pattern, as a name
+    else:
+        raise AssertionError(how)
+
+
+NO_STATE_CASES = ["neither-folder", "empty-folders", "a-folder-by-that-name", "a-link-to-one", "other-names"]
+
+
+@pytest.mark.parametrize("how", NO_STATE_CASES)
+def test_without_the_state_root_stops_with_its_own_status_and_nothing_runs(place, tmp_path: Path, how: str) -> None:
+    """A missing folder is no state, like an empty one, never a failure of
+    its own under set -e. Only a regular file counts, never a link to one."""
+    _no_state(place, tmp_path, how)
+
+    run = _as_this_user(_command(place, make_ios_app(place["apps"])).script)
+
+    assert run.returncode == enrollment.EXIT_NO_FAIRPLAY_STATE == 69, run.stderr
+    assert run.stderr.strip() == NO_STATE
+    assert run.stdout == ""
+    assert place["fakes"].calls("unfairplay") == []
+    assert list(place["work"].iterdir()) == [], "root's folder is gone"
+
+
+def test_without_the_state_root_stops_before_it_copies_unfairplay(place, hang, tmp_path: Path) -> None:
+    """Root's copy of an UnfairPlay that is a FIFO would block until the
+    time limit: a run that ends at once never got to it."""
+    _no_state(place, tmp_path, "neither-folder")
+    command = enrollment.enroll_command(_fifo_helper(place), make_ios_app(place["apps"]), place["models"],
+                                        home=place["home"])
+    proc, _ = hang(command.script, wait_for_start=False)
+
+    out, err = proc.communicate(timeout=20)
+
+    assert proc.returncode == 69, err
+    assert err.strip() == NO_STATE
+    assert out == ""
+    assert list(place["work"].iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("where", "name"),
+    [(0, "SC Info.sidb"), (1, "SC Info.sidb"), (0, "sc info.SIDB"), (1, "SC INFO.SIDB")],
+    ids=["fpsd", "shared", "fpsd-any-case", "shared-any-case"],
+)
+def test_the_state_in_either_folder_in_any_case_lets_setup_run(place, where: int, name: str) -> None:
+    """In the second folder, the first isn't there at all. Root matches
+    each name as the folder lists it, so the case is root's to ignore, on a
+    volume that ignores case or not."""
+    fpsd = place["state"][0]
+    (fpsd / "SC Info.sidb").unlink()
+    if where == 1:
+        fpsd.rmdir()
+    place["state"][where].mkdir(parents=True, exist_ok=True)
+    (place["state"][where] / name).write_bytes(b"sidb")
+
+    run = _as_this_user(_command(place, make_ios_app(place["apps"])).script)
+
+    assert run.returncode == 0, run.stderr
+    assert len(place["fakes"].calls("unfairplay")) == 1
+
+
+@pytest.mark.parametrize("state", ["there", "neither-folder"])
+@pytest.mark.parametrize("shell", sorted(SHELLS))
+def test_the_state_is_looked_for_alike_in_each_shell(place, tmp_path: Path, shell: str, state: str) -> None:
+    """zsh, as sh, could make a pattern that matches nothing an error of its
+    own (NOMATCH); in each shell it is no state, and the state is found."""
+    if not Path(SHELLS[shell][0]).exists():
+        pytest.skip(f"no {SHELLS[shell][0]}")
+    if state != "there":
+        _no_state(place, tmp_path, state)
+    command = _command(place, make_ios_app(place["apps"]))
+
+    run = subprocess.run([*SHELLS[shell], command.script], capture_output=True, text=True, timeout=60)
+
+    if state == "there":
+        assert run.returncode == 0, run.stderr
+        shutil.rmtree(run.stdout.strip())
+    else:
+        assert run.returncode == 69, run.stderr
+        assert run.stderr.strip() == NO_STATE
+        assert place["fakes"].calls("unfairplay") == []
+        assert list(place["work"].iterdir()) == []
 
 
 # --- finish: the model moved, as the user ---------------------------------------

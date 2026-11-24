@@ -10,6 +10,11 @@ import XCTest
 /// could never be terminated that way again. Every store gets a
 /// `FakeControl` in place of `ProcessInfo`, and a stand-in CLI that waits for
 /// the test's go-ahead, so the hold can be seen while the work runs.
+///
+/// And a quit while one runs is answered, not obeyed at once (the try14
+/// delta audit, F4): `QuitGuard` is driven with a recording presenter, reply
+/// and clock, never an alert or a real quit; and each store's hold names the
+/// Stop that Quit Anyway goes through (`hold.stopAll()`, the "quit" endings).
 @MainActor
 final class TerminationHoldTests: XCTestCase {
     /// What `ProcessInfo` would have been asked, by reason.
@@ -67,9 +72,13 @@ final class TerminationHoldTests: XCTestCase {
         try? FileManager.default.removeItem(at: dir)
     }
 
-    /// The test's go-ahead to the stand-in: until it exists, `wait` loops.
+    /// The test's go-ahead to the stand-in: until it exists, `wait` loops,
+    /// for 30 s at most, so a stand-in a failing test never stops doesn't
+    /// outlive the run by long.
     private func go() throws { try Data().write(to: dir.appending(path: "go")) }
-    private var wait: String { "while [ ! -e '\(dir.path)/go' ]; do /bin/sleep 0.05; done" }
+    private var wait: String {
+        "n=0; while [ ! -e '\(dir.path)/go' ] && [ $n -lt 600 ]; do /bin/sleep 0.05; n=$((n+1)); done"
+    }
 
     private func cli(_ body: String) throws -> CLIRunner {
         let file = dir.appending(path: "graft.sh")
@@ -83,14 +92,244 @@ final class TerminationHoldTests: XCTestCase {
     func test_begin_turns_both_off_and_end_turns_them_back_on() {
         let control = FakeControl()
         let hold = TerminationHold(control: control)
-        hold.begin("one")
-        hold.begin("two")
+        let one = hold.begin("one", stop: nil)
+        let two = hold.begin("two", stop: nil)
         XCTAssertTrue(control.isHeld("one"))
-        hold.end("one")
+        hold.end(one)
         XCTAssertTrue(control.isHeld("two"), "the other is still held")
-        hold.end("two")
+        hold.end(two)
         XCTAssertTrue(control.isBalanced)
         XCTAssertTrue(control.isLetGo("one") && control.isLetGo("two"))
+    }
+
+    /// The hold knows what runs, one reason per `begin` not yet ended, and
+    /// stops each through its own stop: two holds with one reason are told
+    /// apart by their tickets, and an ended one is neither named nor stopped.
+    func test_the_hold_names_what_runs_and_stops_each_through_its_own_stop() {
+        let control = FakeControl()
+        let hold = TerminationHold(control: control)
+        var stopped: [String] = []
+        XCTAssertEqual(hold.reasons, [])
+        XCTAssertFalse(hold.isHolding)
+        let first = hold.begin("one") { stopped.append("first") }
+        let other = hold.begin("two", stop: nil)
+        let second = hold.begin("one") { stopped.append("second") }
+        XCTAssertEqual(hold.reasons, ["one", "two", "one"])
+        XCTAssertTrue(hold.isHolding)
+        hold.end(first)
+        XCTAssertEqual(hold.reasons, ["two", "one"])
+        hold.stopAll()
+        XCTAssertEqual(stopped, ["second"], "only what still runs, and only what has a stop")
+        hold.end(first)
+        XCTAssertTrue(control.isHeld("one"), "a ticket ended twice is undone once")
+        hold.end(second)
+        hold.end(other)
+        XCTAssertEqual(hold.reasons, [])
+        XCTAssertFalse(hold.isHolding)
+        XCTAssertTrue(control.isBalanced)
+    }
+
+    /// A stop that ends its own hold before it returns, as a stop of work
+    /// already ending can: `stopAll` doesn't hold the lock while it runs one.
+    func test_a_stop_may_end_its_own_hold() {
+        let control = FakeControl()
+        let hold = TerminationHold(control: control)
+        var ticket: TerminationHold.Ticket?
+        ticket = hold.begin("one") { if let ticket { hold.end(ticket) } }
+        hold.stopAll()
+        XCTAssertFalse(hold.isHolding)
+        XCTAssertTrue(control.isBalanced)
+    }
+
+    // MARK: Quitting while it works (the try14 delta audit, F4)
+
+    /// `QuitGuard` with everything past it recorded: the questions shown, the
+    /// presenter's answer callback, its take-downs, the replies, and a clock
+    /// that moves only when the test steps it.
+    final class QuitHarness {
+        let control = FakeControl()
+        let hold: TerminationHold
+        private(set) var now: TimeInterval = 0
+        private var due: [(at: TimeInterval, order: Int, block: @MainActor () -> Void)] = []
+        private var scheduled = 0
+        private(set) var questions: [QuitQuestion] = []
+        private(set) var answer: (@MainActor (QuitAnswer) -> Void)?
+        private(set) var takeDowns = 0
+        private(set) var replies: [Bool] = []
+        private(set) var repliedAt: TimeInterval?
+        private(set) var quitGuard: QuitGuard!
+
+        @MainActor
+        init() {
+            hold = TerminationHold(control: control)
+            quitGuard = QuitGuard(
+                hold: hold,
+                present: { [unowned self] question, answer in
+                    self.questions.append(question)
+                    self.answer = answer
+                    return { [unowned self] then in
+                        self.takeDowns += 1
+                        then()
+                    }
+                },
+                reply: { [unowned self] quit in
+                    self.replies.append(quit)
+                    self.repliedAt = self.now
+                },
+                schedule: { [unowned self] delay, block in self.after(delay, block) }
+            )
+        }
+
+        func after(_ delay: TimeInterval, _ block: @escaping @MainActor () -> Void) {
+            scheduled += 1
+            due.append((now + delay, scheduled, block))
+        }
+
+        /// Run the next block due, moving the clock to its time. False when
+        /// nothing is due.
+        @MainActor
+        @discardableResult
+        func step() -> Bool {
+            guard let next = due.indices.min(by: { (due[$0].at, due[$0].order) < (due[$1].at, due[$1].order) })
+            else { return false }
+            let item = due.remove(at: next)
+            now = item.at
+            item.block()
+            return true
+        }
+
+        /// Step until nothing is due, or `limit` steps: a guard that never
+        /// replies mustn't hang the test.
+        @MainActor
+        func runDown(limit: Int = 10_000) {
+            var steps = 0
+            while steps < limit, step() { steps += 1 }
+        }
+    }
+
+    func test_with_nothing_running_graft_quits_at_once() {
+        let h = QuitHarness()
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateNow)
+        h.hold.end(h.hold.begin(TerminationHold.building, stop: nil))
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateNow, "ended work is not running")
+        XCTAssertEqual(h.questions, [], "nothing asked")
+        XCTAssertFalse(h.step(), "nothing waited for")
+        XCTAssertEqual(h.replies, [], "terminateNow needs no reply")
+    }
+
+    func test_with_work_running_graft_asks_what_to_do_and_waits_for_the_answer() {
+        let h = QuitHarness()
+        _ = h.hold.begin(TerminationHold.building, stop: nil)
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        XCTAssertEqual(h.questions.map(\.title), ["Quit while Graft is building and installing an app?"])
+        XCTAssertEqual(h.replies, [], "no reply until it's answered")
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateCancel, "a second quit while one waits")
+        XCTAssertEqual(h.questions.count, 1, "asked once")
+    }
+
+    func test_keep_working_replies_no_and_stops_nothing() {
+        let h = QuitHarness()
+        var stops = 0
+        let ticket = h.hold.begin(TerminationHold.building) { stops += 1 }
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.answer?(.keepWorking)
+        XCTAssertEqual(h.replies, [false], "macOS cancels the quit, and a logout or restart with it")
+        h.runDown()
+        XCTAssertEqual(h.replies, [false], "one reply")
+        XCTAssertEqual(stops, 0)
+        XCTAssertTrue(h.control.isHeld(TerminationHold.building))
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater, "the next quit asks again")
+        XCTAssertEqual(h.questions.count, 2)
+        h.hold.end(ticket)
+    }
+
+    /// Quit Anyway asks the work to stop, then waits for its hold to clear,
+    /// but no longer than `stopGrace`: work that doesn't end is quit from.
+    func test_quit_anyway_stops_the_work_then_waits_a_bounded_time_and_quits() throws {
+        let h = QuitHarness()
+        var stops = 0
+        _ = h.hold.begin(TerminationHold.building) { stops += 1 }
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.answer?(.quitAnyway)
+        XCTAssertEqual(stops, 1, "stopped through its own stop, first")
+        XCTAssertEqual(h.replies, [], "not before it has had time to stop")
+        h.runDown()
+        XCTAssertEqual(h.replies, [true])
+        XCTAssertEqual(try XCTUnwrap(h.repliedAt), QuitGuard.stopGrace, accuracy: QuitGuard.checkEvery)
+        XCTAssertEqual(stops, 1, "asked once")
+        XCTAssertEqual(h.takeDowns, 0, "answered, so nothing to take down")
+    }
+
+    func test_quit_anyway_quits_as_soon_as_the_stopped_work_ends() throws {
+        let h = QuitHarness()
+        var ticket: TerminationHold.Ticket?
+        // The CLI unwinds and exits 0.3 s after its SIGTERM.
+        ticket = h.hold.begin(TerminationHold.reinstalling) { [unowned h] in
+            h.after(0.3) { if let ticket { h.hold.end(ticket) } }
+        }
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.answer?(.quitAnyway)
+        h.runDown()
+        XCTAssertEqual(h.replies, [true])
+        XCTAssertEqual(try XCTUnwrap(h.repliedAt), 0.3, accuracy: QuitGuard.checkEvery + 0.001, "not the whole grace")
+        XCTAssertTrue(h.control.isBalanced)
+    }
+
+    /// Work that ends by itself while the question is up: the question comes
+    /// down and Graft quits, as it was asked to; a late answer changes
+    /// nothing.
+    func test_work_that_ends_while_the_question_is_up_takes_it_down_and_quits() {
+        let h = QuitHarness()
+        var stops = 0
+        let ticket = h.hold.begin(TerminationHold.decrypting) { stops += 1 }
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.step()
+        XCTAssertEqual(h.replies, [], "still running: still asking")
+        h.hold.end(ticket)
+        h.runDown()
+        XCTAssertEqual(h.takeDowns, 1)
+        XCTAssertEqual(h.replies, [true])
+        h.answer?(.keepWorking)
+        XCTAssertEqual(h.replies, [true], "a late answer changes nothing")
+        XCTAssertEqual(stops, 0, "nothing left to stop")
+    }
+
+    /// The question names what runs, in plain words, each once.
+    func test_the_question_names_what_runs_in_plain_words() {
+        let words: [(String, String)] = [
+            (TerminationHold.building, "building and installing an app"),
+            (TerminationHold.gettingFromAppStore, "getting an app from the App Store"),
+            (TerminationHold.staging, "staging an IPA for a build"),
+            (TerminationHold.claiming, "getting a free app for your Apple ID"),
+            (TerminationHold.settingUp, "setting up your signing account"),
+            (TerminationHold.enrolling, "setting up App Store decryption"),
+            (TerminationHold.liveContainer, "changing LiveContainer on a device"),
+            (TerminationHold.reinstalling, "re-installing a build on a device"),
+            (TerminationHold.decrypting, "decrypting an app from a device"),
+        ]
+        for (reason, phrase) in words {
+            XCTAssertEqual(QuitQuestion(reasons: [reason]).title, "Quit while Graft is \(phrase)?", reason)
+        }
+        XCTAssertEqual(
+            QuitQuestion(reasons: [TerminationHold.building, TerminationHold.decrypting]).title,
+            "Quit while Graft is building and installing an app and decrypting an app from a device?"
+        )
+        XCTAssertEqual(
+            QuitQuestion(reasons: [
+                TerminationHold.gettingFromAppStore, TerminationHold.building,
+                TerminationHold.gettingFromAppStore, TerminationHold.decrypting,
+            ]).title,
+            "Quit while Graft is getting an app from the App Store, building and installing an app, "
+                + "and decrypting an app from a device?",
+            "each once, in order"
+        )
+        XCTAssertEqual(QuitQuestion(reasons: ["something new"]).title, "Quit while Graft is working?")
+        XCTAssertEqual(
+            QuitQuestion(reasons: ["something new", TerminationHold.staging]).title,
+            "Quit while Graft is staging an IPA for a build?"
+        )
+        let detail = QuitQuestion(reasons: [TerminationHold.building]).detail
+        XCTAssertTrue(detail.contains(QuitQuestion.keepWorking) && detail.contains(QuitQuestion.quitAnyway), detail)
     }
 
     // MARK: A build
@@ -101,12 +340,15 @@ final class TerminationHoldTests: XCTestCase {
         var finished = false
     }
 
+    /// Quit Anyway stops it through Stop (`cancelBuild`), which records the
+    /// stop as the user's.
     func test_a_build_holds_until_it_ends_whether_it_finishes_or_is_stopped() async throws {
-        for stop in [false, true] {
+        for ending in ["finishes", "stopped", "quit"] {
             let control = FakeControl()
+            let hold = TerminationHold(control: control)
             let store = ConfigStore(
                 runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true")),
-                notify: { _ in }, hold: TerminationHold(control: control)
+                notify: { _ in }, hold: hold
             )
             let gate = Gate()
             let started = store.launchBuild(appName: "example", delivery: .unknown) {
@@ -116,10 +358,15 @@ final class TerminationHoldTests: XCTestCase {
             XCTAssertTrue(started)
             await eventually { control.isHeld(TerminationHold.building) }
             XCTAssertFalse(control.isBalanced, "held while it runs")
-            if stop { store.cancelBuild(appName: "example") } else { gate.open = true }
-            await eventually { gate.finished }
-            await eventually({ control.isLetGo(TerminationHold.building) && control.isBalanced },
-                             "stopped: \(stop)")
+            XCTAssertEqual(hold.reasons, [TerminationHold.building])
+            switch ending {
+            case "stopped": store.cancelBuild(appName: "example")
+            case "quit": hold.stopAll()
+            default: gate.open = true
+            }
+            await eventually({ gate.finished }, ending)
+            await eventually({ control.isLetGo(TerminationHold.building) && control.isBalanced }, ending)
+            XCTAssertEqual(store.wasCancelled("example"), ending != "finishes", ending)
         }
     }
 
@@ -130,7 +377,8 @@ final class TerminationHoldTests: XCTestCase {
 
     func test_a_get_and_a_drop_hold_until_they_end_however_they_end() async throws {
         // A get that stages, one that fails, one that is stopped; and a drop.
-        for ending in ["stages", "fails", "stopped", "drop"] {
+        // Quit Anyway stops either ("quit", "drop-quit").
+        for ending in ["stages", "fails", "stopped", "drop", "quit", "drop-quit"] {
             try? FileManager.default.removeItem(at: dir.appending(path: "go"))
             let control = FakeControl()
             let runner = try cli("""
@@ -142,9 +390,10 @@ final class TerminationHoldTests: XCTestCase {
                     printf '%s\\n' '\(Self.provided)' ;;
                 esac
                 """)
-            let store = AppStoreStore(runner: runner, shell: NoAdminShell(), hold: TerminationHold(control: control))
+            let hold = TerminationHold(control: control)
+            let store = AppStoreStore(runner: runner, shell: NoAdminShell(), hold: hold)
             let reason: String
-            if ending == "drop" {
+            if ending.hasPrefix("drop") {
                 let config = ConfigStore(runner: runner, notify: { _ in })
                 XCTAssertTrue(store.startProvide(app: "example", fileURL: URL(fileURLWithPath: "/u/Example.ipa"), config: config))
                 reason = TerminationHold.staging
@@ -153,15 +402,20 @@ final class TerminationHoldTests: XCTestCase {
                 reason = TerminationHold.gettingFromAppStore
             }
             await eventually({ control.isHeld(reason) }, ending)
-            if ending == "stopped" { store.stopGet(app: "example") } else { try go() }
+            switch ending {
+            case "stopped": store.stopGet(app: "example")
+            case "quit", "drop-quit": hold.stopAll()
+            default: try go()
+            }
             await eventually({ !store.isBusy("example") }, ending)
             await eventually({ control.isLetGo(reason) && control.isBalanced }, ending)
             XCTAssertEqual(store.errors["example"] != nil, ending == "fails", ending)
+            XCTAssertEqual(store.staged["example"] != nil, ending == "stages" || ending == "drop", ending)
         }
     }
 
     func test_get_free_holds_until_the_claim_ends() async throws {
-        for stop in [false, true] {
+        for ending in ["works", "stopped", "quit"] {
             try? FileManager.default.removeItem(at: dir.appending(path: "go"))
             try? FileManager.default.removeItem(at: dir.appending(path: "claimed"))
             let control = FakeControl()
@@ -180,17 +434,22 @@ final class TerminationHoldTests: XCTestCase {
                     exit 20 ;;
                 esac
                 """)
-            let store = AppStoreStore(runner: runner, shell: NoAdminShell(), hold: TerminationHold(control: control))
+            let hold = TerminationHold(control: control)
+            let store = AppStoreStore(runner: runner, shell: NoAdminShell(), hold: hold)
             store.startGet(app: "example")
             await eventually { !store.isBusy("example") }
             XCTAssertEqual(store.licenseNeeded["example"]?.offersClaim, true, "premise")
             await store.checkBeforeClaim(app: "example")
             XCTAssertTrue(store.startClaim(app: "example", confirmed: try XCTUnwrap(store.claimConfirmations["example"])))
             await eventually { control.isHeld(TerminationHold.claiming) }
-            if stop { store.stopGet(app: "example") } else { try go() }
-            await eventually({ !store.isBusy("example") }, "stopped: \(stop)")
-            await eventually({ control.isLetGo(TerminationHold.claiming) && control.isBalanced }, "stopped: \(stop)")
-            XCTAssertEqual(store.completions["example"], stop ? nil : 1, "claimed, then got: stopped \(stop)")
+            switch ending {
+            case "stopped": store.stopGet(app: "example")
+            case "quit": hold.stopAll()
+            default: try go()
+            }
+            await eventually({ !store.isBusy("example") }, ending)
+            await eventually({ control.isLetGo(TerminationHold.claiming) && control.isBalanced }, ending)
+            XCTAssertEqual(store.completions["example"], ending == "works" ? 1 : nil, "claimed, then got: \(ending)")
         }
     }
 
@@ -208,9 +467,12 @@ final class TerminationHoldTests: XCTestCase {
                 echo "error: config.yaml is not writable" >&2
                 exit 2
                 """)
-            let store = AccountSetupStore(runner: runner, hold: TerminationHold(control: control))
+            let hold = TerminationHold(control: control)
+            let store = AccountSetupStore(runner: runner, hold: hold)
             let run = Task { await store.chooseFree() }
             await eventually({ control.isHeld(TerminationHold.settingUp) }, "works: \(works)")
+            // It has no Stop, so Quit Anyway's stop leaves it to finish.
+            hold.stopAll()
             try go()
             await run.value
             XCTAssertTrue(control.isLetGo(TerminationHold.settingUp), "works: \(works)")
@@ -226,19 +488,25 @@ final class TerminationHoldTests: XCTestCase {
     final class SeeingShell: PrivilegedShell, @unchecked Sendable {
         let control: FakeControl
         var error: AdminShellError?
+        /// Run while root's run goes, before it ends.
+        var during: (@MainActor () -> Void)?
         private(set) var heldWhenRun: Bool?
 
         init(control: FakeControl) { self.control = control }
 
         func run(_ script: String, prompt: String) async throws -> AdminRun {
             heldWhenRun = control.isHeld(TerminationHold.enrolling)
+            if let during { await during() }
             if let error { throw error }
             return AdminRun(output: "{\"success\":true}\n/private/var/tmp/graft-enroll.AbCd1234\n", via: .plain)
         }
     }
 
+    /// Quit Anyway stops the root run as Cancel does: it creates the cancel
+    /// file, and the script stops (exit 67).
     func test_an_enrolment_holds_through_the_root_run_and_the_finish_however_it_ends() async throws {
-        let command = #"{"type":"appstore-enroll-command","app":"/Applications/Example.app","model_dir":"/u/m","script":"echo ok\n","verified":true}"#
+        let cancelFile = dir.appending(path: "cancel").path
+        let command = #"{"type":"appstore-enroll-command","app":"/Applications/Example.app","model_dir":"/u/m","script":"echo ok\n","verified":true,"cancel_file":""# + cancelFile + #""}"#
         try (command + "\n").write(to: dir.appending(path: "command.json"), atomically: true, encoding: .utf8)
         let runner = try cli("""
             case "$*" in
@@ -246,25 +514,40 @@ final class TerminationHoldTests: XCTestCase {
               *--appstore-enroll-finish*) printf '%s\\n' '{"type":"appstore-enrolled","model_dir":"/u/m","count":1}' ;;
             esac
             """)
-        for cancelled in [false, true] {
+        for ending in ["done", "canceled", "quit"] {
             let control = FakeControl()
+            let hold = TerminationHold(control: control)
             let shell = SeeingShell(control: control)
-            if cancelled { shell.error = AdminShellError(number: AdminShellError.userCancelled, message: "User canceled.") }
-            let store = AppStoreAccountStore(runner: runner, shell: shell, hold: TerminationHold(control: control))
+            var stopAsked = false
+            switch ending {
+            case "canceled":
+                shell.error = AdminShellError(number: AdminShellError.userCancelled, message: "User canceled.")
+            case "quit":
+                shell.during = {
+                    hold.stopAll()
+                    stopAsked = FileManager.default.fileExists(atPath: cancelFile)
+                }
+                shell.error = AdminShellError(number: CLIContract.EnrolExit.stopped, message: "stopped")
+            default: break
+            }
+            let store = AppStoreAccountStore(runner: runner, shell: shell, hold: hold)
             await store.prepareEnrol(appPath: "/Applications/Example.app")
             guard case .ready = store.enrol else { return XCTFail("expected .ready, got \(store.enrol)") }
             await store.confirmEnrol()
-            XCTAssertEqual(store.enrol, cancelled ? .cancelled : .done)
-            XCTAssertEqual(shell.heldWhenRun, true, "held while root runs: canceled \(cancelled)")
-            XCTAssertTrue(control.isLetGo(TerminationHold.enrolling), "cancelled \(cancelled)")
-            XCTAssertTrue(control.isBalanced, "cancelled \(cancelled)")
+            let expected: AppStoreAccountStore.Enrol = ending == "done" ? .done : ending == "quit" ? .stopped : .cancelled
+            XCTAssertEqual(store.enrol, expected, ending)
+            XCTAssertEqual(stopAsked, ending == "quit", "the cancel file, while root runs: \(ending)")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: cancelFile), "removed after: \(ending)")
+            XCTAssertEqual(shell.heldWhenRun, true, "held while root runs: \(ending)")
+            XCTAssertTrue(control.isLetGo(TerminationHold.enrolling), ending)
+            XCTAssertTrue(control.isBalanced, ending)
         }
     }
 
     // MARK: LiveContainer
 
     func test_a_livecontainer_install_holds_until_it_ends_whether_it_works_fails_or_is_stopped() async throws {
-        for ending in ["works", "fails", "stopped"] {
+        for ending in ["works", "fails", "stopped", "quit"] {
             try? FileManager.default.removeItem(at: dir.appending(path: "go"))
             let control = FakeControl()
             let runner = try cli("""
@@ -274,10 +557,15 @@ final class TerminationHoldTests: XCTestCase {
                     if [ '\(ending)' = fails ]; then echo "error: the device went away" >&2; exit 8; fi ;;
                 esac
                 """)
-            let store = LiveContainerStore(runner: runner, hold: TerminationHold(control: control))
+            let hold = TerminationHold(control: control)
+            let store = LiveContainerStore(runner: runner, hold: hold)
             store.startInstall(udid: "U", instances: [1], channel: nil)
             await eventually({ control.isHeld(TerminationHold.liveContainer) }, ending)
-            if ending == "stopped" { store.stop() } else { try go() }
+            switch ending {
+            case "stopped": store.stop()
+            case "quit": hold.stopAll()
+            default: try go()
+            }
             await store.currentAction?.value
             await eventually({ control.isLetGo(TerminationHold.liveContainer) && control.isBalanced }, ending)
             XCTAssertEqual(store.run(for: "U")?.error != nil, ending != "works", ending)
@@ -290,10 +578,10 @@ final class TerminationHoldTests: XCTestCase {
 
     /// `--reinstall-build` pushes to the phone and records a delivery, as a
     /// build does. It holds until it ends: it works, it fails, it is stopped
-    /// (the sheet's `.task` canceled), or the CLI can't even start, which
-    /// throws.
+    /// (the sheet's `.task` canceled, or Quit Anyway), or the CLI can't even
+    /// start, which throws.
     func test_a_reinstall_holds_until_it_ends_however_it_ends() async throws {
-        for ending in ["works", "fails", "stopped", "unstartable"] {
+        for ending in ["works", "fails", "stopped", "quit", "unstartable"] {
             try? FileManager.default.removeItem(at: dir.appending(path: "go"))
             try? FileManager.default.removeItem(at: dir.appending(path: "started"))
             let control = FakeControl()
@@ -321,7 +609,11 @@ final class TerminationHoldTests: XCTestCase {
                 // which "unstartable" covers.
                 let started = dir.appending(path: "started").path
                 await eventually({ FileManager.default.fileExists(atPath: started) }, ending)
-                if ending == "stopped" { run.cancel() } else { try go() }
+                switch ending {
+                case "stopped": run.cancel()
+                case "quit": hold.stopAll()
+                default: try go()
+                }
             }
             let result = try? await run.value
             XCTAssertTrue(control.isLetGo(TerminationHold.reinstalling), ending)
@@ -365,10 +657,11 @@ final class TerminationHoldTests: XCTestCase {
 
     /// A dump stages an IPA and takes minutes, and closing the window doesn't
     /// stop it. It holds until it ends, a row's dump or the frontmost app's:
-    /// it stages, it fails, or it is stopped.
+    /// it stages, it fails, or it is stopped (its task canceled, or Quit
+    /// Anyway).
     func test_a_decrypt_dump_holds_until_it_ends_however_it_ends() async throws {
         let app = DeviceAppRecord(bundleId: "com.example.app", name: "Example", version: "2.0", encrypted: true)
-        for ending in ["stages", "frontmost", "fails", "stopped"] {
+        for ending in ["stages", "frontmost", "fails", "stopped", "quit"] {
             try? FileManager.default.removeItem(at: dir.appending(path: "go"))
             let control = FakeControl()
             let runner = try cli("""
@@ -379,13 +672,18 @@ final class TerminationHoldTests: XCTestCase {
                     printf '%s\\n' '\(Self.decryptEnd)' ;;
                 esac
                 """)
-            let store = DeviceAppsStore(runner: runner, hold: TerminationHold(control: control))
+            let hold = TerminationHold(control: control)
+            let store = DeviceAppsStore(runner: runner, hold: hold)
             let run = Task { @MainActor () -> DecryptEndRecord? in
                 if ending == "frontmost" { return await store.decryptFrontmost(device: "U") }
                 return await store.decrypt(app, device: "U")
             }
             await eventually({ control.isHeld(TerminationHold.decrypting) }, ending)
-            if ending == "stopped" { run.cancel() } else { try go() }
+            switch ending {
+            case "stopped": run.cancel()
+            case "quit": hold.stopAll()
+            default: try go()
+            }
             let record = await run.value
             XCTAssertTrue(control.isLetGo(TerminationHold.decrypting), ending)
             XCTAssertTrue(control.isBalanced, ending)

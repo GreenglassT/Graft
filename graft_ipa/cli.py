@@ -48,6 +48,7 @@ from . import (
     itunes,
     lc_runner,
     playcover,
+    release_check,
     repo,
     storefronts,
     updates,
@@ -4502,6 +4503,36 @@ def _verb_version(**_: Any) -> None:
     console.print(f"graft {__version__}")
 
 
+def _verb_check_update(*, current_version: str | None, json_mode: bool, **_: Any) -> None:
+    """`--check-update`: one request to GitHub's latest-release API
+    (`release_check`), compared with `--current-version` (Graft.app passes its
+    own) or this CLI's version.
+
+    Under --json, one `update-check` event whether or not it worked; a failed
+    check then exits 1 with its sentence on stderr, like any other failure.
+    The app shows that only when someone asked (Help › Check for Updates…).
+    """
+    current = __version__ if current_version is None else current_version.strip()
+    if release_check.parse_version(current) is None:
+        raise _fatal(ConfigError(
+            f"--current-version takes a version such as 2.0.1, not {current_version!r}"
+        ))
+    emitter = JsonEmitter() if json_mode else None
+    try:
+        found = release_check.latest_release()
+    except release_check.UpdateCheckError as e:
+        if emitter:
+            emitter.emit("update-check", **release_check.event(current, error=e))
+        raise
+    fields = release_check.event(current, release=found)
+    if emitter:
+        emitter.emit("update-check", **fields)
+    elif fields["update_available"]:
+        _say_plain(f"Graft {found.version} is available (this is {current}): {found.url}")
+    else:
+        _say_plain(f"Graft {current} is up to date: the latest release is {found.version}.")
+
+
 def _verb_init(
     *,
     config_path: Path,
@@ -5005,15 +5036,22 @@ def _verb_appstore_get(
     cfg: Config,
     provide_ipa_app: str | None,
     allow_unverified: bool | None,
+    again: bool | None,
     json_mode: bool,
     **_: Any,
 ) -> None:
     if not provide_ipa_app:
         raise ConfigError("--appstore-get requires --app <name>")
     emitter = JsonEmitter() if json_mode else None
+    # The App Store's current version already staged: nothing to download,
+    # unless `--again` asks for it anyway. Any doubt downloads (fails open).
+    staged = None if again else appstore.already_staged(cfg, cfg.get_app(provide_ipa_app))
+    if staged is not None:
+        appstore.report_already_staged(provide_ipa_app, staged, emitter=emitter, say=_say_plain)
+        return
     with appstore.fetched(
         cfg, provide_ipa_app, emitter=emitter,
-        allow_unverified=bool(allow_unverified),
+        allow_unverified=bool(allow_unverified), again=bool(again),
         say=_say_plain, warn=lambda message: _warn(emitter, message),
     ) as decrypted:
         _stage_ipa(cfg, app_name=provide_ipa_app, source_path=decrypted, emitter=emitter)
@@ -6582,6 +6620,7 @@ _VERB_ONLY_FLAGS: dict[str, str] = {
     "--with-icons": "with_icons",
     "--force": "force",
     "--allow-unverified": "allow_unverified",
+    "--again": "again",
     "--allow-unverified-helper": "allow_unverified_helper",
     "--expect-ipatool": "expect_ipatool",
     "--country": "search_country",
@@ -6846,6 +6885,9 @@ _MODIFIERS: dict[str, str] = {
     "init_p12": "--p12",
     "init_profile": "--profile",
     "init_replace": "--replace",
+    # `--check-update`'s: a version compared against nothing would read as a
+    # check that ran.
+    "current_version": "--current-version",
 }
 
 #: Why a verb ignores a modifier, where there is more to say than "it does".
@@ -6916,14 +6958,21 @@ class _ModifierGate:
 # and refuses before that verb, a config load or a migration touches anything;
 # `_ModifierGate`, beside it, does the same for the other global modifiers.
 #
-# `_Needs.NOTHING` marks the four verbs that must work on a machine that has
+# `_Needs.NOTHING` marks the five verbs that must work on a machine that has
 # never run `--init`: the GUI's contract test introspects `--describe` before
-# there is a config.yaml to load, and `--init` is what creates one.
+# there is a config.yaml to load, the app checks for a newer Graft before setup
+# is done, and `--init` is what creates one.
 _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
     _DryRunGate(),
     _ModifierGate(),
     _Verb("--describe", "describe", _verb_describe, needs=_Needs.NOTHING, migrates=False),
     _Verb("--version", "version", _verb_version, needs=_Needs.NOTHING, migrates=False),
+    # About the program, not the user's files, like the two above: no config
+    # (the app checks before setup is done) and no migration. Above the
+    # stray-flag gate, whose config load it must not need, so its
+    # `--current-version` is a modifier `_ModifierGate` refuses elsewhere,
+    # as `--init`'s `--account` is.
+    _Verb("--check-update", "check_update", _verb_check_update, needs=_Needs.NOTHING, migrates=False),
     _Verb("--init", "init", _verb_init, needs=_Needs.NOTHING),
     _Verb("--setup-portal", "setup_portal", _verb_setup_portal, needs=_Needs.NOTHING),
     # --- everything below here needs a config ---
@@ -6961,7 +7010,7 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
     ),
     _Verb(
         "--appstore-get", "appstore_get", _verb_appstore_get,
-        accepts=frozenset({"--app", "--allow-unverified"}),
+        accepts=frozenset({"--app", "--allow-unverified", "--again"}),
     ),
     _Verb("--appstore-claim", "appstore_claim", _verb_appstore_claim, accepts=frozenset({"--app"})),
     _Verb("--appstore-login", "appstore_login", _verb_appstore_login, accepts=frozenset({"--expect-ipatool"})),
@@ -7129,11 +7178,13 @@ def main(
     # --- App Store acquisition (`appstore.py`) ---
     appstore_status: bool = typer.Option(False, "--appstore-status", help="Report whether ipatool is installed and signed in and UnfairPlay is enrolled, with the Terminal commands for whatever is missing."),
     appstore_check: bool = typer.Option(False, "--appstore-check", help="Compare each app's App Store version with its cached IPA. Narrow it with --app."),
-    appstore_get: bool = typer.Option(False, "--appstore-get", help="Download the App Store's latest version of --app with ipatool, decrypt it with UnfairPlay, and stage it."),
+    appstore_get: bool = typer.Option(False, "--appstore-get", help="Download the App Store's latest version of --app with ipatool, decrypt it with UnfairPlay, and stage it. Downloads nothing when that version is already staged (see --again)."),
     appstore_claim: bool = typer.Option(False, "--appstore-claim", help="Get --app's free App Store license for the signed-in Apple ID (ipatool purchase). Refuses unless the App Store lists it at 0."),
     # `bool | None` defaulting to None, like `--force`: a verb-only flag, and
     # the stray-flag gate reads "was it passed" as `opts[param] is not None`.
     allow_unverified: bool | None = typer.Option(None, "--allow-unverified", help="With --appstore-get or --provide-ipa: stage a decrypt UnfairPlay could not verify against Apple's page hashes (older apps), with a warning."),
+    # `bool | None` defaulting to None, like `--allow-unverified`: a verb-only flag.
+    again: bool | None = typer.Option(None, "--again", help="With --appstore-get: download, decrypt and stage the App Store's current version even when that version is already staged. Without it, a get of a version already staged downloads nothing and says so."),
     appstore_login: bool = typer.Option(False, "--appstore-login", help="Sign ipatool in to the App Store. stdin gives the Apple ID, then the password, then the 2FA code if Apple asks (asked for in a terminal, the password without echo). None of them is ever an argument, and Graft saves none of them."),
     # `str | None` defaulting to None: a verb-only flag, passed when not None.
     expect_ipatool: str | None = typer.Option(None, "--expect-ipatool", help="With --appstore-login: sign in only if the ipatool found is PATH (compared as real paths). Any other is refused before stdin is read or ipatool starts: appstore-login {state: failed, reason: ipatool-changed}. Graft.app passes the one its sign-in sheet named."),
@@ -7255,6 +7306,8 @@ def main(
     set_ssh_password: bool = typer.Option(False, "--set-ssh-password", help="Prompt for the device's root SSH password and store it in the macOS Keychain (needed by the frida-ios-dump decrypt backend, and by bagbak 4.x, which also pulls over SSH)."),
     decrypt_check: bool = typer.Option(False, "--decrypt-check", help="Report whether the device can decrypt an app right now, and what is blocking it."),
     version: bool = typer.Option(False, "--version", help="Print version and exit."),
+    check_update: bool = typer.Option(False, "--check-update", help="Ask GitHub whether a newer Graft is published: one request, with a generic User-Agent and nothing that identifies you or this Mac. Downloads nothing. Graft.app runs it once a day while open, unless Settings › Updates turns that off."),
+    current_version: str | None = typer.Option(None, "--current-version", help="With --check-update: the version to compare against (default: this CLI's own). Graft.app passes its own."),
     describe: bool = typer.Option(
         False,
         "--describe",

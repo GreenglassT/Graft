@@ -140,3 +140,62 @@ def test_the_release_build_uses_only_the_package_versions_it_resolved():
     tracked = subprocess.run(["git", "-C", str(REPO), "ls-files", "--error-unmatch", str(resolved)],
                              capture_output=True)
     assert tracked.returncode == 0, "committed, so the export the release builds from carries it"
+
+
+# --- 2.0.1: the private deny-list, the shared download cache, a phone's hotspot ---------------
+
+
+def _python_that_fails_at(root: Path, tmp_path: Path, step: str | None) -> Path:
+    """The stand-in venv Python, also logging the caches it was given, and
+    failing the call whose arguments hold `step`."""
+    envlog = tmp_path / "env.log"
+    fail = f'case "$*" in *"{step}"*) exit 1;; esac\n' if step else ""
+    py = root / ".venv" / "bin" / "python"
+    py.write_text(f'#!/bin/sh\necho "python $*" >> "{tmp_path / "ran.log"}"\n'
+                  f'echo "$* cache=${{GRAFT_BUNDLE_CACHE-unset}} work=${{GRAFT_BUNDLE_WORK-unset}}" >> "{envlog}"\n'
+                  f"{fail}exit 0\n")
+    return envlog
+
+
+def test_before_building_it_checks_the_deny_list_scans_the_tracked_files_and_asks_about_a_hotspot(release, tmp_path):
+    """In this order, all before Xcode resolves a package or anything is
+    signed. The downloads cache is left to graft_bundle's per-user default:
+    nothing points it into the checkout any more."""
+    root, run = release
+    envlog = _python_that_fails_at(root, tmp_path, None)
+    head = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    proc, ran = run(str(tmp_path / "out"))
+    assert proc.returncode != 0, "this checkout has no Xcode project to build"
+    steps = [r.split(maxsplit=2)[1:] for r in ran]
+    assert [Path(s[0]).name for s in steps] == ["graft_bundle.py", "denylist.py", "denylist.py", "graft_bundle.py"]
+    assert [s[1] for s in steps] == ["check-python", "check", f"tracked {root} {head}", "hotspot-check"]
+    assert Path(steps[2][0]).parent.parent != root, "the scan runs from the export of the commit"
+    assert not [r for r in ran if r.split()[0] in TRIPPED]
+    hotspot = envlog.read_text().splitlines()[-1]
+    assert "graft_bundle.py hotspot-check cache=unset" in hotspot
+    assert f"work={root}/build/bundle-work" in hotspot
+
+
+@pytest.mark.parametrize("step", ["denylist.py check", "denylist.py tracked", "hotspot-check"])
+def test_a_missing_list_a_deny_listed_name_or_a_no_on_the_hotspot_stops_it_there(release, tmp_path, step):
+    root, run = release
+    _python_that_fails_at(root, tmp_path, step)
+    proc, ran = run(str(tmp_path / "out"))
+    assert proc.returncode == 1, proc.stderr
+    assert step in ran[-1] and not [r for r in ran if r.split()[0] in TRIPPED]
+
+
+def test_the_source_archive_is_scanned_and_a_hit_removes_the_zip():
+    script = (REPO / "scripts" / "graft-release").read_text()
+    sources = script.index('graft_bundle.py" sources "$OUT_DIR/components.json"')
+    scan = script.index('denylist.py" sources "$SOURCES"')
+    assert sources < scan < script.index('rev-parse HEAD)" != "$HEAD_AT_START"')
+    assert 'rm -f "$ZIP"' in script[scan:scan + 200]
+    assert "GRAFT_BUNDLE_CACHE=" not in script, "downloads are cached per user, not per checkout"
+
+
+def test_a_release_with_the_scans_skipped_says_so_at_the_end():
+    script = (REPO / "scripts" / "graft-release").read_text()
+    tail = script[script.index('echo "✓ $OUT_DIR/components.json"'):]
+    assert 'if [[ "${GRAFT_SKIP_DENYLIST:-}" == 1 ]]' in tail and "SKIPPED" in tail

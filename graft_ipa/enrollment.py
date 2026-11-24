@@ -177,6 +177,17 @@ EXIT_WRITABLE = 66
 EXIT_CANCELLED = 67
 #: Stopped because the run went past its time limit (`time_limit`).
 EXIT_TIME_LIMIT = 68
+#: Stopped before anything was copied: neither of `FAIRPLAY_STATE_DIRS`
+#: holds this Mac's FairPlay state (`root_script`).
+EXIT_NO_FAIRPLAY_STATE = 69
+
+#: The folders UnfairPlay's capture reads this Mac's FairPlay state from,
+#: looking for a file named `SC Info.sidb` in any case (v0.4.0's
+#: pkg/fairplay enrollment_capture.go). macOS can leave them without one,
+#: as after a restart in the owner's run, and opening an iPhone or iPad
+#: app installed from the Mac App Store writes it again. Root looks there
+#: before it copies anything (`root_script`). Tests replace it.
+FAIRPLAY_STATE_DIRS: tuple[Path, ...] = (Path("/private/var/db/fpsd/SC Info"), Path("/Users/Shared/SC Info"))
 
 #: How long root's whole run may take (every step after `mktemp`: the
 #: copies, the checks and UnfairPlay setup) for an app of up to
@@ -296,16 +307,26 @@ class EnrollCommand:
 def app_bytes(inner: Path) -> int:
     """The size of every regular file in `inner`, measured as the user and
     never through a link: what UnfairPlay setup zips (`TIME_LIMIT_SECONDS`).
-    What can't be read counts as nothing."""
+    What can't be read counts as nothing.
+
+    `os.fwalk`, not `os.walk`: walk reads its top through a link, so an
+    `inner` that is one (which `check` accepts, and root then refuses on its
+    copy) was measured at its target, every file under it walked (delta
+    audit try13, #4). fwalk without `follow_symlinks` walks no link, its top
+    included: it reads a folder only after checking that what it opened is
+    what it looked at (lstat, open, fstat)."""
     total = 0
-    for folder, _, names in os.walk(inner):
-        for name in names:
-            try:
-                st = os.lstat(os.path.join(folder, name))
-            except OSError:
-                continue
-            if stat.S_ISREG(st.st_mode):
-                total += st.st_size
+    try:
+        for _, _, names, fd in os.fwalk(inner):
+            for name in names:
+                try:
+                    st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    total += st.st_size
+    except OSError:
+        pass
     return total
 
 
@@ -525,6 +546,25 @@ _COPY_WRITABLE = "others could change the app root copied"
 _COPY_NO_PLIST = "the app root copied has no Info.plist it can read"
 _COPY_ESCAPES = "the app root copied names an executable outside it"
 _COPY_NO_EXECUTABLE = "the app root copied has no executable file where it says"
+_NO_FAIRPLAY_STATE = (
+    "this Mac has no SC Info.sidb, the App Store state UnfairPlay reads: "
+    "launch the app once, then set up again"
+)
+
+#: The file in `FAIRPLAY_STATE_DIRS` that UnfairPlay's capture needs.
+FAIRPLAY_STATE_FILE = "SC Info.sidb"
+
+
+def _any_case(name: str) -> str:
+    """`name` as a `/bin/sh` pattern that matches it in any case: each
+    ASCII letter a bracket of both, a letter, digit, `.`, `_` or `-` as it
+    is, and anything else single-quoted (`quote`)."""
+    return "".join(
+        f"[{c.upper()}{c.lower()}]" if c.isascii() and c.isalpha()
+        else c if c.isascii() and (c.isdigit() or c in "._-")
+        else quote(c)
+        for c in name
+    )
 
 
 def root_script(
@@ -552,6 +592,17 @@ def root_script(
     `check` read, into $D, checks the clone again (root's, not writable by
     others; an executable named in its Info.plist that is a plain file inside
     it), and points UnfairPlay at the clone, which nobody else can change.
+
+    Before it copies anything, root looks for this Mac's FairPlay state,
+    which UnfairPlay's capture reads (`FAIRPLAY_STATE_DIRS`): a regular file
+    named `SC Info.sidb`, in any case, in either folder. Without one, setup
+    would run to its end and only then fail ("canonical input has no SIDB
+    state"), so root stops first, with `EXIT_NO_FAIRPLAY_STATE`. A folder
+    that isn't there is no state, never a failure of its own under `set -e`.
+    The look is the shell's own (a glob, a `case` on each name, then `[ -h ]`
+    and `[ -f ]`), so there is no child for the watchdog to kill should it
+    block; but it only lists two fixed folders, never the admin-writable
+    app, opens no file in them and follows no link it finds there.
 
     UnfairPlay runs in the background, its output to a file in $D rather
     than the pipe the script was given, so a Graft that quits mid-setup
@@ -590,6 +641,7 @@ def root_script(
     if int(time_limit) < 1:
         raise ValueError(f"a time limit of {time_limit} seconds stops UnfairPlay before it starts")
     limit = int(time_limit)
+    state = " ".join(f"{q(str(folder))}/*" for folder in FAIRPLAY_STATE_DIRS)
     over_time = f"stopped: the enrollment ran for more than {limit} seconds"
     cancel, over = f'"$D/stop-{EXIT_CANCELLED}"', f'"$D/stop-{EXIT_TIME_LIMIT}"'
     # The script's own Cancel checks: a marker, then out through `leave`,
@@ -660,6 +712,15 @@ def root_script(
         "    done",
         "  done",
         ') </dev/null >/dev/null 2>&1 & echo "$!" )',
+        # This Mac's FairPlay state, before anything is copied: a regular
+        # file named SC Info.sidb, in any case, in either folder. Each
+        # name is matched as a string (`case`), so a folder that isn't there
+        # (its `/*` left as it is) or a file named like the pattern is no
+        # state; `[ ! -h ]` comes first, so a link there is never followed.
+        "I=",
+        f"for F in {state}; do case \"${{F##*/}}\" in {_any_case(FAIRPLAY_STATE_FILE)}) "
+        'if [ ! -h "$F" ] && [ -f "$F" ]; then I=1; fi ;; esac; done',
+        f'[ -n "$I" ] || {_refuse(EXIT_NO_FAIRPLAY_STATE, _NO_FAIRPLAY_STATE)}',
         # Copied first, then the *copy* checked and run: nothing can swap it.
         f'/bin/cp {q(str(unfairplay))} "$D/unfairplay"',
     ]
@@ -726,8 +787,9 @@ def root_script(
         f"if [ -e {cancel} ] || [ -e {over} ]; then exit 1; fi",
         # Its JSON report to stderr: stdout is only the folder's path.
         '/bin/cat "$D/log" >&2',
-        # UnfairPlay's own failure, never mistaken for one of the script's.
-        'case "$S" in 0) ;; 6[4-8]) exit 1 ;; *) exit "$S" ;; esac',
+        # UnfairPlay's own failure, never mistaken for one of the script's
+        # (every EXIT_*, 64 to 69).
+        'case "$S" in 0) ;; 6[4-9]) exit 1 ;; *) exit "$S" ;; esac',
         '/bin/rm -rf "$D/unfairplay" "$D/App.app" "$D/tmp" "$D/home" "$D/log" "$D/got"',
         # Everything in $D was written by root's own UnfairPlay; -h re-owns a
         # link itself, never what it points at.

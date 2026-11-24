@@ -302,10 +302,14 @@ final class ConfigStore: CLIStore {
         beginBuild(appName: appName)
         // macOS mustn't kill the app under a build: the CLI would be left
         // signing or installing with nobody reading it (`TerminationHold`).
+        // Quit Anyway stops it as Stop does, while it is still this build.
         let hold = self.hold
-        buildTask = Task { @MainActor in
-            hold.begin(TerminationHold.building)
-            defer { hold.end(TerminationHold.building) }
+        buildTask = Task { @MainActor [weak self] in
+            let ticket = hold.begin(TerminationHold.building) { [weak self] in
+                guard let self, self.buildingApp == appName else { return }
+                self.cancelBuild(appName: appName)
+            }
+            defer { hold.end(ticket) }
             await work()
         }
         return true

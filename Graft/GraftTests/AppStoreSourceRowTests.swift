@@ -75,6 +75,30 @@ final class AppStoreSourceRowTests: XCTestCase {
             license: .init(price: nil, formattedPrice: nil, trackId: nil)), .openInStore)
     }
 
+    /// Get Again only where the line says up to date with the very version
+    /// Get latest would fetch. "Couldn't tell" is never "again".
+    func test_get_again_is_offered_only_for_the_version_already_staged() {
+        let same = record(store: "21.46.3", cached: "21.46.3", update: false)
+        XCTAssertEqual(AppStoreSourceRow.primaryAction(license: nil, version: same), .getAgain)
+        XCTAssertEqual(AppStoreSourceRow.primaryAction(
+            license: nil, version: record(store: "21.46.3", cached: "21.40.0", update: true)), .getLatest)
+        XCTAssertEqual(AppStoreSourceRow.primaryAction(
+            license: nil, version: record(store: "21.46.3", cached: nil, update: true)), .getLatest)
+        XCTAssertEqual(AppStoreSourceRow.primaryAction(
+            license: nil, version: record(store: "21.40.0", cached: "21.46.3", update: false)),
+            .getLatest, "a newer copy staged: the get fetches another version, not this one again")
+        XCTAssertEqual(AppStoreSourceRow.primaryAction(
+            license: nil, version: record(store: nil, cached: "21.46.3", update: false, error: "offline")),
+            .getLatest)
+        XCTAssertEqual(AppStoreSourceRow.primaryAction(license: nil, version: nil), .getLatest)
+
+        // A license refusal still decides.
+        XCTAssertEqual(AppStoreSourceRow.primaryAction(
+            license: .init(price: 0, formattedPrice: "Free", trackId: 1), version: same), .claimFree)
+        XCTAssertEqual(AppStoreSourceRow.primaryAction(
+            license: .init(price: 2.99, formattedPrice: "$2.99", trackId: 1), version: same), .openInStore)
+    }
+
     // MARK: Get (free) asks first (fix-check #11), naming whom a fresh read found (get-4)
 
     /// What the confirmation's own Get (free) was given, in place of the claim.
@@ -207,5 +231,52 @@ final class AppStoreSourceRowTests: XCTestCase {
         settle(box)
         XCTAssertEqual(claims.given, [.init(email: "someone@example.invalid")],
                        "confirmed: the claim runs, once, for the Apple ID it named")
+    }
+
+    // MARK: Get Again asks first
+
+    @MainActor
+    private final class Gets {
+        var latest = 0
+        var again = 0
+    }
+
+    /// Get Again downloads the whole app again, which is what the owner's
+    /// hotspot paid for once already, so one click only asks. Nothing is got
+    /// until the alert's own Get Again, and Cancel gets nothing.
+    @MainActor
+    func test_get_again_asks_first_and_gets_again_only_once_confirmed() async throws {
+        try AccessibilityTree.requireServed()
+        let gets = Gets()
+        let row = AppStoreSourceRow(
+            version: record(store: "21.46.3", cached: "21.46.3", update: false),
+            isGetting: false, stage: nil, isBlocked: false,
+            onGet: { gets.latest += 1 }, onStop: {}, onRefresh: {},
+            onGetAgain: { gets.again += 1 },
+            appName: "Example"
+        )
+        let box = hosted(row, width: 560)
+        settle(box)
+
+        try clickButton(named: AppStoreSourceRow.getAgainButton, in: box.window)
+        let sheet = try XCTUnwrap(confirmation(over: box.window), "Get Again shows the confirmation")
+        let texts = views(in: sheet.contentView).compactMap { ($0 as? NSTextField)?.stringValue }
+        let words = AppStoreSourceRow.getAgainConfirmation(app: "Example", version: "21.46.3")
+        XCTAssertTrue(texts.contains(words.title), "\(texts)")
+        XCTAssertTrue(texts.contains(words.message), "\(texts)")
+        XCTAssertEqual(gets.again, 0, "one click only asks")
+
+        try XCTUnwrap(button("Cancel", in: sheet)).performClick(nil)
+        waitUntilGone(sheet, from: box.window)
+        settle(box)
+        XCTAssertEqual(gets.again, 0, "Cancel gets nothing")
+
+        try clickButton(named: AppStoreSourceRow.getAgainButton, in: box.window)
+        let again = try XCTUnwrap(confirmation(over: box.window), "asked again")
+        try XCTUnwrap(button(AppStoreSourceRow.getAgainButton, in: again)).performClick(nil)
+        waitUntilGone(again, from: box.window)
+        settle(box)
+        XCTAssertEqual(gets.again, 1, "confirmed: Get Again runs, once")
+        XCTAssertEqual(gets.latest, 0, "and never the plain get")
     }
 }

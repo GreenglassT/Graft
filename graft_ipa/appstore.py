@@ -35,6 +35,7 @@ nobody whatever UnfairPlay did.
 
 from __future__ import annotations
 
+import glob
 import os
 import shlex
 import shutil
@@ -52,8 +53,15 @@ from typing import Any
 from . import appstore_account, host, install_hints, ipatool, itunes, keychain, unfairplay
 from .config import AppConfig, AppStoreToolsConfig, Config
 from .errors import AppStoreError, IPAInspectionError, ITunesError
-from .ipa_cache import find_in_cache
-from .ipa_inspect import check_cryptid, extract_ipa, read_info_plist, verify_decrypted
+from .ipa_cache import CachedIPA, find_in_cache
+from .ipa_inspect import (
+    account_data_in,
+    check_cryptid,
+    extract_ipa,
+    read_info_plist,
+    stripped_note,
+    verify_decrypted,
+)
 from .json_output import JsonEmitter
 from .repo import version_key
 from .tools import SOURCE_BUNDLED
@@ -952,10 +960,16 @@ def fetched(
     *,
     emitter: JsonEmitter | None,
     allow_unverified: bool = False,
+    again: bool = False,
     say: Say = _say_nothing,
     warn: Say = _say_nothing,
 ) -> Iterator[Path]:
     """Download `app_name`'s latest version, decrypt it, and yield the decrypted IPA.
+
+    Whether to download at all is the caller's question (`already_staged`).
+    `again` says it asked with `--again`, so the Terminal command an
+    unverified refusal names keeps it: without it, that command would find the
+    version staged and download nothing.
 
     The caller stages what it is handed inside the `with`; on exit — success,
     failure or Stop — the working directory and everything in it is gone.
@@ -987,10 +1001,84 @@ def fetched(
             tools, encrypted, work,
             app_name=app_name, emitter=emitter, say=say,
             allow_unverified=allow_unverified, warn=warn,
-            retry=f"graft --appstore-get --app {shlex.quote(app_name)}",
+            retry=f"graft --appstore-get --app {shlex.quote(app_name)}" + (" --again" if again else ""),
         )
         _stage(emitter, say, app_name, "stage")
         yield decrypted
+
+
+def _unsafe_in_filename(value: str) -> bool:
+    return any(bad in value for bad in ("/", "\\", "\0", ".."))
+
+
+def already_staged(cfg: Config, app: AppConfig) -> CachedIPA | None:
+    """The staged IPA a get of `app` would only download again, or None.
+
+    A get fetches the App Store's current version, whatever
+    `preferred_version` pins, and stages it as `<bundle id>_<version>.ipa`
+    (`provide_ipa.provide`). When that file is already there as a get leaves
+    one, downloading it again spends the app's whole size and a decrypt to put
+    the same file back: its own Info.plist names this app and that version,
+    its main binary is decrypted (`main_binary_encrypted`), it holds no
+    account data (`ipa_inspect.account_data_in`), and it isn't a partial dump
+    (`ipa_inspect.stripped_note`), which a get would replace with the whole
+    app. A copy under any other name isn't one a get staged, and the build
+    prefers the canonical file once there is one (`find_in_cache`).
+
+    The current version is the listing's (`_listing`), from the same stores
+    `--appstore-check` asks. They are asked only when this app has some IPA
+    staged under a canonical name: with none, there is nothing to compare.
+
+    **Fails open.** None, and the get downloads as it always has, when the
+    lookup fails or names no version, and when the file can't be read to
+    say. Apple's own apps get None as well, so `fetched` refuses them as
+    before.
+    """
+    if apples_own(app.bundle_id):
+        return None
+    if not any(cfg.cache_dir.glob(f"{glob.escape(app.bundle_id)}_*.ipa")):
+        return None
+    listing = _listing(app)
+    version = listing.version if listing is not None else None
+    if not isinstance(version, str) or not version or _unsafe_in_filename(version):
+        return None
+    path = cfg.cache_dir / f"{app.bundle_id}_{version}.ipa"
+    if not path.is_file() or stripped_note(path) is not None:
+        return None
+    try:
+        info = read_info_plist(path)
+        if (info.bundle_id, info.version) != (app.bundle_id, version):
+            return None
+        if account_data_in(path) or main_binary_encrypted(path):
+            return None
+    except Exception:
+        # Whatever the reason a file can't be read (not a zip, a malformed
+        # plist, a damaged member, a read error), "can't say" downloads, as
+        # `IPAInfoMemo.info_for` reads it as "skip this candidate".
+        return None
+    return CachedIPA(path=path, bundle_id=info.bundle_id, version=info.version)
+
+
+def report_already_staged(
+    app_name: str, staged: CachedIPA, *, emitter: JsonEmitter | None, say: Say
+) -> None:
+    """Say that a get stopped before downloading: `staged` is the App Store's
+    current version already (`already_staged`)."""
+    if emitter:
+        emitter.emit(
+            "appstore-already-staged",
+            app=app_name,
+            bundle_id=staged.bundle_id,
+            version=staged.version,
+            filename=staged.path.name,
+            path=str(staged.path),
+        )
+        return
+    say(
+        f"{app_name}: already have {staged.version}, the App Store's current version "
+        f"({staged.path.name}) — nothing downloaded"
+    )
+    say(f"  to download it again anyway: graft --appstore-get --app {shlex.quote(app_name)} --again")
 
 
 def claim(cfg: Config, app_name: str, *, emitter: JsonEmitter | None, say: Say) -> bool:

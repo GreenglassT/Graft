@@ -1,0 +1,111 @@
+[home]
+source = "README.md"
+
+[[group]]
+name = "User Guide"
+
+[[group.page]]
+slug = "getting-started"
+nav = "Getting Started"
+source = "getting-started.md"
+
+[[group.page]]
+slug = "apple-account"
+nav = "Your Apple Account"
+source = "apple-account.md"
+
+[[group.page]]
+slug = "adding-apps"
+nav = "Adding Apps"
+source = "adding-apps.md"
+
+[[group.page]]
+slug = "getting-an-ipa"
+nav = "Getting an IPA"
+source = "getting-an-ipa.md"
+
+[[group.page]]
+slug = "app-store"
+nav = "App Store Downloads"
+source = "app-store.md"
+
+[[group.page]]
+slug = "tweaks"
+nav = "Tweaks"
+source = "tweaks.md"
+
+[[group.page]]
+slug = "building-and-delivery"
+nav = "Building & Delivery"
+source = "building-and-delivery.md"
+
+[[group.page]]
+slug = "livecontainer"
+nav = "LiveContainer"
+source = "livecontainer.md"
+
+[[group]]
+name = "Terminal"
+
+[[group.page]]
+slug = "cli-install"
+nav = "Installing the CLI"
+source = "cli-install.md"
+
+[[group.page]]
+slug = "cli-quick-start"
+nav = "Quick Start"
+source = "cli-quick-start.md"
+
+[[group.page]]
+slug = "cli-reference"
+nav = "CLI Reference"
+source = "cli-reference.md"
+
+[[group.page]]
+slug = "cli-scripting"
+nav = "Scripting & Environment"
+source = "cli-scripting.md"
+
+[[group]]
+name = "Reference"
+
+[[group.page]]
+slug = "configuration"
+nav = "Configuration & Files"
+source = "configuration.md"
+
+[[group.page]]
+slug = "downloads"
+nav = "What Graft Downloads"
+source = "downloads.md"
+
+[[group.page]]
+slug = "network"
+nav = "What Graft Connects To"
+source = "../network.md"
+
+[[group.page]]
+slug = "updating"
+nav = "Updating Graft"
+source = "updating.md"
+
+[[group.page]]
+slug = "changelog"
+nav = "Changelog"
+source = "../../CHANGELOG.md"
+
+[[group.page]]
+slug = "troubleshooting"
+nav = "Troubleshooting"
+source = "troubleshooting.md"
+
+[[group.page]]
+slug = "removing"
+nav = "Removing Graft"
+source = "removing.md"
+
+[[group.page]]
+slug = "building-from-source"
+nav = "Building from Source"
+source = "building-from-source.md"

@@ -202,10 +202,13 @@ def test_a_proxy_with_no_connection_to_hook_is_run_as_before() -> None:
 # --- cli-1: an --lc-install waits on the user, not on a phone gone quiet -----------
 #
 # iOS holds an install over a running LiveContainer until the user closes it,
-# and installd says nothing meanwhile. `lc_manage._install_one` says "close
-# LiveContainer on the device to finish" after 20 s and sets
+# and installd says nothing meanwhile. When the install is an update (that
+# LiveContainer is already on the device), `lc_manage._install_one` says
+# "close LiveContainer on the device to finish" after 20 s and sets
 # `waiting_on_user`; from then on installd's silence is the user's time, up
-# to `PATIENT_SECONDS`. Timers scaled: the real 60 s limit is `SILENCE`.
+# to `PATIENT_SECONDS`. A fresh install never sets it (d14-cli-1; through
+# `lc_manage.install`, in test_lc_install). Timers scaled: the real 60 s
+# limit is `SILENCE`.
 
 #: `PATIENT_SECONDS` (15 minutes), scaled.
 PATIENT = 3.0

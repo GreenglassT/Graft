@@ -36,6 +36,46 @@ struct ScriptCLI {
     }
 }
 
+/// Run a freshly written executable once, and wait for it, before a case
+/// starts timing anything that spawns it.
+///
+/// macOS checks a new executable, a `/bin/sh` script too, on its first exec.
+/// syspolicyd looks up a notarization ticket online, then XProtect scans the
+/// file. The child waits inside `execve` until that's done, while
+/// `Process.run()` has already returned in the parent. The verdict is kept
+/// per file, so every later exec starts at once. An atomic write replaces
+/// the file, so warm it up after the last write.
+///
+/// On this Mac the lookup took about 0.1 s before 2026-11-23. Over a phone
+/// hotspot it takes about 0.7 s, and up to its own 3 s timeout. A case whose
+/// clock starts at the spawn was timing the network instead:
+/// `LoginShellTests`' 0.5 s timeout killed the fake shell before it ran a
+/// line, and `DeviceVitalsPollTests`' 0.8 s windows saw no read at all.
+/// Paying for the check here keeps it out of what the case measures.
+///
+/// `arguments` and `environment` must make the file exit before it does its
+/// work, so this run leaves nothing a case counts. `status` is the exit code
+/// it gives then.
+func warmUpFreshExecutable(
+    _ path: String, arguments: [String] = [], environment: [String: String] = [:],
+    exitingWith status: Int32 = 0, file: StaticString = #filePath, line: UInt = #line
+) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: path)
+    process.arguments = arguments
+    process.environment = environment
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    try process.run()
+    process.waitUntilExit()
+    XCTAssertEqual(
+        process.terminationStatus, status,
+        "the warm-up run of \(path) didn't exit the way that skips its work",
+        file: file, line: line
+    )
+}
+
 /// Poll `condition` every 20 ms until it holds, and fail the test, at the
 /// caller's line, if `timeout` passes first.
 ///

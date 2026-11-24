@@ -92,6 +92,29 @@ final class AppStoreClaimTests: XCTestCase {
         XCTAssertNil(store.errors["example"])
     }
 
+    /// Get Again, refused for want of a license, then Get (free): the get
+    /// after the claim is Get Again too. A plain get there would find the old
+    /// copy staged and download nothing.
+    @MainActor
+    func test_get_free_after_get_again_gets_again() async throws {
+        let (runner, dir) = try cli(price: "0")
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        store.startGet(app: "example", again: true)
+        await eventually { !store.isBusy("example") }
+        XCTAssertEqual(store.licenseNeeded["example"]?.isFree, true)
+
+        await tryClaim(store, true)
+        await eventually { (try? self.argv(dir).contains { $0.contains("--appstore-check") }) == true }
+
+        XCTAssertEqual(try argv(dir).filter { !$0.contains("--appstore-check") }, [
+            "--json --appstore-get --app example --again",
+            "--json --appstore-status",
+            "--json --appstore-claim --app example",
+            "--json --appstore-get --app example --again",
+        ])
+    }
+
     @MainActor
     func test_a_paid_app_is_never_claimed() async throws {
         let (runner, dir) = try cli(price: "2.99")

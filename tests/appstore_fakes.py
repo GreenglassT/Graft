@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import plistlib
 import struct
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -623,8 +624,10 @@ class FakeTools:
             # does), and a shebang cannot carry one. The script by its full
             # path, so a copy of the trampoline (the enrollment script's root
             # copy) still runs it; `FAKE_ARGV0` says which file ran.
+            # `FAKE_WARM_UP` ends it before Python starts (`warm_up`).
             path.write_text(
-                f'#!/bin/sh\nFAKE_ARGV0="$0" exec "{sys.executable}" "{path}.py" "$@"\n'
+                '#!/bin/sh\n[ -z "${FAKE_WARM_UP-}" ] || exit 0\n'
+                f'FAKE_ARGV0="$0" exec "{sys.executable}" "{path}.py" "$@"\n'
             )
             path.chmod(0o755)
         self.save()
@@ -636,6 +639,23 @@ class FakeTools:
 
     def save(self) -> None:
         (self.root / "scenario.json").write_text(json.dumps(self.scenario))
+
+    def warm_up(self) -> None:
+        """Run the fake ipatool once, before anything times it.
+
+        macOS checks a new executable, a script too, on its first exec:
+        syspolicyd looks up a notarization ticket online, then XProtect scans
+        the file. The child waits inside `execve` until that's done, while
+        Popen has already returned. The verdict is kept per file, so later
+        runs start at once. On this Mac the lookup took about 0.1 s before
+        2026-11-23. Over a phone hotspot it takes about 0.7 s, and up to its
+        own 3 s timeout. A sign-in starts its silence limit at the spawn, so a
+        2 s limit sometimes ran out before the fake had printed its first
+        prompt. This pays that cost before the clock starts. `FAKE_WARM_UP`
+        makes the trampoline exit before Python starts, so this run leaves no
+        record in `calls.jsonl`.
+        """
+        subprocess.run([str(self.ipatool)], env={"FAKE_WARM_UP": "1"}, check=True, timeout=30)
 
     def calls(self, tool: str | None = None) -> list[dict[str, Any]]:
         if not self.calls_file.exists():

@@ -27,6 +27,7 @@ REPO = Path(__file__).resolve().parent.parent
 #: Every test file that runs one of the shimmed tools (found by grepping for
 #: the argv). `test_the_list_of_tool_using_files_is_complete` keeps it honest.
 TOOL_USING = (
+    "tests/test_denylist.py",
     "tests/test_graft_bundle.py",
     "tests/test_graft_release.py",
     "tests/test_lc_golden.py",

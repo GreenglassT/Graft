@@ -88,6 +88,11 @@ _NON_VERB_PARAMS: dict[str, str] = {
         "`--replace` qualifies `--init --account paid` on a paid config: a new certificate "
         "and profile. Refused elsewhere like `--account`."
     ),
+    "current_version": (
+        "`--current-version` qualifies `--check-update`: the version to compare against. "
+        "Not in `_VERB_ONLY_FLAGS` for `--account`'s reason: `--check-update` needs no "
+        "config and sits above the gate. `_ModifierGate` refuses it beside anything else."
+    ),
     "dry_run": (
         "A build modifier, read by `_verb_build_apps`, `_verb_prune_builds` and "
         "`_verb_init` (with `--account`). "
@@ -430,7 +435,8 @@ def test_every_handler_can_be_called_with_the_whole_option_bundle() -> None:
 
 def test_the_verbs_that_need_nothing_are_the_ones_that_have_to() -> None:
     """--describe is introspected by the GUI's contract test on a machine that
-    has no config.yaml, and --init is what creates one. Anything else reaching
+    has no config.yaml, the app runs --check-update before setup is done, and
+    --init is what creates one. Anything else reaching
     `_Needs.NOTHING` would be a verb silently running against no config at all
     rather than reporting that it needs one.
 
@@ -439,7 +445,7 @@ def test_the_verbs_that_need_nothing_are_the_ones_that_have_to() -> None:
     at all" — which they never did. They need the file to exist and say so.
     """
     assert {v.flag for v in _verbs() if v.needs is _Needs.NOTHING} == {
-        "--describe", "--version", "--init", "--setup-portal",
+        "--describe", "--version", "--check-update", "--init", "--setup-portal",
     }
 
 

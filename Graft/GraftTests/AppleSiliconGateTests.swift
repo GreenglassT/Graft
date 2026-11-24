@@ -58,11 +58,16 @@ final class AppleSiliconGateTests: XCTestCase {
         let graft = dir.appendingPathComponent("graft")
         try """
         #!/bin/sh
+        [ -z "${GRAFT_GATE_WARM_UP-}" ] || exit 0
         echo "$*" >> '\(calls.path)'
         printf 'error: config file not found at /tmp/example/config.yaml\\n' >&2
         exit 2
         """.write(to: graft, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: graft.path)
+        // macOS checks a new executable on its first exec, which over a phone
+        // hotspot can outlast the 1.5 s `window` waits (`warmUpFreshExecutable`).
+        // The warm-up run exits before it records anything.
+        try warmUpFreshExecutable(graft.path, environment: ["GRAFT_GATE_WARM_UP": "1"])
         return (CLIRunner(executable: graft), calls)
     }
 
@@ -127,6 +132,34 @@ final class AppleSiliconGateTests: XCTestCase {
         settle(pane, seconds: 0.2)
         XCTAssertEqual(opened.given, [AppleSiliconRequiredView.downloadURL])
         XCTAssertEqual(opened.viaEnvironment, [], "not through SwiftUI's openURL")
+    }
+
+    /// The test host is Graft.app itself, under its real bundle id and the
+    /// real HOME. Its own window must run nothing: in a Debug build the CLI
+    /// lookup finds ~/.local/bin/graft first, the owner's real CLI, and its
+    /// App Store status had macOS ask for ipatool's keychain item during a
+    /// test run (2.0.1). So the window is a placeholder, and its runner
+    /// points at nothing that exists.
+    @MainActor
+    func test_the_test_hosts_own_window_runs_nothing() throws {
+        try AccessibilityTree.requireServed()
+        XCTAssertTrue(AdminShell.insideTests)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: GraftApp.testHostExecutable.path))
+        // Every window the host has, whatever it's titled: the real UI names
+        // its window after the selected item.
+        let deadline = Date().addingTimeInterval(5)
+        var shown: [[String]] = []
+        repeat {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            shown = try NSApp.windows.filter { $0.isVisible && !($0 is NSPanel) }.map { window in
+                try AccessibilityTree.nodes(in: window)
+                    .flatMap { [$0.name, ($0.value as? String) ?? ""] }.filter { !$0.isEmpty }
+            }
+        } while !shown.contains(where: { $0.contains(TestHostWindow.text) }) && Date() < deadline
+        XCTAssertTrue(shown.contains(where: { $0.contains(TestHostWindow.text) }), "\(shown)")
+        // Not "no window shows Devices": other cases here host a ContentView
+        // of their own, which may still be open. The app's own window
+        // showing the placeholder is what proves its real UI never came up.
     }
 
     /// The control: the same window on Apple silicon is the app, and its

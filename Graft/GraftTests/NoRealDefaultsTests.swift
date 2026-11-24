@@ -66,6 +66,9 @@ final class NoRealDefaultsTests: XCTestCase {
         // The app's own wrappers: the general pasteboard, another app
         // (`NSWorkspace`), the notification center.
         "Pasteboard.copy", "MacAppStore.open", "BuildNotifier.primeAuthorization",
+        // The quit question: an alert on screen, and the reply that quits
+        // the app (`QuitGuard`, which `GraftAppDelegate` hands them to).
+        "QuitAlert.present", "NSAlert(", "NSApp.reply(",
     ]
 
     /// SwiftUI property wrappers that act on the real thing unless the view's

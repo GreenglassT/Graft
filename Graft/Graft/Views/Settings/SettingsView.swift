@@ -25,6 +25,9 @@ struct SettingsView: View {
     /// A build is running (`ConfigStore.buildingApp`): it signs with the
     /// account, so the account isn't changed under it.
     var isBuilding: Bool = false
+    /// The daily update check's switch. Nil hides Updates, which only tests
+    /// of other sections do.
+    var updates: UpdateStore? = nil
     @State private var showAccountSheet = false
     @State private var confirmingSwitchToFree = false
 
@@ -46,6 +49,9 @@ struct SettingsView: View {
                     CommandLineToolSection(context: .thisApp)
                 }
                 pathsSection
+                if let updates {
+                    UpdatesSection(updates: updates)
+                }
                 versionSection
             }
             .padding(Metrics.paneGutter)
@@ -837,5 +843,33 @@ private struct PathRow: View {
         }
         .padding(.horizontal, Metrics.cardPadding).padding(.vertical, Metrics.innerPadding)
         .cardStyle()
+    }
+}
+
+/// Settings › Updates: the daily check's switch, and what it sends.
+struct UpdatesSection: View {
+    @Bindable var updates: UpdateStore
+
+    static let toggleTitle = "Check for a newer Graft once a day"
+    static let note = "Graft asks GitHub for its latest release while it's open, with nothing "
+        + "that identifies you or this Mac, and shows a banner when there's a newer one. It "
+        + "never downloads or installs anything. Help › Check for Updates… asks now, "
+        + "whether this is on or off."
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SectionTitle(text: "Updates")
+            VStack(alignment: .leading, spacing: Metrics.rowGap) {
+                Toggle(Self.toggleTitle, isOn: $updates.dailyCheck)
+                    .font(AppFont.body)
+                Text(Self.note)
+                    .font(AppFont.body)
+                    .foregroundStyle(Palette.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, Metrics.cardPadding).padding(.vertical, Metrics.innerPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .cardStyle()
+        }
     }
 }

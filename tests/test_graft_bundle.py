@@ -34,6 +34,16 @@ slow = pytest.mark.skipif(os.environ.get("GRAFT_BUNDLE_SLOW") != "1",
                           reason="downloads and builds: set GRAFT_BUNDLE_SLOW=1")
 
 
+@pytest.fixture(autouse=True)
+def _scratch_download_cache(tmp_path_factory, monkeypatch):
+    """The downloads cache is the real account's (~/Library/Caches/graft-release),
+    found when graft_bundle was imported. What reads CACHE when it runs (Go's
+    module cache and its records, the crates) gets a scratch one instead, so
+    no test writes there; fetch()'s default, which the slow tests use, keeps
+    the real one."""
+    monkeypatch.setattr(gb, "CACHE", tmp_path_factory.mktemp("bundle-cache"))
+
+
 def test_the_pins_file_names_every_artifact_with_a_hash():
     pins = gb.load_pins(REPO / "bundle" / "pins.toml")
     assert set(pins) == {"python", "ipatool", "unfairplay", "zsign", "openssl", "cyan",
@@ -96,7 +106,7 @@ def test_fetch_refuses_a_file_whose_hash_differs(tmp_path, monkeypatch):
     with pytest.raises(gb.BundleError, match="SHA-256 mismatch"):
         gb.fetch(pin, tmp_path)
     assert not (tmp_path / "x.tar.gz").exists(), "a file that failed its check is not kept"
-    assert not (tmp_path / "x.tar.gz.part").exists(), "nor is its partial download"
+    assert list(tmp_path.iterdir()) == [], "nor is its partial download"
 
 
 def test_fetch_reuses_a_cached_file_that_matches(tmp_path, monkeypatch):
@@ -2017,11 +2027,15 @@ def test_ipatool_is_patched_then_vendored_then_built_offline_and_its_key_covers_
         return top
 
     def run(argv, cwd=None, env=None, check=False, **kw):
-        events.append(("run", argv[:2], env["PATH"].split(":")[0].endswith("/go/bin"), env["GOMODCACHE"]))
+        events.append(("run", argv[:3], env["PATH"].split(":")[0].endswith("/go/bin"), env["GOMODCACHE"],
+                       {k: env[k] for k in ("GOPATH", "GOCACHE", "HOME")}, Path(cwd)))
         if argv[:3] == ["go", "mod", "vendor"]:
             (Path(cwd) / "vendor" / "example.com" / "m").mkdir(parents=True)
             (Path(cwd) / "vendor" / "example.com" / "m" / "m.go").write_text("package m")
             (Path(cwd) / "vendor" / "modules.txt").write_text("# example.com/m v1.0.0\n")
+            zipped = Path(env["GOMODCACHE"]) / "cache" / "download" / "example.com" / "m" / "@v" / "v1.0.0.zip"
+            zipped.parent.mkdir(parents=True, exist_ok=True)
+            zipped.write_bytes(b"a module zip")
         if argv[:2] == ["go", "build"]:
             assert "-trimpath" in argv and "-mod=vendor" in argv and env["CGO_ENABLED"] == "1"
             assert env["GOPROXY"] == gb.GOPROXY and env["GOFLAGS"] == "" and env["GOTOOLCHAIN"] == "local"
@@ -2048,11 +2062,15 @@ def test_ipatool_is_patched_then_vendored_then_built_offline_and_its_key_covers_
     monkeypatch.setattr(gb, "compiled_modules", lambda go, binary, env: [("example.com/m", "v1.0.0")])
     monkeypatch.setattr(gb, "module_licences", module_licences)
     built = gb.build_ipatool(pin, go_pin, tmp_path / "work")
-    assert [e[0] for e in events] == ["patch", "run", "run", "no shell", "licences"]
+    assert [e[0] for e in events] == ["patch", "run", "run", "run", "no shell", "licences"]
     assert events[0] == ("patch", "ipatool")
-    assert [e[1] for e in events if e[0] == "run"] == [["go", "mod"], ["go", "build"]]
+    assert [e[1] for e in events if e[0] == "run"] == [["go", "mod", "vendor"], ["go", "mod", "verify"],
+                                                      ["go", "build", "-mod=vendor"]]
     assert all(e[2] for e in events if e[0] == "run"), "the pinned Go first on PATH"
-    assert all("/work/" not in e[3] for e in events if e[0] == "run"), "Go's caches are the build's own"
+    for e in (e for e in events if e[0] == "run"):
+        assert e[3] == str(gb.go_modcache()), "the module cache every build shares"
+        assert all(Path(v).is_relative_to(e[5].parents[1]) for v in e[4].values()), "the rest is the build's own"
+    assert gb.go_modules_cached(gb.go_modcache(), pin), "the modules it vendored, recorded"
     assert (built / "ipatool").read_bytes() == b"ipatool binary"
     assert (built / "go-LICENSE").read_text() == "Go's LICENSE" and (built / "LICENSE").read_text() == "ipatool MIT"
     with tarfile.open(built / "vendor.tar.gz") as tf:
@@ -2315,7 +2333,7 @@ def test_unfairplay_is_vendored_then_built_offline_as_upstreams_release_is(tmp_p
     events = _fake_unfairplay_build(tmp_path, monkeypatch)
     pin, go_pin = _unfairplay_pins()
     built = gb.build_unfairplay(pin, go_pin, tmp_path / "work")
-    assert [e[0] for e in events] == ["run"] * 7 + ["build info", "no shell", "licences"]
+    assert [e[0] for e in events] == ["run"] * 8 + ["build info", "no shell", "licences"]
     repo = "https://example.invalid/o/unfairplay.git"
     assert [e[1] for e in events if e[0] == "run"] == gb.unfairplay_steps("0.4.0", repo, UNFAIRPLAY_COMMIT) == [
         ["git", "init", "-q"],
@@ -2325,6 +2343,7 @@ def test_unfairplay_is_vendored_then_built_offline_as_upstreams_release_is(tmp_p
         ["git", "read-tree", "HEAD"],
         ["/bin/sh", "-c", "echo /vendor/ >> .git/info/exclude"],
         ["go", "mod", "vendor"],
+        ["go", "mod", "verify"],
         ["go", "build", "-mod=vendor", "-trimpath", "-buildvcs=true", "-ldflags=-s -w -X main.version=v0.4.0",
          "-o", "unfairplay", "./cmd/unfairplay"]]
     for _, _, env, cwd in (e for e in events if e[0] == "run"):
@@ -2340,10 +2359,12 @@ def test_unfairplay_is_vendored_then_built_offline_as_upstreams_release_is(tmp_p
             "GOTOOLCHAIN": "local", "GOFLAGS": "", "GOWORK": "off", "GOENV": "off", "GOPROXY": gb.GOPROXY,
             "GOSUMDB": gb.GOSUMDB, "GONOSUMDB": "", "GOPRIVATE": "", "GOINSECURE": ""}
         assert "CC" not in env and "CGO_CFLAGS" not in env, "no cgo: nothing for a C compiler"
-        for var in ("GOPATH", "GOMODCACHE", "GOCACHE", "HOME"):
+        for var in ("GOPATH", "GOCACHE", "HOME"):
             assert "/work/" not in env[var] and Path(env[var]).is_relative_to(cwd.parents[1]), var
-    assert events[7][1:] == ("unfairplay",) and events[8][1:] == ("unfairplay", "unfairplay")
-    assert events[9][1] == gb.go_deps(OUR_BUILDINFO), "the modules compiled in, from the binary"
+        assert env["GOMODCACHE"] == str(gb.go_modcache()), "the module cache every build shares"
+    assert events[8][1:] == ("unfairplay",) and events[9][1:] == ("unfairplay", "unfairplay")
+    assert events[10][1] == gb.go_deps(OUR_BUILDINFO), "the modules compiled in, from the binary"
+    assert events[10][2] == gb.go_modcache(), "their notices, from the shared module cache"
     assert (built / "unfairplay").read_bytes() == b"unfairplay binary"
     for f in ("LICENSE", "NOTICE", "LICENSE-DARKPHOENIX.txt", "LICENSE-MACOSFAIRFREE.txt"):
         assert (built / f).read_bytes() == UNFAIRPLAY_TREE[f], f
@@ -3436,9 +3457,11 @@ def test_openssl_builds_in_the_clean_environment_and_its_key_covers_steps_and_to
 
 def test_every_build_key_and_sources_md_name_the_toolchain():
     import inspect
-    for fn in (gb.build_libplist, gb.build_ldid, gb.build_cctools, gb.build_insert_dylib, gb.build_ipatool,
-               gb.build_unfairplay, gb.build_preferences_stub, gb.build_openssl):
+    for fn in (gb.build_libplist, gb.build_ldid, gb.build_cctools, gb.build_insert_dylib, gb.ipatool_key,
+               gb.unfairplay_key, gb.build_preferences_stub, gb.build_openssl):
         assert "toolchain_id()" in inspect.getsource(fn), fn.__name__
+    for fn, key in ((gb.build_ipatool, "ipatool_key"), (gb.build_unfairplay, "unfairplay_key")):
+        assert f"{key}(pin, go_pin)" in inspect.getsource(fn), fn.__name__
     assert "toolchain_id()" in inspect.getsource(gb._toolchain)
 
 
@@ -3835,3 +3858,216 @@ def test_staging_a_go_tool_whose_copyleft_module_its_licence_doesnt_name_is_refu
         licences.mkdir()
         with pytest.raises(gb.BundleError, match=rf"{tool}.*example\.com/lib@v1\.0\.0: GPL"):
             stage(pins, tmp_path / f"{tool}-Contents", licences, tmp_path / "work")
+
+
+# --- 2.0.1: one download cache per user, shared Go modules, and a phone's hotspot ---------------
+
+
+def test_downloads_are_cached_per_user_outside_every_checkout(monkeypatch):
+    """A cache in the checkout started empty in every new worktree, and a
+    release from one fetched some 350 MB again. Builds stay per checkout."""
+    monkeypatch.delenv("GRAFT_BUNDLE_CACHE", raising=False)
+    monkeypatch.delenv("GRAFT_BUNDLE_WORK", raising=False)
+    downloads, builds = gb.cache_dirs()
+    assert downloads == Path.home() / "Library" / "Caches" / "graft-release" / "bundle-cache"
+    assert not downloads.is_relative_to(REPO)
+    assert builds == REPO / "build" / "bundle-work"
+
+
+def test_two_releases_fetching_one_file_at_once_each_keep_their_own_partial_file(tmp_path, monkeypatch):
+    """The cache is shared between checkouts; one partial file name for every
+    fetch let two downloads write into one file."""
+    body = b"pinned bytes"
+    pin = gb.Pin(name="x", url="https://example.invalid/x.tar.gz", sha256=hashlib.sha256(body).hexdigest(),
+                 license="MIT")
+    parts = []
+
+    def download(url, dest):
+        parts.append(dest)
+        if len(parts) == 1:
+            gb.fetch(pin, tmp_path)  # another release, mid-download
+        dest.write_bytes(body)
+
+    monkeypatch.setattr(gb, "_download", download)
+    assert gb.fetch(pin, tmp_path).read_bytes() == body
+    assert len(set(parts)) == 2 and all(p.parent == tmp_path for p in parts)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.tar.gz"]
+    assert (tmp_path / "x.tar.gz").stat().st_mode & 0o777 == 0o644
+
+
+def test_go_modules_are_vendored_then_verified_then_built(tmp_path):
+    """Go checks a cached module only by the hash it recorded at download;
+    with the cache shared, `go mod verify` re-hashes the zips and unpacked
+    files before anything is built from them."""
+    ipatool = gb.ipatool_steps("2.8.0")
+    unfairplay = gb.unfairplay_steps("0.4.0", "https://example.invalid/u.git", "0" * 40)
+    for steps in (ipatool, unfairplay):
+        at = steps.index(["go", "mod", "vendor"])
+        assert steps[at + 1] == ["go", "mod", "verify"] == gb.GO_VERIFY
+        assert steps[at + 2][:2] == ["go", "build"] and "-mod=vendor" in steps[at + 2]
+    assert gb.GO_HERMETIC["GOFLAGS"] == "" and gb.GO_HERMETIC["GOPROXY"] == gb.GOPROXY
+    assert gb.GO_HERMETIC["GOSUMDB"] == gb.GOSUMDB and gb.GO_HERMETIC["GONOSUMDB"] == ""
+
+
+def test_go_shares_its_module_cache_and_nothing_else(tmp_path):
+    go = tmp_path / "go"
+    (tmp_path / "build").mkdir()
+    env = gb.go_env(go, tmp_path / "build", gb.UNFAIRPLAY_ENV, tmp_path / "shared" / "mod")
+    assert env["GOMODCACHE"] == str(tmp_path / "shared" / "mod") and (tmp_path / "shared" / "mod").is_dir()
+    for var in ("GOPATH", "GOCACHE", "HOME"):
+        assert Path(env[var]).parent == tmp_path / "build", var
+    assert gb.go_env(go, tmp_path / "build", gb.UNFAIRPLAY_ENV)["GOMODCACHE"] == str(gb.go_modcache())
+    assert gb.go_modcache() == gb.CACHE / "go-modcache"
+
+
+def test_a_go_build_records_the_modules_it_fetched_for_the_next_releases_plan(tmp_path):
+    modcache = tmp_path / "mod"
+    pin = gb.Pin(name="ipatool", url="https://example.invalid/i.tar.gz", sha256="a" * 64, license="MIT")
+    txt = tmp_path / "modules.txt"
+    txt.write_text("# example.com/A v1.0.0\n## explicit\nexample.com/A\n# example.com/only/required v0.1.0\n"
+                   "## explicit\n# example.com/old v1.0.0 => example.com/new v1.1.0\nexample.com/old\n")
+    for module, version in (("example.com/!a", "v1.0.0"), ("example.com/new", "v1.1.0")):
+        z = modcache / "cache" / "download" / module / "@v" / f"{version}.zip"
+        z.parent.mkdir(parents=True)
+        z.write_bytes(b"zip")
+    assert not gb.go_modules_cached(modcache, pin)
+    gb.record_go_modules(modcache, pin, txt)
+    record = gb._go_modules_record(modcache, pin)
+    assert record.read_text() == "example.com/A v1.0.0\nexample.com/new v1.1.0\n", \
+        "a requirement no package came from is never downloaded, so isn't recorded"
+    assert gb.go_modules_cached(modcache, pin)
+    assert not gb.go_modules_cached(modcache, gb.Pin(**{**pin.__dict__, "sha256": "b" * 64})), "another source"
+    (modcache / "cache" / "download" / "example.com/new" / "@v" / "v1.1.0.zip").unlink()
+    assert not gb.go_modules_cached(modcache, pin), "a module gone from the cache since"
+
+
+def test_a_build_product_naming_the_download_cache_is_refused(tmp_path):
+    def build(tmp, out):
+        (out / "tool").write_bytes(b"built from " + str(gb.CACHE / "go-modcache" / "x").encode())
+    with pytest.raises(gb.BundleError, match="download cache's path in tool"):
+        gb._cached_build("leaky", "k" * 12, tmp_path / "work", build)
+
+
+def _plan_world(tmp_path, monkeypatch):
+    """Pins, locks and caches for download_plan, all made up."""
+    monkeypatch.setattr(gb, "toolchain_id", lambda: "Apple clang version 99, macOS SDK 99.0")
+    cache, work = tmp_path / "cache", tmp_path / "work"
+    (cache / "crates").mkdir(parents=True)
+    work.mkdir()
+
+    def pin(name, body, url=None):
+        return gb.Pin(name=name, url=url or f"https://example.invalid/{name}.tar.gz",
+                      sha256=hashlib.sha256(body).hexdigest(), license="MIT", version="1.0")
+    commit = "c" * 40
+    pins = {"go": pin("go", b"go"), "openssl": pin("openssl", b"openssl"),
+            "ipatool": pin("ipatool", b"ipatool"),
+            "unfairplay": pin("unfairplay", b"u", f"https://example.invalid/o/u/archive/{commit}.tar.gz")}
+    (cache / "go.tar.gz").write_bytes(b"go")
+    (cache / "openssl.tar.gz").write_bytes(b"stale bytes")
+    (cache / f"{commit}.tar.gz").write_bytes(b"u")
+    lock = tmp_path / "requirements.lock"
+    lock.write_text("aaa-pkg==1.0 \\\n    --hash=sha256:" + "1" * 64 + "\nbbb==2.0 \\\n    --hash=sha256:" + "2" * 64
+                    + "\nccc==3.0 \\\n    --hash=sha256:" + "3" * 64 + "\n")
+    (cache / "aaa_pkg-1.0.tar.gz").write_bytes(b"sdist")
+    (cache / "bbb-2.0.zip").write_bytes(b"sdist")
+    crates = tmp_path / "core-crates.lock"
+    crates.write_text('[[package]]\nname = "ring"\nversion = "0.17.0"\nchecksum = "' + "4" * 64 + '"\n'
+                      '[[package]]\nname = "nom"\nversion = "7.1.0"\nchecksum = "' + "5" * 64 + '"\n')
+    (cache / "crates" / "ring-0.17.0.crate").write_bytes(b"crate")
+    return pins, cache, work, lock, crates
+
+
+def test_the_plan_lists_only_what_isnt_cached_without_touching_the_network(tmp_path, monkeypatch):
+    pins, cache, work, lock, crates = _plan_world(tmp_path, monkeypatch)
+    monkeypatch.setattr(gb, "_urlopen", lambda *a, **k: pytest.fail("the plan went to the network"))
+    plan = gb.download_plan(pins, cache, work, lock, crates)
+    assert [(d.what, d.mb, d.kept) for d in plan] == [
+        ("openssl 1.0", 53, True),
+        ("ipatool 1.0", 6, True),
+        ("ipatool's Go modules", 100, True),
+        ("unfairplay's Go modules", 1, True),
+        ("1 source distribution(s) for the source archive: ccc 3.0", 1.0, True),
+        ("1 Rust crate(s) for their licenses", 0.15, True),
+        ("the Python wheels the app bundles (every build downloads them again)", None, False)]
+
+
+def test_go_modules_a_cached_build_or_an_earlier_one_fetched_are_not_planned(tmp_path, monkeypatch):
+    pins, cache, work, lock, crates = _plan_world(tmp_path, monkeypatch)
+    (work / f"ipatool-{gb.ipatool_key(pins['ipatool'], pins['go'])[:12]}").mkdir()
+    record = gb._go_modules_record(gb.go_modcache(cache), pins["unfairplay"])
+    record.parent.mkdir(parents=True)
+    record.write_text("")
+    whats = [d.what for d in gb.download_plan(pins, cache, work, lock, crates)]
+    assert "ipatool's Go modules" not in whats and "unfairplay's Go modules" not in whats
+
+
+ROUTE = """   route to: default
+destination: default
+       mask: default
+    gateway: {gateway}
+  interface: {interface}
+      flags: <UP,GATEWAY,DONE,STATIC,PRCLONING,GLOBAL>
+"""
+
+
+@pytest.mark.parametrize("out, code, want", [
+    (ROUTE.format(gateway="172.20.10.1", interface="en7"), 0, ("172.20.10.1", "en7")),
+    (ROUTE.format(gateway="192.168.1.1", interface="en0"), 0, ("192.168.1.1", "en0")),
+    ("route: writing to routing socket: not in table\n", 1, None)])
+def test_the_default_route_is_read_from_route(monkeypatch, out, code, want):
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, code, out, "")
+    monkeypatch.setattr(gb.subprocess, "run", run)
+    assert gb.default_route() == want
+    assert calls == [["/sbin/route", "-n", "get", "default"]]
+
+
+def _on(monkeypatch, gateway: str, plan: list) -> None:
+    monkeypatch.setattr(gb, "default_route", lambda: (gateway, "en7"))
+    monkeypatch.setattr(gb, "download_plan", lambda pins: plan)
+    monkeypatch.delenv("GRAFT_ALLOW_HOTSPOT", raising=False)
+
+
+BIG = [gb.Download("go 1.26.5", 65), gb.Download("ipatool's Go modules", 100), gb.Download("x", None),
+       gb.Download("the Python wheels", None, kept=False)]
+
+
+def test_off_a_hotspot_nothing_is_planned_or_asked(monkeypatch, capsys):
+    _on(monkeypatch, "192.168.1.1", BIG)
+    monkeypatch.setattr(gb, "download_plan", lambda pins: pytest.fail("planned off a hotspot"))
+    assert gb.check_hotspot({}, interactive=True, answer=lambda: pytest.fail("asked"))
+    assert capsys.readouterr().err == ""
+
+
+def test_on_a_hotspot_with_only_the_wheels_left_it_says_so_and_goes_on(monkeypatch, capsys):
+    _on(monkeypatch, gb.HOTSPOT_GATEWAY, BIG[3:])
+    assert gb.check_hotspot({}, interactive=True, answer=lambda: pytest.fail("asked"))
+    assert "hotspot" in capsys.readouterr().err
+
+
+def test_on_a_hotspot_it_says_what_and_how_much_then_asks(monkeypatch, capsys):
+    _on(monkeypatch, gb.HOTSPOT_GATEWAY, BIG)
+    assert gb.check_hotspot({}, interactive=True, answer=lambda: "y\n")
+    err = capsys.readouterr().err
+    assert "172.20.10.1 on en7" in err and "65 MB  go 1.26.5" in err and "about 165 MB in all, plus 1 of a size" in err
+    assert "[y/N]" in err
+    assert not gb.check_hotspot({}, interactive=True, answer=lambda: "\n"), "no is the default"
+    assert not gb.check_hotspot({}, interactive=True, answer=lambda: ""), "and end of input is no"
+
+
+def test_on_a_hotspot_with_no_one_to_ask_it_stops_unless_allowed(monkeypatch, capsys):
+    _on(monkeypatch, gb.HOTSPOT_GATEWAY, BIG)
+    assert not gb.check_hotspot({}, interactive=False, answer=lambda: pytest.fail("asked"))
+    assert "GRAFT_ALLOW_HOTSPOT=1" in capsys.readouterr().err
+    monkeypatch.setenv("GRAFT_ALLOW_HOTSPOT", "1")
+    assert gb.check_hotspot({}, interactive=False, answer=lambda: pytest.fail("asked"))
+
+
+def test_the_hotspot_check_is_a_command_whose_status_says_go_on_or_stop(monkeypatch):
+    monkeypatch.setattr(gb, "check_hotspot", lambda pins: False)
+    assert gb.main(["hotspot-check"]) == 1
+    monkeypatch.setattr(gb, "check_hotspot", lambda pins: True)
+    assert gb.main(["hotspot-check"]) == 0

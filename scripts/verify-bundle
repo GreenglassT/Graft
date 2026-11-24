@@ -846,6 +846,44 @@ def check_no_build_paths(app: Path, report: Report) -> None:
                  f"{len(hits)} do" if hits else "", output="\n".join(hits[:20]))
 
 
+def _denylist_module():
+    """scripts/denylist.py: the scan for names on the private deny-list."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("denylist_for_verify", REPO / "scripts" / "denylist.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+DENYLIST_CHECK = "no file of Graft's, and no file name, holds a term on the private deny-list"
+
+
+def check_no_denylisted_names(app: Path, report: Report) -> None:
+    """The scan for the release machine's paths looks only for what pwd and
+    the checkout say. A real iOS app's name sat in public code comments from
+    1.0 to 2.0, so this scans the app for the private deny-list's terms:
+    every file's name, and the contents (zlib streams and archives too) of
+    every file of Graft's own. Others', pinned by hash, keep upstream's
+    names, and neither those nor their contents are scanned
+    (denylist.APP_THIRD_PARTY, app_names_scanned). A list that can't be read fails;
+    GRAFT_SKIP_DENYLIST=1 leaves the check out, saying so, and it is then
+    neither passed nor failed."""
+    dl_mod = _denylist_module()
+    if dl_mod.skipped():
+        print(f"SKIP  {DENYLIST_CHECK} — {dl_mod.skip_warning()}", flush=True)
+        return
+    try:
+        dl = dl_mod.load()
+    except dl_mod.DenylistError as e:
+        report.check(DENYLIST_CHECK, False, f"{e}; set {dl_mod.PATH_ENV} to the private scrub list, "
+                     f"or {dl_mod.SKIP_ENV}=1 to leave this check out")
+        return
+    hits = dl_mod.scan_path(app, dl, contents=dl_mod.app_contents_scanned, names=dl_mod.app_names_scanned)
+    report.check(DENYLIST_CHECK, not hits, f"{len(hits)} do" if hits else f"{len(dl.entries)} terms",
+                 output="\n".join(map(str, hits[:40])))
+
+
 #: Section names a coverage or profiling build leaves in a Mach-O; their
 #: contents hold the source tree's paths.
 COVERAGE_SECTIONS = (b"__llvm_covmap", b"__llvm_covfun", b"__llvm_prf_")
@@ -1932,6 +1970,7 @@ def verify_app(app: Path, report: Report, work: Path, *, gatekeeper_accepted: bo
     check_rust_crate_notices(app, report)
     check_no_junk(app, report)
     check_no_build_paths(app, report)
+    check_no_denylisted_names(app, report)
     check_no_coverage_sections(app, report)
     check_no_symlinks(app, report)
     check_links(app, report)

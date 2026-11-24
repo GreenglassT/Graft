@@ -238,9 +238,10 @@ final class AccountSetupStore {
     /// with the CLI's reason in `error`.
     private func run(_ args: [String], stdin: String?, doing: String) async -> InitResultRecord? {
         isRunning = true
-        hold.begin(TerminationHold.settingUp)
+        // No stop: a write has no Stop (`cancel`), so Quit Anyway only waits.
+        let ticket = hold.begin(TerminationHold.settingUp, stop: nil)
         defer {
-            hold.end(TerminationHold.settingUp)
+            hold.end(ticket)
             isRunning = false
         }
         error = nil

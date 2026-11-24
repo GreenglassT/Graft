@@ -3,6 +3,41 @@
 What changed in each release of Graft, newest first. Each release's download
 is on [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
 
+## 2.0.1 (2026-11-24)
+
+Graft now tells you when a new version is out, and has a new icon.
+
+- **Update notice.** Once a day while it's open, Graft asks GitHub whether a
+  newer version is out, through its own CLI (`graft --check-update`), and shows
+  a banner if there is one. That's one request, sent as `User-Agent: Graft`,
+  with nothing that identifies you or your Mac, and it never downloads or
+  installs anything. Help › Check for Updates… asks any time, and Settings ›
+  Updates turns the daily check off. [What Graft connects to](docs/network.md)
+  lists it.
+- **What's New.** Help › What's New… shows this changelog inside the app.
+- **A new icon:** two pieces joined on the diagonal and taped, with a leaf at
+  the tip.
+- **Get Again.** When the version the App Store has is the one already staged,
+  Get latest from App Store downloads nothing and says "Already have
+  <version>". Get Again, or `--again` with `--appstore-get`, downloads it
+  anyway.
+
+### Fixes
+
+- **Set Up Decryption** suggests opening the app you picked first, with a
+  button that does it: macOS sometimes clears the App Store state that step
+  reads, even for an app you've already opened, and opening the app writes it
+  again. If the state still isn't there, root stops before it copies or
+  changes anything (the script exits 69) and the sheet says which app to open.
+  The time limit root works under no longer measures an app through a link.
+- **Quitting, logging out or restarting while Graft is working** (a build or
+  install, an App Store download, setting up decryption or your signing
+  account, a LiveContainer change, or a decrypt from a device) asks first. Keep
+  Working cancels the quit; Quit Anyway stops the work cleanly, then quits.
+- **Installing LiveContainer** waits up to 15 minutes for you to close
+  LiveContainer only when it's updating a copy already on the device. A first
+  install keeps the usual minute and the dropped-connection hint.
+
 ## 2.0 (2026-11-23)
 
 Graft no longer needs Terminal.

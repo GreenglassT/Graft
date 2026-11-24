@@ -231,8 +231,8 @@ final class LiveContainerStore {
 
     private func perform(_ action: Action, udid: String, args: [String], failing: String) async {
         guard !isRunning else { return }
-        hold.begin(TerminationHold.liveContainer)
-        defer { hold.end(TerminationHold.liveContainer) }
+        let ticket = hold.begin(TerminationHold.liveContainer) { [weak self] in self?.stop() }
+        defer { hold.end(ticket) }
         run = Run(udid: udid, action: action)
         do {
             let result = try await runner.stream(arguments: args) { [weak self] event in

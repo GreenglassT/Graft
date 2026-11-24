@@ -26,12 +26,17 @@ targets:
       - path: Graft
         excludes:
           - "Info.plist"
+      # Contents/Resources/CHANGELOG.md, which Help › What's New… shows
+      # (`Changelog`). The repository's own file, so the two never differ.
+      - path: ../CHANGELOG.md
+        group: Graft
+        buildPhase: resources
     info:
       path: Graft/Info.plist
       properties:
         CFBundleDisplayName: Graft
-        CFBundleShortVersionString: "2.0"
-        CFBundleVersion: "4"
+        CFBundleShortVersionString: "2.0.1"
+        CFBundleVersion: "5"
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSPrincipalClass: NSApplication

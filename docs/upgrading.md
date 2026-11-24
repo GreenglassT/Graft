@@ -161,7 +161,7 @@ yours.
 **Before you sign in.** Settings › App Store reads "signed in by another
 ipatool (Graft 1's?): sign in again". Graft looks only at whether the items
 are there, never inside them, so opening Settings shows no Keychain dialog.
-Get latest from App Store refuses until you sign in, and says why.
+Get latest from App Store refuses to download until you sign in, and says why.
 
 **Signing in.** Press **Sign In…**. The sheet says what will happen: "This
 also signs out any ipatool you installed yourself; it will need to sign in

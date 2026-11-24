@@ -190,6 +190,9 @@ class Codes:
 
 
 def _sign_in(fakes: FakeTools, *, codes=None, **kw) -> tuple[str, list[dict]]:
+    # The silence limit counts from the spawn. macOS's check of a new
+    # executable on its first run belongs before that, not inside the limit.
+    fakes.warm_up()
     stream = io.StringIO()
     email = appstore_login.sign_in(
         fakes.ipatool, secret(FAKE_EMAIL.encode()), secret(PASSWORD), codes or Codes(),

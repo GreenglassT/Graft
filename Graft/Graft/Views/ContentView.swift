@@ -206,6 +206,11 @@ struct ContentView: View {
     /// Whether a return refresh is running, and when the last one finished:
     /// returns that come in a burst cost one refresh. See `ReturnRefreshGate`.
     @State private var returnRefresh = ReturnRefreshGate()
+    /// Whether a newer Graft is out: the banner under the panes, the daily
+    /// check, and Check for Updates…'s alert. `GraftApp`'s, since the Help
+    /// menu reaches it too. Nil only in a test that hosts this window for
+    /// something else: no check runs and no banner shows.
+    private let updates: UpdateStore?
 
     /// - Parameter selection: what to open on, for a test that needs to reach a
     ///   pane it cannot click its way to.
@@ -235,9 +240,17 @@ struct ContentView: View {
     /// `adminShell` is the one Set Up Decryption runs behind macOS's
     /// administrator prompt. No default: `GraftApp` passes the real one, a
     /// test a fake (`NoRealDefaultsTests`).
-    init(store: ConfigStore, selection: SidebarItem? = nil, adminShell: PrivilegedShell) {
+    /// `openApp` is Set Up Decryption's "Open <App>": `GraftApp` passes
+    /// NSWorkspace's, and the default, which every test here takes, opens
+    /// nothing.
+    init(
+        store: ConfigStore, selection: SidebarItem? = nil, adminShell: PrivilegedShell,
+        updates: UpdateStore? = nil,
+        openApp: @escaping @MainActor (URL) -> Void = { _ in }
+    ) {
         self._store = Bindable(store)
         self._selection = State(initialValue: selection)
+        self.updates = updates
         self._tweaksStore = State(initialValue: TweaksStore(runner: store.runner))
         self._canisterStore = State(initialValue: CanisterStore(runner: store.runner))
         self._repoStore = State(initialValue: RepoStore(runner: store.runner))
@@ -250,7 +263,7 @@ struct ContentView: View {
         self._deviceAppsStore = State(initialValue: DeviceAppsStore(runner: store.runner))
         self._liveContainerStore = State(initialValue: LiveContainerStore(runner: store.runner))
         self._stagedIPAStore = State(initialValue: StagedIPAStore(runner: store.runner))
-        self._appStoreStore = State(initialValue: AppStoreStore(runner: store.runner, shell: adminShell))
+        self._appStoreStore = State(initialValue: AppStoreStore(runner: store.runner, shell: adminShell, openApp: openApp))
         self._accountSetupStore = State(initialValue: AccountSetupStore(runner: store.runner))
         self._settingsAccountStore = State(initialValue: AccountSetupStore(runner: store.runner))
     }
@@ -276,48 +289,15 @@ struct ContentView: View {
                 // widened at the same time.)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
         } detail: {
-            // Over every pane, not only the app pane: each of them runs the
-            // same CLI against the same missing config, and each would put up
-            // its own alert about it. The sidebar stays — empty, but usable.
-            if let need = Self.setupScreen(need: store.setupNeed, holding: accountSetupStore.holdsSetupScreen) {
-                SetupView(
-                    need: need, isChecking: store.isCheckingSetup,
-                    onCheckAgain: { Task { await checkSetup(.checkAgain) } },
-                    onContinueWithoutTools: { store.continueWithoutTools() },
-                    accountSetup: accountSetupStore,
-                    onAccountSetupFinished: {
-                        Task {
-                            // A check already in flight (a window return
-                            // starts one) would make this one return at once,
-                            // and finish() would put Welcome back up until it
-                            // landed. Wait it out, then check.
-                            while store.isCheckingSetup {
-                                try? await Task.sleep(for: .milliseconds(50))
-                            }
-                            await checkSetup(.accountSetupFinished)
-                            accountSetupStore.finish()
-                        }
+            detailContent
+                // Under the setup screen and every pane alike: a newer Graft
+                // may be the fix for whatever is on screen. Quiet, like the
+                // tools notice, and below it.
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if let updates, let release = updates.banner, let version = release.latest {
+                        UpdateNotice(version: version) { updates.openReleasePage(release) }
                     }
-                )
-            } else {
-                sectionContent
-                    // Non-modal and below the pane, not over it: a missing
-                    // tool is worth knowing before a build fails on it, and
-                    // not worth interrupting anything else for.
-                    .safeAreaInset(edge: .bottom, spacing: 0) {
-                        if let missing = Self.toolsNotice(
-                            missing: settingsStore.missingTools,
-                            dismissed: dismissedToolsNotice,
-                            showingSettings: selection == .section(.settings)
-                        ) {
-                            MissingToolsNotice(
-                                count: missing.count,
-                                onShow: { selection = .section(.settings) },
-                                onDismiss: { dismissedToolsNotice = missing }
-                            )
-                        }
-                    }
-            }
+                }
         }
         .task {
             await checkSetup(.launch)
@@ -591,6 +571,83 @@ struct ContentView: View {
             guard let reported, reported != store.account else { return }
             Task { try? await store.reload() }
         }
+        // Check for Updates…'s answer. The daily check never sets one.
+        .alert(
+            updates?.answer?.title ?? "",
+            isPresented: Binding(
+                get: { updates?.answer != nil },
+                set: { if !$0 { updates?.answer = nil } }
+            ),
+            presenting: updates?.answer
+        ) { answer in
+            if case let .available(release) = answer {
+                Button("Open Release Page") { updates?.openReleasePage(release) }
+                Button("Later", role: .cancel) {}
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: { answer in
+            Text(answer.message(appVersion: updates?.appVersion ?? ""))
+        }
+        // The daily check: now, then hourly while the app is open, each a
+        // no-op until a day has passed since the last success
+        // (`UpdateStore.isDue`). Not keyed on `controlActiveState` like the
+        // device poll: "while the app is open" includes behind other windows,
+        // and a wake with nothing to do starts no subprocess.
+        .task {
+            guard let updates else { return }
+            while !Task.isCancelled {
+                await updates.checkIfDue()
+                try? await Task.sleep(for: UpdateStore.pollInterval)
+            }
+        }
+    }
+
+    /// The setup screen, or the panes with the tools notice under them.
+    @ViewBuilder
+    private var detailContent: some View {
+        // Over every pane, not only the app pane: each of them runs the
+        // same CLI against the same missing config, and each would put up
+        // its own alert about it. The sidebar stays — empty, but usable.
+        if let need = Self.setupScreen(need: store.setupNeed, holding: accountSetupStore.holdsSetupScreen) {
+            SetupView(
+                need: need, isChecking: store.isCheckingSetup,
+                onCheckAgain: { Task { await checkSetup(.checkAgain) } },
+                onContinueWithoutTools: { store.continueWithoutTools() },
+                accountSetup: accountSetupStore,
+                onAccountSetupFinished: {
+                    Task {
+                        // A check already in flight (a window return
+                        // starts one) would make this one return at once,
+                        // and finish() would put Welcome back up until it
+                        // landed. Wait it out, then check.
+                        while store.isCheckingSetup {
+                            try? await Task.sleep(for: .milliseconds(50))
+                        }
+                        await checkSetup(.accountSetupFinished)
+                        accountSetupStore.finish()
+                    }
+                }
+            )
+        } else {
+            sectionContent
+                // Non-modal and below the pane, not over it: a missing
+                // tool is worth knowing before a build fails on it, and
+                // not worth interrupting anything else for.
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if let missing = Self.toolsNotice(
+                        missing: settingsStore.missingTools,
+                        dismissed: dismissedToolsNotice,
+                        showingSettings: selection == .section(.settings)
+                    ) {
+                        MissingToolsNotice(
+                            count: missing.count,
+                            onShow: { selection = .section(.settings) },
+                            onDismiss: { dismissedToolsNotice = missing }
+                        )
+                    }
+                }
+        }
     }
 
     /// What started a setup check.
@@ -858,7 +915,8 @@ struct ContentView: View {
                 account: store.account,
                 accountSetup: settingsAccountStore,
                 onAccountChanged: { await Self.afterAccountChange(config: store, settings: settingsStore) },
-                isBuilding: store.buildingApp != nil
+                isBuilding: store.buildingApp != nil,
+                updates: updates
             )
         case .none:
             // Three ways to be here, and they are not interchangeable: before
@@ -960,6 +1018,49 @@ struct MissingToolsNotice: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Dismiss")
             .help("Hide until a different tool goes missing")
+        }
+        .padding(.horizontal, Metrics.paneGutter)
+        .padding(.vertical, Metrics.innerPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Palette.surface)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Palette.line).frame(height: 1)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+/// "Graft 2.0.1 is available": the main window's word that the daily check
+/// found a newer release, with the way to its page.
+///
+/// `MissingToolsNotice`'s strip, with the accent rather than a warning: nothing
+/// is wrong. No dismiss button: Settings › Updates turns the check, and this
+/// with it, off. Graft downloads and installs nothing; the page is where the
+/// new Graft.zip is.
+struct UpdateNotice: View {
+    let version: String
+    let onOpen: () -> Void
+
+    static func text(version: String) -> String {
+        "Graft \(version) is available"
+    }
+
+    static let buttonTitle = "Release Page"
+
+    var body: some View {
+        HStack(spacing: Metrics.controlGap) {
+            Symbols.updateAvailable.image(size: 12)
+                .foregroundStyle(Palette.accent)
+                .accessibilityHidden(true)
+            Text(Self.text(version: version))
+                .font(AppFont.body)
+                .foregroundStyle(Palette.text)
+            Spacer(minLength: Metrics.controlGap)
+            Button(Self.buttonTitle, action: onOpen)
+                .buttonStyle(.borderless)
+                .font(AppFont.body)
+                .foregroundStyle(Palette.accent)
+                .help("Open this release's page on GitHub, where the new Graft.zip is")
         }
         .padding(.horizontal, Metrics.paneGutter)
         .padding(.vertical, Metrics.innerPadding)

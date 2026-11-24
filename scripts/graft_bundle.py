@@ -48,13 +48,24 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 
 
+def default_download_cache() -> Path:
+    """~/Library/Caches/graft-release/bundle-cache: one per user, outside
+    every checkout. A cache inside the checkout started empty in each new
+    worktree, so a release from one fetched some 350 MB again. Sharing it
+    trusts nothing new: fetch() checks a cached file's SHA-256 on every use,
+    and Go checks its modules against go.sum (and `go mod verify`)."""
+    return Path.home() / "Library" / "Caches" / "graft-release" / "bundle-cache"
+
+
 def cache_dirs() -> tuple[Path, Path]:
-    """(downloads, build products) caches: build/bundle-cache and
-    build/bundle-work, or GRAFT_BUNDLE_CACHE and GRAFT_BUNDLE_WORK, which
-    graft-release sets so a stage run from a fresh export keeps the
-    checkout's caches (everything in them is keyed by content hashes)."""
+    """(downloads, build products) caches: GRAFT_BUNDLE_CACHE, else
+    default_download_cache(); and GRAFT_BUNDLE_WORK, else build/bundle-work,
+    which graft-release sets so a stage run from a fresh export keeps the
+    checkout's builds. Builds stay per checkout: each stage rewrites
+    folders there (pip-reports/, tool-licences/) that two checkouts staging
+    at once would trample."""
     out = []
-    for var, default in (("GRAFT_BUNDLE_CACHE", REPO / "build" / "bundle-cache"),
+    for var, default in (("GRAFT_BUNDLE_CACHE", default_download_cache()),
                          ("GRAFT_BUNDLE_WORK", REPO / "build" / "bundle-work")):
         value = os.environ.get(var)
         if value and not os.path.isabs(value):
@@ -159,13 +170,20 @@ def fetch(pin: Pin, cache: Path = CACHE) -> Path:
     dest = cache / pin.filename
     if dest.exists() and _sha256(dest) == pin.sha256:
         return dest
-    part = dest.with_name(dest.name + ".part")
-    _download(pin.url, part)
-    got = _sha256(part)
-    if got != pin.sha256:
+    # A partial file of this download's own: the cache is shared between
+    # checkouts, so two releases may fetch the same file at once.
+    fd, raw = tempfile.mkstemp(prefix=f"{dest.name}.", suffix=".part", dir=cache)
+    os.close(fd)
+    part = Path(raw)
+    try:
+        _download(pin.url, part)
+        got = _sha256(part)
+        if got != pin.sha256:
+            raise BundleError(f"{pin.name}: SHA-256 mismatch for {pin.url}: got {got}, pinned {pin.sha256}")
+        part.chmod(0o644)  # mkstemp's 0600 would differ from every other cached file
+        part.replace(dest)
+    finally:
         part.unlink(missing_ok=True)
-        raise BundleError(f"{pin.name}: SHA-256 mismatch for {pin.url}: got {got}, pinned {pin.sha256}")
-    part.replace(dest)
     return dest
 
 
@@ -467,8 +485,9 @@ def _cached_build(name: str, key: str, work: Path, build: Callable[[Path, Path],
     The build runs in a fresh temporary directory, never under `work`:
     autotools and these Makefiles don't survive a space in a path, and this
     repo usually lives in one. A build whose products name that temporary
-    directory is refused. The finished tree is renamed into place whole, so
-    one that exists is complete.
+    directory, or the downloads cache (where Go's module cache is, outside
+    it), is refused. The finished tree is renamed into place whole, so one
+    that exists is complete.
     """
     done = work / f"{name}-{key[:12]}"
     if done.is_dir():
@@ -481,11 +500,12 @@ def _cached_build(name: str, key: str, work: Path, build: Callable[[Path, Path],
         out = tmp / "out"
         out.mkdir()
         build(tmp, out)
-        needles = {raw.encode(), str(tmp).encode()}
+        needles = {raw.encode(), str(tmp).encode(), str(CACHE).encode()}
         leaks = [str(p.relative_to(out)) for p in sorted(out.rglob("*"))
                  if p.is_file() and not p.is_symlink() and any(n in p.read_bytes() for n in needles)]
         if leaks:
-            raise BundleError(f"{name}: the build left its build directory's path in {', '.join(leaks)}")
+            raise BundleError(f"{name}: the build left its build directory's or the download cache's path in "
+                              f"{', '.join(leaks)}")
         shutil.rmtree(part, ignore_errors=True)
         work.mkdir(parents=True, exist_ok=True)
         shutil.copytree(out, part, symlinks=True)
@@ -615,13 +635,25 @@ GOSUMDB = "sum.golang.org"
 
 def ipatool_steps(version: str) -> list[list[str]]:
     """Run in ipatool's source, after its patch, with go_env(IPATOOL_ENV). The
-    first downloads the modules (into vendor/, checked against go.sum); the
-    second builds offline from vendor/ alone, with no build path recorded."""
+    first copies the modules into vendor/ (from the module cache, downloading
+    what it lacks, each checked against go.sum); the second re-hashes what
+    the cache holds of them (GO_VERIFY); the third builds offline from
+    vendor/ alone, with no build path recorded."""
     return [
         ["go", "mod", "vendor"],
+        GO_VERIFY,
         ["go", "build", "-mod=vendor", "-trimpath", "-buildvcs=false",
          f"-ldflags=-X github.com/majd/ipatool/v2/cmd.version={version}", "-o", "ipatool", "."],
     ]
+
+
+#: After `go mod vendor`. The module cache is shared between builds and
+#: checkouts (go_modcache), and Go checks a cached module only by the hash
+#: it recorded when it downloaded it (the `.ziphash`, against go.sum), never
+#: the zip or the unpacked files `go mod vendor` copies. This re-hashes both
+#: against that record, so a cached module altered since its download stops
+#: the build, as a fresh download that failed go.sum would.
+GO_VERIFY = ["go", "mod", "verify"]
 
 
 #: Every Go build here: Go told to use exactly the pinned toolchain, and only
@@ -639,16 +671,84 @@ IPATOOL_ENV = {
 }
 
 
-def go_env(go: Path, tmp: Path, settings: dict[str, str]) -> dict[str, str]:
+def go_modcache(cache: Path | None = None) -> Path:
+    """The Go module cache every build here shares (its download cache is
+    its cache/download/): in the downloads cache (`cache`, CACHE unless
+    given), so a release fetches each module once per machine, not once per
+    build. Go makes it read-only; `chmod -R u+w` it before deleting it by
+    hand. CACHE is read at call time, so a test can point it elsewhere."""
+    return (cache or CACHE) / "go-modcache"
+
+
+def go_env(go: Path, tmp: Path, settings: dict[str, str], modcache: Path | None = None) -> dict[str, str]:
     """_build_env(), plus `go`'s bin first on PATH, a build's `settings`
-    (IPATOOL_ENV, UNFAIRPLAY_ENV), and Go's caches in `tmp` (never the
-    release machine's)."""
+    (IPATOOL_ENV, UNFAIRPLAY_ENV), the module cache `modcache` (go_modcache()
+    unless given), and Go's other state, GOPATH (where the checksum
+    database's latest tree head is kept), the build cache and HOME, in
+    `tmp`: never the release machine's own."""
     env = {**_build_env(), **settings}
     env["PATH"] = f"{go / 'bin'}:{env['PATH']}"
-    for var, d in (("GOPATH", "gopath"), ("GOMODCACHE", "modcache"), ("GOCACHE", "gocache"), ("HOME", "home")):
+    for var, d in (("GOPATH", "gopath"), ("GOCACHE", "gocache"), ("HOME", "home")):
         (tmp / d).mkdir(exist_ok=True)
         env[var] = str(tmp / d)
+    modcache = modcache or go_modcache()
+    modcache.mkdir(parents=True, exist_ok=True)
+    env["GOMODCACHE"] = str(modcache)
     return env
+
+
+def _module_dir(module: str) -> str:
+    """A module path as the module cache spells it: each capital letter as "!x"."""
+    return re.sub(r"[A-Z]", lambda m: "!" + m[0].lower(), module)
+
+
+def _go_modules_record(modcache: Path, pin: Pin) -> Path:
+    """Where a Go tool's build records the modules it vendored from
+    `modcache`, by the source built (its pin's hash and patches): the plan
+    (download_plan) reads it to tell whether a build would download any. In
+    the cache itself, so whatever removes the cache removes it too."""
+    source = hashlib.sha256(json.dumps([pin.sha256, patch_hashes(pin.name)]).encode()).hexdigest()
+    return modcache / ".graft-release" / f"{pin.name}-{source[:16]}.txt"
+
+
+def _module_zip(modcache: Path, module: str, version: str) -> Path:
+    return modcache / "cache" / "download" / _module_dir(module) / "@v" / f"{version}.zip"
+
+
+def record_go_modules(modcache: Path, pin: Pin, modules_txt: Path) -> None:
+    """After a Go tool's modules are vendored and verified: each module
+    vendor/modules.txt names whose zip the cache holds, one `<module>
+    <version>` per line. (modules.txt also names requirements no package
+    came from, which Go never downloads.)"""
+    modules = sorted(f"{m} {v}" for m, v in _modules_txt_modules(modules_txt.read_text())
+                     if _module_zip(modcache, m, v).is_file())
+    record = _go_modules_record(modcache, pin)
+    record.parent.mkdir(exist_ok=True)
+    record.write_text("".join(f"{m}\n" for m in modules))
+
+
+def _modules_txt_modules(text: str) -> set[tuple[str, str]]:
+    """(module, version) of each `# module version` line of vendor/modules.txt
+    (a replacement counts as the module it is replaced with)."""
+    found = set()
+    for line in text.splitlines():
+        if line.startswith("# "):
+            old, _, new = line[2:].partition(" => ")
+            module = new.split() if new else old.split()
+            if len(module) == 2:
+                found.add((module[0], module[1]))
+    return found
+
+
+def go_modules_cached(modcache: Path, pin: Pin) -> bool:
+    """Whether a build of `pin` would find every module it needs in
+    `modcache`: an earlier build of the same source recorded them, and each
+    one's zip is still there."""
+    record = _go_modules_record(modcache, pin)
+    if not record.is_file():
+        return False
+    return all(_module_zip(modcache, m, v).is_file()
+               for m, v in (line.split() for line in record.read_text().splitlines() if line.strip()))
 
 
 #: A Go module's or Rust crate's license and notice files, at its root, by
@@ -725,8 +825,7 @@ def module_licences(modcache: Path, modules: list[tuple[str, str]], dest: Path) 
     refused: its notice would be missing from the download."""
     found: dict[str, list[str]] = {}
     for module, version in modules:
-        # The module cache spells capital letters as "!x".
-        root = modcache / (re.sub(r"[A-Z]", lambda m: "!" + m[0].lower(), module) + "@" + version)
+        root = modcache / f"{_module_dir(module)}@{version}"
         files = sorted(f for f in root.iterdir() if f.is_file() and is_licence_name(f.name)) \
             if root.is_dir() else []
         if not any(_is_licence_text(f.read_bytes()) for f in files):
@@ -911,21 +1010,27 @@ def build_ipatool(pin: Pin, go_pin: Pin, work: Path = WORK) -> Path:
         go = extract(fetch(go_pin), tmp / "go") / "go"
         src = _unpack(pin, tmp)
         apply_patches("ipatool", src)
-        env = go_env(go, tmp, IPATOOL_ENV)
+        modcache = go_modcache()
+        env = go_env(go, tmp, IPATOOL_ENV, modcache)
         for step in ipatool_steps(pin.version):
             subprocess.run(step, cwd=src, env=env, check=True)
+        record_go_modules(modcache, pin, src / "vendor" / "modules.txt")
         shutil.copy2(src / "ipatool", out / "ipatool")
         check_no_shell(out / "ipatool", "ipatool")
         vendor_tar_gz(src / "vendor", out / "vendor.tar.gz")
         modules = compiled_modules(go, out / "ipatool", env)
-        module_licences(tmp / "modcache", modules, out / "modules")
+        module_licences(modcache, modules, out / "modules")
         check_go_modules("ipatool", modules, out)
         shutil.copy2(src / "LICENSE", out / "LICENSE")
         for f in ("LICENSE", "PATENTS"):
             shutil.copy2(go / f, out / f"go-{f}")
-    key = build_key(pin.sha256, go_pin.sha256, ipatool_steps(pin.version), IPATOOL_ENV, patch_hashes("ipatool"),
-                    toolchain_id())
-    return _cached_build("ipatool", key, work, build)
+    return _cached_build("ipatool", ipatool_key(pin, go_pin), work, build)
+
+
+def ipatool_key(pin: Pin, go_pin: Pin) -> str:
+    """build_ipatool's cache key."""
+    return build_key(pin.sha256, go_pin.sha256, ipatool_steps(pin.version), IPATOOL_ENV, patch_hashes("ipatool"),
+                     toolchain_id())
 
 
 def stage_ipatool(pins: dict[str, Pin], contents: Path, licences: Path, work: Path = WORK) -> Path:
@@ -977,10 +1082,10 @@ def unfairplay_steps(version: str, repo: str, commit: str) -> list[list[str]]:
     touching them, so Go stamps that revision, and says vcs.modified=true if
     the archive isn't exactly the commit's tree (unfairplay_build_problems
     refuses that). vendor/, which `go mod vendor` writes (each module checked
-    against go.sum and the checksum database), is kept out of git's status.
-    The build is upstream's (.github/workflows/release.yml: `-trimpath`,
-    `-ldflags "-s -w -X main.version=<tag>"`, ./cmd/unfairplay), offline from
-    vendor/ alone."""
+    against go.sum and the checksum database, then re-hashed in the module
+    cache by GO_VERIFY), is kept out of git's status. The build is
+    upstream's (.github/workflows/release.yml: `-trimpath`, `-ldflags "-s -w
+    -X main.version=<tag>"`, ./cmd/unfairplay), offline from vendor/ alone."""
     tag = f"refs/tags/v{version}"
     return [
         ["git", "init", "-q"],
@@ -989,6 +1094,7 @@ def unfairplay_steps(version: str, repo: str, commit: str) -> list[list[str]]:
         ["git", "read-tree", "HEAD"],
         ["/bin/sh", "-c", "echo /vendor/ >> .git/info/exclude"],
         ["go", "mod", "vendor"],
+        GO_VERIFY,
         ["go", "build", "-mod=vendor", "-trimpath", "-buildvcs=true",
          f"-ldflags=-s -w -X main.version=v{version}", "-o", "unfairplay", "./cmd/unfairplay"],
     ]
@@ -1043,9 +1149,11 @@ def build_unfairplay(pin: Pin, go_pin: Pin, work: Path = WORK) -> Path:
         check_archive_commit(pin, fetch(pin))
         go = extract(fetch(go_pin), tmp / "go") / "go"
         src = _unpack(pin, tmp)
-        env = go_env(go, tmp, UNFAIRPLAY_ENV)
+        modcache = go_modcache()
+        env = go_env(go, tmp, UNFAIRPLAY_ENV, modcache)
         for step in unfairplay_steps(pin.version, *source_commit(pin)):
             subprocess.run(step, cwd=src, env=env, check=True)
+        record_go_modules(modcache, pin, src / "vendor" / "modules.txt")
         shutil.copy2(src / "unfairplay", out / "unfairplay")
         version_m = go_version_m(go, out / "unfairplay", env)
         problems = unfairplay_build_problems(version_m, pin, go_pin)
@@ -1054,13 +1162,17 @@ def build_unfairplay(pin: Pin, go_pin: Pin, work: Path = WORK) -> Path:
                               "(vcs.modified: the pinned archive isn't the commit's tree): " + "; ".join(problems))
         check_no_shell(out / "unfairplay", "unfairplay")
         vendor_tar_gz(src / "vendor", out / "vendor.tar.gz")
-        module_licences(tmp / "modcache", go_deps(version_m), out / "modules")
+        module_licences(modcache, go_deps(version_m), out / "modules")
         check_go_modules("unfairplay", go_deps(version_m), out)
         for f in UNFAIRPLAY_LICENCES:
             shutil.copy2(src / f, out / f)
-    key = build_key(pin.sha256, go_pin.sha256, unfairplay_steps(pin.version, *source_commit(pin)), UNFAIRPLAY_ENV,
-                    toolchain_id())
-    return _cached_build("unfairplay", key, work, build)
+    return _cached_build("unfairplay", unfairplay_key(pin, go_pin), work, build)
+
+
+def unfairplay_key(pin: Pin, go_pin: Pin) -> str:
+    """build_unfairplay's cache key."""
+    return build_key(pin.sha256, go_pin.sha256, unfairplay_steps(pin.version, *source_commit(pin)), UNFAIRPLAY_ENV,
+                     toolchain_id())
 
 
 def stage_unfairplay(pins: dict[str, Pin], contents: Path, licences: Path, work: Path = WORK) -> Path:
@@ -2877,10 +2989,11 @@ def _unfairplay_recipe(pin: Pin) -> tuple[str, list[str], list[list[str]], str]:
             "without touching them, so Go records that commit in the binary's build info (`go version -m`: "
             "`vcs.revision`, and `vcs.modified=false` only if the archive is exactly the commit's tree). The "
             "release refuses a binary whose build info says otherwise. `go mod vendor` downloads each module "
-            f"from {GOPROXY}, checked against UnfairPlay's `go.sum` and the checksum database; "
-            "`pinned/unfairplay/vendor.tar.gz` is the `vendor/` it wrote, which the build then reads offline. "
-            "To build offline, unpack that into the archive's top directory, leave out the git steps and "
-            "`go mod vendor`, and build with `-buildvcs=false`: the same code, with no VCS stamp in its build "
+            f"from {GOPROXY}, checked against UnfairPlay's `go.sum` and the checksum database, and `go mod "
+            "verify` re-hashes the module cache's copies; `pinned/unfairplay/vendor.tar.gz` is the `vendor/` "
+            "it wrote, which the build then reads offline. To build offline, unpack that into the archive's top "
+            "directory, leave out the git steps, `go mod vendor` and `go mod verify`, and build with "
+            "`-buildvcs=false`: the same code, with no VCS stamp in its build "
             "info. `unfairplay` goes in as built and is signed with the hardened runtime, the identifier "
             "`unfairplay` (the administrator step checks its copy of UnfairPlay against it) and no entitlements.")
 
@@ -2928,8 +3041,9 @@ def _recipes(ipatool_version: str = "", unfairplay: Pin | None = None,
                     ["Helpers/bin/ipatool"], ipatool_steps(ipatool_version),
                     "With these variables set: " + ", ".join(f"`{k}={v}`" for k, v in IPATOOL_ENV.items())
                     + f". `go mod vendor` downloads each module from {GOPROXY}, checked against ipatool's "
-                    "`go.sum` and the checksum database; `pinned/ipatool/vendor.tar.gz` is the `vendor/` it "
-                    "wrote, which the build then reads offline. `ipatool` goes in as built and is signed with "
+                    "`go.sum` and the checksum database, and `go mod verify` re-hashes the module cache's "
+                    "copies; `pinned/ipatool/vendor.tar.gz` is the `vendor/` it wrote, which the build then reads "
+                    "offline (leave out both `go mod` steps). `ipatool` goes in as built and is signed with "
                     "two entitlements (`bundle/entitlements/ipatool.plist`): `com.apple.security.cs.allow-jit`, "
                     "for Unicorn's code translator, and `com.apple.security.cs.disable-library-validation`, so "
                     "it can load the Unicorn it downloads, which is ad hoc signed. Unicorn is not in Graft.app: "
@@ -3235,6 +3349,149 @@ def write_sources(components: Path, out: Path, lock: Path = RUNTIME_LOCK, *, com
     return names
 
 
+# ------------------------------------------------- downloads, and a phone's hotspot
+
+#: The gateway an iPhone's Personal Hotspot gives a Mac on it, over USB,
+#: Wi-Fi or Bluetooth alike.
+HOTSPOT_GATEWAY = "172.20.10.1"
+#: Set to 1, a release downloads over a hotspot without asking.
+ALLOW_HOTSPOT_ENV = "GRAFT_ALLOW_HOTSPOT"
+
+#: Roughly how many MB each pinned file is, for the hotspot warning only:
+#: pins.toml records no sizes, so these are the files pinned on 2026-11-23,
+#: rounded. A pin not named here shows as a size not known. Nothing checks
+#: anything against them.
+APPROX_MB = {"go": 65, "openssl": 53, "python": 25, "cyan": 9, "ipatool": 6, "cctools": 3, "unfairplay": 1,
+             "libplist": 0.5, "python-build-standalone": 0.5, "zsign": 0.2, "ldid": 0.1, "insert_dylib": 0.1,
+             "hacl": 0.1}
+#: Likewise for the rest: each Go tool's modules (the zips `go mod vendor`
+#: fetches, a guess), and an average source distribution and crate (98
+#: source distributions came to 96 MB, 369 crates to 54 MB).
+GO_MODULES_MB = {"ipatool": 100, "unfairplay": 1}
+SDIST_MB, CRATE_MB = 1.0, 0.15
+
+
+@dataclass(frozen=True)
+class Download:
+    what: str
+    #: Approximate size; None when not known.
+    mb: float | None
+    #: Whether the download cache keeps it: False for what every build fetches again.
+    kept: bool = True
+
+
+def _cached_sdists(cache: Path) -> set[tuple[str, str]]:
+    """(normalized name, version) of each source distribution in `cache`, by its file name."""
+    found = set()
+    for f in cache.iterdir() if cache.is_dir() else ():
+        if m := re.fullmatch(r"(.+)-([^-]+)\.(?:tar\.gz|zip|tar\.bz2)", f.name):
+            found.add((_norm(m[1]), m[2]))
+    return found
+
+
+def _go_build_done(tool: str, pins: dict[str, Pin], work: Path) -> bool:
+    key = {"ipatool": ipatool_key, "unfairplay": unfairplay_key}[tool]
+    try:
+        return (work / f"{tool}-{key(pins[tool], pins['go'])[:12]}").is_dir()
+    except BundleError:
+        return False
+
+
+def download_plan(pins: dict[str, Pin], cache: Path | None = None, work: Path | None = None,
+                  lock: Path = RUNTIME_LOCK, crates: Path = IPATOOL_CORE_CRATES) -> list[Download]:
+    """What a release would still download, worked out offline from what
+    `cache` (CACHE) and `work` (WORK) hold: each pinned file not cached (or
+    cached with another hash); each Go tool's modules, unless its build is
+    cached or an earlier build of the same source recorded them all in the
+    module cache; the source archive's source distributions (one per package
+    in the runtime lock, matched by name and version) and the crates
+    ipatool's 1Password SDK core pins. And the Python wheels, which every
+    stage downloads again (pip runs with --no-cache-dir). Not counted: small
+    lookups (PyPI's JSON, the Swift packages Xcode resolves, UnfairPlay's
+    tag) and the crates named only in a wheel's SBOM, known after staging."""
+    cache, work = cache or CACHE, work or WORK
+    plan = []
+    for name, pin in pins.items():
+        f = cache / pin.filename
+        if not (f.is_file() and _sha256(f) == pin.sha256):
+            plan.append(Download(f"{name} {pin.version}", APPROX_MB.get(name)))
+    for tool in ("ipatool", "unfairplay"):
+        if tool in pins and "go" in pins and not _go_build_done(tool, pins, work) \
+                and not go_modules_cached(go_modcache(cache), pins[tool]):
+            plan.append(Download(f"{tool}'s Go modules", GO_MODULES_MB.get(tool)))
+    have = _cached_sdists(cache)
+    sdists = sorted(f"{n} {v}" for n, (v, _) in lock_hashes(lock).items() if (n, v) not in have)
+    if sdists:
+        plan.append(Download(f"{len(sdists)} source distribution(s) for the source archive: "
+                             + ", ".join(sdists[:5]) + (", ..." if len(sdists) > 5 else ""), len(sdists) * SDIST_MB))
+    missing = sorted(f"{c} {v}" for c, v in pinned_crates(crates) if not (cache / "crates" / f"{c}-{v}.crate").is_file())
+    if missing:
+        plan.append(Download(f"{len(missing)} Rust crate(s) for their licenses", len(missing) * CRATE_MB))
+    plan.append(Download("the Python wheels the app bundles (every build downloads them again)", None, kept=False))
+    return plan
+
+
+def default_route() -> tuple[str, str] | None:
+    """(gateway, interface) of the default route, as `route -n get default`
+    says; None when there is no default route or route couldn't say."""
+    try:
+        r = subprocess.run(["/sbin/route", "-n", "get", "default"], capture_output=True, text=True, timeout=10,
+                           env=_build_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    fields = dict(line.strip().split(": ", 1) for line in r.stdout.splitlines() if ": " in line)
+    if r.returncode != 0 or not (fields.get("gateway") or fields.get("interface")):
+        return None
+    return fields.get("gateway", ""), fields.get("interface", "")
+
+
+def _mb(mb: float | None) -> str:
+    return "     ? MB" if mb is None else ("    <1 MB" if mb < 1 else f"{mb:6.0f} MB")
+
+
+def check_hotspot(pins: dict[str, Pin], *, interactive: bool | None = None,
+                  answer: Callable[[], str] | None = None) -> bool:
+    """Whether a release may go on downloading. On a phone's hotspot (the
+    default route through HOTSPOT_GATEWAY), with anything a cache would keep
+    still to download, it says what and roughly how much, then asks; with
+    GRAFT_ALLOW_HOTSPOT=1 it goes on, and with no terminal to ask on it
+    stops. On any other network, or with everything cached but what every
+    build fetches anyway, it goes on, saying so on a hotspot."""
+    route = default_route()
+    if route is None or route[0] != HOTSPOT_GATEWAY:
+        return True
+    on = f"the default route goes through {HOTSPOT_GATEWAY} on {route[1] or 'an unknown interface'}"
+    plan = download_plan(pins)
+    big = [d for d in plan if d.kept]
+    if not big:
+        every = "; ".join(d.what for d in plan)
+        print(f"note: this Mac is on a phone's hotspot ({on}); everything is cached but {every}", file=sys.stderr)
+        return True
+    known = sum(d.mb for d in big if d.mb is not None)
+    unknown = sum(d.mb is None for d in big)
+    lines = [f"warning: this Mac is on a phone's hotspot ({on}), and this release still has to download:",
+             *(f"  {_mb(d.mb)}  {d.what}" for d in plan),
+             f"  about {known:.0f} MB in all" + (f", plus {unknown} of a size not known" if unknown else "")
+             + ", plus the wheels.",
+             f"  What it downloads stays in {CACHE} for the next release."]
+    print("\n".join(lines), file=sys.stderr)
+    if os.environ.get(ALLOW_HOTSPOT_ENV) == "1":
+        print(f"  {ALLOW_HOTSPOT_ENV}=1: downloading over the hotspot.", file=sys.stderr)
+        return True
+    if interactive is None:
+        interactive = sys.stdin.isatty()
+    if not interactive:
+        print(f"error: not downloading that over a hotspot without asking, and there's no terminal to ask on. "
+              f"Join another network, or set {ALLOW_HOTSPOT_ENV}=1 to go ahead.", file=sys.stderr)
+        return False
+    print("Download it over the hotspot? [y/N] ", end="", file=sys.stderr, flush=True)
+    reply = (answer or sys.stdin.readline)()
+    if reply.strip().lower() in ("y", "yes"):
+        return True
+    print(f"Stopped before downloading. Join another network, or set {ALLOW_HOTSPOT_ENV}=1.", file=sys.stderr)
+    return False
+
+
 #: The interpreter the locks are resolved for and the stage runs under: the
 #: bundled CPython's version, on arm64. pip-compile evaluates markers for the
 #: Python it runs on, so a lock made on 3.14 or under Rosetta could drop a
@@ -3256,10 +3513,12 @@ def check_interpreter(version: tuple[int, ...] | None = None, machine: str | Non
 
 def main(argv: list[str]) -> int:
     usage = ("usage: graft_bundle.py stage <staging-dir> | sources <components.json> "
-             "<Graft-<version>-sources.tar.gz> [--commit SHA --repo CHECKOUT] | check-python")
+             "<Graft-<version>-sources.tar.gz> [--commit SHA --repo CHECKOUT] | check-python | hotspot-check")
     try:
         if argv == ["check-python"]:
             check_interpreter()
+        elif argv == ["hotspot-check"]:
+            return 0 if check_hotspot(load_pins(REPO / "bundle" / "pins.toml")) else 1
         elif len(argv) == 2 and argv[0] == "stage":
             dest = Path(argv[1]).absolute()
             found = stage(dest)

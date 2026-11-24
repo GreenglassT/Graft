@@ -1396,6 +1396,34 @@ struct LiveContainerChoiceRecord: Decodable, Hashable {
     }
 }
 
+/// `update-check`: what `--check-update` found, exactly once per run, with
+/// the same keys whether it worked or not.
+///
+/// Encodable too: `UpdateStore` keeps the last successful one, so the banner
+/// is back after a relaunch without asking GitHub again that day.
+struct UpdateCheckRecord: Codable, Hashable {
+    let ok: Bool
+    /// The version compared against: the app's own, which it passes.
+    let current: String
+    /// The latest published release, without its "v" ("2.0.1"); nil when the
+    /// check failed.
+    let latest: String?
+    /// That release's page on GitHub; nil when the check failed.
+    let url: String?
+    let updateAvailable: Bool
+    /// Why it failed (offline, http, malformed); nil when it didn't.
+    let reason: String?
+    /// The HTTP status of a failure GitHub answered; nil otherwise.
+    let status: Int?
+    /// The CLI's sentence for a failure, which Check for Updates… shows.
+    let message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ok, current, latest, url, reason, status, message
+        case updateAvailable = "update_available"
+    }
+}
+
 enum CanisterFetchResult: Equatable {
     case success(filename: String, sizeBytes: Int, path: String?)
     case failure(error: String)
@@ -1483,6 +1511,7 @@ enum BuildEvent {
     case appStoreVersion(AppStoreVersionRecord)
     case appStoreStage(AppStoreStageRecord)
     case appStoreDecrypted(AppStoreDecryptedRecord)
+    case appStoreAlreadyStaged(AppStoreAlreadyStagedRecord)
     case appStoreRefused(AppStoreRefusalRecord)
     case appStoreLogin(AppStoreLoginRecord)
     case appStoreLogout(AppStoreLogoutRecord)
@@ -1494,6 +1523,7 @@ enum BuildEvent {
     case appStoreSearchResult(AppStoreSearchResult)
     case appStoreSearchEnd(AppStoreSearchEndRecord)
     case appStoreSearchFailed(AppStoreSearchFailedRecord)
+    case updateCheck(UpdateCheckRecord)
     case unknown(type: String, raw: [String: Any])
 
     enum DecodeError: Error {
@@ -1839,6 +1869,8 @@ enum BuildEvent {
             return .appStoreStage(AppStoreStageRecord(app: p.app, stage: AppStoreStage(raw: p.stage)))
         case "appstore-decrypted":
             return .appStoreDecrypted(try decoder.decode(AppStoreDecryptedRecord.self, from: data))
+        case "appstore-already-staged":
+            return .appStoreAlreadyStaged(try decoder.decode(AppStoreAlreadyStagedRecord.self, from: data))
         case "appstore-refused":
             return .appStoreRefused(try decoder.decode(AppStoreRefusalRecord.self, from: data))
         case "appstore-login":
@@ -1861,6 +1893,8 @@ enum BuildEvent {
             return .appStoreSearchEnd(try decoder.decode(AppStoreSearchEndRecord.self, from: data))
         case "appstore-search-failed":
             return .appStoreSearchFailed(try decoder.decode(AppStoreSearchFailedRecord.self, from: data))
+        case "update-check":
+            return .updateCheck(try decoder.decode(UpdateCheckRecord.self, from: data))
         case "init-step":
             return .initStep(try decoder.decode(InitStepRecord.self, from: data))
         case "init-result":

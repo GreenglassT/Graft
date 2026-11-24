@@ -44,8 +44,10 @@ final class CLIContractTests: XCTestCase {
         let fm = FileManager.default
         let pathDirs = (ProcessInfo.processInfo.environment["PATH"] ?? "")
             .split(separator: ":").map(String.init)
-        let home = fm.homeDirectoryForCurrentUser.path
-        for dir in pathDirs + ["\(home)/.local/bin"] where !dir.isEmpty {
+        // PATH only. ~/.local/bin is the owner's own install (a 1.x pipx
+        // graft on this Mac), never the CLI under test: the runner script
+        // puts the worktree's venv first on PATH (TEST_RUNNER_PATH).
+        for dir in pathDirs where !dir.isEmpty {
             let candidate = URL(fileURLWithPath: dir).appendingPathComponent("graft")
             if fm.isExecutableFile(atPath: candidate.path) { return candidate }
         }

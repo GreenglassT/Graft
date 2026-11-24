@@ -109,10 +109,25 @@ struct AppStoreEnrollSheet: View {
     /// once, then set up again. The release body's known issue says the same.
     static func advice(for message: String, appName: String?) -> String? {
         guard message.contains(noSIDBState) else { return nil }
-        return "This Mac's App Store state, which UnfairPlay reads, isn't there right now: macOS sometimes "
+        return noStateAdvice(appName: appName)
+    }
+
+    /// The advice for this Mac's missing App Store state, whether UnfairPlay
+    /// said so at its end or root found none before it started
+    /// (`AppStoreAccountStore.Enrol.noFairPlayState`, exit 69).
+    static func noStateAdvice(appName: String?) -> String {
+        "This Mac's App Store state, which UnfairPlay reads, isn't there right now: macOS sometimes "
             + "clears it, even for an app you've already opened. Open \(appName ?? "the app you picked") once, "
             + "then set up again."
     }
+
+    /// Before the password, under the explanation: the same state, before
+    /// it can fail. A quiet line, with "Open <App>" (`openButton`) beside it.
+    static func openFirstLine(appName: String) -> String {
+        "Open \(appName) once before you continue: macOS sometimes clears the App Store state setup reads, and opening the app writes it again."
+    }
+
+    static func openButton(appName: String) -> String { "Open \(appName)" }
 
     /// What the sheet says about a failed setup: the advice first, when there
     /// is any, then the error as it came, which stays for a report.
@@ -275,6 +290,14 @@ struct AppStoreEnrollSheet: View {
                     .foregroundStyle(Palette.text)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            let name = account.appName(for: command)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(Self.openFirstLine(appName: name))
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(Self.openButton(appName: name)) { account.openEnrolApp() }
+            }
             DisclosureGroup("The exact command, run as root", isExpanded: $showScript) {
                 ScrollView {
                     Text(command.script)
@@ -343,6 +366,12 @@ struct AppStoreEnrollSheet: View {
             Text(Self.timedOutLine(limitSeconds: limit))
                 .font(AppFont.monoSmall)
                 .foregroundStyle(Palette.warn)
+                .fixedSize(horizontal: false, vertical: true)
+        case let .noFairPlayState(appName):
+            Text(Self.noStateAdvice(appName: appName))
+                .font(AppFont.monoSmall)
+                .foregroundStyle(Palette.warn)
+                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         case let .failed(message):
             Text(Self.failedLine(message, appName: account.candidates.first { $0.path == chosen }?.name))

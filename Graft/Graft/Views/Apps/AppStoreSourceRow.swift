@@ -1,7 +1,8 @@
 import SwiftUI
 
 /// The Source IPA section's App Store line: what the store has against what is
-/// cached, and **Get latest from App Store**.
+/// cached, and **Get latest from App Store**, or **Get Again** when that
+/// version is the one already staged.
 ///
 /// The get runs in the CLI — ipatool downloads, UnfairPlay decrypts, the
 /// result is staged like a drop — so this row only shows where it has got to
@@ -10,7 +11,9 @@ import SwiftUI
 /// license for shows Get (free) or Open in App Store instead.
 ///
 /// Always the App Store's *latest* version: there is no version picker, by
-/// the spec's decision.
+/// the spec's decision. A get of the version already staged downloads nothing
+/// and says so (`appstore-already-staged`); Get Again, behind a confirmation,
+/// downloads it anyway.
 struct AppStoreSourceRow: View {
     let version: AppStoreVersionRecord?
     let isGetting: Bool
@@ -25,6 +28,8 @@ struct AppStoreSourceRow: View {
     /// Asks the App Store again now. The pane reuses an answer for ten
     /// minutes rather than asking on every click (`AppStoreStore.checkVersion`).
     let onRefresh: () -> Void
+    /// Get Again's confirmation, answered: the get with `--again`.
+    var onGetAgain: () -> Void = {}
     /// From `AppStoreStore.licenseNeeded`: the button to show instead of Get latest.
     var license: AppStoreStore.LicenseNeed? = nil
     var isClaiming = false
@@ -49,11 +54,40 @@ struct AppStoreSourceRow: View {
     /// Why Get latest can't run now (`AppStoreStore.getBlockedReason`).
     var getBlockedReason: String? = nil
 
-    enum PrimaryAction: Equatable { case getLatest, claimFree, openInStore }
+    /// Get Again's confirmation is up.
+    @State private var confirmingGetAgain = false
 
-    static func primaryAction(license: AppStoreStore.LicenseNeed?) -> PrimaryAction {
-        guard let license else { return .getLatest }
-        return license.offersClaim ? .claimFree : .openInStore
+    enum PrimaryAction: Equatable { case getLatest, getAgain, claimFree, openInStore }
+
+    /// A license refusal decides first. Otherwise Get Again where the line
+    /// says up to date with the very version Get latest would fetch: the
+    /// store's version is the cached one. A store version nobody could check
+    /// is never "again", and nor is a newer copy staged than the store has.
+    ///
+    /// The line's own versions decide, never what the last get said. With a
+    /// version pin the cached version is the pinned one, so a get of the
+    /// store's version, staged beside it, says "Already have" and the row
+    /// still offers Get latest. An answer kept from that get could outlive
+    /// the file it was about (deleted in the Cache pane), and Get Again's
+    /// question would then call a missing file staged.
+    static func primaryAction(
+        license: AppStoreStore.LicenseNeed?, version: AppStoreVersionRecord? = nil
+    ) -> PrimaryAction {
+        if let license { return license.offersClaim ? .claimFree : .openInStore }
+        guard let store = version?.storeVersion else { return .getLatest }
+        return store == version?.cachedVersion ? .getAgain : .getLatest
+    }
+
+    static let getAgainButton = "Get Again"
+
+    /// What Get Again asks first: it downloads the whole app again.
+    static func getAgainConfirmation(app: String, version: String?) -> (title: String, message: String) {
+        let which = version ?? "This version"
+        return (
+            "Download \(app) again?",
+            "\(which) is already staged, and it's the App Store's current version. "
+                + "Getting it again downloads the whole app, decrypts it and replaces the staged copy."
+        )
     }
 
     static func versionLine(_ record: AppStoreVersionRecord?) -> String {
@@ -104,11 +138,13 @@ struct AppStoreSourceRow: View {
                 // The same Stop as a get's: the CLI is SIGTERMed.
                 Button("Stop", action: onStop)
             } else {
-                switch Self.primaryAction(license: license) {
+                switch Self.primaryAction(license: license, version: version) {
                 case .getLatest:
                     Button("Get latest from App Store", action: onGet)
                         .disabled(isBlocked || getBlockedReason != nil)
                         .help(getBlockedReason ?? "Download, decrypt and stage the App Store's latest version")
+                case .getAgain:
+                    getAgain
                 case .claimFree:
                     if isCheckingClaim {
                         ProgressView().controlSize(.small)
@@ -141,5 +177,20 @@ struct AppStoreSourceRow: View {
         } message: { confirmation in
             Text(AppStoreStore.claimConfirmation(app: appName, email: confirmation.email).message)
         }
+    }
+
+    /// Get Again, asking first. Its own alert, on the button rather than
+    /// beside the claim's on the row, so the two never share a view.
+    private var getAgain: some View {
+        let words = Self.getAgainConfirmation(app: appName, version: version?.storeVersion)
+        return Button(Self.getAgainButton) { confirmingGetAgain = true }
+            .disabled(isBlocked || getBlockedReason != nil)
+            .help(getBlockedReason ?? "Download, decrypt and stage the App Store's current version again, though it's already staged")
+            .alert(words.title, isPresented: $confirmingGetAgain) {
+                Button("Cancel", role: .cancel) {}
+                Button(Self.getAgainButton) { onGetAgain() }
+            } message: {
+                Text(words.message)
+            }
     }
 }

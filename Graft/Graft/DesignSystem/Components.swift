@@ -497,7 +497,7 @@ struct TagChip: View {
 /// an app that isn't on the US App Store, ships no flat icon in its IPA, and
 /// isn't installed top-level on a connected phone has no artwork anywhere in
 /// the chain to find. It is also what every icon draws before the first
-/// `ArtworkStore.load` for it returns — this view has no notion of
+/// `ArtworkStore.load` for it returns — this view doesn't track
 /// "loading," only "has an image or doesn't." Don't delete this branch as
 /// dead code; it's a load-bearing fallback, not a bootstrap stub.
 ///

@@ -189,7 +189,9 @@ when Apple has ended the session: a get then says so, and names the button.
    Graft, and open it once.
 2. Press **Set Up Decryption…**. In the sheet, pick that app (the first one
    is already picked) and press **Set Up Decryption…** again. Graft then
-   explains what will happen; press **Continue**.
+   explains what will happen. Open the app once first (the sheet's **Open**
+   button does it): macOS sometimes clears the App Store state UnfairPlay
+   reads, and opening the app writes it again. Then press **Continue**.
 3. macOS's dialog usually names Graft and asks you to allow it administrator
    access ("Allow administrator access for “Graft”?"). On a Mac with Touch ID
    it offers Touch ID or **Use Password…**; on one without, it asks for your
@@ -203,6 +205,9 @@ Mac has to type them. The rest is the same: Graft never sees them, and the
 decryption model it sets up is yours.
 
 What happens:
+- Before root copies anything, it checks that this Mac's App Store state
+  (`SC Info.sidb`) is there. If it isn't, the step stops at once, nothing is
+  changed, and Graft says which app to open.
 - Graft explains the step before macOS's dialog appears, and shows the exact
   command under "The exact command, run as root".
 - Root works only in a folder of its own, on its own copy of the app, and runs
@@ -224,7 +229,9 @@ with an app installed under the new one.
 
 On the app's pane, **Get latest from App Store** downloads, decrypts and
 stages the App Store's latest version. **Stop** cancels it and deletes the
-download.
+download. If that version is already staged, nothing is downloaded and the
+pane says "Already have <version>". The button then reads **Get Again**,
+which asks first, then downloads, decrypts and stages it again.
 
 - If your Apple ID doesn't have the app yet and it's free, the button becomes
   **Get (free)**. Graft asks first, then adds the app to your Apple ID's
@@ -262,17 +269,19 @@ crashes at launch, the decrypt is the likely cause.
 
 ## What Graft downloads, and when
 
-Graft has no telemetry, analytics, crash reporting or update check, and it
-doesn't update itself. Graft.app makes no
-connections of its own: its CLI does, for something you asked for or a pane
-you opened, and to look up the icon of an app that has none yet, at launch
-and when the app list changes. Device UDIDs never leave your Mac.
+Graft has no telemetry, analytics or crash reporting, and it doesn't update
+itself. Graft.app makes no connections of its own: its CLI does, for something
+you asked for or a pane you opened, to look up the icon of an app that has
+none yet, at launch and when the app list changes, and once a day to ask
+GitHub whether a newer Graft is out (Settings › Updates turns that off).
+Device UDIDs never leave your Mac.
 
 | When | Who it contacts | What for |
 |---|---|---|
 | You search the App Store, add an app, or open an app's pane; for an app with no icon yet, at launch, when the app list changes, and after a build or App Store get | Apple's iTunes lookup and search, and its artwork CDN | The app's version, price and icon |
 | You search, fetch or update tweaks | canister.me, and the repos you add | Tweak listings and downloads |
 | A device's pane opens, Edit App opens for a LiveContainer app, or you install LiveContainer | GitHub | LiveContainer's releases |
+| Once a day while Graft is open, unless Settings › Updates turns it off, and when you choose Help › Check for Updates… | GitHub (`api.github.com`), with nothing that identifies you or your Mac | Whether a newer Graft is out |
 | A paid account with an App Store Connect key makes a profile | Apple's App Store Connect API | Provisioning profiles |
 | You sign in, get an app, or get a free one | Apple's App Store, through the bundled ipatool | Your sign-in, the license, the IPA |
 | The first App Store action on a Mac (usually the first sign-in) | PyPI (`files.pythonhosted.org`), and Apple's software CDN | ipatool's Unicorn emulator (a few MB) and its App Store components (about 320 MB, skipped if a 1.x ipatool already downloaded them), once |
@@ -293,12 +302,16 @@ lists every host, when, and what is sent.
 
 ## Updating
 
-Download the new `Graft.zip` from
+Graft says when a newer version is out: a banner at the bottom of the main
+window, from a check it makes once a day while it's open, or Help › Check for
+Updates… at any time. Download the new `Graft.zip` from
 [GitHub Releases](https://github.com/GreenglassT/Graft/releases) and replace
 the `Graft.app` in `/Applications`. Graft doesn't update itself.
 - Your config, apps and builds carry over, and so does your App Store
   sign-in from 2.0 on. From 1.x, you sign in once.
 - The Terminal command points into the app, so it updates too.
+- Help › What's New… shows what changed in each release. It also opens by
+  itself once, the first time a new version of Graft starts.
 
 From Graft 1.x, read [Upgrading from Graft 1.x](docs/upgrading.md) first:
 what happens to your config, your pipx `graft`, your Homebrew tools and your
@@ -787,8 +800,8 @@ UnfairPlay's model in `~/Library/Application Support/unfairplay/models`.
 | `... needs a paid Apple Developer Program membership` | The config has no `signing:` section, so it is set up for a free Apple ID, and the action needs a paid one. Use LiveContainer delivery, or, with a paid membership, Settings › Add a paid account…; it keeps your apps. |
 | Settings › App Store says "signed in by another ipatool (Graft 1's?): sign in again", or, with your own ipatool set in `config.yaml`, "a sign-in this ipatool can't read (another ipatool's?): sign in again" | Your sign-in was made by an ipatool this one can't read: with Graft's own, such as yours under Graft 1; with your own, Graft.app's or another. Press Sign In…; see [Upgrading from Graft 1.x](docs/upgrading.md#your-app-store-sign-in). |
 | A decrypt fails as the wrong model or the wrong Apple ID | Decryption was set up with another Apple ID. Use the same Apple ID in Graft as in the Mac App Store, then press Set Up Again… in Settings › App Store. |
-| Set Up Decryption… or Set Up Again… stops with "canonical input has no SIDB state" | This Mac's App Store state, which UnfairPlay reads, isn't there right now: macOS sometimes clears it, even for an app you've already opened. Open the app you picked once, then set up again. The sheet says the same. |
-| The first sign-in, or the first App Store action, fails while it downloads ipatool's App Store components, with an error naming the macOS 27.0.1 (26A434) restore image (for example "server returned 404 Not Found") | A known issue in 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and if Apple removes that file, a Mac that hasn't downloaded them yet can't get them. A Mac whose ipatool already did (in `~/Library/Caches/ipatool`, a 1.x ipatool's included) isn't affected. Graft 2.0 has no update check, so look on [GitHub Releases](https://github.com/GreenglassT/Graft/releases) for a later Graft, whose ipatool will use an image Apple still serves. |
+| Set Up Decryption… or Set Up Again… says this Mac's App Store state isn't there, or stops with "canonical input has no SIDB state" | macOS sometimes clears the state UnfairPlay reads, even for an app you've already opened. Open the app you picked once (the sheet's Open button does it), then set up again. In Terminal, the setup script exits 69 for this. |
+| The first sign-in, or the first App Store action, fails while it downloads ipatool's App Store components, with an error naming the macOS 27.0.1 (26A434) restore image (for example "server returned 404 Not Found") | A known issue since 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and if Apple removes that file, a Mac that hasn't downloaded them yet can't get them. A Mac whose ipatool already did (in `~/Library/Caches/ipatool`, a 1.x ipatool's included) isn't affected. Help › Check for Updates… says whether a later Graft is out (or look on [GitHub Releases](https://github.com/GreenglassT/Graft/releases)); a later Graft's ipatool will use an image Apple still serves. |
 | Settings › App Store says "couldn't tell… your login keychain is locked" | Unlock the login keychain in Keychain Access, then refresh. Until then Settings offers neither Sign In… nor Sign Out, Get latest from App Store and Get (free) refuse, and so do `graft --appstore-login` and `--appstore-logout` in Terminal. |
 | "Graft.app is damaged: part of it is missing." | A file inside the app is missing. Download Graft again and replace this copy. |
 
@@ -1009,7 +1022,7 @@ graft --appstore-status                     # ipatool installed and signed in? U
 graft --appstore-login                      # asks for the Apple ID, the password, then the code if Apple asks
 graft --appstore-logout
 graft --appstore-check                      # App Store version vs. your staged IPA, per app
-graft --appstore-get --app example          # download, decrypt and stage the latest version
+graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if it's already staged)
 graft --appstore-claim --app example        # Get (free): only for an app the App Store lists at 0
 ```
 
@@ -1020,6 +1033,8 @@ graft --appstore-claim --app example        # Get (free): only for an app the Ap
   ever an argument.
 - `--allow-unverified` with `--appstore-get` or `--provide-ipa` stages a decrypt
   UnfairPlay couldn't verify, with a warning.
+- `--again` with `--appstore-get` downloads even when that version is already
+  staged.
 
 To set up decryption in Terminal, list the apps that can do it, save the
 script, run it as root, then finish as yourself:
@@ -1147,6 +1162,7 @@ graft --set-portal --asc-key-id ABCDE12345 \
   --asc-key-file ~/Downloads/AuthKey_ABCDE12345.p8
 graft --setup-portal                # the same key, with questions
 graft --clear-portal                # remove it (the .p8 stays)
+graft --check-update                # is a newer Graft out? (asks GitHub; downloads nothing)
 ```
 
 `--set-settings --signing-*` refuses on a free config rather than write part of

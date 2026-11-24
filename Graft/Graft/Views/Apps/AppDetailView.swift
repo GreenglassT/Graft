@@ -1347,6 +1347,7 @@ struct AppDetailView: View {
                         )
                     }
                 },
+                onGetAgain: { appStore.startGet(app: app.name, again: true) },
                 license: appStore.licenseNeeded[app.name],
                 isClaiming: appStore.isClaiming(app.name),
                 isCheckingClaim: appStore.checkingClaim.contains(app.name),

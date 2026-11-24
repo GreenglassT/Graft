@@ -421,4 +421,99 @@ final class AppStoreStoreTests: XCTestCase {
             CLIContract.Flag.allowUnverified
         )
     }
+
+    // MARK: A version already staged, and Get Again
+
+    /// A CLI whose App Store version is already staged: a plain get answers
+    /// `appstore-already-staged` and nothing else, exit 0, as the real one
+    /// does; `--again` downloads and stages, refusing an unverified decrypt
+    /// unless `--allow-unverified` came too when `unverified` is set.
+    private static func alreadyStagedScript(unverified: Bool = false) -> String {
+        let refuse = unverified ? """
+            case " $* " in *" --allow-unverified "*) ;; *)
+              printf '%s\\n' '{"type":"appstore-refused","app":"example","reason":"unverified"}'
+              echo "error: UnfairPlay decrypted encrypted.ipa but couldn't verify it" >&2
+              exit 20 ;;
+            esac
+            """ : ""
+        return """
+        case " $* " in
+          *" --appstore-check "*)
+            printf '%s\\n' '{"type":"appstore-version","app":"example","bundle_id":"com.example.app","store_version":"21.46.3","cached_version":"21.46.3","update_available":false,"error":null}'
+            exit 0 ;;
+          *" --again "*)
+            printf '%s\\n' '{"type":"appstore-stage","app":"example","stage":"download"}'
+            \(refuse)
+            printf '%s\\n' '{"type":"appstore-decrypted","app":"example","encrypted_images":8,"decrypted_pages":5,"plaintext_verified":true}'
+            printf '%s\\n' '{"type":"ipa-provided","app":"example","bundle_id":"com.example.app","version":"21.46.3","filename":"com.example.app_21.46.3.ipa","path":"/c/com.example.app_21.46.3.ipa","size_bytes":10}'
+            exit 0 ;;
+        esac
+        printf '%s\\n' '{"type":"appstore-already-staged","app":"example","bundle_id":"com.example.app","version":"21.46.3","filename":"com.example.app_21.46.3.ipa","path":"/c/com.example.app_21.46.3.ipa"}'
+        """
+    }
+
+    /// The owner's report: a get of the version already staged downloaded it
+    /// again. Now the CLI says it has it, and the pane says so too: no error,
+    /// no "Staged", no completion (the cache didn't change), and the version
+    /// line asked again.
+    @MainActor
+    func test_a_get_of_the_version_already_staged_says_so_and_stages_nothing() async throws {
+        let (runner, log) = try scriptRunner(Self.alreadyStagedScript())
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        XCTAssertTrue(store.startGet(app: "example"))
+        await waitUntil { !store.isBusy("example") && store.versions["example"] != nil }
+
+        XCTAssertNil(store.errors["example"])
+        let staged = try XCTUnwrap(store.staged["example"])
+        XCTAssertTrue(staged.alreadyStaged)
+        XCTAssertEqual(staged.message, "✓ Already have 21.46.3, the App Store's current version: nothing downloaded")
+        XCTAssertNil(store.completions["example"], "nothing was staged")
+        XCTAssertNil(store.lastCompleted)
+        XCTAssertEqual(try argv(log), ["--json --appstore-get --app example", "--json --appstore-check --app example"])
+        XCTAssertEqual(store.versions["example"]?.storeVersion, "21.46.3")
+    }
+
+    @MainActor
+    func test_get_again_sends_again_and_stages_as_any_get() async throws {
+        let (runner, log) = try scriptRunner(Self.alreadyStagedScript())
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        XCTAssertTrue(store.startGet(app: "example", again: true))
+        await waitUntil { store.completions["example"] != nil }
+
+        XCTAssertEqual(try argv(log).first, "--json --appstore-get --app example --again")
+        XCTAssertEqual(store.staged["example"]?.message, "✓ Staged 21.46.3 from the App Store")
+        XCTAssertEqual(store.staged["example"]?.alreadyStaged, false)
+    }
+
+    /// "Use it anyway…" re-runs the get it answers. After Get Again that is
+    /// Get Again: without `--again` the retry would only find the old copy.
+    @MainActor
+    func test_use_it_anyway_after_get_again_gets_again() async throws {
+        let (runner, log) = try scriptRunner(Self.alreadyStagedScript(unverified: true))
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        let config = ConfigStore(runner: runner, notify: { _ in })
+        store.startGet(app: "example", again: true)
+        await waitUntil { !store.isBusy("example") }
+        XCTAssertEqual(store.errors["example"], UnverifiedDecrypt.message)
+        XCTAssertEqual(store.unverifiedRetry["example"], .getAgain)
+
+        XCTAssertTrue(store.useUnverified(app: "example", config: config))
+        await waitUntil { store.completions["example"] != nil }
+
+        XCTAssertEqual(
+            Array(try argv(log).prefix(2)),
+            ["--json --appstore-get --app example --again",
+             "--json --appstore-get --app example --again --allow-unverified"]
+        )
+        XCTAssertEqual(store.staged["example"]?.alreadyStaged, false)
+    }
+
+    @MainActor
+    func test_only_get_again_sends_again() {
+        XCTAssertFalse(AppStoreStore.getArgs(app: "example").contains(CLIContract.Flag.again))
+        XCTAssertFalse(AppStoreStore.getArgs(app: "example", allowUnverified: true).contains(CLIContract.Flag.again))
+        XCTAssertTrue(AppStoreStore.getArgs(app: "example", again: true).contains(CLIContract.Flag.again))
+    }
 }

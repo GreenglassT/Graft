@@ -180,6 +180,25 @@ struct AppStoreDecryptedRecord: Decodable, Equatable {
     }
 }
 
+/// `appstore-already-staged`: a get that stopped before downloading, because
+/// the App Store's current version is already staged as a get stages it
+/// (`appstore.already_staged`). It is that get's whole output, and it exits 0:
+/// nothing was downloaded, decrypted or changed. Get Again (`--again`)
+/// downloads anyway.
+struct AppStoreAlreadyStagedRecord: Decodable, Equatable {
+    let app: String
+    let bundleId: String
+    /// The version the App Store has, and the staged IPA is.
+    let version: String
+    let filename: String
+    let path: String
+
+    enum CodingKeys: String, CodingKey {
+        case app, version, filename, path
+        case bundleId = "bundle_id"
+    }
+}
+
 /// `appstore-refused`: a get or an encrypted drop the CLI would not stage, and
 /// why (C-UNVERIFIED). Emitted just before the refusal's non-zero exit, so it
 /// is read off the failed run's events — the only part of a failure that is

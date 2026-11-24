@@ -147,6 +147,13 @@ final class LoginShellTests: XCTestCase {
 
     /// A stand-in for a login shell: refuses anything but `-l -i -c <cmd>`,
     /// runs `prelude`, then the command.
+    ///
+    /// It is run once with no arguments before it is returned. It refuses
+    /// that (exit 64) before the prelude, and macOS's check of a new
+    /// executable is then paid here, not inside a case's timeout
+    /// (`warmUpFreshExecutable`). Without the warm-up, a 0.5 s timeout killed
+    /// the shell before it ran a line. The cases that check what a timeout
+    /// kills could then pass with nothing started to kill.
     private func fakeShell(prelude: String) throws -> String {
         let url = scratch.appendingPathComponent("fake-shell-\(UUID().uuidString)")
         let script = """
@@ -157,6 +164,7 @@ final class LoginShellTests: XCTestCase {
         """
         try script.write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        try warmUpFreshExecutable(url.path, exitingWith: 64)
         return url.path
     }
 
