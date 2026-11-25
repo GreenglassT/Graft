@@ -177,6 +177,18 @@
 <td>Your <strong>Apple ID session</strong> (the token ipatool keeps in the keychain), the <strong>bundle id</strong>, and the machine identifier. If Apple has expired the session, ipatool signs in again with the password it keeps.</td>
 </tr>
 <tr>
+<td>Older versions (<code>--appstore-versions</code>, which runs <code>ipatool list-versions -b &lt;bundle id&gt;</code>, then <code>ipatool get-version-metadata -b &lt;bundle id&gt; --external-version-id &lt;id&gt;</code> for each version it reads)</td>
+<td>When Get an older version… opens on an app's pane, and when you press Show More there: one list, then one request per version not read before (ten at a time). Graft remembers what it read.</td>
+<td>As for a get. <code>get-version-metadata</code> reads that version's <code>Info.plist</code> out of its IPA at the download URL Apple returns, by range requests.</td>
+<td>As for a get, and the <strong>version ids</strong>.</td>
+</tr>
+<tr>
+<td>Get an older version (<code>--appstore-get --version-id &lt;id&gt;</code>, which runs <code>ipatool download -b &lt;bundle id&gt; --external-version-id &lt;id&gt;</code>)</td>
+<td>When you press Get on a version in Get an older version…, unless Graft already staged that version</td>
+<td>As for a get</td>
+<td>As for a get, and the <strong>version id</strong>.</td>
+</tr>
+<tr>
 <td>Get (free) (<code>--appstore-claim</code>, which runs <code>ipatool purchase -b &lt;bundle id&gt;</code>)</td>
 <td>When you press Get (free) on an app's pane and confirm. Only for an app the iTunes lookup says is free; ipatool refuses a paid one too. Graft then starts the get.</td>
 <td>As for a get</td>
@@ -273,6 +285,8 @@
 <li>App Store Connect's API keys page, from Settings › App Store Connect;</li>
 <li>a page in Graft's repository on GitHub, from the button on the screen an Intel Mac shows;</li>
 <li>Graft's releases page on GitHub (<code>github.com/GreenglassT/Graft/releases</code>), from the link under the license notice in Graft › About Graft;</li>
+<li>Graft's page on GitHub (<code>github.com/GreenglassT/Graft</code>), from Help › Star Graft on GitHub, or the same link in Graft › About Graft;</li>
+<li>Graft's Ko-fi page (<code>ko-fi.com/greenglasst</code>), from Help › Support Graft on Ko-fi, or the same link in Graft › About Graft;</li>
 <li>a newer Graft's release page on GitHub, from Release Page on the main window's update banner, or Open Release Page after Help › Check for Updates…;</li>
 <li>a page a link in Help › What's New… points to: Graft's releases, or a page of its documentation, on <code>github.com</code>;</li>
 <li>the new Graft, once Restart to Update has installed it: the update's helper opens it (<code>open</code>), as Finder would;</li>

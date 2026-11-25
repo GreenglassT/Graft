@@ -196,6 +196,63 @@ app, refuses <code>--device</code>, <code>--skip-install</code> and <code>--for-
 replace a file that's already there unless you add <code>--overwrite</code>. Under
 <code>--json</code> its last event before <code>build-end</code> is <code>ipa-exported</code>, with the file's
 <code>path</code>.</p>
+<p>Before it builds, it checks where the file goes, and that it can write a file
+in that folder. It writes the IPA to a hidden <code>.&lt;name&gt;.&lt;random&gt;.partial</code> file
+beside the path, then moves it into place, so a failed or stopped export
+leaves nothing behind. If graft is killed outright mid-write, that hidden file
+can be left there: it's safe to delete. The file's permissions are a new
+file's, as your umask sets them.</p>
+<p>How an export ends, by its exit status and, under <code>--json</code>, <code>build-end</code>'s
+<code>reason</code>. The reason is null when the export worked, was stopped, or failed
+another way (cyan failing, say), which the exit status tells as it does for a
+build.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Exit</th>
+<th><code>reason</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>null</td>
+<td>The IPA was written</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>exists</code></td>
+<td>A file is already at the path. <code>--overwrite</code> replaces it</td>
+</tr>
+<tr>
+<td>2</td>
+<td><code>bad-destination</code></td>
+<td>The path is a folder, its folder isn't there or is one of Graft's own, or it starts with <code>~name</code> for a user this Mac doesn't have</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>unwritable</code></td>
+<td>graft can't write in that folder: its permissions, macOS's privacy controls, or a read-only disk</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>no-space</code></td>
+<td>The disk is full</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>write-failed</code></td>
+<td>Writing the file failed another way</td>
+</tr>
+<tr>
+<td>4</td>
+<td><code>no-ipa</code></td>
+<td>No IPA is staged for the app</td>
+</tr>
+</tbody>
+</table>
+</div>
 <p><code>--skip-decrypt-check</code> skips the decryption check. A Stop (SIGTERM) ends the
 build where it is: nothing is recorded as a failure, and under <code>--json</code> the
 last event is

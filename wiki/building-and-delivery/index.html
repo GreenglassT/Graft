@@ -262,9 +262,11 @@ app too. Graft only saves the file; moving it to the phone is up to you.</li>
 and keeps no log, and archive clean-up never touches the file.</li>
 <li><strong>For your own devices.</strong> It's an app your Apple ID owns or got for free.</li>
 </ul>
-<p>The Save panel asks before replacing a file that's already there. Graft won't
-save into its own folders for staged IPAs and archived builds, which it
-cleans up itself.</p>
+<p>The Save panel asks before replacing a file that's already there. Graft
+builds the file in a temporary folder of its own and moves it to where you
+chose once it's done, so a stopped or failed export leaves nothing in your
+folder. Graft won't save into its own folders for staged IPAs and archived
+builds, which it cleans up itself.</p>
 <p>In Terminal, <code>graft example --export-ipa ~/Desktop/Example.ipa</code> does the same;
 see <a href="/wiki/cli-reference/#building">Building</a> in the CLI Reference.</p>
 <nav class="pager"><a rel="prev" href="/wiki/tweaks/">← Tweaks</a><a rel="next" href="/wiki/livecontainer/">LiveContainer →</a></nav>

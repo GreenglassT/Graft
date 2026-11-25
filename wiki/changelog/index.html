@@ -74,19 +74,45 @@
 <h1>Changelog</h1>
 <p>What changed in each release of Graft, newest first. Each release's download
 is on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>.</p>
-<h2 id="unreleased">Unreleased</h2>
+<h2 id="21-2026-11-24">2.1 (2026-11-24)</h2>
 <h3 id="new">New</h3>
 <ul>
-<li>If PlayCover isn't installed, Build options on an app's pane now says so
+<li>
+<p><strong>Get an older version.</strong> When a new version of an app breaks a tweak, Get
+an older version… on the app's pane lists the versions the App Store still
+has for your Apple ID, newest first, with their dates, and gets the one you
+pick. Graft then holds the app at that version: builds use it, and the pane
+says &quot;Held at 1.2.0 · newest 1.4.0&quot; instead of &quot;update available&quot;, until you
+press Get latest from App Store. Only apps your Apple ID has, Apple doesn't
+serve every old version, and some apps refuse to run once they're too old.
+In Terminal: <code>graft --appstore-versions --app &lt;name&gt;</code>, then
+<code>graft --appstore-get --app &lt;name&gt; --version-id &lt;id&gt;</code>.</p>
+</li>
+<li>
+<p>A preferred version set in Edit App is now a hold too: the pane says &quot;Held
+at&quot;, not &quot;update available&quot;, and Get latest from App Store sets it back to
+latest.</p>
+</li>
+<li>
+<p>If PlayCover isn't installed, Build options on an app's pane now says so
 above Build for this Mac, with a Get PlayCover button that opens
 PlayCover's releases page on GitHub. Graft doesn't download or install
 PlayCover. When handing a build to PlayCover fails because it isn't
-installed, the error names that page too.</li>
-<li><strong>Export IPA…</strong> in Build options saves the app's IPA with its tweaks
+installed, the error names that page too.</p>
+</li>
+<li>
+<p><strong>Export IPA…</strong> in Build options saves the app's IPA with its tweaks
 injected, unsigned, where you choose, for an on-device signer or TrollStore
 on your own devices. Nothing is signed or sent to a device, whatever the
 app's delivery mode, and the export doesn't appear in Builds. In Terminal:
-<code>graft example --export-ipa &lt;file&gt;.ipa</code>.</li>
+<code>graft example --export-ipa &lt;file&gt;.ipa</code>, which checks it can write there
+before it builds. Under <code>--json</code>, a failed export's <code>build-end</code> says why in
+<code>reason</code>, such as <code>exists</code> or <code>unwritable</code>.</p>
+</li>
+<li>
+<p>Help › Star Graft on GitHub and Help › Support Graft on Ko-fi open those
+pages in your browser, and Graft › About Graft links them too.</p>
+</li>
 </ul>
 <h3 id="fixes">Fixes</h3>
 <ul>
@@ -94,11 +120,12 @@ app's delivery mode, and the export doesn't appear in Builds. In Terminal:
 already downloading. It used to, and still said the update was available
 after the banner said it was ready. Now it says the download has started
 and the banner shows how it's going. For an update that's ready it offers
-Restart to Update, as the banner does, and after a failed try it says why
-and offers Try Again.</li>
+Restart to Update, as the banner does, and after a failed try it says why,
+and offers Try Again when trying again can help.</li>
 <li>If you put an older Graft back after an update installed, Graft no longer
-says it couldn't update. It now checks the update log before it says an
-update failed.</li>
+says it couldn't update, as long as the copy you put back is 2.1 or later.
+It now checks the update log before it says an update failed. The log's
+times now include their offset from UTC.</li>
 </ul>
 <h2 id="202-2026-11-24">2.0.2 (2026-11-24)</h2>
 <p>Graft now updates itself.</p>
