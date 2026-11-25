@@ -16,7 +16,7 @@ A build needs a decrypted IPA of the app. There are three ways to get one.
 These are for **personal use**: your own Apple ID, apps you own or get for
 free, on your own devices. Don't redistribute decrypted or modified IPAs.
 
-![An app pane with no IPA yet, showing a drop area, a Choose IPA button and a Get latest from App Store button.](img/ipa-drop.png "An app with no IPA yet: drop one on the pane, choose a file, or get the latest from the App Store.")
+![An app pane with no IPA yet, showing a drop area, a Choose IPA button, and Get an older version and Get latest from App Store buttons.](img/ipa-drop.png "An app with no IPA yet: drop one on the pane, choose a file, or get one from the App Store.")
 
 ## Details for each way
 

@@ -2121,6 +2121,7 @@ def _upstream_of(patch: Path, name: str) -> str:
     return "\n".join(out) + "\n"
 
 
+@needs_tools("git")  # git ls-files
 def test_every_patch_reaches_the_source_archive():
     """The source archive is `git archive` of the commit built, without
     SOURCE_EXCLUDES: each patch the build applies has to be a tracked file
