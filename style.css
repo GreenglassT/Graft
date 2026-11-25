@@ -181,6 +181,8 @@ pre .c { color: var(--term-soft); }
 /* Tip + footer */
 .tip { display: grid; justify-items: start; gap: 1.1rem; margin-top: clamp(4.5rem, 9vw, 7rem); padding: 2.5rem 0; border-top: 1px solid var(--rule); }
 .tip p { margin: 0; max-width: 32rem; font-size: 1.35rem; font-weight: 600; line-height: 1.4; }
+.tip p.small { font-size: 1rem; font-weight: 400; color: var(--ink-soft); }
+.tip p.small a { color: var(--ink); font-weight: 600; }
 footer { border-top: 1px solid var(--rule); padding: 1.75rem 0 3rem; font-size: 0.95rem; color: var(--ink-soft); }
 footer p { margin: 0.3rem 0; }
 
