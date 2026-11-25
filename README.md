@@ -1503,3 +1503,7 @@ Graft.app is an aggregate of separate programs and libraries, each under its own
 If Graft is useful to you, you can support it at
 [ko-fi.com/greenglasst](https://ko-fi.com/greenglasst), also from Help ›
 Support Graft on Ko-fi or Settings › Version in the app.
+
+For questions, help, and testing new builds, join the
+[Graft Discord](https://discord.gg/dnJTnu3X7X). Bugs are best reported as
+[GitHub issues](https://github.com/GreenglassT/Graft/issues).

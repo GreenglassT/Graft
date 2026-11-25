@@ -26,3 +26,7 @@ Common symptoms and error messages, and their likely cause.
 | The first sign-in, or the first App Store action, fails with "Apple no longer serves the macOS 27.0.1 (26A434) restore image that ipatool 2.8.0 takes them from" | A known issue since 2.0. The bundled ipatool takes the App Store's frameworks from one macOS restore image, at a fixed Apple address, and checks every file it takes against its source's pins, so no other image can stand in. If Apple removes that file, a Mac that hasn't downloaded them yet can't get them; Apple's server then answers "403 Forbidden" (or "404 Not Found"), which the error's details show. A Mac whose ipatool already did (in `~/Library/Caches/ipatool`) isn't affected. Graft's update notice, or Help › Check for Updates…, says whether a later Graft is out (or look on [GitHub Releases](https://github.com/GreenglassT/Graft/releases)); a later Graft's ipatool will use an image Apple still serves. |
 | Settings › App Store says "couldn't tell… your login keychain is locked" | Unlock the login keychain in Keychain Access, then refresh. Until then Settings offers neither Sign In… nor Sign Out, Get latest from App Store and Get (free) refuse, and so do `graft --appstore-login` and `--appstore-logout` in Terminal. |
 | "Graft.app is damaged: part of it is missing." | A file inside the app is missing. Download Graft again and replace this copy. |
+
+Still stuck? Ask in the [Graft Discord](https://discord.gg/dnJTnu3X7X), or open a
+[GitHub issue](https://github.com/GreenglassT/Graft/issues) with the error and
+what you were doing.

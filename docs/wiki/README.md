@@ -32,3 +32,5 @@ tweaks, and sends it to your iPhone or iPad. It works with a free Apple ID.
 - [Troubleshooting](troubleshooting.md): common symptoms and error messages, and their likely cause.
 - [Removing Graft](removing.md): what Graft keeps outside the app, and how to remove it from the Help menu or in Terminal.
 - [Building from Source](building-from-source.md): you can build Graft.app from the repository with xcodegen and Xcode, and run its tests there.
+
+Questions? Ask in the [Graft Discord](https://discord.gg/dnJTnu3X7X).
