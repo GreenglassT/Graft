@@ -80,9 +80,11 @@ is on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a
 <ul>
 <li><strong>macOS 13 on Intel Macs.</strong> <code>Graft-Intel.zip</code> now runs on macOS 13
 Ventura, as well as macOS 14 and later. It's still a test build.
-<code>Graft.zip</code>, for Apple silicon, still needs macOS 14. On macOS 13, the up
-and down arrow keys don't move through Add App's search results: click a
-result, or press Return to pick the first.</li>
+<code>Graft.zip</code>, for Apple silicon, still needs macOS 14. A Mac with Apple
+silicon on macOS 13 can run <code>Graft-Intel.zip</code> too, and its banner says
+<code>Graft.zip</code> needs macOS 14 or later. On macOS 13, the up and down arrow keys
+don't move through Add App's search results: click a result, or press
+Return to pick the first.</li>
 </ul>
 <h3 id="fixes">Fixes</h3>
 <ul>
@@ -93,7 +95,8 @@ oldest, and hovering over one says which it is. Show More renumbers them
 when it finds an older one.</li>
 <li>Graft finds its own Python by name, whatever its version, as its updater
 already does. A later release built on a newer Python would otherwise skip
-the check that Graft is the right download for this Mac.</li>
+the check that the app and its Python come from the same download, Apple
+silicon or Intel.</li>
 <li>For people building Graft: a release build runs the tests of Graft's
 ipatool patch and stops if one fails; each download is built for its own
 oldest macOS and checked against it; and an Intel release no longer passes
