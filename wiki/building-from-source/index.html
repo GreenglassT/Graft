@@ -101,10 +101,13 @@ there's no daemon.</p>
 <li>A build from Xcode runs the CLI it finds on your PATH, such as the repo's
 venv.</li>
 </ul>
-<p><code>scripts/graft-release</code> builds the distributable app: everything bundled
-(arm64, with a universal app executable that shows Intel Macs a &quot;needs Apple
-silicon&quot; screen), signed with a Developer ID identity and zipped. Then
-<code>scripts/verify-bundle</code> checks the sealed app. See
+<p><code>scripts/graft-release</code> builds the distributable app: everything bundled for
+one processor (<code>Graft.zip</code> for Apple silicon, <code>Graft-Intel.zip</code> for Intel
+Macs, with <code>--arch x86_64</code>), with a universal app executable in both, so
+<code>Graft.zip</code> opened on an Intel Mac shows a screen that names
+<code>Graft-Intel.zip</code>. It's signed with a Developer ID identity and zipped. Then
+<code>scripts/verify-bundle</code> (with <code>--arch x86_64</code> for the Intel build) checks the
+sealed app. See
 <a href="https://github.com/GreenglassT/Graft/blob/main/Graft/README.md">Graft/README.md</a>, and <a href="/wiki/network/">docs/network.md</a> for
 every host Graft and its tools contact, including what a release build
 downloads.</p>

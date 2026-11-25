@@ -75,8 +75,49 @@
 <h1>Changelog</h1>
 <p>What changed in each release of Graft, newest first. Each release's download
 is on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>.</p>
-<h2 id="21-2026-11-24">2.1 (2026-11-24)</h2>
+<h2 id="22-2026-11-25">2.2 (2026-11-25)</h2>
 <h3 id="new">New</h3>
+<ul>
+<li><strong>Intel Macs, as a test build.</strong> <code>Graft-Intel.zip</code>, beside <code>Graft.zip</code> on
+the release page, runs on an Intel Mac with macOS 14 or later. It stays a
+test build until it has run on a real Intel Mac. Everything works except
+what needs Apple silicon: App Store sign-in, getting and decrypting App
+Store apps (older versions and free ones included), and Build for this Mac
+with PlayCover. Those buttons are still there, disabled, with &quot;Needs a Mac
+with Apple silicon&quot;. On an Intel Mac, use a decrypted IPA you already have,
+or dump one from a jailbroken device. App Store search still works, for
+adding an app by name, and needs no sign-in.</li>
+<li>Each download updates itself from its own zip, and checks that the update
+is the same build before installing it. If a release doesn't have your
+build's zip yet, Graft says there's no update for this Mac yet.</li>
+<li><code>Graft.zip</code> opened on an Intel Mac says to download <code>Graft-Intel.zip</code>, with
+a button to the releases page. <code>Graft-Intel.zip</code> opened on an Apple silicon
+Mac runs, with a banner saying to download <code>Graft.zip</code> for everything.</li>
+<li>Help › Join the Graft Discord, the same button in Settings › Version, and a
+link in Graft › About Graft open the Graft Discord, for questions and help.</li>
+</ul>
+<h3 id="fixes">Fixes</h3>
+<ul>
+<li>Get an older version… stops when the connection stalls. It used to wait
+about a minute on the version it was reading, mark that version as
+unavailable, and go on to the next one, up to a minute each. Now the list
+stops there and says reading that version timed out. The versions it had
+read are kept, so Try Again picks up where it stopped. If that version
+times out again, it's marked as unavailable and the list goes on.</li>
+<li>Get an older version… copes better with slow connections: a request for a
+version's details now fails only after 30 seconds with nothing arriving,
+not after 30 seconds in all.</li>
+<li>Export IPA… no longer freezes the window when it saves to a drive where
+it has to copy the file into place, such as some network and FAT drives.
+The window stays responsive while the file is copied, and Stop ends the
+copy and leaves nothing in the folder. If a file with the same name
+appears in the folder while the file is copied, Graft leaves it alone and
+says so.</li>
+<li>When an export fails, the error names the file you chose, not the
+temporary folder Graft built it in.</li>
+</ul>
+<h2 id="21-2026-11-24">2.1 (2026-11-24)</h2>
+<h3 id="new-1">New</h3>
 <ul>
 <li>
 <p><strong>Get an older version.</strong> When a new version of an app breaks a tweak, Get
@@ -116,7 +157,7 @@ pages in your browser. The same two buttons are in Settings › Version, and
 Graft › About Graft links them too.</p>
 </li>
 </ul>
-<h3 id="fixes">Fixes</h3>
+<h3 id="fixes-1">Fixes</h3>
 <ul>
 <li>Help › Check for Updates… no longer offers Update for an update Graft is
 already downloading. It used to, and still said the update was available
@@ -169,7 +210,7 @@ Graft and move it to the Trash. In Terminal, <code>graft --remove-data</code> li
 the same, and <code>--items</code> removes what you name.
 <a href="/wiki/removing/">Removing Graft</a> has the whole list.</li>
 </ul>
-<h3 id="fixes-1">Fixes</h3>
+<h3 id="fixes-2">Fixes</h3>
 <ul>
 <li><strong>If Apple stops serving the macOS restore image</strong> that the bundled ipatool
 takes the App Store's frameworks from, the first sign-in or App Store action
@@ -260,7 +301,7 @@ Get latest from App Store downloads nothing and says &quot;Already have
 &lt;version&gt;&quot;. Get Again, or <code>--again</code> with <code>--appstore-get</code>, downloads it
 anyway.</li>
 </ul>
-<h3 id="fixes-2">Fixes</h3>
+<h3 id="fixes-3">Fixes</h3>
 <ul>
 <li><strong>Set Up Decryption</strong> suggests opening the app you picked first, with a
 button that does it: macOS sometimes clears the App Store state that step
@@ -338,7 +379,7 @@ waits a minute for it, instead of failing.</li>
 lists every bundled component, and each release page carries the source
 archive.</li>
 </ul>
-<h3 id="fixes-3">Fixes</h3>
+<h3 id="fixes-4">Fixes</h3>
 <ul>
 <li>Re-saving a password no longer asks for your keychain password. In 1.1,
 storing a <code>.p12</code> or SSH password over one already there asked for your login

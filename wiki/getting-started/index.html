@@ -78,7 +78,9 @@ app has its own page.</p>
 <figure class="wiki-shot"><img src="/wiki/img/getting-started-main.png" alt="Graft&#x27;s main window with five example apps in the sidebar and one app&#x27;s pane open." width="1600" height="1040" loading="lazy"><figcaption>The main window: apps in the sidebar, the selected app&#x27;s pane on the right.</figcaption></figure>
 <h2 id="install">Install</h2>
 <ol>
-<li>Download <code>Graft.zip</code> from <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>.</li>
+<li>Download <code>Graft.zip</code> from <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>.
+On an Intel Mac, download <code>Graft-Intel.zip</code> instead (a test build; see
+<a href="#requirements">Requirements</a>).</li>
 <li>Unzip it, move <code>Graft.app</code> to <code>/Applications</code>, and open it.</li>
 </ol>
 <p>Graft.app carries everything it needs:</p>
@@ -92,12 +94,34 @@ libimobiledevice's <code>iproxy</code> and tools you install yourself (see
 <a href="/wiki/getting-an-ipa/#decrypt-on-a-jailbroken-device">Decrypt on a jailbroken device</a>).</p>
 <h2 id="requirements">Requirements</h2>
 <ul>
-<li><strong>A Mac with Apple silicon and macOS 14 or later.</strong> On an Intel Mac,
-Graft.app opens to a screen that says it needs Apple silicon.</li>
-<li><strong>An iPhone or iPad</strong> paired with this Mac, connected by USB, or on the
-same network with Wi-Fi sync turned on.</li>
-<li><strong>An Apple account,</strong> of one of two kinds. The first run asks which you
-have, and Settings switches later.
+<li>
+<p><strong>A Mac with macOS 14 or later.</strong> On a Mac with Apple silicon, download
+<code>Graft.zip</code>, which does everything.</p>
+</li>
+<li>
+<p><strong>On an Intel Mac,</strong> download <code>Graft-Intel.zip</code>. It's a test build until it
+has run on a real Intel Mac. Everything works except what needs Apple
+silicon:</p>
+<ul>
+<li>App Store sign-in, and getting and decrypting App Store apps, older
+versions and free ones included (search still works, for adding an app
+by name, and needs no sign-in);</li>
+<li>Set Up Decryption;</li>
+<li>Build for this Mac, and handing builds to PlayCover.</li>
+</ul>
+<p>Those buttons are there but disabled, with &quot;Needs a Mac with Apple
+silicon&quot;. Use a decrypted IPA you already have, or dump one from a
+jailbroken device. <code>Graft.zip</code> opened on an Intel Mac only says to download
+<code>Graft-Intel.zip</code>; <code>Graft-Intel.zip</code> on an Apple silicon Mac runs, with a
+banner saying to download <code>Graft.zip</code> for everything.</p>
+</li>
+<li>
+<p><strong>An iPhone or iPad</strong> paired with this Mac, connected by USB, or on the
+same network with Wi-Fi sync turned on.</p>
+</li>
+<li>
+<p><strong>An Apple account,</strong> of one of two kinds. The first run asks which you
+have, and Settings switches later.</p>
 <ul>
 <li>A <strong>free Apple ID</strong>, with LiveContainer on the device. Graft builds
 unsigned IPAs and pushes them into LiveContainer, which signs them when
@@ -139,11 +163,11 @@ profile is simplest) that includes your device.</li>
 </tr>
 <tr>
 <td>Download from the App Store</td>
-<td>An Apple ID signed in in Graft. Any Apple ID works, free or paid; it's separate from the account above. The app must be one that Apple ID owns, or a free one Graft can get for it.</td>
+<td>A Mac with Apple silicon, and an Apple ID signed in in Graft. Any Apple ID works, free or paid; it's separate from the account above. The app must be one that Apple ID owns, or a free one Graft can get for it.</td>
 </tr>
 <tr>
 <td>Decrypt App Store downloads</td>
-<td>An iPhone or iPad app installed on this Mac from the Mac App Store, with the same Apple ID, and opened once. Any free one will do.</td>
+<td>A Mac with Apple silicon, and an iPhone or iPad app installed on it from the Mac App Store, with the same Apple ID, and opened once. Any free one will do.</td>
 </tr>
 <tr>
 <td>Decrypt on a jailbroken device</td>
@@ -151,7 +175,7 @@ profile is simplest) that includes your device.</li>
 </tr>
 <tr>
 <td>Run a build on this Mac</td>
-<td><a href="https://github.com/PlayCover/PlayCover/releases">PlayCover</a>, a free app you install yourself. Graft doesn't include it.</td>
+<td>A Mac with Apple silicon, and <a href="https://github.com/PlayCover/PlayCover/releases">PlayCover</a>, a free app you install yourself. Graft doesn't include it.</td>
 </tr>
 </tbody>
 </table>
