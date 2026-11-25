@@ -75,8 +75,35 @@
 <h1>Changelog</h1>
 <p>What changed in each release of Graft, newest first. Each release's download
 is on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>.</p>
-<h2 id="22-2026-11-25">2.2 (2026-11-25)</h2>
+<h2 id="221-2026-11-25">2.2.1 (2026-11-25)</h2>
 <h3 id="new">New</h3>
+<ul>
+<li><strong>macOS 13 on Intel Macs.</strong> <code>Graft-Intel.zip</code> now runs on macOS 13
+Ventura, as well as macOS 14 and later. It's still a test build.
+<code>Graft.zip</code>, for Apple silicon, still needs macOS 14. On macOS 13, the up
+and down arrow keys don't move through Add App's search results: click a
+result, or press Return to pick the first.</li>
+</ul>
+<h3 id="fixes">Fixes</h3>
+<ul>
+<li>Get an older version… tells apart builds the App Store has under the same
+version number. They used to look like the same row twice. Now they read
+&quot;1.2.0 (build 1 of 2)&quot; and &quot;1.2.0 (build 2 of 2)&quot;, numbered from the
+oldest, and hovering over one says which it is. Show More renumbers them
+when it finds an older one.</li>
+<li>Graft finds its own Python by name, whatever its version, as its updater
+already does. A later release built on a newer Python would otherwise skip
+the check that Graft is the right download for this Mac.</li>
+<li>For people building Graft: a release build runs the tests of Graft's
+ipatool patch and stops if one fails; each download is built for its own
+oldest macOS and checked against it; and an Intel release no longer passes
+its check when the app names <code>GraftBundleArch</code> only in a comment or an
+<code>#if false</code> block. The test suites also no longer depend on the Mac they
+run on, and a test build of the app keeps its settings apart from the
+Graft you use.</li>
+</ul>
+<h2 id="22-2026-11-25">2.2 (2026-11-25)</h2>
+<h3 id="new-1">New</h3>
 <ul>
 <li><strong>Intel Macs, as a test build.</strong> <code>Graft-Intel.zip</code>, beside <code>Graft.zip</code> on
 the release page, runs on an Intel Mac with macOS 14 or later. It stays a
@@ -96,7 +123,7 @@ Mac runs, with a banner saying to download <code>Graft.zip</code> for everything
 <li>Help › Join the Graft Discord, the same button in Settings › Version, and a
 link in Graft › About Graft open the Graft Discord, for questions and help.</li>
 </ul>
-<h3 id="fixes">Fixes</h3>
+<h3 id="fixes-1">Fixes</h3>
 <ul>
 <li>Get an older version… stops when the connection stalls. It used to wait
 about a minute on the version it was reading, mark that version as
@@ -117,7 +144,7 @@ says so.</li>
 temporary folder Graft built it in.</li>
 </ul>
 <h2 id="21-2026-11-24">2.1 (2026-11-24)</h2>
-<h3 id="new-1">New</h3>
+<h3 id="new-2">New</h3>
 <ul>
 <li>
 <p><strong>Get an older version.</strong> When a new version of an app breaks a tweak, Get
@@ -157,7 +184,7 @@ pages in your browser. The same two buttons are in Settings › Version, and
 Graft › About Graft links them too.</p>
 </li>
 </ul>
-<h3 id="fixes-1">Fixes</h3>
+<h3 id="fixes-2">Fixes</h3>
 <ul>
 <li>Help › Check for Updates… no longer offers Update for an update Graft is
 already downloading. It used to, and still said the update was available
@@ -210,7 +237,7 @@ Graft and move it to the Trash. In Terminal, <code>graft --remove-data</code> li
 the same, and <code>--items</code> removes what you name.
 <a href="/wiki/removing/">Removing Graft</a> has the whole list.</li>
 </ul>
-<h3 id="fixes-2">Fixes</h3>
+<h3 id="fixes-3">Fixes</h3>
 <ul>
 <li><strong>If Apple stops serving the macOS restore image</strong> that the bundled ipatool
 takes the App Store's frameworks from, the first sign-in or App Store action
@@ -301,7 +328,7 @@ Get latest from App Store downloads nothing and says &quot;Already have
 &lt;version&gt;&quot;. Get Again, or <code>--again</code> with <code>--appstore-get</code>, downloads it
 anyway.</li>
 </ul>
-<h3 id="fixes-3">Fixes</h3>
+<h3 id="fixes-4">Fixes</h3>
 <ul>
 <li><strong>Set Up Decryption</strong> suggests opening the app you picked first, with a
 button that does it: macOS sometimes clears the App Store state that step
@@ -379,7 +406,7 @@ waits a minute for it, instead of failing.</li>
 lists every bundled component, and each release page carries the source
 archive.</li>
 </ul>
-<h3 id="fixes-4">Fixes</h3>
+<h3 id="fixes-5">Fixes</h3>
 <ul>
 <li>Re-saving a password no longer asks for your keychain password. In 1.1,
 storing a <code>.p12</code> or SSH password over one already there asked for your login

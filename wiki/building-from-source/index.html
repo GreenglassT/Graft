@@ -105,9 +105,11 @@ venv.</li>
 one processor (<code>Graft.zip</code> for Apple silicon, <code>Graft-Intel.zip</code> for Intel
 Macs, with <code>--arch x86_64</code>), with a universal app executable in both, so
 <code>Graft.zip</code> opened on an Intel Mac shows a screen that names
-<code>Graft-Intel.zip</code>. It's signed with a Developer ID identity and zipped. Then
-<code>scripts/verify-bundle</code> (with <code>--arch x86_64</code> for the Intel build) checks the
-sealed app. See
+<code>Graft-Intel.zip</code>. Each is built for its own oldest macOS, 14.0 for
+<code>Graft.zip</code> and 13.0 for <code>Graft-Intel.zip</code>. It's signed with a Developer ID
+identity and zipped. Then <code>scripts/verify-bundle</code> (with <code>--arch x86_64</code> for the
+Intel build) checks the sealed app, including that no program in it needs a
+newer macOS than that. See
 <a href="https://github.com/GreenglassT/Graft/blob/main/Graft/README.md">Graft/README.md</a>, and <a href="/wiki/network/">docs/network.md</a> for
 every host Graft and its tools contact, including what a release build
 downloads.</p>
