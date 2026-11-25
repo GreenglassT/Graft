@@ -106,6 +106,9 @@ h1 {
 .star-count[hidden] { display: none; }
 .star-link .star-icon { vertical-align: -0.12em; margin-right: 0.3em; }
 .fineprint { margin: 1.25rem 0 0; font-size: 0.95rem; color: var(--ink-soft); max-width: 36rem; }
+/* Intel Mac? link under each Download button. */
+.intel-dl { margin: 0.9rem 0 0; font-size: 0.95rem; color: var(--ink-soft); max-width: 36rem; }
+.intel-dl a { color: var(--ink); font-weight: 600; }
 
 /* Sections */
 .build, .more, .agents, .install, .faq, .own { margin-top: clamp(4.5rem, 9vw, 7.5rem); scroll-margin-top: 1.5rem; }
