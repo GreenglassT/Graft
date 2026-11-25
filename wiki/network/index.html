@@ -179,7 +179,7 @@
 <tr>
 <td>Older versions (<code>--appstore-versions</code>, which runs <code>ipatool list-versions -b &lt;bundle id&gt;</code>, then <code>ipatool get-version-metadata -b &lt;bundle id&gt; --external-version-id &lt;id&gt;</code> for each version it reads)</td>
 <td>When Get an older version… opens on an app's pane, and when you press Show More there: one list, then one request per version not read before (ten at a time). Graft remembers what it read.</td>
-<td>As for a get. <code>get-version-metadata</code> reads that version's <code>Info.plist</code> out of its IPA at the download URL Apple returns, by range requests.</td>
+<td>As for a get. <code>get-version-metadata</code> reads that version's <code>Info.plist</code> out of its IPA at the download URL Apple returns, by range requests: the last MB of the IPA, where its list of files is, and the MB around the <code>Info.plist</code>. That's about 2 MB per version, a few more for an app with tens of thousands of files.</td>
 <td>As for a get, and the <strong>version ids</strong>.</td>
 </tr>
 <tr>
@@ -211,7 +211,7 @@
 </div>
 <p>About the first-use downloads:</p>
 <ul>
-<li>Unicorn isn't in Graft.app. The bundled ipatool downloads it from PyPI as upstream ipatool does, and Graft builds ipatool unpatched. It checks the wheel's and the library's SHA-256 against the ones its source pins, and the library's again before each load. As with upstream ipatool, other code running as you could swap the cached library between that last check and the load. PyPI sees your IP address and ipatool's User-Agent, nothing else.</li>
+<li>Unicorn isn't in Graft.app. The bundled ipatool downloads it from PyPI as upstream ipatool does; Graft's one patch to ipatool doesn't touch that. It checks the wheel's and the library's SHA-256 against the ones its source pins, and the library's again before each load. As with upstream ipatool, other code running as you could swap the cached library between that last check and the load. PyPI sees your IP address and ipatool's User-Agent, nothing else.</li>
 <li>Offline, that first action fails with &quot;ipatool needs to download its App Store emulator (Unicorn, from PyPI) the first time; connect to the internet and try again.&quot;</li>
 <li>ipatool checks every file it takes from the restore image against a size and SHA-256 its source pins, so only that one image will do. If Apple stops serving it, that first action fails with &quot;Apple no longer serves the macOS 27.0.1 (26A434) restore image that ipatool 2.8.0 takes them from&quot;; a newer Graft, whose ipatool uses an image Apple still serves, fixes it.</li>
 <li>A first sign-in can take several minutes while these download; the sign-in sheet says so.</li>
@@ -252,7 +252,7 @@
 <h2 id="the-bundled-tools">The bundled tools</h2>
 <ul>
 <li>
-<p><strong>ipatool 2.8.0:</strong> as above. It is built from its pinned source, unpatched, and its only entitlements are <code>allow-jit</code> and <code>disable-library-validation</code>, which its emulator needs.</p>
+<p><strong>ipatool 2.8.0:</strong> as above. It is built from its pinned source with one patch, to how it reads an older version's <code>Info.plist</code> (above), and its only entitlements are <code>allow-jit</code> and <code>disable-library-validation</code>, which its emulator needs.</p>
 </li>
 <li>
 <p><strong>UnfairPlay 0.4.0:</strong> no network code. It is built from its pinned source, unpatched, with no entitlements. Its Go build info lists only cobra, pflag and a plist library, with cgo off, and it imports no socket calls. Graft runs <code>unfairplay --version</code> and <code>unfairplay decrypt</code>, and Set Up Decryption runs <code>unfairplay setup</code> as root, offline.</p>
@@ -285,8 +285,8 @@
 <li>App Store Connect's API keys page, from Settings › App Store Connect;</li>
 <li>a page in Graft's repository on GitHub, from the button on the screen an Intel Mac shows;</li>
 <li>Graft's releases page on GitHub (<code>github.com/GreenglassT/Graft/releases</code>), from the link under the license notice in Graft › About Graft;</li>
-<li>Graft's page on GitHub (<code>github.com/GreenglassT/Graft</code>), from Help › Star Graft on GitHub, or the same link in Graft › About Graft;</li>
-<li>Graft's Ko-fi page (<code>ko-fi.com/greenglasst</code>), from Help › Support Graft on Ko-fi, or the same link in Graft › About Graft;</li>
+<li>Graft's page on GitHub (<code>github.com/GreenglassT/Graft</code>), from Help › Star Graft on GitHub, the same button in Settings › Version, or the same link in Graft › About Graft;</li>
+<li>Graft's Ko-fi page (<code>ko-fi.com/greenglasst</code>), from Help › Support Graft on Ko-fi, the same button in Settings › Version, or the same link in Graft › About Graft;</li>
 <li>a newer Graft's release page on GitHub, from Release Page on the main window's update banner, or Open Release Page after Help › Check for Updates…;</li>
 <li>a page a link in Help › What's New… points to: Graft's releases, or a page of its documentation, on <code>github.com</code>;</li>
 <li>the new Graft, once Restart to Update has installed it: the update's helper opens it (<code>open</code>), as Finder would;</li>
