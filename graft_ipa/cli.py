@@ -46,6 +46,7 @@ from . import (
     device_apps,
     device_session,
     host,
+    ipatool,
     itunes,
     lc_runner,
     playcover,
@@ -144,7 +145,12 @@ from .json_output import (
 # it has to be patchable as `cli.list_livecontainer_documents`.
 from .lc_runner import list_livecontainer_documents
 from .legacy_env import legacy_env_notices
-from .preflight import deliveries_in_use, run_all_checks, run_free_account_checks
+from .preflight import (
+    deliveries_in_use,
+    run_all_checks,
+    run_export_checks,
+    run_free_account_checks,
+)
 from .retention import Archive, plan_prune
 from .signer import run_zsign
 from .trash import move_to_trash
@@ -631,12 +637,17 @@ class _BuildReport:
         delivery: str | None,
         dry_run: bool = False,
         for_playcover: bool = False,
+        export_to: Path | None = None,
     ) -> None:
         self._emitter = emitter
         self._app_name = app_name
         self._bundle_id = bundle_id
         self._delivery = delivery
         self._dry_run = dry_run
+        # `--export-ipa`'s path, for `build-start`: the stream says from its
+        # first line that this run writes a file and delivers nothing. Known
+        # from argv, like `delivery`; checked inside the block.
+        self._export_to = export_to
         # Passed in rather than filled in from inside the block, like `delivery`
         # and `dry_run` and unlike `version`/`ipa_path`: it comes straight from
         # argv, so it is known before `build-start` and nothing about reading it
@@ -661,6 +672,8 @@ class _BuildReport:
         # sweep to run once it is released (`sweep_when_done`).
         self._archive_hold: _RetentionLock | None = None
         self._sweep: tuple[Config, Path | None] | None = None
+        # `build-end`'s `reason` for an export that failed, set on the way out.
+        self._reason: str | None = None
 
     @property
     def elapsed(self) -> float:
@@ -668,11 +681,14 @@ class _BuildReport:
 
     @property
     def _start_fields(self) -> dict[str, Any]:
-        return {
+        fields: dict[str, Any] = {
             "app": self._app_name,
             "bundle_id": self._bundle_id,
             "delivery": self._delivery,
         }
+        if self._export_to is not None:
+            fields["export_to"] = str(self._export_to)
+        return fields
 
     def __enter__(self) -> _BuildReport:
         self._started = time.time()
@@ -833,6 +849,8 @@ class _BuildReport:
         # "Last build failed / 143".
         stopped = isinstance(exc, (Stopped, KeyboardInterrupt))
         error = None if exc is None or stopped else (str(exc) or exc.__class__.__name__)
+        # Why an export failed, for an agent: `EXPORT_FAILURE_REASONS`.
+        self._reason = None if error is None else _export_reason(exc)
         # A second Stop while the terminal records go out would raise from in
         # here and lose `build-end`; held until they are out, it is raised the
         # moment the mask is restored.
@@ -895,6 +913,10 @@ class _BuildReport:
             fields["error"] = None
         elif error is not None:
             fields["error"] = error
+        # An export's, always: null unless it failed for one of
+        # `EXPORT_FAILURE_REASONS`. A build's has none.
+        if self._export_to is not None:
+            fields["reason"] = self._reason
         # Emitted before the tee is detached, so the replayable log ends the way
         # the live stream did rather than stopping one event short.
         self._emitter.emit("build-end", **fields)
@@ -2703,8 +2725,10 @@ def _stage_ipa(
     app_name: str,
     source_path: Path,
     emitter: JsonEmitter | None,
-) -> None:
+) -> str:
     """Copy a decrypted IPA into the cache under its canonical name, and say so.
+    Returns the version staged, which a get of a chosen version holds the app
+    at.
 
     Shared by `--provide-ipa` and `--appstore-get`, so both end in the same
     `ipa-provided` event the GUI already refreshes on.
@@ -2726,11 +2750,12 @@ def _stage_ipa(
             path=str(dest),
             size_bytes=size,
         )
-        return
+        return info.version
     console.print(
         f"[green]✓[/green] cached [bold]{dest.name}[/bold]  "
         f"({size // 1024} KB)  → {dest}"
     )
+    return info.version
 
 
 def _do_cached_ipa(
@@ -3134,6 +3159,12 @@ def _do_delete_staged(
 #: passes to `codesign`, not a flag it accepts.
 PLAYCOVER_BUNDLE_ID = "io.playcover.PlayCover"
 
+#: PlayCover's official releases page, which a failed handoff's hint names.
+#: Graft doesn't include PlayCover and never downloads or installs it; the
+#: person gets it from here. Graft.app's Get PlayCover opens the same page
+#: (`PlayCover.releasesURL`, kept equal by `PlayCoverNoticeTests`).
+PLAYCOVER_RELEASES_URL = "https://github.com/PlayCover/PlayCover/releases"
+
 
 #: Where PlayCover keeps its per-app settings, and the two keys that decide
 #: whether a handed-over app is usable at all.
@@ -3391,9 +3422,16 @@ def _do_install_to_mac(
                     "(LiveContainer or sideload)"
                 ),
             )
+        # The hint says where PlayCover comes from, which is the fix for the
+        # first of the two states, and installing it again is the fix for the
+        # second. `open`'s own words follow. Graft.app's Build options says the
+        # same before a Mac build starts, when LaunchServices has no app for
+        # PLAYCOVER_BUNDLE_ID.
         raise ConfigError(
             "PlayCover is not installed, or could not launch",
             hint=(
+                f"get PlayCover from {PLAYCOVER_RELEASES_URL} and install it, "
+                "or install it again if it won't open, then try again. "
                 f"`open -b {PLAYCOVER_BUNDLE_ID}` exited {result.returncode}: "
                 f"{result.stderr.strip() or 'no output'}"
             ),
@@ -5130,24 +5168,80 @@ def _verb_appstore_get(
     provide_ipa_app: str | None,
     allow_unverified: bool | None,
     again: bool | None,
+    version_id: str | None,
+    json_mode: bool,
+    **_: Any,
+) -> None:
+    """The latest version, or with `--version-id` the one it names. A get of
+    a chosen version holds the app at it (`appstore.hold`); a get of the
+    latest lets go (`appstore.release_hold`). Either only once it worked,
+    including when the version was already staged: a failed get changes
+    nothing. A preferred version changed while it ran (Edit App) is left as
+    it is, with a warning."""
+    if not provide_ipa_app:
+        raise ConfigError("--appstore-get requires --app <name>")
+    if version_id is not None and not ipatool.is_external_version_id(version_id.strip()):
+        raise ConfigError(
+            f"--version-id takes an App Store version id, a number, not {version_id!r}",
+            hint=f"graft --appstore-versions --app {provide_ipa_app} lists them",
+        )
+    chosen = version_id.strip() if version_id is not None else None
+    emitter = JsonEmitter() if json_mode else None
+
+    def warn(message: str) -> None:
+        _warn(emitter, message)
+
+    app = cfg.get_app(provide_ipa_app)
+    # The version asked for already staged: nothing to download, unless
+    # `--again` asks for it anyway. Any doubt downloads (fails open).
+    if again:
+        staged = None
+    elif chosen is not None:
+        staged = appstore.already_staged_version(cfg, app, chosen)
+    else:
+        staged = appstore.already_staged(cfg, app)
+    if staged is not None:
+        appstore.report_already_staged(
+            provide_ipa_app, staged, emitter=emitter, say=_say_plain, version_id=chosen,
+        )
+        version = staged.version
+    else:
+        with appstore.fetched(
+            cfg, provide_ipa_app, emitter=emitter,
+            allow_unverified=bool(allow_unverified), again=bool(again), version_id=chosen,
+            say=_say_plain, warn=warn,
+        ) as decrypted:
+            version = _stage_ipa(cfg, app_name=provide_ipa_app, source_path=decrypted, emitter=emitter)
+    if chosen is not None:
+        appstore.hold(cfg, provide_ipa_app, version, emitter=emitter, say=_say_plain, warn=warn)
+    else:
+        appstore.release_hold(cfg, provide_ipa_app, emitter=emitter, say=_say_plain, warn=warn)
+
+
+def _verb_appstore_versions(
+    *,
+    cfg: Config,
+    provide_ipa_app: str | None,
+    search_limit: int | None,
+    versions_offset: int | None,
     json_mode: bool,
     **_: Any,
 ) -> None:
     if not provide_ipa_app:
-        raise ConfigError("--appstore-get requires --app <name>")
-    emitter = JsonEmitter() if json_mode else None
-    # The App Store's current version already staged: nothing to download,
-    # unless `--again` asks for it anyway. Any doubt downloads (fails open).
-    staged = None if again else appstore.already_staged(cfg, cfg.get_app(provide_ipa_app))
-    if staged is not None:
-        appstore.report_already_staged(provide_ipa_app, staged, emitter=emitter, say=_say_plain)
-        return
-    with appstore.fetched(
-        cfg, provide_ipa_app, emitter=emitter,
-        allow_unverified=bool(allow_unverified), again=bool(again),
-        say=_say_plain, warn=lambda message: _warn(emitter, message),
-    ) as decrypted:
-        _stage_ipa(cfg, app_name=provide_ipa_app, source_path=decrypted, emitter=emitter)
+        raise ConfigError("--appstore-versions requires --app <name>")
+    limit = appstore.VERSIONS_LIMIT if search_limit is None else search_limit
+    if not 0 <= limit <= appstore.VERSIONS_LIMIT_MAX:
+        raise ConfigError(
+            f"--limit with --appstore-versions is how many versions to read the details of, "
+            f"0 to {appstore.VERSIONS_LIMIT_MAX}, not {limit}"
+        )
+    offset = versions_offset or 0
+    if offset < 0:
+        raise ConfigError(f"--offset can't be negative ({offset})")
+    appstore.list_versions(
+        cfg, provide_ipa_app, offset=offset, limit=limit,
+        emitter=JsonEmitter() if json_mode else None, say=_say_plain,
+    )
 
 
 def _verb_appstore_claim(
@@ -5341,6 +5435,77 @@ def _verb_install_to_mac(
         cfg, filename=install_to_mac,
         emitter=JsonEmitter() if json_mode else None,
     )
+
+
+def _verb_export_ipa(
+    *,
+    cfg: Config,
+    export_ipa: str | None,
+    export_overwrite: bool | None,
+    apps: list[str] | None,
+    dry_run: bool,
+    skip_decrypt_check: bool,
+    verbose: bool,
+    json_mode: bool,
+    **_: Any,
+) -> int | None:
+    """`--export-ipa PATH APP`: the build of APP as far as cyan, written to PATH unsigned.
+
+    For people who sign on the phone (an on-device signer and a certificate
+    service) or install with TrollStore. It runs inside the same envelope and
+    stages as a build (`_build_one`, `export_to`), so it reports the same way
+    and stops the same way, and it never signs, archives, or looks for a device.
+
+    **No history row, by decision.** The build history is the record of what
+    Graft archived and can ship again: Re-install, Install to Mac and Reveal
+    act on a row's `ipa_path`, and the `archive_keep` sweep keeps or trashes
+    archives by those rows. An export's file is the user's, at a path they
+    chose and may move or delete, and it is unsigned: a row naming it would be
+    a Re-install that ships an unsigned IPA, or a file the sweep could reach.
+    Nor is it a delivery, so no delivery row, and the delivery badges don't
+    move. The stream it answers with, ending in `ipa-exported`, is its record;
+    and with no row to reach a saved log from, it keeps none.
+    """
+    if not apps or apps[1:]:
+        # A build's usage error, and for its reasons (`_verb_build_apps`): no
+        # build was asked for, so nothing is reported as one.
+        if json_mode:
+            err_console.print("usage: graft APP --export-ipa PATH   (one app: an export writes one IPA)")
+        else:
+            console.print("usage: graft APP --export-ipa PATH   (one app: an export writes one IPA)")
+        return 64
+    # As a build is: a Stop (SIGTERM) raises `Stopped`, so the envelope reports
+    # it and the write's temp file is removed on the way out.
+    from . import lc_manage
+
+    with lc_manage.exit_on_termination():
+        _build_one(
+            cfg=cfg,
+            app_name=apps[0],
+            dry_run=dry_run,
+            skip_install=True,
+            skip_decrypt_check=skip_decrypt_check,
+            verbose=verbose,
+            device=None,
+            emitter=JsonEmitter() if json_mode else None,
+            export_to=_export_path(export_ipa or ""),
+            overwrite=bool(export_overwrite),
+        )
+
+
+def _export_path(given: str) -> Path:
+    """`--export-ipa`'s PATH, absolute when it can be made so here.
+
+    Ahead of the envelope, so `build-start` names the file the export will
+    write rather than a relative path. Resolving it can raise (a working
+    directory that is gone, `~nobody`); that leaves it as given, and the
+    envelope's own check reports it (`_check_export_destination`).
+    """
+    path = Path(given)
+    try:
+        return path.expanduser().absolute()
+    except (OSError, RuntimeError):
+        return path
 
 
 def _verb_attach_tweak(
@@ -6857,11 +7022,13 @@ _VERB_ONLY_FLAGS: dict[str, str] = {
     "--force": "force",
     "--allow-unverified": "allow_unverified",
     "--again": "again",
+    "--version-id": "version_id",
     "--allow-unverified-helper": "allow_unverified_helper",
     "--expect-ipatool": "expect_ipatool",
     "--expect-email": "expect_email",
     "--country": "search_country",
     "--limit": "search_limit",
+    "--offset": "versions_offset",
     "--instances": "lc_instances",
     "--channel": "lc_channel",
     "--cert-only": "lc_cert_only",
@@ -7048,7 +7215,7 @@ class _StrayFlagGate:
             f"is not valid with {verb}" if verb
             else (
                 "requires --add-app, --add-app-manual, --provide-ipa, "
-                "--appstore-check, --appstore-get, --appstore-claim, --appstore-login, --appstore-enroll-command, --appstore-search, --attach-tweak, --detach-tweak, --set-app-options, "
+                "--appstore-check, --appstore-get, --appstore-versions, --appstore-claim, --appstore-login, --appstore-enroll-command, --appstore-search, --attach-tweak, --detach-tweak, --set-app-options, "
                 "--delivery-state, --reconcile, --set-settings, --set-portal, --artwork, "
                 "--prune-builds, --devices, --device-apps, --decrypt, "
                 "--decrypt-frontmost, --delete-staged, --lc-status, --lc-install, --lc-clean, "
@@ -7133,6 +7300,9 @@ _MODIFIERS: dict[str, str] = {
     "app_path": "--app-path",
     "wait_pid": "--wait-pid",
     "relaunch": "--relaunch",
+    # `--export-ipa`'s: dropped by a build, it would read as a file that was
+    # allowed to be replaced and wasn't.
+    "export_overwrite": "--overwrite",
 }
 
 #: Why a verb ignores a modifier, where there is more to say than "it does".
@@ -7142,6 +7312,11 @@ _MODIFIER_HINTS: dict[tuple[str, str], str] = {
     ),
     ("--prune-builds", "apps"): (
         "it cleans up every app's archives; there is no per-app clean-up"
+    ),
+    ("--export-ipa", "device"): "an export installs nothing, so it uses no device",
+    ("--export-ipa", "skip_install"): "an export installs nothing anyway",
+    ("--export-ipa", "for_playcover"): (
+        "an export is the build for a phone, unsigned; Build for this Mac is a build of its own"
     ),
 }
 
@@ -7261,7 +7436,11 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
     ),
     _Verb(
         "--appstore-get", "appstore_get", _verb_appstore_get,
-        accepts=frozenset({"--app", "--allow-unverified", "--again"}),
+        accepts=frozenset({"--app", "--allow-unverified", "--again", "--version-id"}),
+    ),
+    _Verb(
+        "--appstore-versions", "appstore_versions", _verb_appstore_versions,
+        accepts=frozenset({"--app", "--limit", "--offset"}),
     ),
     _Verb("--appstore-claim", "appstore_claim", _verb_appstore_claim, accepts=frozenset({"--app", "--expect-email"})),
     _Verb("--appstore-login", "appstore_login", _verb_appstore_login, accepts=frozenset({"--expect-ipatool"})),
@@ -7280,6 +7459,13 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
     _Verb("--delete-staged", "delete_staged", _verb_delete_staged,
           accepts=frozenset({"--force"})),
     _Verb("--install-to-mac", "install_to_mac", _verb_install_to_mac),
+    # A build up to cyan, then the IPA is written where it was told instead of
+    # signed or delivered. A verb rather than a build modifier, so that
+    # `_ModifierGate` refuses what an export would ignore (`--device`,
+    # `--skip-install`, `--for-playcover`) off its handler, with nothing to
+    # keep in step; it reads the app names a build takes. Below the gate, so
+    # a verb-only flag beside it (`--app`) is refused rather than dropped.
+    _Verb("--export-ipa", "export_ipa", _verb_export_ipa),
     _Verb("--attach-tweak", "attach_tweak", _verb_attach_tweak, accepts=frozenset({"--app"})),
     _Verb("--detach-tweak", "detach_tweak", _verb_detach_tweak, accepts=frozenset({"--app"})),
     _Verb("--delete-tweak", "delete_tweak", _verb_delete_tweak),
@@ -7393,7 +7579,7 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
 def main(
     ctx: typer.Context,
     apps: list[str] = typer.Argument(None, help="App name(s) from config to build & install."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="With a build, --prune-builds, --init --account or --remove-data --items: show what would happen without doing it. Every other verb refuses it."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="With a build, --export-ipa, --prune-builds, --init --account or --remove-data --items: show what would happen without doing it. Every other verb refuses it."),
     skip_install: bool = typer.Option(False, "--skip-install", help="Build only (and sign, for a sideload app): don't install or push it to the device."),
     for_playcover: bool = typer.Option(False, "--for-playcover", help="Also make the build loadable on this Mac under PlayCover."),
     skip_decrypt_check: bool = typer.Option(
@@ -7433,7 +7619,7 @@ def main(
     add_app_delivery: str | None = typer.Option(None, "--delivery", help="With --add-app or --add-app-manual: 'sideload' or 'livecontainer' (defaults to sideload with a paid account, livecontainer with a free Apple ID; sideload needs a paid account). With --set-app-options: change the app's delivery mode."),
     add_app_store_country: str | None = typer.Option(None, "--store-country", help="With --add-app-manual or --set-app-options: the App Store the app was found in, as a two-letter code such as GB. --appstore-check and --artwork then look it up there (default: the store of this Mac's region, else the US)."),
     provide_ipa_path: Path | None = typer.Option(None, "--provide-ipa", help="Validate a .ipa and stage it in cache_dir under the canonical filename. Requires --app."),
-    provide_ipa_app: str | None = typer.Option(None, "--app", help="With --provide-ipa / --attach-tweak / --detach-tweak / --appstore-get / --appstore-claim: the configured app name (YAML key). With --appstore-enroll-command: the installed app's path."),
+    provide_ipa_app: str | None = typer.Option(None, "--app", help="With --provide-ipa / --attach-tweak / --detach-tweak / --appstore-get / --appstore-versions / --appstore-claim: the configured app name (YAML key). With --appstore-enroll-command: the installed app's path."),
     cached_ipa_app: str | None = typer.Option(None, "--cached-ipa", help="Report which IPA the build pipeline would use for the given app (YAML key)."),
     # --- App Store acquisition (`appstore.py`) ---
     appstore_status: bool = typer.Option(False, "--appstore-status", help="Report whether ipatool is installed and signed in and UnfairPlay is enrolled, with the Terminal commands for whatever is missing."),
@@ -7444,7 +7630,10 @@ def main(
     # the stray-flag gate reads "was it passed" as `opts[param] is not None`.
     allow_unverified: bool | None = typer.Option(None, "--allow-unverified", help="With --appstore-get or --provide-ipa: stage a decrypt UnfairPlay could not verify against Apple's page hashes (older apps), with a warning."),
     # `bool | None` defaulting to None, like `--allow-unverified`: a verb-only flag.
-    again: bool | None = typer.Option(None, "--again", help="With --appstore-get: download, decrypt and stage the App Store's current version even when that version is already staged. Without it, a get of a version already staged downloads nothing and says so."),
+    again: bool | None = typer.Option(None, "--again", help="With --appstore-get: download, decrypt and stage the App Store's current version (or the --version-id one) even when that version is already staged. Without it, a get of a version already staged downloads nothing and says so."),
+    # `str | None` defaulting to None: a verb-only flag, passed when not None.
+    version_id: str | None = typer.Option(None, "--version-id", help="With --appstore-get: get this version instead of the latest, by the id --appstore-versions lists, and hold the app at it: its builds use that version, and --appstore-check doesn't call a newer one an update, until a get of the latest. Only versions the App Store still serves this Apple ID."),
+    appstore_versions: bool = typer.Option(False, "--appstore-versions", help="List the versions the App Store serves this Apple ID for --app, newest first, with each one's id for --appstore-get --version-id. Reads the version number and date of --limit of them from --offset on (one request each, remembered); the rest are listed by id."),
     appstore_login: bool = typer.Option(False, "--appstore-login", help="Sign ipatool in to the App Store. stdin gives the Apple ID, then the password, then the 2FA code if Apple asks (asked for in a terminal, the password without echo). None of them is ever an argument, and Graft saves none of them."),
     # `str | None` defaulting to None: a verb-only flag, passed when not None.
     expect_ipatool: str | None = typer.Option(None, "--expect-ipatool", help="With --appstore-login: sign in only if the ipatool found is PATH (compared as real paths). Any other is refused before stdin is read or ipatool starts: appstore-login {state: failed, reason: ipatool-changed}. Graft.app passes the one its sign-in sheet named."),
@@ -7460,7 +7649,8 @@ def main(
     # `str | None` / `int | None` defaulting to None: verb-only flags, detected
     # as passed by `is not None`, like `--force` below.
     search_country: str | None = typer.Option(None, "--country", help="With --appstore-search: which country's App Store, as a two-letter code such as US or GB (default: this Mac's region, else US)."),
-    search_limit: int | None = typer.Option(None, "--limit", help="With --appstore-search: how many results, at most 50 (default 25)."),
+    search_limit: int | None = typer.Option(None, "--limit", help="With --appstore-search: how many results, at most 50 (default 25). With --appstore-versions: how many versions to read the details of, at most 50 (default 10)."),
+    versions_offset: int | None = typer.Option(None, "--offset", help="With --appstore-versions: start reading details this many versions in from the newest (default 0)."),
     staged_ipas: bool = typer.Option(False, "--staged-ipas", help="Report every IPA staged in the cache, with what any strip removed."),
     delete_staged: str | None = typer.Option(None, "--delete-staged", help="Delete one staged IPA from the cache, by filename."),
     # `bool | None` defaulting to None, like `--brief` and `--with-icons`
@@ -7469,6 +7659,10 @@ def main(
     # passed on every invocation.
     force: bool | None = typer.Option(None, "--force", help="With --delete-staged: delete even if it is the only staged IPA an app can build from. With --lc-install: replace LiveContainers AltStore or SideStore manages."),
     install_to_mac: str | None = typer.Option(None, "--install-to-mac", help="Hand one staged IPA or archived build to PlayCover to install on this Mac, by filename."),
+    export_ipa: str | None = typer.Option(None, "--export-ipa", help="Build the app named beside it as far as injecting its tweaks, then write that IPA, unsigned, to PATH: for an on-device signer or TrollStore, on your own devices. Nothing is signed or sent to a device, whatever the app's delivery mode, and nothing is added to the build history. Refuses a file already at PATH without --overwrite."),
+    # `bool | None` defaulting to None, like `--relaunch`: a modifier
+    # `_ModifierGate` refuses beside anything but `--export-ipa`.
+    export_overwrite: bool | None = typer.Option(None, "--overwrite", help="With --export-ipa: replace a file already at PATH."),
     delivery_state_flag: bool = typer.Option(False, "--delivery-state", help="Report whether each app's last delivery still matches its config. Narrow it with --app."),
     list_settings: bool = typer.Option(False, "--settings", help="Show the global settings --set-settings can write."),
     set_settings_flag: bool = typer.Option(False, "--set-settings", help="Write global settings (see the --default-device / --archive-keep / --signing-* options)."),
@@ -7802,6 +7996,274 @@ def _record_delivery_if_pushed(
         _warn(emitter, f"couldn't record delivery: {exc}")
 
 
+#: Why an export failed, as its `build-end`'s `reason` says it, for an agent
+#: that has to tell the cases apart: "exists" shares exit 2 with every
+#: config error, and AGENTS.md says to ask before `--overwrite`. Null on
+#: success, on a Stop, and on a failure that isn't the export's own (a
+#: missing cyan, cyan failing), which the exit status and `error` describe.
+#: The README's CLI section and AGENTS.md list them.
+EXPORT_FAILURE_REASONS: dict[str, str] = {
+    "exists": "a file is already at PATH, and --overwrite wasn't given",
+    "bad-destination": "PATH is a folder, in a folder that isn't there, in one of Graft's "
+    "own, or starts with ~ for a user this Mac doesn't have",
+    "unwritable": "graft isn't let write in PATH's folder: its permissions, macOS's "
+    "privacy controls, or a read-only disk",
+    "no-space": "the disk PATH is on is full",
+    "write-failed": "writing the file failed another way",
+    "no-ipa": "no IPA is staged for the app to export",
+}
+
+
+def _export_failure(error: GraftError, reason: str) -> GraftError:
+    """`error`, marked with the `reason` its export's `build-end` gives."""
+    assert reason in EXPORT_FAILURE_REASONS, reason
+    error.export_reason = reason  # type: ignore[attr-defined]
+    return error
+
+
+def _export_reason(exc: BaseException | None) -> str | None:
+    """The `reason` an export's `build-end` gives for `exc`, or None."""
+    from .errors import IPANotFoundError
+
+    if isinstance(exc, IPANotFoundError):
+        return "no-ipa"
+    return getattr(exc, "export_reason", None)
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    """Whether `path` is `folder` or inside it, by what the file system says
+    they are rather than how they are spelled.
+
+    Each of `path`'s ancestors, as it resolves, is compared with `folder` by
+    `(st_dev, st_ino)`. macOS's disks are case-insensitive and don't tell a
+    precomposed é from a decomposed one unless formatted to, so
+    `…/graft/IPAS` names `cache_dir` too, and a comparison of the strings let
+    an export write into it (EX2). `path` must exist; a `folder` that doesn't,
+    or can't be looked at, holds nothing.
+    """
+    try:
+        held = os.stat(folder)
+    except OSError:
+        return False
+    wanted = (held.st_dev, held.st_ino)
+    here = Path(os.path.realpath(path))
+    for each in (here, *here.parents):
+        seen = os.stat(each)
+        if (seen.st_dev, seen.st_ino) == wanted:
+            return True
+    return False
+
+
+def _check_export_destination(
+    cfg: Config, dest: Path, *, overwrite: bool, dry_run: bool = False
+) -> Path:
+    """Where `--export-ipa` will write, made absolute, or the reason it won't.
+
+    Run first in the envelope, before minutes of downloading and injecting
+    that a typo would waste. The refusal of a file already there is checked
+    again at the moment of the move (`_write_export`), which is the check
+    that holds: this one is so the answer comes now rather than at the end.
+
+    Graft's own folders for staged IPAs and archived builds are refused. A
+    tweaked IPA in the cache could be taken for a source to build from, and
+    the retention sweep moves files in `built_dir` to the Trash; both also
+    sweep stale temp files like the one this writes.
+
+    Last, a file is made in the folder and removed, so a folder graft can't
+    write to fails now rather than after the build: one whose permissions say
+    no, a read-only disk, or one macOS's privacy controls keep graft out of,
+    which only an attempt to write finds out (EX1). A dry run writes nothing,
+    so it asks the folder's permissions instead. Anything the file system
+    says no to on the way is said as `_export_write_error` says a failed
+    write, with its hint, rather than escaping raw: `Path.is_dir` raises,
+    rather than answering False, for a folder graft can't search.
+    """
+    try:
+        dest = dest.expanduser()
+    except RuntimeError:
+        # `~name` for a user this Mac doesn't have.
+        raise _export_failure(ConfigError(
+            f"{dest} starts with {dest.parts[0]}, and graft can't find that user's home folder",
+            hint="give the whole path, or start it with ~/ for your own home folder",
+        ), "bad-destination") from None
+    try:
+        if not dest.is_absolute():
+            dest = Path.cwd() / dest
+        if dest.is_dir():
+            raise _export_failure(ConfigError(
+                f"{dest} is a folder: --export-ipa takes the file to write",
+                hint=f"name the file too, such as {dest / 'Example.ipa'}",
+            ), "bad-destination")
+        if not dest.parent.is_dir():
+            raise _export_failure(ConfigError(
+                f"there's no folder at {dest.parent} to export into",
+                hint="create it first, or choose another folder",
+            ), "bad-destination")
+        for folder, holds in ((cfg.cache_dir, "staged IPAs"), (cfg.built_dir, "archived builds")):
+            if _inside(dest.parent, folder):
+                raise _export_failure(ConfigError(
+                    f"{dest} is in Graft's own folder for {holds} ({folder})",
+                    hint="choose another folder: Graft manages the files in that one itself",
+                ), "bad-destination")
+        if os.path.lexists(dest) and not overwrite:
+            raise _export_failure(ConfigError(
+                f"{dest} already exists",
+                hint="pass --overwrite to replace it, or choose another name",
+            ), "exists")
+        if dry_run:
+            if not os.access(dest.parent, os.W_OK | os.X_OK):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(dest.parent))
+        else:
+            fd, probe = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".partial")
+            os.close(fd)
+            os.unlink(probe)
+    except OSError as exc:
+        raise _export_write_error(dest, exc) from exc
+    return dest
+
+
+#: `os.link` failing with one of these means the filesystem has no hard links
+#: (FAT and exFAT drives, some network shares), not that the name is taken.
+_NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK})
+
+
+def _export_write_error(dest: Path, exc: OSError) -> GraftError:
+    """A failed export write, said with what to do about it."""
+    hints = {
+        errno.ENOSPC: f"free some space on the disk {dest.parent} is on, or choose another folder",
+        errno.EPERM: (
+            "macOS didn't let Graft write there: allow Graft (or Terminal, if you ran graft "
+            "there) in System Settings › Privacy & Security › Files and Folders, or choose "
+            "another folder"
+        ),
+        errno.EACCES: f"your user can't write to {dest.parent}; choose another folder",
+        errno.EROFS: f"{dest.parent} is on a read-only disk; choose another folder",
+    }
+    reasons = {
+        errno.ENOSPC: "no-space",
+        errno.EPERM: "unwritable",
+        errno.EACCES: "unwritable",
+        errno.EROFS: "unwritable",
+    }
+    code = exc.errno or 0
+    return _export_failure(
+        GraftError(f"couldn't write {dest}: {exc.strerror or exc}", hint=hints.get(code)),
+        reasons.get(code, "write-failed"),
+    )
+
+
+def _read_umask() -> int:
+    """The process's umask. Python can only read it by setting another and
+    putting it back, so 0o077 stands in for that instant: a file another
+    thread made then would be made more private, not less."""
+    mask = os.umask(0o077)
+    os.umask(mask)
+    return mask
+
+
+#: The umask graft started with. Read once, here at import, before the build
+#: starts any thread that could make a file while it is swapped out.
+_UMASK = _read_umask()
+
+
+def _write_export(src: Path, dest: Path, *, overwrite: bool) -> tuple[bool, int]:
+    """Put `src` at `dest` whole, or not at all. Returns (replaced, size).
+
+    Copied to a hidden temp file beside `dest`, then moved into place, so a
+    Stop, a full disk or an error mid-copy leaves no half-written `dest`, and
+    the temp file is removed on the way out. Not on every way out: a SIGKILL,
+    a crash or a power cut mid-copy leaves it, hidden, beside `dest`
+    (`.Example.ipa.k2j4xq.partial`), the decrypted app and all, and nothing
+    sweeps that folder. From Terminal it is the user's to delete (the README
+    says so); Graft.app's export writes into a folder macOS empties itself
+    (`ExportStaging`), and moves the file to where the user chose (EX1, EX4).
+
+    The file's mode is what the umask makes of 0666, as for any new file:
+    `mkstemp` makes it 0600 whatever the umask, which made every export, and
+    a file `--overwrite` replaced, readable by its owner alone (EX3).
+
+    Without `overwrite` the move is a hard link, which fails on a name that
+    exists: a file saved at `dest` while the build ran is never replaced,
+    though the check before the build found nothing there. A filesystem
+    without hard links falls back to looking, then renaming, which leaves the
+    instant between the two.
+    """
+    taken = _export_failure(ConfigError(
+        f"{dest} appeared while the IPA was being built, and was left alone",
+        hint="pass --overwrite to replace it, or choose another name",
+    ), "exists")
+    tmp: Path | None = None
+    try:
+        # Inside the `try`, so a Stop the moment it returns finds `tmp` set
+        # and the file goes with the rest.
+        fd, tmp_name = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.", suffix=".partial")
+        tmp = Path(tmp_name)
+        with os.fdopen(fd, "wb") as out:
+            os.fchmod(out.fileno(), 0o666 & ~_UMASK)
+            with src.open("rb") as source:
+                shutil.copyfileobj(source, out, 1 << 20)
+            size = out.tell()
+        if overwrite:
+            replaced = os.path.lexists(dest)
+            os.replace(tmp, dest)
+            return replaced, size
+        try:
+            os.link(tmp, dest)
+        except FileExistsError:
+            raise taken from None
+        except OSError as exc:
+            if exc.errno not in _NO_HARD_LINKS:
+                raise
+            if os.path.lexists(dest):
+                raise taken from None
+            os.replace(tmp, dest)
+        return False, size
+    except OSError as exc:
+        raise _export_write_error(dest, exc) from exc
+    finally:
+        # After a link, the temp name is the second of two; after a rename,
+        # it is already gone.
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+
+
+def _export_tweaked(
+    tweaked: Path,
+    dest: Path,
+    *,
+    overwrite: bool,
+    app_name: str,
+    app_cfg: AppConfig,
+    version: str,
+    dry_run: bool,
+    emitter: JsonEmitter | None,
+) -> None:
+    """An export's stage 4, and its last: cyan's output, unsigned, at `dest`.
+
+    `ipa-exported` goes out once the file is in place, and nothing after it
+    but `build-end`. A dry run says where the file would go and writes nothing.
+    """
+    console.print(f"→ stage 4: exporting the unsigned IPA to [cyan]{escape(str(dest))}[/cyan]")
+    if emitter:
+        emitter.emit("stage", name="export", status="start")
+    size: int | None = None
+    if dry_run:
+        replaced = os.path.lexists(dest)
+        console.print(f"   [dim]would write {escape(str(dest))}[/dim]")
+    else:
+        replaced, size = _write_export(tweaked, dest, overwrite=overwrite)
+        console.print(
+            f"   [green]✓[/green] wrote {escape(dest.name)} ({_human_bytes(size)}), unsigned"
+        )
+    if emitter:
+        emitter.emit("stage", name="export", status="end")
+        emitter.emit(
+            "ipa-exported", app=app_name, version=version, path=str(dest),
+            filename=dest.name, size_bytes=size, tweaks=list(app_cfg.tweaks),
+            replaced=replaced, dry_run=dry_run,
+        )
+
+
 def _build_one(
     *,
     cfg: Config,
@@ -7815,11 +8277,21 @@ def _build_one(
     emitter: JsonEmitter | None = None,
     trash_dir: Path | None = None,
     log: BuildLog | None = None,
+    export_to: Path | None = None,
+    overwrite: bool = False,
 ) -> None:
     """Build one app, start to finish, entirely inside the report envelope.
 
     `log` is an injection seam for tests; `main` leaves it None so log.sqlite is
     opened inside the envelope, where a failure to open it is reportable.
+
+    `export_to` makes the run an export (`--export-ipa`, `_verb_export_ipa`):
+    the same build as far as cyan, then cyan's output is written, unsigned,
+    to that path, and nothing after it runs. It never signs, never archives
+    into `built_dir`, never looks for a device, and the app's delivery mode
+    plays no part. It writes no history row and keeps no saved log, so the
+    retention sweep never runs for it either. `overwrite` lets it replace a
+    file already there.
     """
     # `.get`, not `cfg.get_app`. A `with` header is evaluated before `__enter__`
     # runs, so a lookup that raises here is outside the envelope just as surely
@@ -7836,39 +8308,60 @@ def _build_one(
         # Empty rather than absent when the app is gone: `build-start` says
         # which app is building, and that is knowable from argv alone.
         bundle_id=app_cfg.bundle_id if app_cfg else "",
-        delivery=app_cfg.delivery if app_cfg else None,
+        # Null for an export, which delivers nothing whatever the app's mode.
+        # (`export_to` is a Path or None, and a Path is always true.)
+        delivery=None if export_to else (app_cfg.delivery if app_cfg else None),
         dry_run=dry_run,
         for_playcover=for_playcover,
+        export_to=export_to,
     ) as report:
         app_cfg = cfg.get_app(app_name)
         report.tweaks = list(app_cfg.tweaks)
-        # Inside the envelope so `build-end` carries the refusal: building
-        # LiveContainer the sideload way signs it with zsign and breaks every
-        # guest app's login. `--lc-install` is the way now.
-        from .lc_manage import refuse_legacy_build
+        exporting = export_to is not None
+        if export_to is not None:
+            # An export installs nothing. Every device step below is gated on
+            # this — the pre-flight's device checks, the LiveContainer check
+            # before cyan, both deliveries' stage 5 — so none can be reached
+            # by an export, even before stage 4 sends it down neither delivery.
+            skip_install = True
+            # First, before minutes of work: a file it may not replace, a
+            # folder that isn't there, or one of Graft's own.
+            export_to = _check_export_destination(
+                cfg, export_to, overwrite=overwrite, dry_run=dry_run
+            )
+            # Nothing else here applies. Neither refusal below is about an IPA
+            # that is never signed, and `report.log` stays None: an export
+            # writes no history row (`_verb_export_ipa` says why).
+        else:
+            # Inside the envelope so `build-end` carries the refusal: building
+            # LiveContainer the sideload way signs it with zsign and breaks
+            # every guest app's login. `--lc-install` is the way now.
+            from .lc_manage import refuse_legacy_build
 
-        refuse_legacy_build(app_cfg, free_account=cfg.free_account)
-        # Sideload signs with the paid .p12 and profile; a free Apple ID has
-        # neither. Here rather than at load, so the rest of a free config (and
-        # every other app in it) keeps working; inside the envelope, so the
-        # refusal is this build's `build-end`.
-        cfg.require_delivery(app_cfg.delivery, app=app_cfg.name)
-        # Opened here, not by the caller. `BuildLog.__init__` does a `mkdir` and
-        # an `executescript` in the same state directory the tee lives in, so a
-        # read-only or full volume makes it raise — and constructed in `main`
-        # ahead of the loop it raised before any app was attempted, producing no
-        # build event for any of them. That is the exact scenario `open_tee` was
-        # hardened for, reached through a different door.
-        if log is None:
-            log = BuildLog(cfg.state_dir / "log.sqlite")
-        report.log = log
+            refuse_legacy_build(app_cfg, free_account=cfg.free_account)
+            # Sideload signs with the paid .p12 and profile; a free Apple ID
+            # has neither. Here rather than at load, so the rest of a free
+            # config (and every other app in it) keeps working; inside the
+            # envelope, so the refusal is this build's `build-end`.
+            cfg.require_delivery(app_cfg.delivery, app=app_cfg.name)
+            # Opened here, not by the caller. `BuildLog.__init__` does a
+            # `mkdir` and an `executescript` in the same state directory the
+            # tee lives in, so a read-only or full volume makes it raise — and
+            # constructed in `main` ahead of the loop it raised before any app
+            # was attempted, producing no build event for any of them. That is
+            # the exact scenario `open_tee` was hardened for, reached through a
+            # different door.
+            if log is None:
+                log = BuildLog(cfg.state_dir / "log.sqlite")
+            report.log = log
 
         console.rule(f"[bold]{escape(app_name)}[/bold] — {escape(app_cfg.bundle_id)}")
 
         # Tee every JSON event to a per-build .jsonl so the GUI can replay it
         # later. Only meaningful when --json is in use; non-JSON runs leave no
-        # machine-readable artifact.
-        if emitter is not None and not dry_run:
+        # machine-readable artifact. Not for an export: with no history row,
+        # nothing could ever reach its log.
+        if emitter is not None and not dry_run and not exporting:
             report.open_tee(cfg.state_dir / "build-logs")
 
         # `tmp_root` is read by the finally block, so it is initialized BEFORE
@@ -7882,7 +8375,8 @@ def _build_one(
         try:
             # Pre-flight — only the checks this app's delivery mode actually needs.
             # (The full, mode-agnostic check set is available via `--check`.)
-            checks = run_all_checks(
+            # An export needs cyan and nothing else, whatever the mode.
+            checks = run_export_checks() if exporting else run_all_checks(
                 cfg, delivery=app_cfg.delivery, will_install=not skip_install, app=app_cfg
             )
             failures = [c for c in checks if not c.ok]
@@ -8062,7 +8556,18 @@ def _build_one(
             # edit could forget to copy across: the envelope reads these when it
             # writes the history row, and a lost `ipa_path` is a build with no
             # Re-install button.
-            if app_cfg.delivery == "livecontainer":
+            #
+            # An export takes neither: cyan's output goes where it was told,
+            # unsigned, and that is the run's last step. `report.ipa_path`
+            # stays None — the file is the user's, not an archive — so no
+            # retention sweep is asked for below.
+            if export_to is not None:
+                _export_tweaked(
+                    tweaked, export_to, overwrite=overwrite, app_name=app_name,
+                    app_cfg=app_cfg, version=cached.version, dry_run=dry_run,
+                    emitter=emitter,
+                )
+            elif app_cfg.delivery == "livecontainer":
                 # Skip signing entirely; LiveContainer runs the tweaked IPA unsigned.
                 console.print("→ stage 4: archiving tweaked IPA (delivery=livecontainer)")
                 if emitter:

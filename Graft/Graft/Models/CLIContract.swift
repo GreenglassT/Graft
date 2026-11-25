@@ -327,6 +327,22 @@ enum CLIContract {
         /// confirmation, and by the re-runs that answer a Get Again ("Use it
         /// anyway…", the get after Get (free)).
         static let again = "--again"
+        /// With `--appstore-get`: get the version this id names (one
+        /// `--appstore-versions` listed) instead of the latest, and hold the
+        /// app at it: the CLI pins its `preferred_version` and answers
+        /// `appstore-hold`. A version already staged is held without a
+        /// download (`appstore-already-staged`). Sent from the Get an older
+        /// version… sheet, and by the "Use it anyway…" re-run of one.
+        static let versionId = "--version-id"
+        /// Requires `--app`. Lists the versions the App Store serves this
+        /// Apple ID, newest first: `appstore-release` each, then
+        /// `appstore-releases-end`. Reads the details of a page of them
+        /// (the CLI's default, 10) and remembers them (`AppStoreVersionsStore`).
+        static let appstoreVersions = "--appstore-versions"
+        /// With `--appstore-versions`: where the page whose details are read
+        /// starts, counted from the newest. The sheet's Show More sends the
+        /// end of the last page. Never `--limit`: the CLI's page is the sheet's.
+        static let offset = "--offset"
         /// Search the App Store for iPhone apps (`AppStoreSearchStore`). Sent
         /// attached, `--appstore-search=<term>`, so a term that starts with a
         /// dash is still the term.
@@ -391,6 +407,25 @@ enum CLIContract {
         /// this app guarantees it does.
         static let forPlaycover = "--for-playcover"
 
+        /// Build the app as far as injecting its tweaks, then write that IPA,
+        /// unsigned, to the path that follows — for an on-device signer or
+        /// TrollStore. The CLI never signs, archives or touches a device for
+        /// it, whatever the app's delivery mode, and writes no history row.
+        ///
+        /// A verb, not a toggle: `AppDetailView`'s Export IPA… sets it on a
+        /// copy of the pane's options for one launch, as Build for this Mac
+        /// does `forPlaycover`, and `BuildOptions.Option.exportIPA` renders
+        /// it. The CLI refuses `--device`, `--skip-install` and
+        /// `--for-playcover` beside it, so `BuildOptions.activeOptions` never
+        /// sends them with it.
+        static let exportIPA = "--export-ipa"
+        /// With `--export-ipa`: replace a file already at its path. The CLI
+        /// refuses one without it. The app sends it only for a dry run's
+        /// preview of a file the user chose to replace in the Save panel: a
+        /// real export writes into a new staging folder, and the app replaces
+        /// the file itself (`ExportStaging`).
+        static let overwrite = "--overwrite"
+
         /// Every constant declared above.
         ///
         /// Swift can't enumerate the static members of a caseless enum, and
@@ -423,13 +458,14 @@ enum CLIContract {
             devices, brief, deviceInfo, withIcons,
             lcStatus, lcInstall, lcPushCert, lcClean, instances, channel, certOnly,
             artwork, refreshArtwork,
-            appstoreStatus, appstoreCheck, appstoreGet, allowUnverified, again, appstoreSearch, country,
+            appstoreStatus, appstoreCheck, appstoreGet, allowUnverified, again, versionId,
+            appstoreVersions, offset, appstoreSearch, country,
             appstoreLogin, expectIpatool, appstoreLogout, appstoreClaim, expectEmail, appstoreEnrollCandidates, appstoreEnrollCommand,
             appstoreEnrollFinish, allowUnverifiedHelper,
             check, setP12Password, setSSHPassword,
             initSetup, account, p12, profile, replace,
             dryRun, skipInstall, skipDecryptCheck, device,
-            forPlaycover,
+            forPlaycover, exportIPA, overwrite,
         ]
     }
 
@@ -841,6 +877,7 @@ enum CLIContract {
         "staged-ipa-deleted",
         "staged-ipa-in-use",
         "handed-to-playcover",
+        "ipa-exported",
         "tweak-attached",
         "tweak-detached",
         "settings",
@@ -865,6 +902,9 @@ enum CLIContract {
         "appstore-search-result",
         "appstore-search-end",
         "appstore-search-failed",
+        "appstore-release",
+        "appstore-releases-end",
+        "appstore-hold",
         "init-step",
         "init-result",
         "update-check",

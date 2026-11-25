@@ -586,6 +586,17 @@ def run_all_checks(
     return results
 
 
+def run_export_checks() -> list[CheckResult]:
+    """Pre-flight for `--export-ipa`: cyan, and nothing else.
+
+    An export stops once cyan has injected the tweaks, so it needs no signing
+    identity, no device and no LiveContainer, whatever the app's delivery mode
+    and whichever account this is. Checking them would refuse an export that
+    can't fail for want of them.
+    """
+    return check_tools(["cyan"])
+
+
 ACCOUNT_CHECK_NAME = "account"
 FREE_ACCOUNT_DETAIL = "free Apple ID: LiveContainer delivery only"
 LIVECONTAINER_CHECK_NAME = "LiveContainer on device"

@@ -100,9 +100,15 @@ _NON_VERB_PARAMS: dict[str, str] = {
     ),
     "wait_pid": "`--wait-pid` qualifies `--install-update`; refused elsewhere like `--app-path`.",
     "relaunch": "`--relaunch` qualifies `--install-update`; refused elsewhere like `--app-path`.",
+    "export_overwrite": (
+        "`--overwrite` qualifies `--export-ipa`: replace a file already at its PATH. A "
+        "modifier rather than a verb-only flag so that `_ModifierGate` refuses it beside "
+        "every other verb, the ones above the stray-flag gate included, before any config "
+        "load: a build would drop it without a word."
+    ),
     "dry_run": (
-        "A build modifier, read by `_verb_build_apps`, `_verb_prune_builds` and "
-        "`_verb_init` (with `--account`). "
+        "A build modifier, read by `_verb_build_apps`, `_verb_export_ipa`, "
+        "`_verb_prune_builds` and `_verb_init` (with `--account`). "
         "Not in `_VERB_ONLY_FLAGS`: it has a default of False, and the verbs "
         "that may take it are read off their handlers (`_Verb.honours_dry_run`) "
         "by `_DryRunGate`, which refuses it everywhere else."

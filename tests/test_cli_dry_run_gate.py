@@ -53,7 +53,7 @@ def test_lc_clean_with_dry_run_is_refused_and_cleans_nothing(
     assert cleaned == [], "--lc-clean ran under --dry-run"
     said = _said(result)
     assert "--dry-run is not valid with --lc-clean" in said, said
-    assert "previews only a build and --init, --prune-builds" in said, said
+    assert "previews only a build and --init, --export-ipa, --prune-builds" in said, said
 
 
 def test_the_refusal_comes_before_the_config_is_even_read(
@@ -79,9 +79,11 @@ def test_the_verbs_that_preview_are_the_ones_whose_handlers_take_dry_run() -> No
     makes here rather than something the gate notices for them.
 
     `--remove-data` joined them: with `--items` it removes things that can't
-    be put back, so saying what would go first is worth having."""
+    be put back, so saying what would go first is worth having. So did
+    `--export-ipa`, which is a build: it says where the file would go and
+    writes nothing."""
     assert {v.flag for v in _verbs() if v.honours_dry_run} == {
-        "--init", "--prune-builds", "--remove-data",
+        "--init", "--prune-builds", "--remove-data", "--export-ipa",
     }
     for v in _verbs():
         assert v.honours_dry_run == ("dry_run" in inspect.signature(v.run).parameters)

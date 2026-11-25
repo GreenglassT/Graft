@@ -37,11 +37,11 @@ Follow these even when a command's hint suggests something else.
    `--set-portal`, `--clear-portal` and `--set-settings --signing-*` to them.
    The first-run setup belongs in Graft.app.
 6. **Keychain commands need the person at the Mac.** `--appstore-status`,
-   `--appstore-get` and `--appstore-claim` read the App Store sign-in from the
-   login keychain. On a paid account, `--check`, builds and `--lc-install` read
-   the `.p12` password there. If macOS shows a dialog, stop and say which
-   command caused it. Never answer or dismiss it for the person, and don't run
-   `security` yourself.
+   `--appstore-get`, `--appstore-versions` and `--appstore-claim` read the App
+   Store sign-in from the login keychain. On a paid account, `--check`, builds
+   and `--lc-install` read the `.p12` password there. If macOS shows a dialog,
+   stop and say which command caused it. Never answer or dismiss it for the
+   person, and don't run `security` yourself.
 7. **Device commands change the person's real phone or tablet.** Say which
    device (from `--devices`) and what will change, and get a yes, before a
    build without `--skip-install`, `--reinstall-build`, `--lc-install`,
@@ -59,13 +59,15 @@ Follow these even when a command's hint suggests something else.
 These report, change nothing on a device or an account, and are safe to run
 without asking: `--version`, `--describe`, `--help`, `--list`, `--tweaks`,
 `--repos`, `--staged-ipas`, `--cached-ipa`, `--builds`, `--delivery-state`,
-`--settings`, `--appstore-search`, `--appstore-check`, `--search`,
-`--devices`, `--lc-status`, `--reconcile`, `--check-update`, `--remove-data`
-(listing only, without `--items`), and a build with
+`--settings`, `--appstore-search`, `--appstore-check`, `--appstore-versions`,
+`--search`, `--devices`, `--lc-status`, `--reconcile`, `--check-update`,
+`--remove-data` (listing only, without `--items`), and a build with
 `--dry-run`. The steps below that change only Graft's own files (`--add-app`,
 `--appstore-get` for an app the Apple ID has, `--provide-ipa`, `--fetch`,
-`--attach-tweak`) need no yes beyond the person's request. Several commands go
-online; [What Graft connects to](docs/network.md) lists where.
+`--attach-tweak`) need no yes beyond the person's request, with one
+exception: if `--appstore-check` shows `held_version`, ask before a plain
+`--appstore-get`; it lets go of the hold. Several commands go online;
+[What Graft connects to](docs/network.md) lists where.
 
 ## Find the CLI
 
@@ -146,6 +148,14 @@ graft --appstore-get --app example --json
   yes, run `graft --appstore-claim --app example --json` (it ends with
   `appstore-claimed`), then the get again. With a price above 0, stop: the
   person can buy it in the App Store with the same Apple ID.
+- For an older version, `graft --appstore-versions --app example --json`
+  lists `appstore-release` {external_id, version, release_date} newest first,
+  then `appstore-releases-end`; `version` is null until read (`--offset`
+  reads the next page). `--appstore-get --app example --version-id <id>`
+  gets that one and holds the app at it (`appstore-hold`): its builds use it
+  until a plain `--appstore-get`, which lets go. A `preferred_version` the
+  person set by hand is a hold too, and `--appstore-check` shows either as
+  `held_version`: ask before a plain get lets go of it.
 - `reason: "unverified"` means UnfairPlay couldn't verify the decrypt.
   `--allow-unverified` stages it anyway, and the app may crash at launch: ask
   first.
@@ -195,6 +205,19 @@ graft example --device <UDID> --json     # to another device
   device. The person then opens LiveContainer and imports it: tell them so.
   You can't do that step, and Graft can't see it.
 - `--skip-install` builds without touching the device.
+- `graft example --export-ipa <path>.ipa --json` builds as far as injecting
+  the tweaks and saves that IPA, unsigned, at the path, for the person's
+  on-device signer or TrollStore. It signs nothing and touches no device, and
+  its last event before `build-end` is `ipa-exported` {path, size_bytes}.
+  Save it only where the person asks, and don't send the file anywhere (rule
+  1). It refuses a file already at the path; ask before adding
+  `--overwrite`, which replaces it.
+- A failed export's `build-end` says why in `reason`: `exists` (exit 2; ask
+  before `--overwrite`), `bad-destination` (2: a folder, a missing folder,
+  one of Graft's own, or a `~name` path for a user this Mac doesn't have), `unwritable`, `no-space` or `write-failed` (1: ask the
+  person for another folder, or to free space), or `no-ipa` (4: get the IPA,
+  step 2). It's null for any other failure, which the exit status describes
+  as for a build.
 
 ### 6. Check status
 
@@ -214,7 +237,9 @@ graft --tweak-updates --json                  # tweak-update: newer published ve
 - Exit status 0 is success. Otherwise stderr ends with `error: <message>`,
   often followed by `hint: <what to do>`.
 - A build exits 1 when any app failed, whatever the cause. Read each
-  `build-end`: its `error` holds the message and the hint.
+  `build-end`: its `error` holds the message and the hint. An export
+  (`--export-ipa`) exits with its failure's own code, and its `build-end`
+  has `reason` too (step 5).
 - Listings end with a sentinel event (`devices-end`, `preflight-end`,
   `canister-search-end`, `appstore-search-end`, `staged-ipas-end` and the
   like), even when they found nothing. No sentinel means the output was cut

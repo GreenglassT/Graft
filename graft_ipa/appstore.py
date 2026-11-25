@@ -36,10 +36,12 @@ nobody whatever UnfairPlay did.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import shlex
 import shutil
 import signal
+import stat
 import tempfile
 import threading
 import time
@@ -51,7 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from . import appstore_account, host, install_hints, ipatool, itunes, keychain, unfairplay
-from .config import AppConfig, AppStoreToolsConfig, Config
+from .config import AppConfig, AppStoreToolsConfig, Config, swap_preferred_version
 from .errors import AppStoreError, IPAInspectionError, ITunesError
 from .ipa_cache import CachedIPA, find_in_cache
 from .ipa_inspect import (
@@ -453,6 +455,11 @@ def check(
     to get. `cached_version` is the file a build would use (`find_in_cache`,
     which honours a pinned `preferred_version`), so the comparison is against
     what the next build would actually ship.
+
+    `held_version` is the version the app is held at (`held_version`), or
+    null. A held app is never told of an update: holding it is how the user
+    said they don't want the newer one yet. Get latest lets go
+    (`release_hold`).
     """
     for name in app_names:
         app = cfg.get_app(name)
@@ -468,7 +475,8 @@ def check(
             error = e.message
         cached = find_in_cache(cfg, app)
         cached_version = cached.version if cached else None
-        update = store_version is not None and (
+        held = held_version(app)
+        update = held is None and store_version is not None and (
             cached_version is None or version_key(store_version) > version_key(cached_version)
         )
         if emitter:
@@ -479,11 +487,17 @@ def check(
                 store_version=store_version,
                 cached_version=cached_version,
                 update_available=update,
+                held_version=held,
                 error=error,
             )
             continue
         if error:
             say(f"{name}: couldn't check the App Store — {error}")
+        elif held is not None:
+            say(
+                f"{name}: held at {held} (cached {cached_version or 'nothing'}), "
+                f"{store_version} on the App Store"
+            )
         elif update:
             say(f"{name}: {store_version} on the App Store, cached {cached_version or 'nothing'} — update available")
         else:
@@ -976,26 +990,52 @@ def _refuse_for_licence(
 
 
 def _needs_licence(
-    app_name: str, app: AppConfig, emitter: JsonEmitter | None, cause: AppStoreError
+    app_name: str, app: AppConfig, emitter: JsonEmitter | None, cause: AppStoreError,
+    version_id: str | None = None,
 ) -> AppStoreError:
     """A download refused for want of a license, as the `needs-license`
     refusal (with the price, so the app can offer Get (free) or Open in App
-    Store) and an error whose hint says which of the two applies."""
+    Store) and an error whose hint says which of the two applies. For a get
+    of one version (`version_id`), the hint names that version's command: a
+    plain get, followed literally, would get the latest and let go of the
+    hold."""
     listing = _listing(app)
     _refuse_for_licence(emitter, app_name, REFUSED_NEEDS_LICENSE, listing)
+    quoted = shlex.quote(app_name)
+    again = (
+        f"get that version again with `graft --appstore-get --app {quoted} --version-id {version_id}`"
+        if version_id else "get it again"
+    )
     if listing is not None and listing.price == 0:
         hint = (
             "it's free: get it for this Apple ID with Get (free) in Graft, or "
-            f"`graft --appstore-claim --app {shlex.quote(app_name)}`, then get it again"
+            f"`graft --appstore-claim --app {quoted}`, then {again}"
         )
     elif listing is not None and listing.price:
         hint = (
             f"it costs {listing.formatted_price or listing.price}: buy it in the App Store "
-            "with the same Apple ID, then get it again"
+            f"with the same Apple ID, then {again}"
         )
+    elif version_id:
+        hint = f"{cause.hint}; then {again}" if cause.hint else f"then {again}"
     else:
         hint = cause.hint
     return AppStoreError(cause.message, hint=hint)
+
+
+def _old_version_gone(app_name: str, app: AppConfig, error: AppStoreError) -> AppStoreError:
+    """`error`, for a download of a chosen version ipatool couldn't make,
+    with a hint that says Apple keeps only some old versions. Only ipatool's
+    own download failures get it, as with `_found_elsewhere`."""
+    if not error.message.startswith(f"ipatool couldn't download {app.bundle_id}"):
+        return error
+    return AppStoreError(
+        error.message,
+        hint=(
+            "Apple doesn't serve every old version, and this one may be gone: pick another "
+            f"(graft --appstore-versions --app {shlex.quote(app_name)}), or get the latest"
+        ),
+    )
 
 
 @contextmanager
@@ -1006,15 +1046,17 @@ def fetched(
     emitter: JsonEmitter | None,
     allow_unverified: bool = False,
     again: bool = False,
+    version_id: str | None = None,
     say: Say = _say_nothing,
     warn: Say = _say_nothing,
 ) -> Iterator[Path]:
-    """Download `app_name`'s latest version, decrypt it, and yield the decrypted IPA.
+    """Download `app_name`'s latest version, or the one `version_id` names
+    (an id `list_versions` listed), decrypt it, and yield the decrypted IPA.
 
-    Whether to download at all is the caller's question (`already_staged`).
-    `again` says it asked with `--again`, so the Terminal command an
-    unverified refusal names keeps it: without it, that command would find the
-    version staged and download nothing.
+    Whether to download at all is the caller's question (`already_staged`,
+    `already_staged_version`). `again` says it asked with `--again`, so the
+    Terminal command an unverified refusal names keeps it: without it, that
+    command would find the version staged and download nothing.
 
     The caller stages what it is handed inside the `with`; on exit — success,
     failure or Stop — the working directory and everything in it is gone.
@@ -1036,17 +1078,19 @@ def fetched(
         _stage(emitter, say, app_name, "download")
         before = appstore_account.cache_before(source)
         try:
-            encrypted = ipatool.download(ipa_path, app.bundle_id, work)
+            encrypted = ipatool.download(ipa_path, app.bundle_id, work, external_version_id=version_id)
         except ipatool.LicenseRequired as e:
-            raise _needs_licence(app_name, app, emitter, e) from e
+            raise _needs_licence(app_name, app, emitter, e, version_id=version_id) from e
         except AppStoreError as e:
-            raise _found_elsewhere(app, e) from e
+            raise _found_elsewhere(app, _old_version_gone(app_name, app, e) if version_id else e) from e
         _adopt_cache(source, before)
         decrypted = _decrypt(
             tools, encrypted, work,
             app_name=app_name, emitter=emitter, say=say,
             allow_unverified=allow_unverified, warn=warn,
-            retry=f"graft --appstore-get --app {shlex.quote(app_name)}" + (" --again" if again else ""),
+            retry=f"graft --appstore-get --app {shlex.quote(app_name)}"
+            + (f" --version-id {version_id}" if version_id else "")
+            + (" --again" if again else ""),
         )
         _stage(emitter, say, app_name, "stage")
         yield decrypted
@@ -1084,7 +1128,26 @@ def already_staged(cfg: Config, app: AppConfig) -> CachedIPA | None:
     if not any(cfg.cache_dir.glob(f"{glob.escape(app.bundle_id)}_*.ipa")):
         return None
     listing = _listing(app)
-    version = listing.version if listing is not None else None
+    return _staged_as_get(cfg, app, listing.version if listing is not None else None)
+
+
+def already_staged_version(cfg: Config, app: AppConfig, external_id: str) -> CachedIPA | None:
+    """The staged IPA a get of version `external_id` would only download
+    again, or None: the version a listing read for that id
+    (`list_versions`), staged as a get stages it (`_staged_as_get`).
+
+    **Fails open**, as `already_staged` does: an id no listing has read, or
+    whose file can't be read to say, downloads.
+    """
+    if apples_own(app.bundle_id):
+        return None
+    known = _VersionCache.load(cfg.cache_dir).known(app.bundle_id).get(external_id)
+    return _staged_as_get(cfg, app, known.version if known is not None else None)
+
+
+def _staged_as_get(cfg: Config, app: AppConfig, version: str | None) -> CachedIPA | None:
+    """`<bundle id>_<version>.ipa`, when it is there as a get leaves one (see
+    `already_staged`), else None."""
     if not isinstance(version, str) or not version or _unsafe_in_filename(version):
         return None
     path = cfg.cache_dir / f"{app.bundle_id}_{version}.ipa"
@@ -1105,10 +1168,12 @@ def already_staged(cfg: Config, app: AppConfig) -> CachedIPA | None:
 
 
 def report_already_staged(
-    app_name: str, staged: CachedIPA, *, emitter: JsonEmitter | None, say: Say
+    app_name: str, staged: CachedIPA, *, emitter: JsonEmitter | None, say: Say,
+    version_id: str | None = None,
 ) -> None:
     """Say that a get stopped before downloading: `staged` is the App Store's
-    current version already (`already_staged`)."""
+    current version already (`already_staged`), or the version `version_id`
+    names (`already_staged_version`)."""
     if emitter:
         emitter.emit(
             "appstore-already-staged",
@@ -1119,11 +1184,293 @@ def report_already_staged(
             path=str(staged.path),
         )
         return
-    say(
-        f"{app_name}: already have {staged.version}, the App Store's current version "
-        f"({staged.path.name}) — nothing downloaded"
-    )
-    say(f"  to download it again anyway: graft --appstore-get --app {shlex.quote(app_name)} --again")
+    chosen = f" --version-id {version_id}" if version_id else ""
+    which = "" if version_id else ", the App Store's current version"
+    say(f"{app_name}: already have {staged.version}{which} ({staged.path.name}) — nothing downloaded")
+    say(f"  to download it again anyway: graft --appstore-get --app {shlex.quote(app_name)}{chosen} --again")
+
+
+# ---------------------------------------------------------------------------
+# Older versions, and holding an app at one
+# ---------------------------------------------------------------------------
+
+#: What `preferred_version` says when nothing is pinned.
+LATEST = "latest"
+
+#: How many versions `--appstore-versions` reads the details of when not
+#: told (`--limit`), and the most one run will. Each is one ipatool run and
+#: one App Store request that reads that version's Info.plist out of its
+#: IPA: seconds apiece.
+VERSIONS_LIMIT = 10
+VERSIONS_LIMIT_MAX = 50
+
+#: What each version id was read to be, per bundle id, in `cache_dir`. An id
+#: names one build for good, so what it says never changes and nothing here
+#: expires; the list of ids is asked for afresh each time. Dotted and not an
+#: .ipa, like `ipa_memo`'s file beside it: nothing that lists the cache offers
+#: it, and Remove Graft's Data's Staged IPAs takes it with the folder.
+VERSIONS_CACHE = ".appstore-versions.json"
+_VERSIONS_CACHE_FORMAT = 1
+#: The most of `VERSIONS_CACHE` that is read. A row is under 100 bytes, so
+#: this is tens of thousands of versions; anything bigger isn't one Graft
+#: wrote, and is no cache.
+_VERSIONS_CACHE_MAX = 4 << 20
+
+
+class _VersionCache:
+    """`VERSIONS_CACHE`, read once and written after each version read, so a
+    listing stopped halfway keeps what it had read. Anything that won't
+    read as this shape is an empty cache, and a write that fails costs only
+    a read again next time.
+
+    Read without following a link, and only from a regular file of at most
+    `_VERSIONS_CACHE_MAX` bytes: a FIFO there would wait forever for a
+    writer, and a link to /dev/zero would never end. Written whole to a new
+    file (0600) that replaces it, so a reader never sees half of one and a
+    link there is replaced, never written through."""
+
+    def __init__(self, path: Path, apps: dict[str, dict[str, dict[str, Any]]]) -> None:
+        self.path = path
+        self.apps = apps
+
+    @classmethod
+    def load(cls, cache_dir: Path) -> _VersionCache:
+        path = cache_dir / VERSIONS_CACHE
+        raw = cls._read(path)
+        try:
+            data = json.loads(raw) if raw is not None else None
+        except (ValueError, RecursionError):
+            data = None
+        apps = data.get("apps") if isinstance(data, dict) and data.get("format") == _VERSIONS_CACHE_FORMAT else None
+        return cls(path, apps if isinstance(apps, dict) else {})
+
+    @staticmethod
+    def _read(path: Path) -> bytes | None:
+        """`path`'s bytes when it is a regular file, not a link, of at most
+        `_VERSIONS_CACHE_MAX` bytes; else None."""
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            return None
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > _VERSIONS_CACHE_MAX:
+                return None
+            chunks: list[bytes] = []
+            size = 0
+            while size <= _VERSIONS_CACHE_MAX:
+                chunk = os.read(fd, _VERSIONS_CACHE_MAX + 1 - size)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+        return b"".join(chunks) if size <= _VERSIONS_CACHE_MAX else None
+
+    def known(self, bundle_id: str) -> dict[str, ipatool.VersionMetadata]:
+        rows = self.apps.get(bundle_id)
+        if not isinstance(rows, dict):
+            return {}
+        found: dict[str, ipatool.VersionMetadata] = {}
+        for external_id, row in rows.items():
+            if not isinstance(row, dict):
+                continue
+            shown, released = row.get("version"), row.get("release_date")
+            if isinstance(shown, str) and shown and (released is None or isinstance(released, str)):
+                found[external_id] = ipatool.VersionMetadata(version=shown, release_date=released)
+        return found
+
+    def remember(self, bundle_id: str, external_id: str, meta: ipatool.VersionMetadata) -> None:
+        rows = self.apps.get(bundle_id)
+        if not isinstance(rows, dict):
+            rows = self.apps[bundle_id] = {}
+        rows[external_id] = {"version": meta.version, "release_date": meta.release_date}
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".appstore-versions-", dir=self.path.parent)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump({"format": _VERSIONS_CACHE_FORMAT, "apps": self.apps}, f)
+                os.replace(tmp, self.path)
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
+        except OSError:
+            pass
+
+
+def newest_first(ids: list[str]) -> list[str]:
+    """`ids`, once each, newest first. The App Store numbers its version ids
+    as it issues them, so the newest is the highest, whatever order
+    `list-versions` gave them in."""
+    return sorted(dict.fromkeys(ids), key=int, reverse=True)
+
+
+def held_version(app: AppConfig) -> str | None:
+    """The version `app` is held at: its `preferred_version` pin, or None
+    for `latest`. A get of a chosen version sets it (`hold`); a get of the
+    latest lets go (`release_hold`). A pin set by hand is a hold too: either
+    way, builds use that version."""
+    return None if app.preferred_version == LATEST else app.preferred_version
+
+
+def list_versions(
+    cfg: Config,
+    app_name: str,
+    *,
+    offset: int = 0,
+    limit: int = VERSIONS_LIMIT,
+    emitter: JsonEmitter | None,
+    say: Say,
+) -> None:
+    """The versions the App Store serves this Apple ID for `app_name`,
+    newest first: one `appstore-release` each, then `appstore-releases-end`.
+
+    `list-versions` gives only ids, and each id's version and date is a
+    request of its own (`ipatool.version_metadata`), so those are read for
+    the `limit` versions from `offset` on, and for no others. What was read
+    is remembered (`_VersionCache`), so every row whose id was read once
+    says its version, and a page already read costs nothing. A version Apple
+    won't describe says so on its row (`error`), and the rest go on. One
+    that doesn't answer in time stops the listing, which fails: a dropped
+    connection would otherwise wait out every version on the page in turn.
+
+    Checked as a get is first (`_require_signed_in`), and refused the same
+    ways: Apple's own apps, ipatool missing or signed out, the login keychain
+    locked. Only apps this Apple ID has: anything else is the get's
+    `needs-license` refusal.
+    """
+    app = cfg.get_app(app_name)
+    _refuse_apples_own(app)
+    tools = cfg.appstore
+    ipa_path = _ipatool_path(tools)
+    source = _require_signed_in(tools, ipa_path)
+    before = appstore_account.cache_before(source)
+    try:
+        ids = newest_first(ipatool.list_versions(ipa_path, app.bundle_id))
+    except ipatool.LicenseRequired as e:
+        raise _needs_licence(app_name, app, emitter, e) from e
+    cache = _VersionCache.load(cfg.cache_dir)
+    known = cache.known(app.bundle_id)
+    held = held_version(app)
+    if not emitter:
+        say(f"{app_name} ({app.bundle_id}): {len(ids)} version(s) on the App Store for this Apple ID, newest first")
+    for index, external_id in enumerate(ids):
+        meta = known.get(external_id)
+        error: str | None = None
+        if meta is None and offset <= index < offset + limit:
+            try:
+                meta = ipatool.version_metadata(ipa_path, app.bundle_id, external_id)
+            except ipatool.VersionUnavailable as e:
+                error = e.message
+            except ipatool.LicenseRequired as e:
+                raise _needs_licence(app_name, app, emitter, e) from e
+            except ipatool.VersionMetadataTimeout as e:
+                raise AppStoreError(
+                    f"the list of {app_name}'s versions stopped: {e.message}",
+                    hint=f"{e.hint}; the versions read so far are remembered",
+                ) from e
+            else:
+                cache.remember(app.bundle_id, external_id, meta)
+        staged = meta is not None and _staged_file(cfg, app, meta.version) is not None
+        if emitter:
+            emitter.emit(
+                "appstore-release",
+                app=app_name,
+                bundle_id=app.bundle_id,
+                external_id=external_id,
+                index=index,
+                newest=index == 0,
+                version=meta.version if meta else None,
+                release_date=meta.release_date if meta else None,
+                staged=staged,
+                error=error,
+            )
+            continue
+        notes = [n for n, on in (("newest", index == 0), ("staged", staged),
+                                 ("held", meta is not None and meta.version == held)) if on]
+        shown = f"{meta.version:<12} {(meta.release_date or '')[:10]:<10}" if meta else f"{'?':<12} {'':<10}"
+        say(f"  {shown}  {external_id}" + (f"  ({', '.join(notes)})" if notes else "")
+            + (f"  — {error}" if error else ""))
+    _adopt_cache(source, before)
+    if emitter:
+        emitter.emit(
+            "appstore-releases-end", app=app_name, bundle_id=app.bundle_id,
+            count=len(ids), offset=offset, limit=limit, held_version=held,
+        )
+        return
+    quoted = shlex.quote(app_name)
+    if offset + limit < len(ids):
+        say(f"more: graft --appstore-versions --app {quoted} --offset {offset + limit}")
+    if ids:
+        say(f"get one: graft --appstore-get --app {quoted} --version-id <id>")
+
+
+def _staged_file(cfg: Config, app: AppConfig, version: str) -> Path | None:
+    """`<bundle id>_<version>.ipa`, when there is such a file. Its name
+    only, for a listing's `staged`: a get still checks the file itself
+    (`_staged_as_get`)."""
+    if _unsafe_in_filename(version):
+        return None
+    path = cfg.cache_dir / f"{app.bundle_id}_{version}.ipa"
+    return path if path.is_file() else None
+
+
+def hold(
+    cfg: Config, app_name: str, version: str, *, emitter: JsonEmitter | None, say: Say,
+    warn: Say = _say_nothing,
+) -> None:
+    """Hold `app_name` at `version`: pin its `preferred_version`, so its
+    builds use that version's IPA (`find_in_cache`) and `--appstore-check`
+    doesn't call a newer one an update. After a get of a chosen version."""
+    _set_hold(cfg, app_name, version, emitter=emitter, say=say, warn=warn)
+
+
+def release_hold(
+    cfg: Config, app_name: str, *, emitter: JsonEmitter | None, say: Say, warn: Say = _say_nothing,
+) -> None:
+    """Let go of `app_name`'s hold, if it has one: back to `latest`. After a
+    get of the latest, which is what the user asked for by pressing it."""
+    _set_hold(cfg, app_name, None, emitter=emitter, say=say, warn=warn)
+
+
+def _set_hold(
+    cfg: Config, app_name: str, version: str | None, *, emitter: JsonEmitter | None, say: Say,
+    warn: Say,
+) -> None:
+    """Write the hold, and say so with `appstore-hold`, only when it changes:
+    `version` is the new one (null when let go), `previous` the old one.
+
+    `cfg` was read before the get started, and a download can take minutes.
+    The config is read again as the hold is written (`swap_preferred_version`),
+    and only `preferred_version` is written. When it was changed meanwhile
+    (Edit App), that later choice stays: the get warns and holds nothing.
+    """
+    app = cfg.get_app(app_name)
+    target = version or LATEST
+    found = swap_preferred_version(cfg.path, app_name, expected=app.preferred_version, new=target)
+    if found == target:
+        return
+    if found != app.preferred_version:
+        instead = f"holding it at {version}" if version is not None else f"setting it back to {LATEST}"
+        warn(
+            f"{app_name}'s preferred version changed to {found} while this get ran, so Graft "
+            f"left it there instead of {instead}"
+        )
+        return
+    previous = held_version(app)
+    if emitter:
+        emitter.emit("appstore-hold", app=app_name, bundle_id=app.bundle_id, version=version, previous=previous)
+    elif version is not None:
+        say(
+            f"{app_name}: held at {version}. Builds use it, and Graft won't call a newer "
+            f"version an update, until a get of the latest (graft --appstore-get --app {shlex.quote(app_name)})"
+        )
+    else:
+        say(f"{app_name}: no longer held at {previous}; builds use the newest staged version")
 
 
 def claim(

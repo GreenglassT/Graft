@@ -659,6 +659,39 @@ final class CommandLineToolTests: XCTestCase {
         XCTAssertEqual(credits.attribute(.link, at: range.location, effectiveRange: nil) as? URL, AboutGraft.releasesURL)
     }
 
+    /// Star on GitHub and Support on Ko-fi: the two pages, exactly, under
+    /// the titles the Help menu and About Graft use.
+    func test_the_support_links_are_the_repository_and_ko_fi() {
+        XCTAssertEqual(SupportLinks.repository.absoluteString, "https://github.com/GreenglassT/Graft")
+        XCTAssertEqual(SupportLinks.koFi.absoluteString, "https://ko-fi.com/greenglasst")
+        XCTAssertEqual(SupportLinks.starTitle, "Star Graft on GitHub")
+        XCTAssertEqual(SupportLinks.supportTitle, "Support Graft on Ko-fi")
+    }
+
+    /// About Graft links both pages under their titles, after the notice
+    /// and the release page, which keep their place.
+    func test_the_about_panel_links_github_and_ko_fi() throws {
+        let credits = AboutGraft.credits(version: "2.1")
+        let text = credits.string as NSString
+        XCTAssertTrue(credits.string.hasPrefix(AboutGraft.notice(version: "2.1")), credits.string)
+        let release = text.range(of: AboutGraft.releasesURL.absoluteString)
+        for (title, url) in [(SupportLinks.starTitle, SupportLinks.repository), (SupportLinks.supportTitle, SupportLinks.koFi)] {
+            let range = text.range(of: title)
+            XCTAssertNotEqual(range.location, NSNotFound, credits.string)
+            XCTAssertGreaterThan(range.location, release.location, "\(title) comes after the release page")
+            XCTAssertEqual(credits.attribute(.link, at: range.location, effectiveRange: nil) as? URL, url, title)
+        }
+    }
+
+    /// The Help menu offers both. Only the titles are checked: choosing one
+    /// would open a browser.
+    func test_the_help_menu_offers_star_and_ko_fi() throws {
+        let help = try XCTUnwrap(NSApplication.shared.mainMenu?.items.first { $0.title == "Help" }?.submenu, "no Help menu")
+        let titles = help.items.map(\.title)
+        XCTAssertTrue(titles.contains(SupportLinks.starTitle), "\(titles)")
+        XCTAssertTrue(titles.contains(SupportLinks.supportTitle), "\(titles)")
+    }
+
     /// The old Credits.rtf, which said "Graft is MIT licensed", no longer
     /// ships: nothing can show it, and nothing in the bundle says it.
     func test_the_old_credits_file_is_not_in_the_app() {

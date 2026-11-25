@@ -5,9 +5,10 @@ import SwiftUI
 /// administrator prompt (`FallbackAdminShell` over `AppleScriptAdminShell` and
 /// `OsascriptAdminShell`), the user's login shell (`ShellEnvironment.shared`),
 /// the notification center (`BuildNotifier.post`), the rebuild installer and
-/// relaunch, the rebuild marker under Caches, the real UserDefaults, the clock
-/// and the browser (`AppleSiliconGate`'s download button, `UpdateStore`'s
-/// release page, What's New's links). A test that forgets a fake
+/// relaunch, the rebuild marker under Caches, the real UserDefaults, the clock,
+/// the browser (`AppleSiliconGate`'s download button, `UpdateStore`'s
+/// release page, What's New's links, Get PlayCover), and LaunchServices'
+/// answer for whether PlayCover is installed. A test that forgets a fake
 /// then doesn't compile; `NoRealDefaultsTests` keeps a default of any of them
 /// from coming back, outside this file.
 @main
@@ -64,6 +65,7 @@ struct GraftApp: App {
         _updates = State(initialValue: UpdateStore(
             runner: runner, defaults: .standard, now: Date.init,
             appVersion: AboutGraft.version(of: .main), open: { NSWorkspace.shared.open($0) },
+            updateLog: URL.libraryDirectory.appending(path: "Logs/Graft/update.log"),
             host: SelfUpdateHost.running()
         ))
         _removeData = State(initialValue: RemoveDataStore(
@@ -108,7 +110,15 @@ struct GraftApp: App {
                             // like `openURL` above (`NoRealDefaultsTests`).
                             openApp: {
                                 NSWorkspace.shared.openApplication(at: $0, configuration: NSWorkspace.OpenConfiguration())
-                            }
+                            },
+                            // Build options' "This Mac": whether LaunchServices
+                            // has PlayCover under the bundle id the handoff
+                            // opens, and Get PlayCover's page in the browser.
+                            // Nothing here downloads or launches PlayCover.
+                            playCover: PlayCover(
+                                lookup: { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) },
+                                openURL: { NSWorkspace.shared.open($0) }
+                            )
                         )
                         // A quit installs a checked update on the way out
                         // (`UpdateStore.handOver`). Here, not in the
@@ -204,7 +214,7 @@ struct GraftApp: App {
                 }
             }
             CommandGroup(after: .help) {
-                // Says what it found in the window's alert (`UpdateStore.answer`).
+                // Says what it found in the window's alert (`UpdateStore.answerAlert`).
                 // Not on an Intel Mac, which runs no CLI at all.
                 Button("Check for Updates…") {
                     Task { await updates.checkNow() }
@@ -215,6 +225,10 @@ struct GraftApp: App {
                     if let folder = BundledLicenses.installed { NSWorkspace.shared.open(folder) }
                 }
                 .disabled(BundledLicenses.installed == nil)
+                Divider()
+                // Pages Graft opens only when chosen, in the browser (docs/network.md).
+                Button(SupportLinks.starTitle) { NSWorkspace.shared.open(SupportLinks.repository) }
+                Button(SupportLinks.supportTitle) { NSWorkspace.shared.open(SupportLinks.koFi) }
                 Divider()
                 // What Graft keeps outside Graft.app, before moving it to the
                 // Trash. Not on an Intel Mac, which runs no CLI, nor while a
@@ -386,7 +400,7 @@ enum AboutGraft {
     }
 
     /// The panel's credits: the notice for `version`, then the release page,
-    /// linked.
+    /// linked, then Star on GitHub and Support on Ko-fi (`SupportLinks`).
     static func credits(version: String) -> NSAttributedString {
         let font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
         let body: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
@@ -394,12 +408,30 @@ enum AboutGraft {
         var link = body
         link[.link] = releasesURL
         text.append(NSAttributedString(string: releasesURL.absoluteString, attributes: link))
+        text.append(NSAttributedString(string: "\n\n", attributes: body))
+        for (index, (title, url)) in [(SupportLinks.starTitle, SupportLinks.repository),
+                                      (SupportLinks.supportTitle, SupportLinks.koFi)].enumerated() {
+            if index > 0 { text.append(NSAttributedString(string: "  ·  ", attributes: body)) }
+            var support = body
+            support[.link] = url
+            text.append(NSAttributedString(string: title, attributes: support))
+        }
         return text
     }
 
     static func panelOptions(bundle: Bundle = .main) -> [NSApplication.AboutPanelOptionKey: Any] {
         [.credits: credits(version: version(of: bundle))]
     }
+}
+
+/// Help › Star Graft on GitHub and Support Graft on Ko-fi, and the same two
+/// links in About Graft. Graft opens them only when they're chosen, in the
+/// browser, like every other page it links (docs/network.md).
+enum SupportLinks {
+    static let starTitle = "Star Graft on GitHub"
+    static let supportTitle = "Support Graft on Ko-fi"
+    static let repository = URL(string: "https://github.com/GreenglassT/Graft")!
+    static let koFi = URL(string: "https://ko-fi.com/greenglasst")!
 }
 
 /// Help › Licenses: the GPL text and every bundled component's license and

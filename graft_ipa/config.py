@@ -1628,6 +1628,26 @@ def set_app_options(
     _commit_apps(path, raw, apps)
 
 
+@_locked
+def swap_preferred_version(path: Path, name: str, *, expected: str, new: str) -> str:
+    """Set app `name`'s `preferred_version` to `new`, but only if the file
+    still says `expected`; return what it said (`"latest"` when unset, as
+    `AppConfig` reads it).
+
+    Read and written under the config lock, so nothing lands between the
+    look and the write. For a change that was decided against a config read
+    earlier (`appstore.hold`, after a download that may have taken minutes):
+    when the pin is no longer what it was then, someone changed it since (Edit
+    App), and that later choice is kept. Writes nothing when it already says
+    `new`. Only `preferred_version` is written (`set_app_options`).
+    """
+    _, apps = _load_apps(path)
+    found = str(_require_app_mapping(apps, name, path).get("preferred_version", "latest"))
+    if found == expected and found != new:
+        set_app_options(path, name, preferred_version=new)
+    return found
+
+
 @dataclass(frozen=True)
 class _Setting:
     """One globally-editable setting: where it lives, and what its value means.

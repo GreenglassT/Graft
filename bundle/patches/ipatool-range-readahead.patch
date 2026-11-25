@@ -1,0 +1,762 @@
+--- a/pkg/appstore/appstore_partial_zip.go
++++ b/pkg/appstore/appstore_partial_zip.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"archive/zip"
+ 	"bytes"
++	"context"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+@@ -10,6 +11,7 @@
+ 	"net/http"
+ 	"strconv"
+ 	"strings"
++	"sync"
+ 	"time"
+ 
+ 	apphttp "github.com/majd/ipatool/v2/pkg/http"
+@@ -31,18 +33,71 @@
+ 	ReleaseDate    time.Time
+ }
+ 
++// archive/zip reads a remote IPA in many small ReadAt calls: the central
++// directory through a 4 KiB bufio.Reader, then a file's header and body. One
++// range request per call made a large app's version metadata cost hundreds of
++// sequential round trips, any one of which stalling failed the whole read. So
++// httpRangeReaderAt reads the end of the file, where the central directory is,
++// in one request, and the rest in aligned blocks, keeping the few most recent:
++// a metadata read takes a handful of requests and a few MiB of memory.
++const (
++	// rangeTailSize is how much of the end of the file is read at once: the
++	// end of central directory record and, but for apps with very many files,
++	// the whole central directory. Blocks cover the rest of a larger one.
++	rangeTailSize = 1 << 20
++	// rangeBlockSize is how much any other read fetches, from a multiple of it.
++	rangeBlockSize = 1 << 20
++	// rangeCachedBlocks is how many of the most recently fetched blocks are kept.
++	rangeCachedBlocks = 4
++)
++
++// rangeRequestTimeout bounds each range request, its body included, so that a
++// stalled one fails and is tried again rather than hanging the read. A
++// variable so that tests can shorten it.
++var rangeRequestTimeout = 30 * time.Second
++
+ type httpRangeReaderAt struct {
+ 	client apphttp.Client[interface{}]
+ 	url    string
+ 	size   int64
++
++	mu     sync.Mutex
++	tail   *rangeBlock
++	blocks []*rangeBlock
+ }
+ 
++// rangeBlock is the bytes of the file from off, as one range request read them.
++type rangeBlock struct {
++	off  int64
++	data []byte
++}
++
++// inTransitError is a range request that failed in transit (an error from the
++// transport, a timeout, a short body), which trying again can fix.
++type inTransitError struct {
++	err error
++}
++
++func (e inTransitError) Error() string { return e.err.Error() }
++
++func (e inTransitError) Unwrap() error { return e.err }
++
++func failedInTransit(err error) bool {
++	var transit inTransitError
++
++	return errors.As(err, &transit)
++}
++
+ func newHTTPRangeReaderAt(client apphttp.Client[interface{}], url string) (*httpRangeReaderAt, int64, error) {
+ 	if url == "" {
+ 		return nil, 0, errors.New("url is empty")
+ 	}
+ 
+ 	size, err := remoteFileSize(client, url)
++	if failedInTransit(err) {
++		size, err = remoteFileSize(client, url)
++	}
++
+ 	if err != nil {
+ 		return nil, 0, fmt.Errorf("failed to read remote file size: %w", err)
+ 	}
+@@ -55,17 +110,21 @@
+ }
+ 
+ func remoteFileSize(client apphttp.Client[interface{}], url string) (int64, error) {
++	ctx, cancel := context.WithTimeout(context.Background(), rangeRequestTimeout)
++	defer cancel()
++
+ 	req, err := client.NewRequest("GET", url, nil)
+ 	if err != nil {
+ 		return 0, fmt.Errorf("failed to create request: %w", err)
+ 	}
+ 
++	req = req.WithContext(ctx)
+ 	req.Header.Set("Accept-Encoding", "identity")
+ 	req.Header.Set("Range", "bytes=0-0")
+ 
+ 	res, err := client.Do(req)
+ 	if err != nil {
+-		return 0, fmt.Errorf("request failed: %w", err)
++		return 0, inTransitError{fmt.Errorf("request failed: %w", err)}
+ 	}
+ 
+ 	if res != nil && res.Body != nil {
+@@ -120,24 +179,90 @@
+ 		return 0, io.EOF
+ 	}
+ 
+-	requestEnd := off + int64(len(p)) - 1
+-	rangeEnd := requestEnd
++	r.mu.Lock()
++	defer r.mu.Unlock()
+ 
+-	if rangeEnd >= r.size {
+-		rangeEnd = r.size - 1
++	n := 0
++	for n < len(p) && off+int64(n) < r.size {
++		block, err := r.block(off + int64(n))
++		if err != nil {
++			return n, err
++		}
++
++		n += copy(p[n:], block.data[off+int64(n)-block.off:])
+ 	}
+ 
++	if n < len(p) {
++		return n, io.EOF
++	}
++
++	return n, nil
++}
++
++// block returns the block holding offset off, which is before the end of the
++// file: the tail, a cached block, or a block fetched now. r.mu is held.
++func (r *httpRangeReaderAt) block(off int64) (*rangeBlock, error) {
++	tailStart := max(r.size-rangeTailSize, 0)
++	if off >= tailStart {
++		if r.tail == nil {
++			data, err := r.readRange(tailStart, r.size)
++			if err != nil {
++				return nil, err
++			}
++
++			r.tail = &rangeBlock{off: tailStart, data: data}
++		}
++
++		return r.tail, nil
++	}
++
++	for _, block := range r.blocks {
++		if off >= block.off && off < block.off+int64(len(block.data)) {
++			return block, nil
++		}
++	}
++
++	start := off - off%rangeBlockSize
++
++	data, err := r.readRange(start, min(start+rangeBlockSize, tailStart))
++	if err != nil {
++		return nil, err
++	}
++
++	block := &rangeBlock{off: start, data: data}
++	r.blocks = append([]*rangeBlock{block}, r.blocks[:min(len(r.blocks), rangeCachedBlocks-1)]...)
++
++	return block, nil
++}
++
++// readRange reads bytes [start, end) of the file in one range request, and in
++// one more if that fails in transit: one stalled request would otherwise fail
++// the whole read.
++func (r *httpRangeReaderAt) readRange(start, end int64) ([]byte, error) {
++	data, err := r.requestRange(start, end)
++	if failedInTransit(err) {
++		data, err = r.requestRange(start, end)
++	}
++
++	return data, err
++}
++
++func (r *httpRangeReaderAt) requestRange(start, end int64) ([]byte, error) {
++	ctx, cancel := context.WithTimeout(context.Background(), rangeRequestTimeout)
++	defer cancel()
++
+ 	req, err := r.client.NewRequest("GET", r.url, nil)
+ 	if err != nil {
+-		return 0, fmt.Errorf("failed to create request: %w", err)
++		return nil, fmt.Errorf("failed to create request: %w", err)
+ 	}
+ 
++	req = req.WithContext(ctx)
+ 	req.Header.Set("Accept-Encoding", "identity")
+-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, rangeEnd))
++	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end-1))
+ 
+ 	res, err := r.client.Do(req)
+ 	if err != nil {
+-		return 0, fmt.Errorf("request failed: %w", err)
++		return nil, inTransitError{fmt.Errorf("request failed: %w", err)}
+ 	}
+ 
+ 	if res != nil && res.Body != nil {
+@@ -145,25 +270,23 @@
+ 	}
+ 
+ 	if res.StatusCode != http.StatusPartialContent {
+-		return 0, fmt.Errorf("expected partial content response, got status %d", res.StatusCode)
++		return nil, fmt.Errorf("expected partial content response, got status %d", res.StatusCode)
+ 	}
+ 
+-	readLength := int(rangeEnd-off) + 1
+-
+-	n, err := io.ReadFull(res.Body, p[:readLength])
+-	if err == io.ErrUnexpectedEOF || err == io.EOF {
+-		return n, io.EOF
++	// Exactly the bytes asked for, of a file of the size first read.
++	contentRange := fmt.Sprintf("bytes %d-%d/%d", start, end-1, r.size)
++	if got := res.Header.Get("Content-Range"); got != contentRange {
++		return nil, fmt.Errorf("invalid content range: %s, expected %s", got, contentRange)
+ 	}
+ 
++	data := make([]byte, end-start)
++
++	_, err = io.ReadFull(res.Body, data)
+ 	if err != nil {
+-		return n, fmt.Errorf("failed to read response body: %w", err)
++		return nil, inTransitError{fmt.Errorf("failed to read response body: %w", err)}
+ 	}
+ 
+-	if requestEnd >= r.size {
+-		return n, io.EOF
+-	}
+-
+-	return n, nil
++	return data, nil
+ }
+ 
+ func (t *appstore) readVersionMetadataFromIPA(url string) (versionMetadata, error) {
+--- a/pkg/appstore/appstore_get_version_metadata_test.go
++++ b/pkg/appstore/appstore_get_version_metadata_test.go
+@@ -32,7 +32,9 @@
+ 	filler, err := zipWriter.CreateHeader(fillerHeader)
+ 	Expect(err).ToNot(HaveOccurred())
+ 
+-	_, err = filler.Write(make([]byte, 1024*1024))
++	// Several times the tail httpRangeReaderAt reads at once, so that reading
++	// the metadata still reads only part of the IPA.
++	_, err = filler.Write(make([]byte, 4*rangeTailSize))
+ 	Expect(err).ToNot(HaveOccurred())
+ 
+ 	infoHeader := &zip.FileHeader{
+@@ -163,7 +165,8 @@
+ 		Expect(n).To(Equal(2))
+ 		Expect(err).To(Equal(io.EOF))
+ 		Expect(string(buf[:n])).To(Equal("ef"))
+-		Expect(rangeLog).To(ContainElement("bytes=4-5"))
++		// The size, then the whole of a file smaller than the tail; never past its end.
++		Expect(rangeLog).To(Equal([]string{"bytes=0-0", "bytes=0-5"}))
+ 	})
+ })
+ 
+--- /dev/null
++++ b/pkg/appstore/appstore_partial_zip_readahead_test.go
+@@ -0,0 +1,489 @@
++package appstore
++
++import (
++	"archive/zip"
++	"bytes"
++	"context"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"io"
++	"math/rand"
++	"net/http"
++	"net/http/httptest"
++	"strconv"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"howett.net/plist"
++)
++
++// rangeServer serves data as Apple's CDN serves an IPA, a GET with a Range
++// header answered 206 with that range, and counts the requests and the bytes
++// it sent. misbehave, when set, may answer request n (from 1) itself.
++type rangeServer struct {
++	*httptest.Server
++	requests atomic.Int64
++	sent     atomic.Int64
++}
++
++func newRangeServer(t *testing.T, data []byte, misbehave func(n int64, w http.ResponseWriter, r *http.Request) bool) *rangeServer {
++	t.Helper()
++
++	server := &rangeServer{}
++	server.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		n := server.requests.Add(1)
++
++		if r.Header.Get("Accept-Encoding") != "identity" {
++			t.Errorf("request %d: Accept-Encoding = %q", n, r.Header.Get("Accept-Encoding"))
++		}
++
++		if misbehave != nil && misbehave(n, w, r) {
++			return
++		}
++
++		start, end, err := testRangeBounds(r.Header.Get("Range"), len(data))
++		if err != nil {
++			t.Errorf("request %d: %v", n, err)
++			w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
++
++			return
++		}
++
++		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
++		w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
++		w.WriteHeader(http.StatusPartialContent)
++
++		sent, _ := w.Write(data[start : end+1])
++		server.sent.Add(int64(sent))
++	}))
++	t.Cleanup(server.Close)
++
++	return server
++}
++
++// stall answers nothing until the client gives up.
++func stall(_ http.ResponseWriter, r *http.Request) {
++	select {
++	case <-r.Context().Done():
++	case <-time.After(10 * time.Second):
++	}
++}
++
++func randomBytes(size int64, seed int64) []byte {
++	data := make([]byte, size)
++	_, _ = rand.New(rand.NewSource(seed)).Read(data)
++
++	return data
++}
++
++func withRangeRequestTimeout(t *testing.T, timeout time.Duration) {
++	t.Helper()
++
++	saved := rangeRequestTimeout
++	rangeRequestTimeout = timeout
++
++	t.Cleanup(func() { rangeRequestTimeout = saved })
++}
++
++// readaheadTestIPA is an IPA laid out as a big app's is: thousands of files,
++// a nested bundle's Info.plist, the main app's Info.plist far from the end
++// (its executable after it), and the central directory last. It returns the
++// IPA and the size of its central directory.
++func readaheadTestIPA(t *testing.T, files int) ([]byte, int64) {
++	t.Helper()
++
++	buffer := new(bytes.Buffer)
++	writer := zip.NewWriter(buffer)
++
++	add := func(name string, method uint16, data []byte) {
++		file, err := writer.CreateHeader(&zip.FileHeader{Name: name, Method: method, Modified: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)})
++		if err != nil {
++			t.Fatal(err)
++		}
++
++		if _, err := file.Write(data); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	infoPlist := func(version string) []byte {
++		data, err := plist.Marshal(map[string]interface{}{
++			"CFBundleExecutable":         "Sample",
++			"CFBundleShortVersionString": version,
++			"releaseDate":                "2024-04-02T12:00:00Z",
++		}, plist.BinaryFormat)
++		if err != nil {
++			t.Fatal(err)
++		}
++
++		return data
++	}
++
++	small := randomBytes(16, 0)
++	for i := range files / 2 {
++		add(fmt.Sprintf("Payload/Sample.app/Assets.bundle/Images/%06d/image-with-a-long-name@3x.png", i), zip.Store, small)
++	}
++
++	add("Payload/Sample.app/Frameworks/Nested.framework/Info.plist", zip.Deflate, infoPlist("9.9.9"))
++	add("Payload/Sample.app/Info.plist", zip.Deflate, infoPlist("4.5.6"))
++	add("Payload/Sample.app/Sample", zip.Store, randomBytes(3*rangeBlockSize, 1))
++
++	for i := range files - files/2 {
++		add(fmt.Sprintf("Payload/Sample.app/Frameworks/Nested.framework/Resources/%06d.lproj/Localizable.strings", i), zip.Store, small)
++	}
++
++	if err := writer.Close(); err != nil {
++		t.Fatal(err)
++	}
++
++	data := buffer.Bytes()
++	// The end of central directory record, with no comment: the directory's
++	// size is at 12.
++	return data, int64(binary.LittleEndian.Uint32(data[len(data)-22+12:]))
++}
++
++func TestPartialZipReadaheadReadsVersionMetadataInAFewRequests(t *testing.T) {
++	for _, test := range []struct {
++		name  string
++		files int
++	}{
++		{name: "thousands of files", files: 5000},
++		{name: "a central directory bigger than the tail", files: 40000},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			ipa, directory := readaheadTestIPA(t, test.files)
++			server := newRangeServer(t, ipa, nil)
++
++			metadata, err := (&appstore{httpClient: newDownloadTestClient()}).readVersionMetadataFromIPA(server.URL)
++			if err != nil {
++				t.Fatal(err)
++			}
++
++			if metadata.DisplayVersion != "4.5.6" || !metadata.ReleaseDate.Equal(time.Date(2024, 4, 2, 12, 0, 0, 0, time.UTC)) {
++				t.Fatalf("metadata = %+v", metadata)
++			}
++
++			// The size, the tail, and the block the Info.plist is in (the
++			// first); then a block per MiB of directory beyond the tail, plus
++			// one for the block the directory starts in.
++			limit := int64(3)
++			if beyond := directory - rangeTailSize; beyond > 0 {
++				limit += (beyond+rangeBlockSize-1)/rangeBlockSize + 1
++			}
++
++			requests := server.requests.Load()
++			t.Logf("%d files, a %d-byte IPA with a %d-byte central directory: %d requests, %d bytes sent",
++				test.files, len(ipa), directory, requests, server.sent.Load())
++
++			if requests > limit {
++				t.Fatalf("%d requests, more than %d", requests, limit)
++			}
++		})
++	}
++}
++
++func TestPartialZipReadaheadReadAtIsByteExact(t *testing.T) {
++	// The tail starts partway through the third block, so that block is short.
++	data := randomBytes(3*rangeBlockSize+rangeTailSize/2+123, 2)
++	server := newRangeServer(t, data, nil)
++
++	reader, size, err := newHTTPRangeReaderAt(newDownloadTestClient(), server.URL)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	if size != int64(len(data)) {
++		t.Fatalf("size = %d, want %d", size, len(data))
++	}
++
++	tailStart := size - rangeTailSize
++
++	for _, read := range []struct {
++		name   string
++		off, n int64
++		want   int64
++		eof    bool
++	}{
++		{name: "within a block", off: 10, n: 100, want: 100},
++		{name: "across a block boundary", off: rangeBlockSize - 10, n: 20, want: 20},
++		{name: "across two block boundaries", off: rangeBlockSize - 1, n: rangeBlockSize + 2, want: rangeBlockSize + 2},
++		{name: "the short block's last byte", off: tailStart - 1, n: 1, want: 1},
++		{name: "across the start of the tail", off: tailStart - 7, n: 14, want: 14},
++		{name: "up to the end exactly", off: size - 100, n: 100, want: 100},
++		{name: "the last byte", off: size - 1, n: 1, want: 1},
++		{name: "past the end", off: size - 3, n: 10, want: 3, eof: true},
++		{name: "at the end", off: size, n: 1, want: 0, eof: true},
++		{name: "the whole file", off: 0, n: size, want: size},
++		{name: "more than the whole file", off: 0, n: size + 5, want: size, eof: true},
++	} {
++		t.Run(read.name, func(t *testing.T) {
++			p := make([]byte, read.n)
++
++			n, err := reader.ReadAt(p, read.off)
++			if int64(n) != read.want {
++				t.Fatalf("n = %d, want %d", n, read.want)
++			}
++
++			if read.eof && err != io.EOF {
++				t.Fatalf("err = %v, want io.EOF", err)
++			}
++
++			if !read.eof && err != nil {
++				t.Fatalf("err = %v", err)
++			}
++
++			if !bytes.Equal(p[:n], data[read.off:read.off+int64(n)]) {
++				t.Fatal("the bytes read are not the file's")
++			}
++		})
++	}
++
++	if _, err := reader.ReadAt(make([]byte, 1), -1); err == nil {
++		t.Fatal("a negative offset was read")
++	}
++
++	// The size, the tail and the three blocks before it, each fetched once,
++	// and no byte of the file twice.
++	if requests, sent := server.requests.Load(), server.sent.Load(); requests != 5 || sent != size+1 {
++		t.Fatalf("%d requests sending %d bytes, want 5 sending %d", requests, sent, size+1)
++	}
++}
++
++func TestPartialZipReadaheadReadAtIsSafeConcurrently(t *testing.T) {
++	data := randomBytes(4*rangeBlockSize+rangeTailSize/2+7, 3)
++	server := newRangeServer(t, data, nil)
++
++	reader, size, err := newHTTPRangeReaderAt(newDownloadTestClient(), server.URL)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	var wg sync.WaitGroup
++	for g := range 8 {
++		wg.Go(func() {
++			random := rand.New(rand.NewSource(int64(g)))
++			for range 40 {
++				off := random.Int63n(size)
++				p := make([]byte, 1+random.Int63n(rangeBlockSize*3/2))
++				want := min(int64(len(p)), size-off)
++
++				n, err := reader.ReadAt(p, off)
++				if int64(n) != want || (err != nil && (err != io.EOF || want == int64(len(p)))) {
++					t.Errorf("ReadAt(%d bytes, %d) = %d, %v", len(p), off, n, err)
++
++					return
++				}
++
++				if !bytes.Equal(p[:n], data[off:off+int64(n)]) {
++					t.Errorf("ReadAt(%d bytes, %d): the bytes read are not the file's", len(p), off)
++
++					return
++				}
++			}
++		})
++	}
++
++	wg.Wait()
++}
++
++func TestPartialZipReadaheadRefusesAServerThatIgnoresRange(t *testing.T) {
++	data := randomBytes(2*rangeBlockSize+rangeTailSize, 4)
++	whole := func(w http.ResponseWriter, _ *http.Request) {
++		w.WriteHeader(http.StatusOK)
++		_, _ = w.Write(data)
++	}
++
++	t.Run("for the size", func(t *testing.T) {
++		server := newRangeServer(t, data, func(_ int64, w http.ResponseWriter, r *http.Request) bool {
++			whole(w, r)
++
++			return true
++		})
++
++		_, _, err := newHTTPRangeReaderAt(newDownloadTestClient(), server.URL)
++		if err == nil || !strings.Contains(err.Error(), "expected partial content response, got status 200") {
++			t.Fatalf("err = %v", err)
++		}
++	})
++
++	t.Run("after the size", func(t *testing.T) {
++		server := newRangeServer(t, data, func(n int64, w http.ResponseWriter, r *http.Request) bool {
++			if n == 1 {
++				return false
++			}
++
++			whole(w, r)
++
++			return true
++		})
++
++		reader, _, err := newHTTPRangeReaderAt(newDownloadTestClient(), server.URL)
++		if err != nil {
++			t.Fatal(err)
++		}
++
++		n, err := reader.ReadAt(make([]byte, 10), 0)
++		if n != 0 || err == nil || !strings.Contains(err.Error(), "expected partial content response, got status 200") {
++			t.Fatalf("ReadAt = %d, %v", n, err)
++		}
++	})
++}
++
++func TestPartialZipReadaheadRefusesARangeOtherThanAsked(t *testing.T) {
++	data := randomBytes(2*rangeBlockSize+rangeTailSize, 5)
++
++	for _, test := range []struct {
++		name     string
++		answer   func(w http.ResponseWriter, start, end int)
++		requests int64
++		says     string
++	}{
++		{
++			name: "a body shorter than its headers say",
++			answer: func(w http.ResponseWriter, start, end int) {
++				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
++				w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
++				w.WriteHeader(http.StatusPartialContent)
++				_, _ = w.Write(data[start : start+(end-start)/2])
++			},
++			// The size, then the block, tried twice: a short body is in transit.
++			requests: 3,
++			says:     "failed to read response body",
++		},
++		{
++			name: "a shorter range than asked",
++			answer: func(w http.ResponseWriter, start, end int) {
++				end -= 10
++				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
++				w.WriteHeader(http.StatusPartialContent)
++				_, _ = w.Write(data[start : end+1])
++			},
++			requests: 2,
++			says:     "invalid content range",
++		},
++		{
++			name: "another range",
++			answer: func(w http.ResponseWriter, start, end int) {
++				start, end = start+1, end+1
++				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
++				w.WriteHeader(http.StatusPartialContent)
++				_, _ = w.Write(data[start : end+1])
++			},
++			requests: 2,
++			says:     "invalid content range",
++		},
++		{
++			name: "another size",
++			answer: func(w http.ResponseWriter, start, end int) {
++				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)+1))
++				w.WriteHeader(http.StatusPartialContent)
++				_, _ = w.Write(data[start : end+1])
++			},
++			requests: 2,
++			says:     "invalid content range",
++		},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			server := newRangeServer(t, data, func(n int64, w http.ResponseWriter, r *http.Request) bool {
++				if n == 1 {
++					return false
++				}
++
++				start, end, err := testRangeBounds(r.Header.Get("Range"), len(data))
++				if err != nil {
++					t.Error(err)
++				}
++
++				test.answer(w, start, end)
++
++				return true
++			})
++
++			reader, _, err := newHTTPRangeReaderAt(newDownloadTestClient(), server.URL)
++			if err != nil {
++				t.Fatal(err)
++			}
++
++			n, err := reader.ReadAt(make([]byte, 10), 0)
++			if n != 0 || err == nil || err == io.EOF || !strings.Contains(err.Error(), test.says) {
++				t.Fatalf("ReadAt = %d, %v", n, err)
++			}
++
++			if requests := server.requests.Load(); requests != test.requests {
++				t.Fatalf("%d requests, want %d", requests, test.requests)
++			}
++		})
++	}
++}
++
++func TestPartialZipReadaheadTimesOutAndRetriesAStalledRequest(t *testing.T) {
++	withRangeRequestTimeout(t, 300*time.Millisecond)
++
++	data := randomBytes(2*rangeBlockSize+rangeTailSize, 6)
++	stallBody := func(w http.ResponseWriter, r *http.Request) {
++		start, end, _ := testRangeBounds(r.Header.Get("Range"), len(data))
++		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
++		w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
++		w.WriteHeader(http.StatusPartialContent)
++		_, _ = w.Write(data[start : start+(end-start)/2])
++		w.(http.Flusher).Flush()
++		stall(w, r)
++	}
++
++	for _, test := range []struct {
++		name     string
++		stalls   func(n int64) bool
++		answer   func(w http.ResponseWriter, r *http.Request)
++		requests int64
++		fails    bool
++	}{
++		{name: "the size, once", stalls: func(n int64) bool { return n == 1 }, answer: stall, requests: 3},
++		{name: "a block, once", stalls: func(n int64) bool { return n == 2 }, answer: stall, requests: 3},
++		{name: "a block's body, once", stalls: func(n int64) bool { return n == 2 }, answer: stallBody, requests: 3},
++		{name: "a block, every time", stalls: func(n int64) bool { return n >= 2 }, answer: stall, requests: 3, fails: true},
++		{name: "a block's body, every time", stalls: func(n int64) bool { return n >= 2 }, answer: stallBody, requests: 3, fails: true},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			server := newRangeServer(t, data, func(n int64, w http.ResponseWriter, r *http.Request) bool {
++				if !test.stalls(n) {
++					return false
++				}
++
++				test.answer(w, r)
++
++				return true
++			})
++
++			began := time.Now()
++
++			reader, _, err := newHTTPRangeReaderAt(newDownloadTestClient(), server.URL)
++			if err != nil {
++				t.Fatal(err)
++			}
++
++			p := make([]byte, 10)
++			n, err := reader.ReadAt(p, 0)
++
++			took := time.Since(began)
++			if took < rangeRequestTimeout || took > 4*rangeRequestTimeout+2*time.Second {
++				t.Fatalf("took %v, with a %v timeout", took, rangeRequestTimeout)
++			}
++
++			if test.fails {
++				if n != 0 || !errors.Is(err, context.DeadlineExceeded) {
++					t.Fatalf("ReadAt = %d, %v", n, err)
++				}
++			} else if err != nil || !bytes.Equal(p, data[:10]) {
++				t.Fatalf("ReadAt = %d, %v", n, err)
++			}
++
++			if requests := server.requests.Load(); requests != test.requests {
++				t.Fatalf("%d requests, want %d", requests, test.requests)
++			}
++		})
++	}
++}

@@ -154,7 +154,9 @@ def test_a_version_pin_does_not_hide_the_store_s_version_from_the_check(
     config: Path, cache_dir: Path, fakes: FakeTools, store: Store
 ) -> None:
     """A get always fetches the store's current version, whatever the pin, so
-    the question is whether *that* version is staged, not the pinned one."""
+    the question is whether *that* version is staged, not the pinned one. And
+    having it, the get lets go of the pin (`appstore.release_hold`): Get
+    latest is a request for the latest."""
     _staged_as_a_get_stages_it(cache_dir, version="20.0.0")
     _staged_as_a_get_stages_it(cache_dir)
     _set_app(config, preferred_version="20.0.0")
@@ -162,7 +164,7 @@ def test_a_version_pin_does_not_hide_the_store_s_version_from_the_check(
     result = _run(["--json", "--appstore-get", "--app", "example"])
 
     assert result.exit_code == 0, result.output
-    assert [e["type"] for e in _events(result)] == ["appstore-already-staged"]
+    assert [e["type"] for e in _events(result)] == ["appstore-already-staged", "appstore-hold"]
     assert _downloads(fakes) == []
 
 

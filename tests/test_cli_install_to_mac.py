@@ -177,6 +177,61 @@ def test_playcover_missing_fails_naming_it(tmp_path: Path) -> None:
     assert e.value.message == "PlayCover is not installed, or could not launch"
 
 
+def test_playcover_missing_hint_names_the_releases_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Graft doesn't include PlayCover, so the hint says where it comes from:
+    PlayCover's official releases page. `open`'s own words still follow, and
+    the message and exit code are unchanged, so the error's shape is too."""
+    from graft_ipa import host
+
+    monkeypatch.setattr(host, "_sysctl_arm64", lambda: 1)  # Apple silicon
+    cache = tmp_path / "cache"
+    path = _ipa(cache)
+    with patch.object(cli_mod.subprocess, "run") as run:
+        run.return_value = SimpleNamespace(
+            returncode=1, stdout="", stderr=OPEN_MISSING_BUNDLE_STDERR,
+        )
+        with pytest.raises(ConfigError) as e:
+            cli_mod._do_install_to_mac(_cfg(cache), filename=path.name, emitter=None)
+    assert cli_mod.PLAYCOVER_RELEASES_URL == "https://github.com/PlayCover/PlayCover/releases"
+    assert e.value.message == "PlayCover is not installed, or could not launch"
+    assert e.value.exit_code == 2
+    assert e.value.hint.startswith(
+        "get PlayCover from https://github.com/PlayCover/PlayCover/releases and install it"
+    )
+    assert f"`open -b {PLAYCOVER_ID}` exited 1: {OPEN_MISSING_BUNDLE_STDERR.strip()}" in e.value.hint
+
+
+def test_playcover_missing_in_json_mode_prints_no_event_and_the_hint_on_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The JSON contract is unchanged: a failed handoff puts no event on
+    stdout, and its error and hint go to stderr through `_fatal`, with exit 2,
+    which is where the app reads them. `open` is stubbed: nothing here asks
+    LaunchServices or launches anything."""
+    from graft_ipa import host
+
+    monkeypatch.setattr(host, "_sysctl_arm64", lambda: 1)  # Apple silicon
+    cache = tmp_path / "cache"
+    path = _ipa(cache)
+    with patch.object(cli_mod.subprocess, "run") as run:
+        run.return_value = SimpleNamespace(
+            returncode=1, stdout="", stderr=OPEN_MISSING_BUNDLE_STDERR,
+        )
+        with pytest.raises(ConfigError) as e:
+            cli_mod._verb_install_to_mac(
+                cfg=_cfg(cache), install_to_mac=path.name, json_mode=True
+            )
+        exit_ = cli_mod._fatal(e.value)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert exit_.exit_code == 2
+    err = " ".join(captured.err.split())  # Rich wraps to the terminal's width
+    assert "error: PlayCover is not installed, or could not launch" in err
+    assert "hint: get PlayCover from https://github.com/PlayCover/PlayCover/releases" in err
+
+
 def test_on_an_intel_mac_a_failed_handoff_says_playcover_needs_apple_silicon(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

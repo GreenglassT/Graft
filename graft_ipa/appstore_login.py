@@ -287,8 +287,10 @@ def classify(error: str, *, code_typed: bool = True) -> LoginFailed:
     says what the rest of Graft says for it (`ipatool.UNICORN_FIRST_USE`).
     Apple no longer serving the restore image ipatool sets itself up from
     says that a newer Graft fixes it (`ipatool.RESTORE_IMAGE_GONE`), before
-    any rule could call its HTTP status something else.
+    any rule could call its HTTP status something else. No URL's query
+    reaches a message (`ipatool.without_url_queries`).
     """
+    error = ipatool.without_url_queries(error)
     if (first_use := ipatool.unicorn_failure(error)) is not None:
         return LoginFailed(REASON_NETWORK, first_use.message, hint=first_use.hint)
     if (gone := ipatool.restore_image_failure(error)) is not None:

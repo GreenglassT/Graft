@@ -100,6 +100,34 @@ which asks first, then downloads, decrypts and stages it again.
 - Add App's Search offers "Get it from the App Store after adding" once the
   App Store is set up.
 
+## Get an older version
+
+When a new version breaks a tweak, you can go back to one that worked.
+**Get an older version…**, beside Get latest on the app's pane, lists the
+versions the App Store still has for your Apple ID, newest first, with each
+one's date. Graft reads ten at a time, and **Show More** reads the next ten.
+Press **Get** on one, and Graft downloads, decrypts and stages it as Get latest
+does.
+
+Graft then holds the app at that version: its builds use it, and the pane says
+"Held at 1.2.0 · newest 1.4.0" instead of "update available". **Get latest
+from App Store** lets go of the hold and gets the newest version again. The
+hold is the app's preferred version, which Edit App also shows. A preferred
+version set in Edit App is a hold too; Get latest sets it back to latest.
+
+- Only apps your Apple ID has. If it doesn't have the app yet, get it first.
+- Apple doesn't serve every old version. One it won't describe or hand over
+  says so, and you can pick another.
+- Some apps refuse to run once they're too old, and ask you to update.
+- A version that's already staged is held without downloading it again.
+- An old version may be one UnfairPlay can't verify (see
+  [Decrypts UnfairPlay can't verify](#decrypts-unfairplay-cant-verify)).
+
+In Terminal, `graft --appstore-versions --app example` lists the versions
+with their ids, and `graft --appstore-get --app example --version-id <id>`
+gets one and holds the app at it; see [App Store](cli-reference.md#app-store)
+in the CLI Reference.
+
 ## Privacy
 
 The downloaded IPA carries your Apple ID and your license for the app. Graft

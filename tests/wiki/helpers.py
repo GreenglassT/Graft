@@ -117,9 +117,11 @@ SITEMAP_XML = """\
 
 
 def make_site(root: Path) -> Path:
-    """A fake site checkout: CNAME, style.css, index.html and sitemap.xml."""
+    """A fake site checkout: CNAME, style.css, index.html, sitemap.xml and the 1200×630
+    link-preview card, og.png."""
     write(root / "CNAME", "graftipa.com\n")
     write(root / "style.css", "body { margin: 0; }\n")
     write(root / "index.html", INDEX_HTML)
     write(root / "sitemap.xml", SITEMAP_XML)
+    (root / "og.png").write_bytes(_png(1200, 630, (16, 24, 40)))
     return root

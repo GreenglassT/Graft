@@ -440,6 +440,13 @@ PATCHES: dict[str, tuple[str, ...]] = {
     # cctools-port's FAKE_SIGN hook runs `system("codesign -s - -f <file>")`,
     # unquoted, after every change install_name_tool makes to an ARM Mach-O.
     "cctools": ("cctools-port-no-fake-sign.patch",),
+    # ipatool's get-version-metadata read a version's Info.plist out of its
+    # remote IPA with one HTTP range request per small read archive/zip made:
+    # hundreds per version for a big app, and one stalled request failed the
+    # whole read. The patch reads the end of the IPA in one request and the
+    # rest in 1 MiB blocks, each request bounded and tried twice; it changes
+    # only that reader (pkg/appstore/appstore_partial_zip.go) and its tests.
+    "ipatool": ("ipatool-range-readahead.patch",),
 }
 #: How a patch is applied: exactly (no fuzz), and never twice.
 PATCH_ARGV = ("/usr/bin/patch", "-p1", "--forward", "--batch", "--fuzz=0", "-i")
@@ -3215,7 +3222,7 @@ def _recipes(ipatool_version: str = "", unfairplay: Pin | None = None,
                     "`misc/lipo`, `misc/install_name_tool` and `otool/otool` go in as built."),
         "insert_dylib": ("the archive's top directory", [f"{tools}/insert_dylib"],
                          insert_dylib_steps(), "`insert_dylib/insert_dylib` goes in as built."),
-        "ipatool": ("the archive's top directory, unpatched, with the Go toolchain below first on PATH",
+        "ipatool": ("the archive's top directory, once patched, with the Go toolchain below first on PATH",
                     ["Helpers/bin/ipatool"], ipatool_steps(ipatool_version),
                     "With these variables set: " + ", ".join(f"`{k}={v}`" for k, v in IPATOOL_ENV.items())
                     + f". `go mod vendor` downloads each module from {GOPROXY}, checked against ipatool's "

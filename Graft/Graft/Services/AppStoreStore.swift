@@ -44,6 +44,10 @@ final class AppStoreStore {
     /// Signing in and out, and enrolling (`AppStoreAccountStore`). Reads
     /// status again through `loadStatus` after each.
     let account: AppStoreAccountStore
+    /// Get an older version…'s list (`AppStoreVersionsStore`). Here for
+    /// Search's reason: the sheet is rebuilt each time it opens. It loads
+    /// this when it opens and resets it when it closes.
+    let olderVersions: AppStoreVersionsStore
 
     /// The last `--appstore-status` answer, or nil before one arrives or after
     /// one fails. A failed reload clears it: a "signed in" left over from
@@ -109,6 +113,9 @@ final class AppStoreStore {
         /// A Get Again (`--again`): re-run as one, or it would only find the
         /// copy already staged and download nothing.
         case getAgain
+        /// A get of the version this id names (`--version-id`), from Get an
+        /// older version….
+        case version(String)
         case drop(URL)
     }
 
@@ -125,6 +132,11 @@ final class AppStoreStore {
     /// The most recent completion for any app — what `ContentView` watches to
     /// refresh that app's artwork, whichever pane is showing.
     private(set) var lastCompleted: Completion?
+    /// The most recent get that changed an app's hold (`appstore-hold`): a
+    /// get of a chosen version, or a get of the latest that let go. The hold
+    /// is the app's `preferred_version`, so `ContentView` reads the app list
+    /// again when this changes.
+    private(set) var lastHoldChange: Completion?
 
     /// What the last finished get or drop staged, per app — the line the app
     /// pane shows under the Source IPA section until the next action.
@@ -159,9 +171,16 @@ final class AppStoreStore {
         /// Nothing landed: the get found the App Store's current version
         /// already staged and downloaded nothing (`appstore-already-staged`).
         var alreadyStaged = false
+        /// A get of a version picked in Get an older version…, which holds
+        /// the app at it.
+        var chosen = false
 
         var message: String {
             switch source {
+            case .appStore where chosen:
+                return alreadyStaged
+                    ? "✓ Already have \(version): nothing downloaded. Builds use it until you get the latest."
+                    : "✓ Staged \(version) from the App Store. Builds use it until you get the latest."
             case .appStore:
                 return alreadyStaged
                     ? "✓ Already have \(version), the App Store's current version: nothing downloaded"
@@ -200,6 +219,7 @@ final class AppStoreStore {
         self.now = now
         self.hold = hold
         self.search = AppStoreSearchStore(runner: runner)
+        self.olderVersions = AppStoreVersionsStore(runner: runner)
         self.account = AppStoreAccountStore(runner: runner, shell: shell, hold: hold, openApp: openApp)
         account.onChange = { [weak self] in await self?.loadStatus() }
         account.onAccountChange = { [weak self] in self?.forgetLicences() }
@@ -228,8 +248,11 @@ final class AppStoreStore {
         [Flag.json, Flag.appstoreClaim, Flag.app, app] + (expectEmail.map { [Flag.expectEmail, $0] } ?? [])
     }
     static func checkArgs(app: String) -> [String] { [Flag.json, Flag.appstoreCheck, Flag.app, app] }
-    static func getArgs(app: String, allowUnverified: Bool = false, again: Bool = false) -> [String] {
+    static func getArgs(
+        app: String, allowUnverified: Bool = false, again: Bool = false, versionId: String? = nil
+    ) -> [String] {
         [Flag.json, Flag.appstoreGet, Flag.app, app]
+            + (versionId.map { [Flag.versionId, $0] } ?? [])
             + (again ? [Flag.again] : [])
             + (allowUnverified ? [Flag.allowUnverified] : [])
     }
@@ -438,6 +461,10 @@ final class AppStoreStore {
         /// The refused get was a Get Again, so the get after a claim is one
         /// too: a plain get would find the old copy staged and stop there.
         var again = false
+        /// The refused get was of a version picked in Get an older version…
+        /// (`--version-id`), so the get after a claim is of that version too:
+        /// a plain get would fetch the latest and let go of the hold.
+        var versionId: String? = nil
 
         enum Claim: Equatable {
             /// Not tried yet.
@@ -691,20 +718,22 @@ final class AppStoreStore {
                 licenseNeeded[app] = LicenseNeed(
                     price: paid.price, formattedPrice: paid.formattedPrice,
                     trackId: paid.trackId ?? earlier?.trackId, claim: .refusedPaid,
-                    again: earlier?.again ?? false
+                    again: earlier?.again ?? false, versionId: earlier?.versionId
                 )
             } else {
                 licenseNeeded[app] = LicenseNeed(
                     price: earlier?.price, formattedPrice: earlier?.formattedPrice,
-                    trackId: earlier?.trackId, claim: .failed, again: earlier?.again ?? false
+                    trackId: earlier?.trackId, claim: .failed, again: earlier?.again ?? false,
+                    versionId: earlier?.versionId
                 )
             }
             return
         }
         let again = licenseNeeded[app]?.again ?? false
+        let versionId = licenseNeeded[app]?.versionId
         licenseNeeded[app] = nil
         beginGet(
-            app: app, allowUnverified: false, again: again,
+            app: app, allowUnverified: false, again: again, versionId: versionId,
             afterClaim: alreadyOwned ? .alreadyOwned : .claimed
         )
     }
@@ -724,13 +753,21 @@ final class AppStoreStore {
     /// CLI downloads even when the App Store's current version is already
     /// staged, where a plain get stops and says so
     /// (`appstore-already-staged`).
+    ///
+    /// `versionId` is a version picked in Get an older version…: the CLI gets
+    /// that one instead of the latest and holds the app at it
+    /// (`appstore-hold`). Without one, a get that works lets go of any hold.
     @discardableResult
-    func startGet(app: String, allowUnverified: Bool = false, again: Bool = false) -> Bool {
-        beginGet(app: app, allowUnverified: allowUnverified, again: again, afterClaim: nil)
+    func startGet(
+        app: String, allowUnverified: Bool = false, again: Bool = false, versionId: String? = nil
+    ) -> Bool {
+        beginGet(app: app, allowUnverified: allowUnverified, again: again, versionId: versionId, afterClaim: nil)
     }
 
     @discardableResult
-    private func beginGet(app: String, allowUnverified: Bool, again: Bool, afterClaim: AfterClaim?) -> Bool {
+    private func beginGet(
+        app: String, allowUnverified: Bool, again: Bool, versionId: String?, afterClaim: AfterClaim?
+    ) -> Bool {
         guard activity[app] == nil else { return false }
         if let getBlockedReason {
             // Not silent: Add App's "Get it after adding" lands here too.
@@ -743,11 +780,12 @@ final class AppStoreStore {
         licenseNeeded[app] = nil
         stages[app] = nil
         staged[app] = nil
+        let retry: Retry = versionId.map { .version($0) } ?? (again ? .getAgain : .get)
         tasks[app] = Task { [weak self] in
             await self?.run(
-                app: app, source: .appStore, retry: again ? .getAgain : .get, afterClaim: afterClaim
+                app: app, source: .appStore, retry: retry, afterClaim: afterClaim
             ) {
-                try await $0.streamGet(app: app, allowUnverified: allowUnverified, again: again)
+                try await $0.streamGet(app: app, allowUnverified: allowUnverified, again: again, versionId: versionId)
             }
         }
         return true
@@ -765,6 +803,8 @@ final class AppStoreStore {
             return startGet(app: app, allowUnverified: true)
         case .getAgain:
             return startGet(app: app, allowUnverified: true, again: true)
+        case let .version(id):
+            return startGet(app: app, allowUnverified: true, versionId: id)
         case let .drop(fileURL):
             return startProvide(app: app, fileURL: fileURL, config: config, allowUnverified: true)
         }
@@ -882,9 +922,11 @@ final class AppStoreStore {
                 case nil:
                     claim = .offer
                 }
+                let versionId: String?
+                if case let .version(id) = retry { versionId = id } else { versionId = nil }
                 licenseNeeded[app] = LicenseNeed(
                     price: need.price, formattedPrice: need.formattedPrice, trackId: need.trackId, claim: claim,
-                    again: retry == .getAgain
+                    again: retry == .getAgain, versionId: versionId
                 )
             }
             return
@@ -896,17 +938,21 @@ final class AppStoreStore {
         // it as it starts, but a drop doesn't, and the row stayed on Get
         // (free) or Open in App Store, with no banner left to dismiss.
         licenseNeeded[app] = nil
+        let chosen: Bool
+        if case .version = retry { chosen = true } else { chosen = false }
         switch landed {
         case let .alreadyStaged(record)?:
             // Nothing was staged, so no completion: the cache is as it was.
             // The version line is asked again, as the get's lookup just was.
-            staged[app] = Staged(source: source, version: record.version, decrypted: false, alreadyStaged: true)
+            staged[app] = Staged(
+                source: source, version: record.version, decrypted: false, alreadyStaged: true, chosen: chosen
+            )
             await checkVersion(app: app, force: true)
             return
         case let .provided(provided)?:
             staged[app] = Staged(
                 source: source, version: provided.record.version,
-                decrypted: provided.decrypted, warnings: provided.warnings
+                decrypted: provided.decrypted, warnings: provided.warnings, chosen: chosen
             )
         case nil:
             break
@@ -927,14 +973,28 @@ final class AppStoreStore {
     ///
     /// A get of the version already staged downloads nothing and says so
     /// (`appstore-already-staged`), unless `again`.
-    private func streamGet(app: String, allowUnverified: Bool, again: Bool) async throws -> Landed? {
+    private func streamGet(
+        app: String, allowUnverified: Bool, again: Bool, versionId: String?
+    ) async throws -> Landed? {
         let events = try await runner.streamEvents(
-            Self.getArgs(app: app, allowUnverified: allowUnverified, again: again),
+            Self.getArgs(app: app, allowUnverified: allowUnverified, again: again, versionId: versionId),
             failing: "Get from App Store", refusal: .appStoreGet
         ) { [weak self] event in
             self?.note(event, forGetOf: app)
         }
+        if Self.holdChanged(in: events) {
+            serial += 1
+            lastHoldChange = Completion(app: app, serial: serial)
+        }
         return Self.landed(in: events)
+    }
+
+    /// Whether a get's events say it changed the app's hold.
+    static func holdChanged(in events: [BuildEvent]) -> Bool {
+        events.contains { event in
+            if case .appStoreHold = event { return true }
+            return false
+        }
     }
 
     /// What a get or drop's work came back with: the IPA it staged, or, for a

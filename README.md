@@ -11,8 +11,11 @@ delivers the result to your iPhone or iPad over USB or Wi-Fi.
   so an app keeps its original bundle id, or signs and installs it as a
   normal app with your own certificate and provisioning profile.
 - Searches the App Store and downloads apps your Apple ID owns or can get for
-  free, then decrypts them on this Mac. It also takes an IPA you already have,
-  or a dump from your own jailbroken device.
+  free, then decrypts them on this Mac, including an older version when a new
+  one breaks a tweak. It also takes an IPA you already have, or a dump from
+  your own jailbroken device.
+- Exports the tweaked IPA unsigned instead, for an on-device signer or
+  TrollStore on your own devices.
 - Finds tweaks on canister.me and in APT repositories, and checks them for
   updates.
 - Keeps a build history and archived builds for rollback, and tells you when
@@ -23,6 +26,9 @@ delivers the result to your iPhone or iPad over USB or Wi-Fi.
 Everything happens in the app. There's nothing to install in Terminal.
 
 ![Graft.app](docs/screenshot.png)
+
+If Graft helps you, a [star on GitHub](https://github.com/GreenglassT/Graft)
+helps others find it.
 
 ## Install
 
@@ -71,7 +77,7 @@ Coming from Graft 1.x? See [Upgrading from Graft 1.x](docs/upgrading.md).
 | Download from the App Store | An Apple ID signed in in Graft. Any Apple ID works, free or paid; it's separate from the account above. The app must be one that Apple ID owns, or a free one Graft can get for it. |
 | Decrypt App Store downloads | An iPhone or iPad app installed on this Mac from the Mac App Store, with the same Apple ID, and opened once. Any free one will do. |
 | Decrypt on a jailbroken device | A jailbroken iPhone or iPad with frida-server 16.x and OpenSSH, plus tools you install yourself (see [Decrypt on a jailbroken device](#decrypt-on-a-jailbroken-device)). |
-| Run a build on this Mac | [PlayCover](https://github.com/PlayCover/PlayCover). |
+| Run a build on this Mac | [PlayCover](https://github.com/PlayCover/PlayCover/releases), a free app you install yourself. Graft doesn't include it. |
 
 ## Getting started
 
@@ -241,6 +247,29 @@ which asks first, then downloads, decrypts and stages it again.
 - Add App's Search offers "Get it from the App Store after adding" once the
   App Store is set up.
 
+### Get an older version
+
+When a new version breaks a tweak, you can go back to one that worked.
+**Get an older version…**, beside Get latest on the app's pane, lists the
+versions the App Store still has for your Apple ID, newest first, with each
+one's date. Graft reads ten at a time, and **Show More** reads the next ten.
+Press **Get** on one, and Graft downloads, decrypts and stages it as Get latest
+does.
+
+Graft then holds the app at that version: its builds use it, and the pane says
+"Held at 1.2.0 · newest 1.4.0" instead of "update available". **Get latest
+from App Store** lets go of the hold and gets the newest version again. The
+hold is the app's preferred version, which Edit App also shows. A preferred
+version set in Edit App is a hold too; Get latest sets it back to latest.
+
+- Only apps your Apple ID has. If it doesn't have the app yet, get it first.
+- Apple doesn't serve every old version. One it won't describe or hand over
+  says so, and you can pick another.
+- Some apps refuse to run once they're too old, and ask you to update.
+- A version that's already staged is held without downloading it again.
+- An old version may be one UnfairPlay can't verify (see
+  [Decrypts UnfairPlay can't verify](#decrypts-unfairplay-cant-verify)).
+
 ### Privacy
 
 The downloaded IPA carries your Apple ID and your license for the app. Graft
@@ -284,7 +313,7 @@ Device UDIDs never leave your Mac.
 | Once a day while Graft is open, unless Settings › Updates turns it off, and when you choose Help › Check for Updates… | GitHub (`api.github.com`), with nothing that identifies you or your Mac | Whether a newer Graft is out |
 | A newer Graft is out, unless Settings › Updates turns automatic updates off (then when you choose Update) | GitHub's release files (`github.com`), with nothing that identifies you or your Mac | The new `Graft.zip`, about 150 MB, once |
 | A paid account with an App Store Connect key makes a profile | Apple's App Store Connect API | Provisioning profiles |
-| You sign in, get an app, or get a free one | Apple's App Store, through the bundled ipatool | Your sign-in, the license, the IPA |
+| You sign in, get an app or an older version of one, list an app's older versions, or get a free one | Apple's App Store, through the bundled ipatool | Your sign-in, the license, the IPA, the versions' numbers and dates |
 | The first App Store action on a Mac (usually the first sign-in) | PyPI (`files.pythonhosted.org`), and Apple's software CDN | ipatool's Unicorn emulator (a few MB) and its App Store components (about 320 MB, skipped if a 1.x ipatool already downloaded them), once |
 
 About that first App Store action:
@@ -569,7 +598,8 @@ repository or releases.
 ## Building
 
 Build & Install runs this pipeline. Build options (beside it) picks the
-device and can build without installing.
+device and can build without installing. It can also export the IPA unsigned
+instead (see [Exporting an IPA](#exporting-an-ipa)).
 
 1. **Pre-flight.** Tools, signing files, password, device, and that the device
    is in the profile. Only what the delivery mode needs is checked.
@@ -672,6 +702,42 @@ a minimal stand-in instead. Phone builds are never changed this way.
 Graft.app carries that stand-in prebuilt, so a Mac build needs no Xcode. A
 `graft` installed with pipx builds it on demand and needs full Xcode for that;
 see [The CLI without the app](#the-cli-without-the-app-pipx).
+
+Graft doesn't include PlayCover, and doesn't download or install it. When
+PlayCover isn't installed, Build options says so above Build for this Mac, and
+**Get PlayCover** opens
+[PlayCover's releases page](https://github.com/PlayCover/PlayCover/releases)
+on GitHub in your browser. You can still build first: once PlayCover is
+installed, Install to Mac… on the build's row in Builds hands it over. If a
+handover fails because PlayCover isn't installed, the error names the same
+page.
+
+## Exporting an IPA
+
+If you sign apps on the phone, with an on-device signer and a certificate
+service, or install them with TrollStore, Graft can give you the IPA instead
+of delivering it. **Export IPA…** in Build options builds the app as far as
+injecting its tweaks, then saves that IPA where you choose.
+
+- **What the file is.** The app's decrypted IPA with its tweaks injected and
+  the app's options applied, with your Apple ID's purchase data removed. It
+  isn't signed: the binaries cyan changed need re-signing before iOS runs
+  them.
+- **What to do with it.** Put it on the phone (in Files, say) and open it in
+  your on-device signer, which signs it with your certificate and installs
+  it. Or install it with TrollStore.
+- **What Graft doesn't do.** It signs nothing and sends nothing to a device,
+  whatever the app's delivery mode, so a free Apple ID can export a Sideload
+  app too. Graft only saves the file; moving it to the phone is up to you.
+- **It isn't a build in Builds.** An export adds no row to the build history
+  and keeps no log, and archive clean-up never touches the file.
+- **For your own devices.** It's an app your Apple ID owns or got for free.
+
+The Save panel asks before replacing a file that's already there. Graft
+builds the file in a temporary folder of its own and moves it to where you
+chose once it's done, so a stopped or failed export leaves nothing in your
+folder. Graft won't save into its own folders for staged IPAs and archived
+builds, which it cleans up itself.
 
 ## Configuration
 
@@ -813,6 +879,7 @@ Graft](#removing-graft) lists everything.
 | `ApplicationVerificationFailed` | The `.p12` and profile are from different teams, or the device's UDID isn't in the profile. |
 | `MismatchedApplicationIdentifierEntitlement` | The profile doesn't allow this bundle id; use a wildcard profile. Installing LiveContainer: delete an old zsign-signed copy on the device first. |
 | `DeviceLocked` | Unlock the device. |
+| An app, such as an emulator, says it needs JIT | Graft doesn't turn on JIT. [StikDebug](https://github.com/StikDebug/StikDebug), an app on the iPhone, does. On iOS 26 and recent iPhones, only apps built to support it can get JIT, whatever tool you use. |
 | `wrong password` from zsign | The `.p12` password is wrong. |
 | `Library not loaded: @rpath/libexample.dylib` | Add a copy of that library to the app's tweaks; see [Shared libraries](#shared-libraries). |
 | `couldn't extract some-tweak.deb` | The download is probably an HTML error page; fetch it again. |
@@ -1088,6 +1155,8 @@ graft --appstore-login                      # asks for the Apple ID, the passwor
 graft --appstore-logout
 graft --appstore-check                      # App Store version vs. your staged IPA, per app
 graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if it's already staged)
+graft --appstore-versions --app example     # the versions the App Store has for your Apple ID, newest first, with their ids
+graft --appstore-get --app example --version-id <id>   # get that version, and hold the app at it
 graft --appstore-claim --app example        # Get (free): only for an app the App Store lists at 0
 ```
 
@@ -1100,6 +1169,12 @@ graft --appstore-claim --app example        # Get (free): only for an app the Ap
   UnfairPlay couldn't verify, with a warning.
 - `--again` with `--appstore-get` downloads even when that version is already
   staged.
+- `--appstore-versions` reads the number and date of ten versions at a time,
+  starting at `--offset` (`--limit` reads up to 50), and remembers them. The
+  rest are listed by id.
+- `--version-id` holds the app at the version it gets: `preferred_version` pins
+  it, and `--appstore-check` doesn't call a newer one an update. A plain
+  `--appstore-get` lets go of the hold.
 
 To set up decryption in Terminal, list the apps that can do it, save the
 script, run it as root, then finish as yourself:
@@ -1165,8 +1240,37 @@ graft example --skip-install        # build (and sign, for sideload) only
 graft example --device <UDID>       # a specific device instead of the default
 graft example --for-playcover       # also make the build loadable on this Mac under PlayCover
 graft --install-to-mac <filename>   # hand a staged IPA or an archived build to PlayCover
+graft example --export-ipa ~/Desktop/Example.ipa   # inject the tweaks, save the IPA unsigned
 graft example -v                    # verbose, and keep the temp directory
 ```
+
+`--export-ipa` signs nothing and touches no device (see
+[Exporting an IPA](#exporting-an-ipa)). It takes one app, refuses `--device`,
+`--skip-install` and `--for-playcover`, and won't replace a file that's
+already there unless you add `--overwrite`. Under `--json` its last event
+before `build-end` is `ipa-exported`, with the file's `path`.
+
+Before it builds, it checks where the file goes, and that it can write a file
+in that folder. It writes the IPA to a hidden `.<name>.<random>.partial` file
+beside the path, then moves it into place, so a failed or stopped export
+leaves nothing behind. If graft is killed outright mid-write, that hidden file
+can be left there: it's safe to delete. The file's permissions are a new
+file's, as your umask sets them.
+
+How an export ends, by its exit status and, under `--json`, `build-end`'s
+`reason`. The reason is null when the export worked, was stopped, or failed
+another way (cyan failing, say), which the exit status tells as it does for a
+build.
+
+| Exit | `reason` | Meaning |
+|---|---|---|
+| 0 | null | The IPA was written |
+| 2 | `exists` | A file is already at the path. `--overwrite` replaces it |
+| 2 | `bad-destination` | The path is a folder, its folder isn't there or is one of Graft's own, or it starts with `~name` for a user this Mac doesn't have |
+| 1 | `unwritable` | graft can't write in that folder: its permissions, macOS's privacy controls, or a read-only disk |
+| 1 | `no-space` | The disk is full |
+| 1 | `write-failed` | Writing the file failed another way |
+| 4 | `no-ipa` | No IPA is staged for the app |
 
 `--skip-decrypt-check` skips the decryption check. A Stop (SIGTERM) ends the
 build where it is: nothing is recorded as a failure, and under `--json` the
@@ -1186,8 +1290,8 @@ graft --delivery-state [--app example]   # would building now produce something 
 graft --reconcile [--app example]        # check the device first, then report
 ```
 
-`--dry-run` previews only a build, `--prune-builds`, `--init --account` and
-`--remove-data --items`.
+`--dry-run` previews only a build, `--export-ipa`, `--prune-builds`,
+`--init --account` and `--remove-data --items`.
 Every other command refuses it, before doing anything, rather than running for
 real under a flag that said it wouldn't.
 
@@ -1397,4 +1501,5 @@ Graft.app is an aggregate of separate programs and libraries, each under its own
 ## Support
 
 If Graft is useful to you, you can support it at
-[ko-fi.com/greenglasst](https://ko-fi.com/greenglasst).
+[ko-fi.com/greenglasst](https://ko-fi.com/greenglasst), also from Help ›
+Support Graft on Ko-fi or Settings › Version in the app.

@@ -285,6 +285,31 @@ struct HandedToPlayCoverRecord: Decodable, Hashable {
     }
 }
 
+/// What `--export-ipa` wrote: the app's tweak-injected IPA, unsigned, at the
+/// path the Save panel chose. The export's last event before `build-end`.
+///
+/// `dryRun` is a preview's: it names where the file would go, `sizeBytes` is
+/// nil and nothing was written, so nothing should offer to show it.
+struct IPAExportedRecord: Decodable, Hashable {
+    let app: String
+    let version: String
+    /// Absolute.
+    let path: String
+    let filename: String
+    let sizeBytes: Int?
+    /// The app's tweaks, as config.yaml lists them.
+    let tweaks: [String]
+    /// A file was already there, and the export replaced it (`--overwrite`).
+    let replaced: Bool
+    let dryRun: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case app, version, path, filename, tweaks, replaced
+        case sizeBytes = "size_bytes"
+        case dryRun = "dry_run"
+    }
+}
+
 /// What is published for one library file, against what it holds.
 ///
 /// Emitted for *every* file, including ones nothing publishes — anything built
@@ -1536,6 +1561,7 @@ enum BuildEvent {
     case stagedIPADeleted(StagedIPADeletedRecord)
     case stagedIPAInUse(StagedIPAInUseRecord)
     case handedToPlayCover(HandedToPlayCoverRecord)
+    case ipaExported(IPAExportedRecord)
     case tweakAttached(TweakMutationRecord)
     case tweakDetached(TweakMutationRecord)
     case tweakDeleted(TweakDeletedRecord)
@@ -1584,6 +1610,11 @@ enum BuildEvent {
     case appStoreSearchResult(AppStoreSearchResult)
     case appStoreSearchEnd(AppStoreSearchEndRecord)
     case appStoreSearchFailed(AppStoreSearchFailedRecord)
+    /// `--appstore-versions`: one version the App Store serves, then the sentinel.
+    case appStoreRelease(AppStoreReleaseRecord)
+    case appStoreReleasesEnd(AppStoreReleasesEndRecord)
+    /// A get held the app at a version, or let go (`version` nil).
+    case appStoreHold(AppStoreHoldRecord)
     case updateCheck(UpdateCheckRecord)
     // What Graft keeps outside Graft.app (`--remove-data`); records in
     // `RemoveDataRecords.swift`.
@@ -1913,6 +1944,8 @@ enum BuildEvent {
             return .stagedIPAInUse(try decoder.decode(StagedIPAInUseRecord.self, from: data))
         case "handed-to-playcover":
             return .handedToPlayCover(try decoder.decode(HandedToPlayCoverRecord.self, from: data))
+        case "ipa-exported":
+            return .ipaExported(try decoder.decode(IPAExportedRecord.self, from: data))
         case "tweak-attached":
             return .tweakAttached(try decoder.decode(TweakMutationRecord.self, from: data))
         case "tweak-detached":
@@ -1963,6 +1996,12 @@ enum BuildEvent {
             return .appStoreSearchEnd(try decoder.decode(AppStoreSearchEndRecord.self, from: data))
         case "appstore-search-failed":
             return .appStoreSearchFailed(try decoder.decode(AppStoreSearchFailedRecord.self, from: data))
+        case "appstore-release":
+            return .appStoreRelease(try decoder.decode(AppStoreReleaseRecord.self, from: data))
+        case "appstore-releases-end":
+            return .appStoreReleasesEnd(try decoder.decode(AppStoreReleasesEndRecord.self, from: data))
+        case "appstore-hold":
+            return .appStoreHold(try decoder.decode(AppStoreHoldRecord.self, from: data))
         case "update-check":
             return .updateCheck(try decoder.decode(UpdateCheckRecord.self, from: data))
         case "data-item":
@@ -2035,6 +2074,11 @@ enum BuildProgress: Equatable {
     /// all, and it is the one line in an otherwise green build that says the
     /// obvious next action is not the one they are about to take.
     case liveContainerChoice(LiveContainerChoiceRecord)
+    /// What an export (`--export-ipa`) wrote, just before its `build-end`.
+    /// Part of the stream because it is the export's result: the one line
+    /// that says where the file went, and the record the pane's confirmation
+    /// and its Show in Finder are drawn from.
+    case exported(IPAExportedRecord)
     case finished(ok: Bool, error: String?, elapsed: Double?)
     /// The build was stopped, and the CLI said so: a `build-end` with
     /// `stopped: true` (C-STOP). Its own case rather than `finished(ok:
@@ -2104,6 +2148,8 @@ extension BuildEvent {
             return .encrypted(record)
         case let .liveContainerChoice(record):
             return .liveContainerChoice(record)
+        case let .ipaExported(record):
+            return .exported(record)
         case let .buildEnd(_, ok, error, elapsedSeconds, stopped):
             // Ahead of `ok`: a stopped build-end carries `ok: false`, and
             // that is not a verdict on the build.

@@ -268,7 +268,8 @@ final class FreeAccountViewTests: XCTestCase {
             devices: DevicesStore(runner: accountTestShell), tweaksStore: TweaksStore(runner: accountTestShell),
             staged: StagedIPAStore(runner: accountTestShell), appStore: AppStoreStore(runner: accountTestShell, shell: NoAdminShell()),
             liveContainer: LiveContainerStore(runner: accountTestShell),
-            settings: SettingsStore(runner: accountTestShell), showSettings: {}
+            settings: SettingsStore(runner: accountTestShell), showSettings: {},
+            playCover: .inert
         )
         let box = hosted(pane, size: NSSize(width: 1000, height: 900))
         try await Task.sleep(nanoseconds: 500_000_000)

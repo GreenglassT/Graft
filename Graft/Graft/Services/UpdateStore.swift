@@ -59,7 +59,14 @@ struct SelfUpdateHost {
 /// - The helper's own failure (a folder macOS won't let it change) can't be
 ///   reported by a process that has quit. The attempt is written down before
 ///   the quit (`Key.attempt`), and a launch that finds itself still the old
-///   version says the install didn't take, and links the release page.
+///   version says the install didn't take, and links the release page;
+///   unless the helper's log says it installed it after the attempt
+///   (`installLogged`): then the old version was put back by hand since.
+///
+/// **Check for Updates…'s alert** (`answerAlert`) says what the banner says
+/// about the release it found, as things stood once any download the check
+/// started had started, and is fixed while it's open. It never offers
+/// Update for a download already under way.
 ///
 /// The switches, the time of the last successful check and its answer live
 /// in `defaults`, so the banner is back after a relaunch without asking
@@ -95,14 +102,15 @@ final class UpdateStore: QuitHandover {
         static let failedVersion = "updateInstall.failedVersion"
     }
 
-    /// An install handed over at a quit: the version, and the version it
-    /// replaces.
+    /// An install handed over at a quit: the version, the version it
+    /// replaces, and when (nil in one that 2.0.2 wrote).
     struct Attempt: Codable, Equatable {
         let version: String
         let from: String
+        var at: Date?
     }
 
-    /// What Help › Check for Updates… says.
+    /// What Help › Check for Updates… found.
     enum Answer: Equatable {
         case upToDate
         case available(UpdateCheckRecord)
@@ -111,33 +119,42 @@ final class UpdateStore: QuitHandover {
 
         /// The sentence for a run that said nothing at all.
         static let noAnswer = "The command-line tool gave no answer."
+    }
 
-        var title: String {
-            switch self {
-            case .upToDate: return "You're up to date"
-            case let .available(record): return "Graft \(record.latest ?? "") is available"
-            case .failed: return "Couldn't check for updates"
+    /// What Check for Updates…'s alert shows (`alert(for:)`).
+    struct CheckAlert: Equatable {
+        /// The alert's button that updates (`perform`), as the banner's:
+        /// Update and Try Again are its Update, Restart to Update its
+        /// Restart to Update.
+        enum Action: Equatable {
+            /// `update()`: download it, check it, and restart into it; or
+            /// join the download already running.
+            case update
+            /// `update()` again, after a failed try that trying again can
+            /// help (`Phase.failed`'s `retryable`).
+            case tryAgain
+            /// `restartToUpdate()`: quit, install the checked download, and
+            /// open it. Asked for this quit only: if the quit is canceled,
+            /// a later one installs it only as the second switch says.
+            case restartToUpdate
+
+            var title: String {
+                switch self {
+                case .update: return "Update"
+                case .tryAgain: return "Try Again"
+                case .restartToUpdate: return "Restart to Update"
+                }
             }
         }
 
-        /// `canUpdate`: this copy can update itself (`UpdateStore.canUpdate`),
-        /// so the alert offers Update.
-        func message(appVersion: String, canUpdate: Bool = false) -> String {
-            switch self {
-            case .upToDate:
-                return "Graft \(appVersion) is the newest version."
-            case .available where canUpdate:
-                return "You have Graft \(appVersion). Update downloads the new version from GitHub, "
-                    + "checks that it's Graft, signed by its developer and notarized by Apple, and "
-                    + "restarts Graft. Your settings, apps and builds carry over."
-            case .available:
-                return "You have Graft \(appVersion). Download the new Graft.zip from its release "
-                    + "page, then replace Graft.app in Applications. Your settings, apps and "
-                    + "builds carry over."
-            case let .failed(why):
-                return why
-            }
-        }
+        let title: String
+        let message: String
+        /// The button that updates, if any.
+        let action: Action?
+        /// The release Open Release Page opens; nil for no such button.
+        let release: UpdateCheckRecord?
+        /// The cancel button: Later beside an offer, OK otherwise.
+        let cancel: String
     }
 
     /// Where updating is.
@@ -151,7 +168,9 @@ final class UpdateStore: QuitHandover {
         /// Handed to the helper as Graft quits.
         case installing(version: String)
         /// The CLI's sentence; the banner links the release page.
-        case failed(version: String, message: String)
+        /// `retryable`: trying again can help (`retryHelps`), so Check for
+        /// Updates… offers Try Again.
+        case failed(version: String, message: String, retryable: Bool)
     }
 
     /// What the banner shows: `phase`, or with nothing under way, the last
@@ -164,7 +183,8 @@ final class UpdateStore: QuitHandover {
             /// `installsOnQuit`: quitting installs it (the switch, or Update).
             case ready(installsOnQuit: Bool)
             case installing
-            case failed(String)
+            /// The sentence, and `Phase.failed`'s `retryable`.
+            case failed(String, retryable: Bool)
         }
 
         let version: String
@@ -223,6 +243,20 @@ final class UpdateStore: QuitHandover {
         "not-newer", "no-team",
     ]
 
+    /// The CLI's reasons for a failure that trying again can't help with
+    /// this launch, so Check for Updates… doesn't offer Try Again: those
+    /// `refusedForWhatItIs` names (the same download meets the same
+    /// refusal), and where this copy is, which no retry changes: run from a
+    /// translocated copy, in a folder this account can't change, or not
+    /// Graft.app. Their sentences say what to do instead.
+    static let retryCantHelp: Set<String> = refusedForWhatItIs.union(["translocated", "not-writable", "not-graft"])
+
+    /// Whether trying again can help with a failure for `reason`. True for
+    /// none: the CLI didn't say why (it stopped, or couldn't run).
+    static func retryHelps(_ reason: String?) -> Bool {
+        reason.map { !retryCantHelp.contains($0) } ?? true
+    }
+
     let runner: CLIRunner
     /// This copy's CFBundleShortVersionString: what the CLI compares against.
     let appVersion: String
@@ -231,6 +265,9 @@ final class UpdateStore: QuitHandover {
     private let defaults: UserDefaults
     private let now: () -> Date
     private let open: (URL) -> Void
+    /// The helper's log, ~/Library/Logs/Graft/update.log (`app_update.log_path`
+    /// in the CLI): read at launch only, when an attempt needs a verdict.
+    private let updateLog: URL
 
     /// Settings › Updates' first switch: whether the daily check runs. On
     /// unless turned off. Off also takes the offer off the banner; Check for
@@ -252,8 +289,15 @@ final class UpdateStore: QuitHandover {
     /// The last successful answer about this version, nil before there is one.
     private(set) var lastAnswer: UpdateCheckRecord?
     private(set) var isChecking = false
-    /// What Check for Updates… found, until its alert is dismissed.
-    var answer: Answer?
+    /// What Check for Updates… found, until its alert is dismissed
+    /// (`dismissAnswer`).
+    private(set) var answer: Answer?
+    /// What its alert shows: `alert(for: answer)`, as things stood once the
+    /// check was done and any download it starts had started. Fixed while
+    /// it's open, so no button changes under the pointer (the banner
+    /// follows the phase): its words stay true as the phase moves on, and
+    /// its button (`perform`) is the banner's.
+    private(set) var answerAlert: CheckAlert?
     private(set) var phase: Phase = .idle
     /// From the quit taking the install until the helper is started (or
     /// couldn't be).
@@ -281,18 +325,20 @@ final class UpdateStore: QuitHandover {
     @ObservationIgnored var handoverTimeout: Duration = .seconds(15)
 
     /// Every dependency is a parameter: `GraftApp` passes the real
-    /// preferences, clock, browser and host, a test its own
+    /// preferences, clock, browser, update log and host, a test its own
     /// (`NoRealDefaultsTests`). No host, no self-update: the banner then
     /// links the release page, as before 2.0.2.
     init(
         runner: CLIRunner, defaults: UserDefaults, now: @escaping () -> Date,
-        appVersion: String, open: @escaping (URL) -> Void, host: SelfUpdateHost? = nil
+        appVersion: String, open: @escaping (URL) -> Void, updateLog: URL,
+        host: SelfUpdateHost? = nil
     ) {
         self.runner = runner
         self.defaults = defaults
         self.now = now
         self.appVersion = appVersion
         self.open = open
+        self.updateLog = updateLog
         self.host = host
         dailyCheck = defaults.object(forKey: Key.dailyCheck) as? Bool ?? true
         autoInstall = defaults.object(forKey: Key.autoInstall) as? Bool ?? true
@@ -308,14 +354,115 @@ final class UpdateStore: QuitHandover {
         if let data = defaults.data(forKey: Key.attempt) {
             defaults.removeObject(forKey: Key.attempt)
             // Still the version it was to replace: the helper didn't install
-            // it. Any other version means it did, or someone else did. Its
-            // version goes in the banner and its link, so only a plain one.
+            // it, unless its log says it did after the attempt, and this copy
+            // was put back by hand since (a downgrade). Any other version
+            // means it did, or someone else did. Its version goes in the
+            // banner and its link, so only a plain one.
             if let attempt = try? JSONDecoder().decode(Attempt.self, from: data),
-               attempt.from == appVersion, Self.isPlainVersion(attempt.version) {
+               attempt.from == appVersion, Self.isPlainVersion(attempt.version),
+               !Self.installLogged(attempt, in: updateLog) {
                 defaults.set(attempt.version, forKey: Key.failedVersion)
-                phase = .failed(version: attempt.version, message: Self.installDidNotTake)
+                // Its sentence says to download it by hand: no Try Again.
+                phase = .failed(version: attempt.version, message: Self.installDidNotTake, retryable: false)
             }
         }
+    }
+
+    /// Whether the helper's log says it installed `attempt`'s version at or
+    /// after the time the attempt was written down. False when it can't
+    /// tell: an attempt with no time (2.0.2's), or no log that's a file.
+    ///
+    /// The helper's line for an install that worked (`app_update.HELPER`,
+    /// pinned by tests/test_app_update_helper.py) is its time, to the
+    /// second (`loggedTime`), then "installed Graft <version> at <app>; …".
+    /// The helper is the one the attempt's own version started, so it's the
+    /// same line this version reads.
+    nonisolated static func installLogged(_ attempt: Attempt, in log: URL) -> Bool {
+        guard let at = attempt.at, let tail = tail(of: log) else { return false }
+        // Whole seconds: an install in the attempt's own second counts.
+        let earliest = at.timeIntervalSinceReferenceDate.rounded(.down)
+        let said = " installed Graft \(attempt.version) at "
+        return lines(of: tail).contains { line in
+            guard let when = loggedTime(of: line, saying: said) else { return false }
+            return when.timeIntervalSinceReferenceDate >= earliest
+        }
+    }
+
+    /// When a line of the helper's log was written, if what follows its
+    /// time is `said`; nil for any other line.
+    ///
+    /// Since 2.1 the time has its offset from UTC ("2026-11-24 09:30:15
+    /// +1400", `date '+%Y-%m-%d %H:%M:%S %z'`), and is read in that offset:
+    /// the helper's zone is the CLI's, which has any TZ the user's shell
+    /// profile sets, and can differ from this app's. 2.0.2's helper wrote
+    /// its times with none ("2026-11-24 09:30:15"), and the log keeps its
+    /// lines: such a time is read in this Mac's zone, as it was. Between
+    /// the time and `said`, only " " or " ±hhmm".
+    nonisolated static func loggedTime(of line: String, saying said: String) -> Date? {
+        let time = line.prefix(19)
+        guard time.count == 19 else { return nil }
+        let rest = line.dropFirst(19)
+        // Seconds east of UTC; nil for a time with no offset.
+        var offset: Int?
+        if !rest.hasPrefix(said) {
+            let mark = Array(rest.prefix(6))
+            let digits = mark.dropFirst(2).compactMap { $0.isASCII ? $0.wholeNumberValue : nil }
+            guard mark.count == 6, mark[0] == " ", mark[1] == "+" || mark[1] == "-", digits.count == 4,
+                  rest.dropFirst(6).hasPrefix(said)
+            else { return nil }
+            let hours = digits[0] * 10 + digits[1], minutes = digits[2] * 10 + digits[3]
+            guard hours < 24, minutes < 60 else { return nil }
+            offset = (mark[1] == "+" ? 1 : -1) * (hours * 60 * 60 + minutes * 60)
+        }
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        // With an offset: read as UTC, then moved back by it.
+        stamp.timeZone = offset == nil ? .current : .gmt
+        stamp.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        guard let read = stamp.date(from: String(time)) else { return nil }
+        return read - TimeInterval(offset ?? 0)
+    }
+
+    /// `data`'s lines, as UTF-8: split at each LF byte, each without the CR
+    /// before it in a line that ended CRLF. Bytes, not
+    /// `String.split(separator: "\n")`: Swift reads "\r\n" as one Character,
+    /// which isn't "\n", so a CRLF line would run on into the next.
+    nonisolated static func lines(of data: Data) -> [String] {
+        data.split(separator: 0x0A, omittingEmptySubsequences: false).map { line in
+            String(decoding: line.last == 0x0D ? line.dropLast() : line, as: UTF8.self)
+        }
+    }
+
+    /// The last MiB of the log: the newest lines (the helper appends to it
+    /// on every update).
+    nonisolated static let tailLimit = 1 << 20
+
+    /// The last `tailLimit` bytes of `log`, or nil unless it's a regular
+    /// file. One open, which follows no symlink (`O_NOFOLLOW`) and doesn't
+    /// wait for a FIFO's writer at launch (`O_NONBLOCK`); then the type of
+    /// what that open found (`fstat`), and the read, from the same
+    /// descriptor. So nothing put at the path between a look and the read
+    /// is what's read.
+    private nonisolated static func tail(of log: URL) -> Data? {
+        let fd = Darwin.open(log.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { return nil }
+        let size = Int(info.st_size)
+        let start = max(size - tailLimit, 0)
+        var bytes = [UInt8](repeating: 0, count: size - start)
+        var got = 0
+        while got < bytes.count {
+            let read = bytes.withUnsafeMutableBytes { buffer in
+                pread(fd, buffer.baseAddress! + got, buffer.count - got, off_t(start + got))
+            }
+            if read < 0, errno == EINTR { continue }
+            guard read >= 0 else { return nil }
+            if read == 0 { break }  // it got shorter since the fstat
+            got += read
+        }
+        return Data(bytes[..<got])
     }
 
     /// The release the main window's banner offers, or nil: the last
@@ -348,10 +495,10 @@ final class UpdateStore: QuitHandover {
             return Notice(version: version, state: .ready(installsOnQuit: autoInstall || userAsked))
         case let .installing(version):
             return Notice(version: version, state: .installing)
-        case let .failed(version, message):
+        case let .failed(version, message, retryable):
             // Until a newer release than the one that failed is offered.
             if availableVersion == nil || availableVersion == version {
-                return Notice(version: version, state: .failed(message))
+                return Notice(version: version, state: .failed(message, retryable: retryable))
             }
         }
         guard let release = banner, let latest = release.latest else { return nil }
@@ -376,17 +523,109 @@ final class UpdateStore: QuitHandover {
     /// (`startDownloadIfWanted`): the offer may be from a check before this
     /// launch.
     func checkIfDue() async {
+        var found: Answer?
         if Self.isDue(dailyCheck: dailyCheck, lastChecked: lastChecked, now: now()) {
-            await check(answering: false)
+            found = await check(answering: false)
         }
         startDownloadIfWanted()
+        if let found { present(found) }
     }
 
     /// Help › Check for Updates…: now, whatever the switch says, and always
     /// with an answer.
     func checkNow() async {
-        await check(answering: true)
+        let found = await check(answering: true)
         startDownloadIfWanted()
+        if let found { present(found) }
+    }
+
+    /// Check for Updates…'s answer, and its alert as things stand now:
+    /// after `startDownloadIfWanted`, so a download the check started is
+    /// already under way and the alert doesn't offer it again.
+    private func present(_ found: Answer) {
+        answer = found
+        answerAlert = alert(for: found)
+    }
+
+    /// The alert's dismissal, whichever button closed it.
+    func dismissAnswer() {
+        answer = nil
+        answerAlert = nil
+    }
+
+    /// The alert's button that updates, as the banner's: Update and Try
+    /// Again are `update()`, and Restart to Update is `restartToUpdate()`.
+    /// Not `update()`, which would also ask for every later quit to install
+    /// it, even after this quit was canceled.
+    func perform(_ action: CheckAlert.Action) {
+        switch action {
+        case .update, .tryAgain: update()
+        case .restartToUpdate: restartToUpdate()
+        }
+    }
+
+    /// What Check for Updates…'s alert says about `answer`, from where
+    /// updating is now. About a newer release, it says what the banner says
+    /// about it (`notice`), so the two never disagree. While a download runs
+    /// or is checked it offers nothing to start, only OK and Open Release
+    /// Page, in words that stay true however the download ends. Once that
+    /// download is ready it offers Restart to Update, as the banner does;
+    /// after a failed one, Try Again, when trying again can help.
+    func alert(for answer: Answer) -> CheckAlert {
+        switch answer {
+        case .upToDate:
+            return CheckAlert(title: "You're up to date", message: "Graft \(appVersion) is the newest version.",
+                              action: nil, release: nil, cancel: "OK")
+        case let .failed(why):
+            return CheckAlert(title: "Couldn't check for updates", message: why,
+                              action: nil, release: nil, cancel: "OK")
+        case let .available(record):
+            let version = record.latest ?? ""
+            let have = "You have Graft \(appVersion)."
+            let banner = notice.flatMap { $0.version == version ? $0.state : nil }
+            switch banner {
+            case .downloading?, .verifying?:
+                return CheckAlert(
+                    title: "Graft \(version) is available",
+                    message: "\(have) Graft has started downloading it in the background, and checks that "
+                        + "it's Graft, signed by its developer and notarized by Apple, before it installs it. "
+                        + "The banner at the bottom of the window shows how it's going.",
+                    action: nil, release: record, cancel: "OK"
+                )
+            case let .ready(installsOnQuit)?:
+                return CheckAlert(
+                    title: "Graft \(version) is ready",
+                    message: installsOnQuit
+                        ? "\(have) Graft \(version) is downloaded and checked, and installs when you quit Graft. "
+                            + "Restart to Update installs it now."
+                        : "\(have) Graft \(version) is downloaded and checked. Restart to Update quits Graft, "
+                            + "puts it in place of this one, and opens it.",
+                    action: .restartToUpdate, release: record, cancel: "Later"
+                )
+            case .installing?:
+                return CheckAlert(title: "Installing Graft \(version)…", message: "Graft installs it as it quits.",
+                                  action: nil, release: nil, cancel: "OK")
+            case let .failed(why, retryable)?:
+                return CheckAlert(title: "Graft couldn't update to \(version)", message: why,
+                                  action: canUpdate && retryable ? .tryAgain : nil, release: record, cancel: "Later")
+            case .available?, nil:
+                guard canUpdate else {
+                    return CheckAlert(
+                        title: "Graft \(version) is available",
+                        message: "\(have) Download the new Graft.zip from its release page, then replace "
+                            + "Graft.app in Applications. Your settings, apps and builds carry over.",
+                        action: nil, release: record, cancel: "Later"
+                    )
+                }
+                return CheckAlert(
+                    title: "Graft \(version) is available",
+                    message: "\(have) Update downloads the new version from GitHub, checks that it's Graft, "
+                        + "signed by its developer and notarized by Apple, and restarts Graft. Your settings, "
+                        + "apps and builds carry over.",
+                    action: .update, release: record, cancel: "Later"
+                )
+            }
+        }
     }
 
     /// The alert's Open Release Page: the page of the release on offer,
@@ -405,10 +644,12 @@ final class UpdateStore: QuitHandover {
         [Flag.json, Flag.checkUpdate, Flag.currentVersion, appVersion]
     }
 
-    private func check(answering: Bool) async {
+    /// Runs the check. Returns what Check for Updates… says, or nil when
+    /// nobody asked: the daily check is quiet, whatever it found.
+    private func check(answering: Bool) async -> Answer? {
         guard !isChecking else {
             if answering { answerWhenDone = true }
-            return
+            return nil
         }
         isChecking = true
         defer { isChecking = false }
@@ -431,17 +672,16 @@ final class UpdateStore: QuitHandover {
         guard let record, Self.isUsable(record) else {
             // Quiet unless someone asked: the banner keeps what it had.
             let unreadable = record?.ok == true && record?.latest != nil
-            if says {
-                answer = .failed(unreadable ? Self.unreadableVersion : record?.message ?? failure ?? Answer.noAnswer)
-            }
-            return
+            guard says else { return nil }
+            return .failed(unreadable ? Self.unreadableVersion : record?.message ?? failure ?? Answer.noAnswer)
         }
         defaults.set(now(), forKey: Key.lastChecked)
         if let data = try? JSONEncoder().encode(record) {
             defaults.set(data, forKey: Key.lastAnswer)
         }
         lastAnswer = record
-        if says { answer = record.updateAvailable ? .available(record) : .upToDate }
+        guard says else { return nil }
+        return record.updateAvailable ? .available(record) : .upToDate
     }
 
     // MARK: Updating
@@ -531,7 +771,8 @@ final class UpdateStore: QuitHandover {
             if let reason = end?.reason, Self.refusedForWhatItIs.contains(reason) {
                 defaults.set(version, forKey: Key.failedVersion)
             }
-            phase = .failed(version: version, message: end?.message ?? failure ?? Answer.noAnswer)
+            phase = .failed(version: version, message: end?.message ?? failure ?? Answer.noAnswer,
+                            retryable: Self.retryHelps(end?.reason))
             return
         }
         ready = (mine, got, path)
@@ -587,8 +828,9 @@ final class UpdateStore: QuitHandover {
         let relaunch = relaunchRequested
         phase = .installing(version: ready.version)
         // Written before the helper exists: once Graft has quit, the next
-        // launch is the only one left to say whether it took.
-        if let data = try? JSONEncoder().encode(Attempt(version: ready.version, from: appVersion)) {
+        // launch is the only one left to say whether it took. Its time places
+        // it in the helper's log (`installLogged`).
+        if let data = try? JSONEncoder().encode(Attempt(version: ready.version, from: appVersion, at: now())) {
             defaults.set(data, forKey: Key.attempt)
         }
         let args = installArguments(appPath: ready.appPath, host: host, relaunch: relaunch)
@@ -607,7 +849,8 @@ final class UpdateStore: QuitHandover {
             self.ready = nil
             self.defaults.removeObject(forKey: Key.attempt)
             self.defaults.set(ready.version, forKey: Key.failedVersion)
-            self.phase = .failed(version: ready.version, message: failure)
+            self.phase = .failed(version: ready.version, message: failure.message,
+                                 retryable: Self.retryHelps(failure.reason))
             // A quit still quits. Restart to Update stays open, to say why.
             once.call(!relaunch)
         }
@@ -633,8 +876,9 @@ final class UpdateStore: QuitHandover {
         relaunchRequested = false
     }
 
-    /// Start the helper: nil once it's started, else why not.
-    private func install(_ args: [String]) async -> String? {
+    /// Start the helper: nil once it's started, else why not, and the
+    /// CLI's reason when it gave one.
+    private func install(_ args: [String]) async -> (message: String, reason: String?)? {
         do {
             let result = try await runner.runOnce(arguments: args)
             let record = result.stdout.buildEvents().lazy.compactMap { event -> UpdateInstallRecord? in
@@ -642,9 +886,10 @@ final class UpdateStore: QuitHandover {
                 return nil
             }.first
             if let record, record.ok { return nil }
-            return record?.message ?? (result.exitCode != 0 ? result.failureSummary : Answer.noAnswer)
+            return (record?.message ?? (result.exitCode != 0 ? result.failureSummary : Answer.noAnswer),
+                    record?.reason)
         } catch {
-            return error.localizedDescription
+            return (error.localizedDescription, nil)
         }
     }
 }

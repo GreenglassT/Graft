@@ -7,6 +7,7 @@ Common symptoms and error messages, and their likely cause.
 | `ApplicationVerificationFailed` | The `.p12` and profile are from different teams, or the device's UDID isn't in the profile. |
 | `MismatchedApplicationIdentifierEntitlement` | The profile doesn't allow this bundle id; use a wildcard profile. Installing LiveContainer: delete an old zsign-signed copy on the device first. |
 | `DeviceLocked` | Unlock the device. |
+| An app, such as an emulator, says it needs JIT | Graft doesn't turn on JIT. [StikDebug](https://github.com/StikDebug/StikDebug), an app on the iPhone, does. On iOS 26 and recent iPhones, only apps built to support it can get JIT, whatever tool you use. |
 | `wrong password` from zsign | The `.p12` password is wrong. |
 | `Library not loaded: @rpath/libexample.dylib` | Add a copy of that library to the app's tweaks; see [Shared libraries](tweaks.md#shared-libraries). |
 | `couldn't extract some-tweak.deb` | The download is probably an HTML error page; fetch it again. |

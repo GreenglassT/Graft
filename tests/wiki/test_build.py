@@ -61,6 +61,29 @@ def test_refuses_wrong_cname(repo, site):
     assert snapshot(site) == before
 
 
+def test_refuses_a_site_without_og_png(repo, site):
+    """Every page's og:image points at the site's og.png, so it must be there."""
+    (site / "og.png").unlink()
+    before = snapshot(site)
+    with pytest.raises(WikiError, match=r"og\.png: not found"):
+        run(repo, site)
+    assert snapshot(site) == before
+
+
+@pytest.mark.parametrize(
+    "data",
+    [_png(1200, 631, (0, 0, 0)), _png(630, 1200, (0, 0, 0)), b"GIF89a not a png"],
+    ids=["one-row-taller", "portrait", "not-a-png"],
+)
+def test_refuses_an_og_png_that_isnt_1200x630(repo, site, data):
+    """The pages say og:image is 1200×630; an image of any other size makes that a lie."""
+    (site / "og.png").write_bytes(data)
+    before = snapshot(site)
+    with pytest.raises(WikiError, match=r"og\.png: "):
+        run(repo, site)
+    assert snapshot(site) == before
+
+
 def test_removes_stale_files_under_wiki(repo, site):
     write(site / "wiki/old/index.html", "stale")
     write(site / ".wiki-build/leftover", "stale")

@@ -60,8 +60,36 @@ final class UpdateStoreTests: XCTestCase {
     ) -> UpdateStore {
         UpdateStore(
             runner: cli.runner, defaults: defaults, now: { [clock] in clock.now },
-            appVersion: appVersion, open: { [weak self] in self?.opened.append($0) }
+            appVersion: appVersion, open: { [weak self] in self?.opened.append($0) },
+            updateLog: updateLog
         )
+    }
+
+    /// Where the store looks for the helper's word on an install: a file in
+    /// a temp folder of this test's, never ~/Library/Logs/Graft. Nothing is
+    /// there until a test writes it (`writeLog`).
+    private lazy var updateLog: URL = {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "update_log_\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir.appending(path: "update.log")
+    }()
+
+    /// `text` as the helper's `say` writes it (`app_update.HELPER`): the
+    /// time to the second in `zone`, with its offset from UTC ("+1400"),
+    /// then the text. The helper's zone is the CLI's, which can differ from
+    /// the app's. `offset: false` is how 2.0.2's helper wrote it: no
+    /// offset, in this Mac's zone.
+    private func logged(_ text: String, at date: Date, in zone: TimeZone = .current, offset: Bool = true) -> String {
+        let stamp = DateFormatter()
+        stamp.locale = Locale(identifier: "en_US_POSIX")
+        stamp.timeZone = offset ? zone : .current
+        stamp.dateFormat = offset ? "yyyy-MM-dd HH:mm:ss Z" : "yyyy-MM-dd HH:mm:ss"
+        return "\(stamp.string(from: date)) \(text)"
+    }
+
+    private func writeLog(_ lines: [String]) throws {
+        try (lines.joined(separator: "\n") + "\n").write(to: updateLog, atomically: true, encoding: .utf8)
     }
 
     private static let offline = "Couldn't reach GitHub to check for a newer Graft. Check this "
@@ -315,8 +343,13 @@ final class UpdateStoreTests: XCTestCase {
 
         XCTAssertEqual(cli.argv(), ["--json --check-update --current-version 2.0"])
         XCTAssertEqual(sut.answer, .upToDate)
-        XCTAssertEqual(sut.answer?.title, "You're up to date")
-        XCTAssertEqual(sut.answer?.message(appVersion: sut.appVersion), "Graft 2.0 is the newest version.")
+        XCTAssertEqual(sut.answerAlert, UpdateStore.CheckAlert(
+            title: "You're up to date", message: "Graft 2.0 is the newest version.",
+            action: nil, release: nil, cancel: "OK"
+        ))
+        sut.dismissAnswer()
+        XCTAssertNil(sut.answer)
+        XCTAssertNil(sut.answerAlert)
     }
 
     func test_check_for_updates_runs_even_the_same_day() async throws {
@@ -335,8 +368,10 @@ final class UpdateStoreTests: XCTestCase {
         guard case let .available(release)? = sut.answer else {
             return XCTFail("not an offer: \(String(describing: sut.answer))")
         }
-        XCTAssertEqual(sut.answer?.title, "Graft 2.0.1 is available")
-        XCTAssertTrue(sut.answer?.message(appVersion: "2.0").hasPrefix("You have Graft 2.0.") == true)
+        let alert = try XCTUnwrap(sut.answerAlert)
+        XCTAssertEqual(alert.title, "Graft 2.0.1 is available")
+        XCTAssertTrue(alert.message.hasPrefix("You have Graft 2.0."), alert.message)
+        XCTAssertEqual(alert.release, release)
         XCTAssertEqual(sut.banner, release)
         sut.openReleasePage(release)
         XCTAssertEqual(opened, [URL(string: Self.page)!])
@@ -348,8 +383,9 @@ final class UpdateStoreTests: XCTestCase {
         await sut.checkNow()
 
         XCTAssertEqual(sut.answer, .failed(Self.offline))
-        XCTAssertEqual(sut.answer?.title, "Couldn't check for updates")
-        XCTAssertEqual(sut.answer?.message(appVersion: "2.0"), Self.offline)
+        XCTAssertEqual(sut.answerAlert, UpdateStore.CheckAlert(
+            title: "Couldn't check for updates", message: Self.offline, action: nil, release: nil, cancel: "OK"
+        ))
         XCTAssertNil(sut.lastChecked)
         XCTAssertNil(sut.banner)
     }
@@ -364,7 +400,7 @@ final class UpdateStoreTests: XCTestCase {
         let sut = UpdateStore(
             runner: CLIRunner(executable: URL(fileURLWithPath: "/nonexistent/graft")),
             defaults: try throwawayDefaults(), now: { [clock] in clock.now },
-            appVersion: "2.0", open: { _ in XCTFail("nothing to open") }
+            appVersion: "2.0", open: { _ in XCTFail("nothing to open") }, updateLog: updateLog
         )
         await sut.checkNow()
         guard case let .failed(why)? = sut.answer else {
@@ -395,10 +431,10 @@ final class UpdateStoreTests: XCTestCase {
 
     /// A stand-in graft for the self-update: each verb answers from files in
     /// `dir` the test writes, and every run is logged (`ScriptCLI`). The
-    /// check prints `check<n>` for its n-th run, or `check`; a download
-    /// runs `download<n>.sh`, or `download.sh`; an install runs
-    /// `install.sh` if there is one, then prints `install` and exits with
-    /// `install-status`.
+    /// check runs `check.sh` if there is one, then prints `check<n>` for its
+    /// n-th run, or `check`; a download runs `download<n>.sh`, or
+    /// `download.sh`; an install runs `install.sh` if there is one, then
+    /// prints `install` and exits with `install-status`.
     private final class UpdateCLI {
         let dir: URL
         let script: ScriptCLI
@@ -414,6 +450,7 @@ final class UpdateStoreTests: XCTestCase {
             count() { n=$(cat "$D/$1.count" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$D/$1.count"; echo $n; }
             case "$*" in
             *--check-update*)
+              if [ -e "$D/check.sh" ]; then . "$D/check.sh"; fi
               n=$(count check); if [ -e "$D/check$n" ]; then cat "$D/check$n"; else cat "$D/check"; fi ;;
             *--download-update*)
               n=$(count download); if [ -e "$D/download$n.sh" ]; then . "$D/download$n.sh"; else . "$D/download.sh"; fi ;;
@@ -464,10 +501,10 @@ final class UpdateStoreTests: XCTestCase {
               "reason": reason, "message": message])
     }
 
-    private static func installed(ok: Bool = true, message: String? = nil) -> String {
+    private static func installed(ok: Bool = true, message: String? = nil, reason: String = "not-writable") -> String {
         json(["type": "update-install", "ok": ok, "version": ok ? "2.0.1" : nil,
               "log": ok ? "/logs/update.log" : nil, "relaunch": false, "url": nil,
-              "reason": ok ? nil : "not-writable", "message": message])
+              "reason": ok ? nil : reason, "message": message])
     }
 
     /// `download.sh`'s text: print `lines` and exit `status`.
@@ -486,6 +523,7 @@ final class UpdateStoreTests: XCTestCase {
         UpdateStore(
             runner: cli.runner, defaults: defaults, now: { [clock] in clock.now },
             appVersion: appVersion, open: { [weak self] in self?.opened.append($0) },
+            updateLog: updateLog,
             host: SelfUpdateHost(
                 appPath: Self.appPath, pid: 4242, hold: hold,
                 terminate: { [weak self] in self?.terminated += 1 }
@@ -510,7 +548,7 @@ final class UpdateStoreTests: XCTestCase {
         try cli.write("check", line())
         let sut = UpdateStore(
             runner: cli.runner, defaults: try throwawayDefaults(), now: { [clock] in clock.now },
-            appVersion: "2.0", open: { _ in }
+            appVersion: "2.0", open: { _ in }, updateLog: updateLog
         )
         await sut.checkIfDue()
         sut.update()
@@ -564,9 +602,9 @@ final class UpdateStoreTests: XCTestCase {
         let sut = updatingStore(cli, defaults: defaults)
 
         await sut.checkIfDue()
-        await eventually({ sut.phase == .failed(version: "2.0.1", message: why) }, "failed")
+        await eventually({ sut.phase == .failed(version: "2.0.1", message: why, retryable: false) }, "failed")
 
-        XCTAssertEqual(sut.notice?.state, .failed(why))
+        XCTAssertEqual(sut.notice?.state, .failed(why, retryable: false))
         XCTAssertEqual(UpdateNotice.text(try XCTUnwrap(sut.notice)), "Graft couldn't update to 2.0.1")
         sut.openNoticePage()
         XCTAssertEqual(opened, [URL(string: "https://github.com/GreenglassT/Graft/releases/tag/v2.0.1")!])
@@ -594,7 +632,7 @@ final class UpdateStoreTests: XCTestCase {
         let sut = updatingStore(cli, defaults: try throwawayDefaults())
 
         await sut.checkIfDue()
-        await eventually({ sut.phase == .failed(version: "2.0.1", message: "No.") }, "failed")
+        await eventually({ sut.phase == .failed(version: "2.0.1", message: "No.", retryable: false) }, "failed")
 
         sut.openNoticePage()
         XCTAssertEqual(opened, [URL(string: Self.page)!])
@@ -687,7 +725,7 @@ final class UpdateStoreTests: XCTestCase {
         let attempt = try JSONDecoder().decode(
             UpdateStore.Attempt.self, from: try XCTUnwrap(defaults.data(forKey: UpdateStore.Key.attempt))
         )
-        XCTAssertEqual(attempt, UpdateStore.Attempt(version: "2.0.1", from: "2.0"))
+        XCTAssertEqual(attempt, UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: clock.now))
     }
 
     func test_restart_to_update_quits_and_the_helper_reopens_graft() async throws {
@@ -764,7 +802,7 @@ final class UpdateStoreTests: XCTestCase {
         await eventually({ replies == [true] }, "a quit still quits")
 
         XCTAssertFalse(sut.installPending)
-        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: why))
+        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: why, retryable: false))
         XCTAssertNil(defaults.data(forKey: UpdateStore.Key.attempt))
         XCTAssertEqual(defaults.string(forKey: UpdateStore.Key.failedVersion), "2.0.1")
     }
@@ -779,7 +817,7 @@ final class UpdateStoreTests: XCTestCase {
         var replies: [Bool] = []
         XCTAssertTrue(sut.handOver { replies.append($0) })
         await eventually({ replies == [false] }, "the restart is canceled, to say why")
-        XCTAssertEqual(sut.notice?.state, .failed("No."))
+        XCTAssertEqual(sut.notice?.state, .failed("No.", retryable: false))
     }
 
     func test_an_install_that_never_answers_does_not_keep_graft_from_quitting() async throws {
@@ -816,7 +854,7 @@ final class UpdateStoreTests: XCTestCase {
 
         let sut = updatingStore(cli, defaults: defaults)
 
-        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake))
+        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake, retryable: false))
         XCTAssertNil(defaults.data(forKey: UpdateStore.Key.attempt), "said once")
         XCTAssertEqual(defaults.string(forKey: UpdateStore.Key.failedVersion), "2.0.1")
     }
@@ -832,6 +870,290 @@ final class UpdateStoreTests: XCTestCase {
         XCTAssertEqual(sut.phase, .idle)
         XCTAssertNil(defaults.data(forKey: UpdateStore.Key.attempt))
         XCTAssertNil(defaults.string(forKey: UpdateStore.Key.failedVersion))
+    }
+
+    // MARK: The helper's log
+
+    /// The helper's line for an install that worked, as `app_update.HELPER`
+    /// writes it after its time (tests/test_app_update_helper.py pins it).
+    private static func installedLine(_ version: String = "2.0.1") -> String {
+        "installed Graft \(version) at \(appPath); the old one is in the Trash at /private/var/empty/Example/Trash/Graft.app"
+    }
+
+    private func attempt(at: Date?, in defaults: UserDefaults) throws {
+        defaults.set(try JSONEncoder().encode(UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: at)),
+                     forKey: UpdateStore.Key.attempt)
+    }
+
+    /// The install worked and the old version was put back by hand since
+    /// (a downgrade): the helper's log says it installed 2.0.1 after the
+    /// attempt was written down. Not a failure, and 2.0.1 isn't marked as
+    /// one, so it still downloads on its own.
+    func test_a_launch_on_the_old_version_after_a_logged_install_is_not_a_failure() async throws {
+        let defaults = try throwawayDefaults()
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        try cli.write("download.sh", Self.prints(Self.downloaded()))
+        let at = clock.now
+        try attempt(at: at, in: defaults)
+        try writeLog([
+            logged("waiting for Graft (pid 4242) to quit, to install Graft 2.0.1 at \(Self.appPath)", at: at + 1),
+            logged(Self.installedLine(), at: at + 2),
+        ])
+
+        let sut = updatingStore(cli, defaults: defaults)
+
+        XCTAssertEqual(sut.phase, .idle)
+        XCTAssertNil(sut.notice)
+        XCTAssertNil(defaults.data(forKey: UpdateStore.Key.attempt), "read once")
+        XCTAssertNil(defaults.string(forKey: UpdateStore.Key.failedVersion))
+        await sut.checkIfDue()
+        await eventually({ sut.phase == .ready(version: "2.0.1") }, "2.0.1 still downloads on its own")
+    }
+
+    /// The helper's times are whole seconds: an install in the same second
+    /// as the attempt is logged with that second, which counts.
+    func test_an_install_logged_in_the_attempt_s_own_second_counts() throws {
+        let defaults = try throwawayDefaults()
+        try attempt(at: clock.now + 0.7, in: defaults)
+        try writeLog([logged(Self.installedLine(), at: clock.now)])
+
+        let sut = updatingStore(try UpdateCLI(test: self), defaults: defaults)
+
+        XCTAssertEqual(sut.phase, .idle)
+    }
+
+    /// A line whose time has an offset (the helper's since 2.1) is read in
+    /// that offset, whatever this Mac's zone is: the helper's zone is the
+    /// CLI's, which has any TZ the user's shell profile sets. Here zones a
+    /// day apart, and one half an hour off the hour: an install two seconds
+    /// after the attempt counts, one two seconds before doesn't, and one in
+    /// the attempt's own second does.
+    func test_an_install_logged_in_another_zone_is_read_by_its_offset() throws {
+        let attempt = UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: clock.now + 0.7)
+        for name in ["Pacific/Kiritimati", "Etc/GMT+12", "Asia/Kolkata", "UTC"] {
+            let zone = try XCTUnwrap(TimeZone(identifier: name))
+            func counts(at date: Date) throws -> Bool {
+                try writeLog([logged(Self.installedLine(), at: date, in: zone)])
+                return UpdateStore.installLogged(attempt, in: updateLog)
+            }
+            XCTAssertTrue(try counts(at: clock.now + 2), name)
+            XCTAssertTrue(try counts(at: clock.now), "the attempt's own second: \(name)")
+            XCTAssertFalse(try counts(at: clock.now - 2), name)
+        }
+        XCTAssertTrue(logged("x", at: clock.now, in: TimeZone(identifier: "Pacific/Kiritimati")!).hasSuffix(" +1400 x"),
+                      "the form tested is the helper's")
+    }
+
+    /// 2.0.2's helper wrote its times with no offset, in this Mac's zone
+    /// (the first update to 2.1 is installed by it): such a line is still
+    /// read, as this Mac's time.
+    func test_an_install_logged_without_an_offset_is_read_in_this_mac_s_zone() throws {
+        let attempt = UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: clock.now + 0.7)
+        func counts(at date: Date) throws -> Bool {
+            try writeLog([logged(Self.installedLine(), at: date, offset: false)])
+            return UpdateStore.installLogged(attempt, in: updateLog)
+        }
+
+        XCTAssertTrue(try counts(at: clock.now + 2))
+        XCTAssertTrue(try counts(at: clock.now), "the attempt's own second")
+        XCTAssertFalse(try counts(at: clock.now - 2))
+        XCTAssertFalse(logged("x", at: clock.now, offset: false).contains("+"), "the form tested is 2.0.2's")
+    }
+
+    /// A time with anything but a plain ±hhmm after it isn't the helper's,
+    /// so the line doesn't count. Each line's time is half an hour before
+    /// the attempt in UTC's digits: read with an offset of -0100, it's half
+    /// an hour after, and counts (the first line); read with any of the
+    /// others, as an offset or as anything, it would count too.
+    func test_a_time_with_a_malformed_offset_is_not_read() throws {
+        let attempt = UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: clock.now)
+        let utc = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let time = String(logged("x", at: clock.now - 30 * 60, in: utc).prefix(19))
+        try writeLog(["\(time) -0100 \(Self.installedLine())"])
+        XCTAssertTrue(UpdateStore.installLogged(attempt, in: updateLog), "a well-formed -0100")
+
+        for offset in ["-01:00", "0100", "-010", "-01000", "-\u{FF10}\u{FF11}\u{FF10}\u{FF10}", "~0100", "-01a0",
+                       "-2400", "-0060", " -0100"] {
+            try writeLog(["\(time) \(offset) \(Self.installedLine())"])
+            XCTAssertFalse(UpdateStore.installLogged(attempt, in: updateLog), offset)
+        }
+    }
+
+    /// A genuine failure still says so, whatever else the log holds: the
+    /// helper's own "not installed", no log at all, an install of the same
+    /// version from before the attempt, or of another version.
+    func test_a_launch_on_the_old_version_with_no_install_logged_since_says_it_did_not_take() throws {
+        let at = clock.now
+        let refused = "not installed: couldn't move Graft 2.0.1 to \(Self.appPath)"
+        let logs: [(String, [String]?)] = [
+            ("the helper said no", [logged(refused, at: at + 2)]),
+            ("no log", nil),
+            ("an empty log", []),
+            ("an earlier install of 2.0.1", [logged(Self.installedLine(), at: at - 1), logged(refused, at: at + 2)]),
+            ("another version", [logged(Self.installedLine("2.0.2"), at: at + 2)]),
+            ("a version 2.0.1 begins", [logged(Self.installedLine("2.0.10"), at: at + 2)]),
+            ("not the helper's line", [logged("waiting for Graft (pid 4242) to quit, to install Graft 2.0.1 at "
+                                              + Self.appPath, at: at + 2),
+                                       "x installed Graft 2.0.1 at \(Self.appPath)",
+                                       Self.installedLine()]),
+        ]
+        for (name, lines) in logs {
+            let defaults = try throwawayDefaults()
+            try attempt(at: at, in: defaults)
+            try? FileManager.default.removeItem(at: updateLog)
+            if let lines { try writeLog(lines) }
+
+            let sut = updatingStore(try UpdateCLI(test: self), defaults: defaults)
+
+            XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake, retryable: false), name)
+            XCTAssertEqual(defaults.string(forKey: UpdateStore.Key.failedVersion), "2.0.1", name)
+        }
+    }
+
+    /// An attempt with no time (2.0.2 wrote them so) can't be placed in the
+    /// log: as before, a launch still on the old version says it didn't
+    /// take.
+    func test_an_attempt_with_no_time_does_not_read_the_log() throws {
+        let defaults = try throwawayDefaults()
+        try attempt(at: nil, in: defaults)
+        try writeLog([logged(Self.installedLine(), at: clock.now)])
+
+        let sut = updatingStore(try UpdateCLI(test: self), defaults: defaults)
+
+        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake, retryable: false))
+    }
+
+    /// Only the log's last stretch is read: the helper appends to it on
+    /// every update, so the newest lines are at its end.
+    func test_an_install_logged_after_a_long_log_still_counts() throws {
+        let defaults = try throwawayDefaults()
+        try attempt(at: clock.now, in: defaults)
+        let filler = Array(repeating: logged("not installed: an older try", at: clock.now - 86_400), count: 40_000)
+        try writeLog(filler + [logged(Self.installedLine(), at: clock.now + 2)])
+
+        let sut = updatingStore(try UpdateCLI(test: self), defaults: defaults)
+
+        XCTAssertEqual(sut.phase, .idle)
+    }
+
+    /// Something that isn't a file where the log goes (here a FIFO, whose
+    /// open would wait for a writer forever) isn't read: the launch doesn't
+    /// hang on it, and can't tell, so it says the install didn't take.
+    func test_a_log_that_is_not_a_file_is_not_read() async throws {
+        try? FileManager.default.removeItem(at: updateLog)
+        XCTAssertEqual(mkfifo(updateLog.path, 0o600), 0)
+        let attempt = UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: clock.now)
+        let log = updateLog
+        final class Reply: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value: Bool?
+            func set(_ new: Bool) { lock.withLock { value = new } }
+            func get() -> Bool? { lock.withLock { value } }
+        }
+        let reply = Reply()
+        let read = Task.detached { reply.set(UpdateStore.installLogged(attempt, in: log)) }
+        let deadline = Date() + 3
+        while reply.get() == nil, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let answered = reply.get()
+        if answered == nil {
+            // A reader stuck in open() goes once the FIFO's other end opens.
+            let fd = open(log.path, O_WRONLY | O_NONBLOCK)
+            if fd >= 0 { close(fd) }
+        }
+        await read.value
+        XCTAssertEqual(answered, false, "read the FIFO, or hung on it")
+    }
+
+    /// A symlink where the log goes isn't followed, even to a file that
+    /// says it installed: one open that refuses it (`O_NOFOLLOW`), so
+    /// nothing can be swapped in between a look at the path and the read.
+    func test_a_symlink_at_the_log_path_is_not_followed() throws {
+        let elsewhere = updateLog.deletingLastPathComponent().appending(path: "elsewhere.log")
+        try (logged(Self.installedLine(), at: clock.now + 2) + "\n").write(to: elsewhere, atomically: true, encoding: .utf8)
+        try? FileManager.default.removeItem(at: updateLog)
+        try FileManager.default.createSymbolicLink(at: updateLog, withDestinationURL: elsewhere)
+        let attempt = UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: clock.now)
+
+        XCTAssertTrue(UpdateStore.installLogged(attempt, in: elsewhere), "the file itself says so")
+        XCTAssertFalse(UpdateStore.installLogged(attempt, in: updateLog), "read through a symlink")
+    }
+
+    /// The read is the log's last MiB, to the byte: a line that starts
+    /// exactly a MiB from the end is read whole; one a byte further back
+    /// loses its first byte, and isn't the helper's line any more.
+    func test_only_the_log_s_last_mib_is_read() throws {
+        let mib = 1 << 20
+        let installed = logged(Self.installedLine(), at: clock.now + 2) + "\n"
+        let attempt = UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: clock.now)
+        // Before the line, a stretch that says nothing, so the log is longer
+        // than a MiB either way; after it, `after` bytes that say nothing.
+        func log(after: Int) throws {
+            let before = String(repeating: "y", count: 99) + "\n"
+            let filler = String(repeating: "x", count: after - 1) + "\n"
+            try (before + installed + filler).write(to: updateLog, atomically: true, encoding: .utf8)
+        }
+
+        try log(after: mib - installed.utf8.count)
+        XCTAssertTrue(UpdateStore.installLogged(attempt, in: updateLog), "starts a MiB from the end")
+        try log(after: mib - installed.utf8.count + 1)
+        XCTAssertFalse(UpdateStore.installLogged(attempt, in: updateLog), "starts a MiB and a byte from the end")
+    }
+
+    /// A log whose lines end CRLF (an editor saved it so) is still read a
+    /// line at a time: the helper's line after another one counts.
+    func test_a_log_with_crlf_lines_is_read_line_by_line() throws {
+        let defaults = try throwawayDefaults()
+        try attempt(at: clock.now, in: defaults)
+        let lines = [
+            logged("waiting for Graft (pid 4242) to quit, to install Graft 2.0.1 at \(Self.appPath)", at: clock.now + 1),
+            logged(Self.installedLine(), at: clock.now + 2),
+        ]
+        try (lines.joined(separator: "\r\n") + "\r\n").write(to: updateLog, atomically: true, encoding: .utf8)
+
+        let sut = updatingStore(try UpdateCLI(test: self), defaults: defaults)
+
+        XCTAssertEqual(sut.phase, .idle)
+    }
+
+    /// The log's lines: split at LF bytes, with a CR dropped only where it
+    /// ends a line (CRLF), one at most.
+    func test_the_log_s_lines_split_at_lf_and_drop_a_crlf_s_cr() {
+        XCTAssertEqual(UpdateStore.lines(of: Data("a\r\nb\nc\r\n".utf8)), ["a", "b", "c", ""])
+        XCTAssertEqual(UpdateStore.lines(of: Data("a\rb\r\r\n\n".utf8)), ["a\rb\r", "", ""])
+        XCTAssertEqual(UpdateStore.lines(of: Data()), [""])
+    }
+
+    /// The helper's line for an install that worked, word for word as
+    /// `app_update.HELPER` writes it, but for its second and the folder it
+    /// ran in (here /private/var/empty/Example). Its offset is the one the
+    /// helper writes in the zone that test runs it in (+1400). A plain
+    /// literal: tests/test_app_update_helper.py reads it from this file,
+    /// runs the real helper, and checks the two match.
+    static let helperInstalledLine = "2026-11-24 09:30:15 +1400 installed Graft 2.0.2 at /private/var/empty/Example/Applications/Graft.app; the old one is in the Trash at /private/var/empty/Example/Trash/Graft.app"
+
+    /// The round trip: the helper's own line, read by the app. It counts for
+    /// an attempt written down before it, or in its second, and not for one
+    /// after it, nor for another version's. Its time, 09:30:15 at +1400,
+    /// is 19:30:15 UTC the day before, whatever this Mac's zone is.
+    func test_the_helper_s_own_line_is_read_as_its_install() throws {
+        try writeLog([Self.helperInstalledLine])
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let then = try XCTUnwrap(utc.date(from: DateComponents(
+            year: 2026, month: 11, day: 23, hour: 19, minute: 30, second: 15
+        )))
+        XCTAssertTrue(Self.helperInstalledLine.hasPrefix("2026-11-24 09:30:15 +1400 "))
+        func counts(_ version: String, at: Date) -> Bool {
+            UpdateStore.installLogged(UpdateStore.Attempt(version: version, from: "2.0.1", at: at), in: updateLog)
+        }
+
+        XCTAssertTrue(counts("2.0.2", at: then - 1))
+        XCTAssertTrue(counts("2.0.2", at: then + 0.5), "the same second")
+        XCTAssertFalse(counts("2.0.2", at: then + 1), "an install before the attempt")
+        XCTAssertFalse(counts("2.0.3", at: then - 1), "another version")
     }
 
     // MARK: The generation counter
@@ -897,13 +1219,355 @@ final class UpdateStoreTests: XCTestCase {
 
     // MARK: Settings and the alert
 
-    func test_the_alert_offers_update_only_to_a_copy_that_can() {
-        let record = UpdateCheckRecord(ok: true, current: "2.0", latest: "2.0.1", url: Self.page,
-                                       updateAvailable: true, reason: nil, status: nil, message: nil)
-        let answer = UpdateStore.Answer.available(record)
-        XCTAssertTrue(answer.message(appVersion: "2.0", canUpdate: true).contains("Update downloads"))
-        XCTAssertTrue(answer.message(appVersion: "2.0").contains("Download the new Graft.zip"))
+    func test_the_alert_offers_update_only_to_a_copy_that_can() async throws {
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        let can = updatingStore(cli, defaults: try throwawayDefaults())
+        can.autoInstall = false
+        await can.checkNow()
+        XCTAssertEqual(can.answerAlert?.action, .update)
+        XCTAssertTrue(can.answerAlert?.message.contains("Update downloads") == true)
+
+        let cannot = store(try fakeCLI(line()), defaults: try throwawayDefaults())
+        await cannot.checkNow()
+        XCTAssertNil(cannot.answerAlert?.action)
+        XCTAssertEqual(cannot.answerAlert?.cancel, "Later")
+        XCTAssertNotNil(cannot.answerAlert?.release, "Open Release Page")
+        XCTAssertTrue(cannot.answerAlert?.message.contains("Download the new Graft.zip") == true)
+
         XCTAssertEqual(UpdatesSection.toggleTitle, "Check for updates automatically")
         XCTAssertEqual(UpdatesSection.installToggleTitle, "Download and install updates automatically")
+    }
+
+    // MARK: Check for Updates… while updating
+
+    /// A stand-in download that says how far it got (`first`), then waits
+    /// for the test's "go" before it's done.
+    private static func waits(_ cli: UpdateCLI, after first: String) -> String {
+        prints(first).replacingOccurrences(of: "exit 0\n", with: "") + cli.wait(for: "go") + prints(downloaded())
+    }
+
+    /// The bug: the alert said "available" and offered Update while the
+    /// download the check had just started ran, and still did once the
+    /// banner said Restart to Update. It now says the download has started,
+    /// offers only OK and Open Release Page, and stays as it was (true, and
+    /// in step with the banner) when the download is done. With the daily
+    /// check off too: the banner shows a download whatever that switch says.
+    func test_check_for_updates_while_its_download_runs_offers_nothing_to_start() async throws {
+        for daily in [true, false] {
+            let cli = try UpdateCLI(test: self)
+            try cli.write("check", line())
+            try cli.write("download.sh", Self.waits(cli, after: Self.progress(received: 10, total: 100)))
+            let sut = updatingStore(cli, defaults: try throwawayDefaults())
+            sut.dailyCheck = daily
+
+            await sut.checkNow()
+
+            guard case let .downloading(version, _) = sut.phase, version == "2.0.1" else {
+                return XCTFail("not downloading: \(sut.phase)")
+            }
+            let alert = try XCTUnwrap(sut.answerAlert)
+            XCTAssertEqual(alert.title, "Graft 2.0.1 is available")
+            XCTAssertNil(alert.action, "nothing to start: it's downloading")
+            XCTAssertEqual(alert.cancel, "OK")
+            XCTAssertEqual(alert.release?.latest, "2.0.1", "Open Release Page")
+            XCTAssertTrue(alert.message.hasPrefix("You have Graft 2.0. Graft has started downloading it"), alert.message)
+            XCTAssertTrue(alert.message.contains("The banner at the bottom of the window shows how it's going."))
+            XCTAssertEqual(sut.notice?.version, "2.0.1", "the banner it points to is there")
+
+            try cli.go("go")
+            await eventually({ sut.phase == .ready(version: "2.0.1") }, "ready")
+            XCTAssertEqual(sut.answerAlert, alert, "fixed while it's open: no button changes under the pointer")
+            XCTAssertEqual(sut.notice?.state, .ready(installsOnQuit: true))
+            XCTAssertEqual(cli.runs(of: "--download-update").count, 1)
+            XCTAssertEqual(terminated, 0, "nobody asked to restart")
+        }
+    }
+
+    /// Being checked is the same: the download is under way.
+    func test_check_for_updates_while_the_download_is_checked_offers_nothing_to_start() async throws {
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        try cli.write("download.sh", Self.waits(cli, after: Self.progress(received: nil, total: nil, check: "signature")))
+        let sut = updatingStore(cli, defaults: try throwawayDefaults())
+        await sut.checkIfDue()
+        await eventually({ sut.phase == .verifying(version: "2.0.1") }, "checking")
+
+        await sut.checkNow()
+
+        XCTAssertNil(sut.answerAlert?.action)
+        XCTAssertEqual(sut.answerAlert?.cancel, "OK")
+        XCTAssertTrue(sut.answerAlert?.message.contains("has started downloading it") == true)
+        try cli.go("go")
+        await eventually({ sut.phase == .ready(version: "2.0.1") }, "ready")
+        XCTAssertEqual(cli.runs(of: "--download-update").count, 1)
+    }
+
+    /// Check for Updates… chosen while the daily check runs gets that
+    /// check's answer (`checkIfDue`), built once the download that check
+    /// starts has started: it offers nothing to start, as when Check for
+    /// Updates… runs the check itself.
+    func test_check_for_updates_during_a_daily_check_that_starts_the_download_offers_nothing_to_start() async throws {
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        try cli.write("check.sh", cli.wait(for: "checked"))
+        try cli.write("download.sh", Self.waits(cli, after: Self.progress(received: 10, total: 100)))
+        let sut = updatingStore(cli, defaults: try throwawayDefaults())
+
+        let daily = Task { await sut.checkIfDue() }
+        await eventually({ sut.isChecking }, "the daily check started")
+        await sut.checkNow()
+        XCTAssertNil(sut.answerAlert, "answered before the check finished")
+        try cli.go("checked")
+        await daily.value
+
+        guard case .downloading(version: "2.0.1", _) = sut.phase else {
+            return XCTFail("not downloading: \(sut.phase)")
+        }
+        let alert = try XCTUnwrap(sut.answerAlert)
+        XCTAssertNil(alert.action, "nothing to start: it's downloading")
+        XCTAssertEqual(alert.cancel, "OK")
+        XCTAssertTrue(alert.message.contains("Graft has started downloading it"), alert.message)
+        XCTAssertEqual(cli.runs(of: "--check-update").count, 1)
+        try cli.go("go")
+        await eventually({ sut.phase == .ready(version: "2.0.1") }, "ready")
+    }
+
+    /// Ready: the banner's Restart to Update, and the banner's words. The
+    /// button restarts into the download it has: no second one.
+    func test_check_for_updates_when_it_is_ready_offers_restart_to_update() async throws {
+        let cli = try UpdateCLI(test: self)
+        let sut = try await readyStore(cli, defaults: try throwawayDefaults())
+
+        await sut.checkNow()
+
+        let alert = try XCTUnwrap(sut.answerAlert)
+        XCTAssertEqual(alert.title, "Graft 2.0.1 is ready")
+        XCTAssertEqual(alert.action, .restartToUpdate)
+        XCTAssertEqual(alert.cancel, "Later")
+        XCTAssertNotNil(alert.release)
+        XCTAssertEqual(alert.message, "You have Graft 2.0. Graft 2.0.1 is downloaded and checked, and installs "
+            + "when you quit Graft. Restart to Update installs it now.")
+        sut.perform(.restartToUpdate)
+        XCTAssertEqual(terminated, 1, "restarts into it")
+        XCTAssertEqual(cli.runs(of: "--download-update").count, 1, "no second download")
+
+        // With the second switch off, a quit doesn't install it, so the
+        // alert doesn't say it does, nor does the banner.
+        let other = try UpdateCLI(test: self)
+        let off = try await readyStore(other, defaults: try throwawayDefaults())
+        off.autoInstall = false
+        await off.checkNow()
+        XCTAssertEqual(off.notice?.state, .ready(installsOnQuit: false))
+        XCTAssertEqual(off.answerAlert?.action, .restartToUpdate)
+        XCTAssertEqual(off.answerAlert?.message, "You have Graft 2.0. Graft 2.0.1 is downloaded and checked. "
+            + "Restart to Update quits Graft, puts it in place of this one, and opens it.")
+    }
+
+    /// Failed: what the banner says, and Try Again, which downloads it
+    /// again (the banner's Release Page is there too).
+    func test_check_for_updates_after_a_failed_download_says_why_and_offers_try_again() async throws {
+        let cli = try UpdateCLI(test: self)
+        let why = "Couldn't download the new Graft. Check this Mac's internet connection, then try again."
+        try cli.write("check", line())
+        try cli.write("download1.sh", Self.prints(Self.notDownloaded("offline", why), status: 1))
+        try cli.write("download2.sh", Self.prints(Self.downloaded()))
+        let sut = updatingStore(cli, defaults: try throwawayDefaults())
+        await sut.checkIfDue()
+        await eventually({ sut.phase == .failed(version: "2.0.1", message: why, retryable: true) }, "failed")
+
+        await sut.checkNow()
+
+        XCTAssertEqual(sut.answerAlert, UpdateStore.CheckAlert(
+            title: "Graft couldn't update to 2.0.1", message: why, action: .tryAgain,
+            release: sut.lastAnswer, cancel: "Later"
+        ))
+        XCTAssertEqual(UpdateNotice.text(try XCTUnwrap(sut.notice)), "Graft couldn't update to 2.0.1")
+        XCTAssertEqual(cli.runs(of: "--download-update").count, 1, "not again on its own")
+        sut.perform(.tryAgain)
+        await eventually({ self.terminated == 1 }, "tried again, and restarts into it")
+        XCTAssertEqual(cli.runs(of: "--download-update").count, 2)
+    }
+
+    /// Try Again only where trying again can help. Not after a download
+    /// refused for what it is (this copy having no team to trust, a
+    /// signature that doesn't check out), nor for where this copy is
+    /// (translocated, a folder it can't change): the same try meets the
+    /// same refusal. After one that went offline, ran out of space or got
+    /// no answer at all, Try Again is offered. Either way the alert says
+    /// why, and links the release page.
+    func test_check_for_updates_offers_try_again_only_when_it_can_help() async throws {
+        let cases: [(reason: String?, retryable: Bool)] = [
+            ("no-team", false), ("signature", false), ("digest", false), ("translocated", false),
+            ("not-writable", false), ("not-graft", false), ("offline", true), ("http", true),
+            ("disk", true), ("busy", true), (nil, true),
+        ]
+        for (reason, retryable) in cases {
+            let name = reason ?? "no answer"
+            let cli = try UpdateCLI(test: self)
+            try cli.write("check", line())
+            try cli.write("download.sh", reason.map { Self.prints(Self.notDownloaded($0, "No."), status: 1) }
+                ?? "echo 'Traceback' >&2\nexit 1\n")
+            let sut = updatingStore(cli, defaults: try throwawayDefaults())
+            await sut.checkIfDue()
+            await eventually({ if case .failed = sut.phase { return true }; return false }, name)
+            guard case let .failed(_, message, got) = sut.phase else { return XCTFail(name) }
+            XCTAssertEqual(got, retryable, name)
+
+            await sut.checkNow()
+
+            XCTAssertEqual(sut.answerAlert, UpdateStore.CheckAlert(
+                title: "Graft couldn't update to 2.0.1", message: message, action: retryable ? .tryAgain : nil,
+                release: sut.lastAnswer, cancel: "Later"
+            ), name)
+        }
+    }
+
+    /// An install that didn't take (the next launch is still the old
+    /// version) says to download it by hand: no Try Again. An install the
+    /// helper couldn't start is the same as a download: Try Again unless
+    /// its reason says no try can help.
+    func test_check_for_updates_after_a_failed_install_offers_try_again_only_when_it_can_help() async throws {
+        let defaults = try throwawayDefaults()
+        try attempt(at: nil, in: defaults)
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        let relaunched = updatingStore(cli, defaults: defaults)
+
+        await relaunched.checkNow()
+
+        XCTAssertEqual(relaunched.answerAlert, UpdateStore.CheckAlert(
+            title: "Graft couldn't update to 2.0.1", message: UpdateStore.installDidNotTake, action: nil,
+            release: relaunched.lastAnswer, cancel: "Later"
+        ))
+
+        for (reason, retryable) in [("not-writable", false), ("no-team", false), ("helper", true)] {
+            let cli = try UpdateCLI(test: self)
+            let sut = try await readyStore(cli, defaults: try throwawayDefaults())
+            try cli.write("install", Self.installed(ok: false, message: "No.", reason: reason))
+            try cli.write("install-status", "1")
+            var replies: [Bool] = []
+            XCTAssertTrue(sut.handOver { replies.append($0) }, reason)
+            await eventually({ replies == [true] }, reason)
+            XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: "No.", retryable: retryable), reason)
+
+            await sut.checkNow()
+
+            XCTAssertEqual(sut.answerAlert?.action, retryable ? .tryAgain : nil, reason)
+        }
+    }
+
+    /// Restart to Update in the alert is the banner's Restart to Update
+    /// (`restartToUpdate`): it asks for this quit, and Keep Working takes
+    /// that back. With the second switch off, a later quit then installs
+    /// nothing, after either; with it on, a later quit installs it without
+    /// reopening, after either. (The alert's was `update()`, which asked
+    /// for every later quit to install it, so after a canceled quit each
+    /// one did, whatever the switch said.)
+    func test_restart_to_update_in_the_alert_is_the_banner_s() async throws {
+        struct Outcome: Equatable {
+            let quits: Int
+            let afterKeepWorking: UpdateStore.Notice.State?
+            let laterQuitInstalls: [String]
+        }
+        func press(fromAlert: Bool, autoInstall: Bool) async throws -> Outcome {
+            let cli = try UpdateCLI(test: self)
+            let sut = try await readyStore(cli, defaults: try throwawayDefaults())
+            sut.autoInstall = autoInstall
+            try cli.write("install", Self.installed())
+            let before = terminated
+            if fromAlert {
+                await sut.checkNow()
+                let alert = try XCTUnwrap(sut.answerAlert)
+                XCTAssertEqual(alert.action, .restartToUpdate)
+                sut.perform(try XCTUnwrap(alert.action))
+                sut.dismissAnswer()
+            } else {
+                sut.restartToUpdate()
+            }
+            let quits = terminated - before
+            sut.quitCanceled()
+            let state = sut.notice?.state
+            var replies: [Bool] = []
+            if sut.handOver({ replies.append($0) }) {
+                await eventually({ replies == [true] }, "the later quit")
+            }
+            return Outcome(quits: quits, afterKeepWorking: state, laterQuitInstalls: cli.runs(of: "--install-update"))
+        }
+
+        for autoInstall in [false, true] {
+            let banner = try await press(fromAlert: false, autoInstall: autoInstall)
+            let alert = try await press(fromAlert: true, autoInstall: autoInstall)
+            XCTAssertEqual(alert, banner, "switch \(autoInstall)")
+            XCTAssertEqual(banner, Outcome(
+                quits: 1, afterKeepWorking: .ready(installsOnQuit: autoInstall),
+                laterQuitInstalls: autoInstall
+                    ? ["--json --install-update /cache/a/Graft.app --app-path \(Self.appPath) --wait-pid 4242"]
+                    : []
+            ), "switch \(autoInstall)")
+        }
+    }
+
+    /// The alert's buttons are named as the banner's are.
+    func test_the_alert_s_buttons_are_named_as_the_banner_s() {
+        XCTAssertEqual(UpdateStore.CheckAlert.Action.update.title, UpdateNotice.updateTitle)
+        XCTAssertEqual(UpdateStore.CheckAlert.Action.restartToUpdate.title, UpdateNotice.restartTitle)
+        XCTAssertEqual(UpdateStore.CheckAlert.Action.tryAgain.title, "Try Again")
+    }
+
+    /// With the second switch on, a version that failed in an earlier
+    /// launch isn't downloaded on its own: nothing is under way, and the
+    /// alert offers Update, as the banner does.
+    func test_check_for_updates_for_a_version_that_failed_before_offers_update() async throws {
+        let cli = try UpdateCLI(test: self)
+        let defaults = try throwawayDefaults()
+        defaults.set("2.0.1", forKey: UpdateStore.Key.failedVersion)
+        try cli.write("check", line())
+        let sut = updatingStore(cli, defaults: defaults)
+
+        await sut.checkNow()
+
+        XCTAssertEqual(sut.phase, .idle)
+        XCTAssertEqual(sut.notice?.state, .available(canUpdate: true))
+        XCTAssertEqual(sut.answerAlert?.action, .update)
+        XCTAssertTrue(sut.answerAlert?.message.contains("Update downloads") == true)
+        XCTAssertEqual(cli.runs(of: "--download-update"), [])
+    }
+
+    /// An alert that offered Update before any download ran (the second
+    /// switch off), pressed after the switch went on and its download
+    /// started: Update joins that download, and restarts into it. No
+    /// second one.
+    func test_update_from_an_alert_shown_before_the_download_started_joins_it() async throws {
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        try cli.write("download.sh", Self.waits(cli, after: Self.progress(received: 10, total: 100)))
+        let sut = updatingStore(cli, defaults: try throwawayDefaults())
+        sut.autoInstall = false
+        await sut.checkNow()
+        XCTAssertEqual(sut.answerAlert?.action, .update)
+
+        sut.autoInstall = true
+        await eventually({ cli.runs(of: "--download-update").count == 1 }, "the switch started it")
+        sut.perform(.update)
+        try cli.go("go")
+
+        await eventually({ self.terminated == 1 }, "restarts into it: Update was asked for")
+        XCTAssertEqual(cli.runs(of: "--download-update").count, 1)
+    }
+
+    /// Installing, as Graft quits: nothing to offer.
+    func test_check_for_updates_while_it_installs_offers_nothing() async throws {
+        let cli = try UpdateCLI(test: self)
+        let sut = try await readyStore(cli, defaults: try throwawayDefaults())
+        try cli.write("install", Self.installed())
+        XCTAssertTrue(sut.handOver { _ in })
+
+        await sut.checkNow()
+
+        XCTAssertEqual(sut.answerAlert, UpdateStore.CheckAlert(
+            title: "Installing Graft 2.0.1…", message: "Graft installs it as it quits.",
+            action: nil, release: nil, cancel: "OK"
+        ))
     }
 }

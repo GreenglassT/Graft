@@ -826,7 +826,10 @@ version=$GRAFT_UPDATE_VERSION
 parent=$(dirname "$app")
 copy="$parent/.Graft-update-$$.app"
 
-say() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$log" 2>/dev/null; }
+# Each line's time has its offset from UTC: the app reads the log at its next
+# launch (UpdateStore.installLogged), and this script's zone is the CLI's,
+# which has any TZ the user's shell profile sets, where the app's may not.
+say() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*" >>"$log" 2>/dev/null; }
 
 reopen() {
   if [ "$GRAFT_UPDATE_RELAUNCH" = 1 ] && [ -d "$app" ]; then
@@ -883,6 +886,19 @@ if ! "$GRAFT_UPDATE_MV" "$copy" "$app" >>"$log" 2>&1; then
   give_up "couldn't move Graft $version to $app"
 fi
 
+# Launch Services: forget the old copy and take the new one. The -u works:
+# it finds the old record by the bundle itself, though that record still
+# names the path the bundle was moved from. It lasts only until something
+# asks Launch Services for that bundle's icon, which registers it again where
+# it is now; Finder draws that icon when it shows the Trash, and a Dock tile
+# kept for Graft may too. So lsregister -dump can list the copy in the Trash
+# again later, until the Trash is emptied. Tried on throwaway unsigned
+# bundles (2026-11-24): after a move and a -u, reading the bundle's
+# Info.plist (PlistBuddy), codesign -dvvv, and its type or kind left it
+# unregistered; NSWorkspace's icon for it registered it at once. A second
+# -u, after the relaunch or on a retry, would be undone the same way by the
+# next look, so there isn't one. The relaunch below opens the new app by
+# its path, not by its bundle id.
 "$GRAFT_UPDATE_LSREGISTER" -u "$trashed" >>"$log" 2>&1
 "$GRAFT_UPDATE_LSREGISTER" -f "$app" >>"$log" 2>&1 || say "Launch Services didn't register $app"
 rmdir "$(dirname "$staged")" "$(dirname "$(dirname "$staged")")" 2>/dev/null

@@ -586,16 +586,25 @@ struct SettingsView: View {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
     }
 
+    /// The versions, and beside them Star on GitHub and Support on Ko-fi
+    /// (`SupportLinks`), as in the Help menu and About Graft: pages Graft
+    /// opens only when they're clicked, in the browser.
     private var versionSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionTitle(text: "Version")
-            Text(Self.versionLine(
-                app: Self.appVersion, cli: store.settings?.cliVersion,
-                hasSettings: store.settings != nil
-            ))
-            .font(AppFont.mono)
-            .foregroundStyle(Palette.textMuted)
-            .textSelection(.enabled)
+            HStack(spacing: 10) {
+                Text(Self.versionLine(
+                    app: Self.appVersion, cli: store.settings?.cliVersion,
+                    hasSettings: store.settings != nil
+                ))
+                .font(AppFont.mono)
+                .foregroundStyle(Palette.textMuted)
+                .textSelection(.enabled)
+                Spacer(minLength: 12)
+                Button(SupportLinks.starTitle) { NSWorkspace.shared.open(SupportLinks.repository) }
+                Button(SupportLinks.supportTitle) { NSWorkspace.shared.open(SupportLinks.koFi) }
+            }
+            .controlSize(.small)
             .padding(.horizontal, Metrics.cardPadding).padding(.vertical, Metrics.innerPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
             .cardStyle()

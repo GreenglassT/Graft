@@ -69,6 +69,66 @@ final class AppStoreRecordsTests: XCTestCase {
         ))
     }
 
+    func test_a_held_version_comes_through_and_an_older_cli_reads_as_not_held() throws {
+        let held = #"{"type":"appstore-version","app":"example","bundle_id":"com.example.app","store_version":"1.4.0","cached_version":"1.2.0","update_available":false,"held_version":"1.2.0","error":null}"#
+        guard case let .appStoreVersion(record) = try BuildEvent.decode(line: held) else {
+            return XCTFail("expected .appStoreVersion")
+        }
+        XCTAssertEqual(record.heldVersion, "1.2.0")
+        XCTAssertFalse(record.updateAvailable)
+
+        let older = #"{"type":"appstore-version","app":"x","bundle_id":"com.x","store_version":"1.4.0","cached_version":"1.2.0","update_available":true,"error":null}"#
+        guard case let .appStoreVersion(plain) = try BuildEvent.decode(line: older) else {
+            return XCTFail("expected .appStoreVersion")
+        }
+        XCTAssertNil(plain.heldVersion)
+    }
+
+    /// `--appstore-versions`' rows, read and not yet read, and its sentinel:
+    /// the exact lines `appstore.list_versions` prints.
+    func test_a_listed_version_decodes_read_or_not() throws {
+        let read = #"{"type":"appstore-release","app":"example","bundle_id":"com.example.app","external_id":"800400","index":0,"newest":true,"version":"1.4.0","release_date":"2026-10-01T07:00:00Z","staged":true,"error":null}"#
+        guard case let .appStoreRelease(row) = try BuildEvent.decode(line: read) else {
+            return XCTFail("expected .appStoreRelease")
+        }
+        XCTAssertEqual(row, AppStoreReleaseRecord(
+            app: "example", bundleId: "com.example.app", externalId: "800400", index: 0, newest: true,
+            version: "1.4.0", releaseDate: "2026-10-01T07:00:00Z", staged: true, error: nil
+        ))
+        XCTAssertEqual(row.id, "800400")
+
+        let unread = #"{"type":"appstore-release","app":"example","bundle_id":"com.example.app","external_id":"800100","index":3,"newest":false,"version":null,"release_date":null,"staged":false,"error":"Apple didn't describe this version (ipatool: received error: This item is no longer available.)"}"#
+        guard case let .appStoreRelease(gone) = try BuildEvent.decode(line: unread) else {
+            return XCTFail("expected .appStoreRelease")
+        }
+        XCTAssertNil(gone.version)
+        XCTAssertNil(gone.releaseDate)
+        XCTAssertNotNil(gone.error)
+    }
+
+    func test_the_listing_sentinel_and_a_hold_decode() throws {
+        let end = #"{"type":"appstore-releases-end","app":"example","bundle_id":"com.example.app","count":4,"offset":0,"limit":10,"held_version":null}"#
+        guard case let .appStoreReleasesEnd(record) = try BuildEvent.decode(line: end) else {
+            return XCTFail("expected .appStoreReleasesEnd")
+        }
+        XCTAssertEqual(record, AppStoreReleasesEndRecord(
+            app: "example", bundleId: "com.example.app", count: 4, offset: 0, limit: 10, heldVersion: nil
+        ))
+
+        let held = #"{"type":"appstore-hold","app":"example","bundle_id":"com.example.app","version":"1.2.0","previous":null}"#
+        guard case let .appStoreHold(hold) = try BuildEvent.decode(line: held) else {
+            return XCTFail("expected .appStoreHold")
+        }
+        XCTAssertEqual(hold, AppStoreHoldRecord(app: "example", bundleId: "com.example.app", version: "1.2.0", previous: nil))
+
+        let released = #"{"type":"appstore-hold","app":"example","bundle_id":"com.example.app","version":null,"previous":"1.2.0"}"#
+        guard case let .appStoreHold(gone) = try BuildEvent.decode(line: released) else {
+            return XCTFail("expected .appStoreHold")
+        }
+        XCTAssertNil(gone.version)
+        XCTAssertEqual(gone.previous, "1.2.0")
+    }
+
     func test_a_failed_lookup_decodes_rather_than_vanishing() throws {
         // `store_version: null` with the reason in `error` — the CLI's way of
         // saying "couldn't tell", which must not decode the same as no event.

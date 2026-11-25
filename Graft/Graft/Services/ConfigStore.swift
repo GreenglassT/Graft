@@ -477,12 +477,15 @@ final class ConfigStore: CLIStore {
             // next one canceled.
             if buildingApp == appName { cancellingApp = appName }
             notify(appName, .cancelled)
-        case .start, .log, .pruned, .liveContainerChoice:
+        case .start, .log, .pruned, .liveContainerChoice, .exported:
             // Transcript-only. `liveContainerChoice` is deliberately here and
             // not given a card of its own: unlike an encrypted binary it is
             // not a standing property of the artifact — it describes one push,
             // it is only actionable in the minute after that push, and the
             // next build re-decides it from what is installed then.
+            // `exported` likewise: the pane that started the export reads it
+            // off the finished stream for its confirmation, and a banner
+            // already says the run ended (`EffectiveDelivery.notDelivered`).
             break
         }
     }

@@ -114,6 +114,10 @@ struct AppStoreVersionRecord: Decodable, Equatable {
     let cachedVersion: String?
     let updateAvailable: Bool
     let error: String?
+    /// The version the app is held at (its `preferred_version` pin), or nil.
+    /// A held app's `updateAvailable` is always false: the row says "Held at
+    /// 1.2.0 · newest 1.4.0" instead, with Get latest to let go.
+    var heldVersion: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case app, error
@@ -121,6 +125,73 @@ struct AppStoreVersionRecord: Decodable, Equatable {
         case storeVersion = "store_version"
         case cachedVersion = "cached_version"
         case updateAvailable = "update_available"
+        case heldVersion = "held_version"
+    }
+}
+
+/// `appstore-release`: one version the App Store serves this Apple ID for an
+/// app (`--appstore-versions`), newest first.
+///
+/// `version` and `releaseDate` are nil until the CLI has read them, which it
+/// does a page at a time (`AppStoreVersionsStore`); `error` says why Apple
+/// wouldn't describe this one. `externalId` is what `--version-id` takes.
+struct AppStoreReleaseRecord: Decodable, Equatable, Identifiable {
+    let app: String
+    let bundleId: String
+    let externalId: String
+    /// 0 is the newest.
+    let index: Int
+    let newest: Bool
+    let version: String?
+    /// RFC 3339, as ipatool prints it.
+    let releaseDate: String?
+    /// That version's IPA is in the cache under the name a get gives it.
+    let staged: Bool
+    let error: String?
+
+    var id: String { externalId }
+
+    enum CodingKeys: String, CodingKey {
+        case app, index, newest, version, staged, error
+        case bundleId = "bundle_id"
+        case externalId = "external_id"
+        case releaseDate = "release_date"
+    }
+}
+
+/// `appstore-releases-end`: the listing's sentinel. A listing that found
+/// nothing is this alone; one without it was cut off.
+struct AppStoreReleasesEndRecord: Decodable, Equatable {
+    let app: String
+    let bundleId: String
+    /// How many versions there are.
+    let count: Int
+    /// The page whose details were read: `limit` versions from `offset`.
+    let offset: Int
+    let limit: Int
+    /// As `AppStoreVersionRecord.heldVersion`.
+    let heldVersion: String?
+
+    enum CodingKeys: String, CodingKey {
+        case app, count, offset, limit
+        case bundleId = "bundle_id"
+        case heldVersion = "held_version"
+    }
+}
+
+/// `appstore-hold`: a get changed the version the app is held at, which is
+/// its `preferred_version`: a get of a chosen version holds it there, and a
+/// get of the latest lets go (`version` nil). Sent only on a change. The app
+/// list is read again, since the pin is part of it.
+struct AppStoreHoldRecord: Decodable, Equatable {
+    let app: String
+    let bundleId: String
+    let version: String?
+    let previous: String?
+
+    enum CodingKeys: String, CodingKey {
+        case app, version, previous
+        case bundleId = "bundle_id"
     }
 }
 

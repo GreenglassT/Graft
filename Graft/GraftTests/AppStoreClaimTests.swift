@@ -115,6 +115,50 @@ final class AppStoreClaimTests: XCTestCase {
         ])
     }
 
+    /// A get of a version picked in Get an older version…, refused for want
+    /// of a license, then Get (free): the get after the claim is of that
+    /// version too. A plain get there would fetch the latest and let go of
+    /// the hold.
+    @MainActor
+    func test_get_free_after_a_version_get_gets_that_version() async throws {
+        let (runner, dir) = try cli(price: "0")
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        store.startGet(app: "example", versionId: "800200")
+        await eventually { !store.isBusy("example") }
+        XCTAssertEqual(store.licenseNeeded["example"]?.versionId, "800200")
+
+        await tryClaim(store, true)
+        await eventually { (try? self.argv(dir).contains { $0.contains("--appstore-check") }) == true }
+
+        XCTAssertEqual(try argv(dir).filter { !$0.contains("--appstore-check") }, [
+            "--json --appstore-get --app example --version-id 800200",
+            "--json --appstore-status",
+            "--json --appstore-claim --app example --expect-email a@example.invalid",
+            "--json --appstore-get --app example --version-id 800200",
+        ])
+    }
+
+    /// A claim that fails keeps which version the refused get was of, as it
+    /// keeps the rest of what that refusal said.
+    @MainActor
+    func test_a_failed_claim_after_a_version_get_keeps_its_version() async throws {
+        let (runner, _) = try cli(price: "0", claim: """
+            echo "error: the claim didn't go through" >&2
+            exit 20
+            """)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        store.startGet(app: "example", versionId: "800200")
+        await eventually { !store.isBusy("example") }
+        await tryClaim(store, true)
+        await eventually { !store.isBusy("example") }
+
+        let need = try XCTUnwrap(store.licenseNeeded["example"])
+        XCTAssertEqual(need.claim, .failed)
+        XCTAssertEqual(need.versionId, "800200")
+    }
+
     @MainActor
     func test_a_paid_app_is_never_claimed() async throws {
         let (runner, dir) = try cli(price: "2.99")

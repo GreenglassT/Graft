@@ -40,6 +40,7 @@ This is the whole list, by the name `--items` takes:
 | `passwords` | Your `.p12` and SSH passwords. Only when you name it. | your login keychain, service `graft` (or `tweak-build` from before Graft's rename), accounts `p12-<team id>` and `ssh-<device UDID>` |
 | `graft-link` | `graft` for Terminal, when it's a link into Graft.app | `~/.local/bin/graft` |
 | `app-settings` | The app's own settings. The app removes these; in Terminal, `defaults delete com.greenglasst.graft`. | `~/Library/Preferences/com.greenglasst.graft.plist` |
+| `update-log` | The update log: what Graft wrote each time it updated itself, and the last rebuild's output for an app built from source | `~/Library/Logs/Graft` |
 | `temp` | Temporary folders a stopped build, signing or install left behind, more than an hour old, and the rebuild marker of an app built from source | your temp folder (`$TMPDIR`), `~/Library/Caches/Graft` |
 
 Keychain items are found and removed by their service and account only, and
@@ -62,9 +63,6 @@ tweaks Graft moved to the Trash stay there until you empty it. The Mac App
 Store app you set up decryption with, PlayCover and the apps you installed on
 this Mac with it, and LiveContainer and the apps on your devices, are yours to
 keep or delete.
-
-The list also leaves out `~/Library/Logs/Graft`, where Graft writes the log of
-the updates it installs. Delete that folder yourself.
 
 ## By hand
 

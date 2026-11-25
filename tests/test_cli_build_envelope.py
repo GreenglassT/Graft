@@ -21,9 +21,9 @@ by asking which functions *contain* a `with _BuildReport(...)` — a set of two,
 `_build_one` and `_do_reinstall_build`. The `BuildLog(...)` defect its own
 docstring cites lived in neither: it was in the dispatcher, `main`'s fall-through
 verb, now `_verb_build_apps`. Discovering entry points by "contains a `with`" is
-precisely the rule that excludes the caller, so `_BUILD_ENTRY_POINTS` names all
-three and a separate assertion checks that nothing has opened an envelope
-without being added to it.
+precisely the rule that excludes the caller, so `_BUILD_ENTRY_POINTS` names
+every one, the `--export-ipa` dispatcher too, and a separate assertion checks
+that nothing has opened an envelope without being added to it.
 
 TWO RULES, BECAUSE THE TWO LAYERS OWE DIFFERENT THINGS.
 
@@ -80,7 +80,7 @@ ENVELOPE_CLASS = "_BuildReport"
 # that looked for one. `test_no_envelope_is_opened_outside_a_declared_entry_point`
 # keeps the declaration honest in the other direction.
 _BUILD_ENTRY_POINTS: frozenset[str] = frozenset(
-    {"_build_one", "_do_reinstall_build", "_verb_build_apps"}
+    {"_build_one", "_do_reinstall_build", "_verb_build_apps", "_verb_export_ipa"}
 )
 
 # Calls that cannot raise for any argument, by their exact spelling. Matching on

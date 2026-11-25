@@ -182,7 +182,9 @@ final class AppDetailLayoutTests: XCTestCase {
                     settings: SettingsStore(runner: store.runner),
                     // The bar's Change control. Nothing here observes it; the
                     // pane only needs it to be constructible.
-                    showSettings: {}
+                    showSettings: {},
+                    // Never asked: no case here opens Build options.
+                    playCover: .inert
                 )
             }
         }

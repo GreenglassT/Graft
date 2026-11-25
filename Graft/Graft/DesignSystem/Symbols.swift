@@ -479,6 +479,12 @@ enum Symbols {
     /// A newer build of this tweak exists, or a newer Graft (`UpdateNotice`).
     static let updateAvailable = Symbol(name: "arrow.up.circle.fill", weight: .regular)
 
+    /// This app is held at a version picked in Get an older version…: its
+    /// builds use that one, and a newer one isn't called an update
+    /// (`AppStoreSourceRow`). A pin, drawn at 10pt in `Palette.textDim`
+    /// beside the line that says which version, so `.medium`.
+    static let held = Symbol(name: "pin.fill", weight: .medium)
+
     /// The backend chose a different route than asked — one line of "here is
     /// what actually happened" under a dump.
     static let note = Symbol(name: "arrow.triangle.branch", weight: .medium)
@@ -533,7 +539,7 @@ enum Symbols {
         revealInFinder, rowMenu, buildOptions, dismiss, clearOption, search,
         dropIPA, checkboxOn, checkboxOff,
         ok, blocked, advisory, failure, attention, encrypted, updateAvailable,
-        note, waiting, keychainLocked,
+        held, note, waiting, keychainLocked,
         device, noDefaultDevice, noDevice, deviceLocked, scanning, notDelivering,
     ]
 }

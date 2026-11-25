@@ -53,6 +53,8 @@ graft --appstore-login                      # asks for the Apple ID, the passwor
 graft --appstore-logout
 graft --appstore-check                      # App Store version vs. your staged IPA, per app
 graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if it's already staged)
+graft --appstore-versions --app example     # the versions the App Store has for your Apple ID, newest first, with their ids
+graft --appstore-get --app example --version-id <id>   # get that version, and hold the app at it
 graft --appstore-claim --app example        # Get (free): only for an app the App Store lists at 0
 ```
 
@@ -65,6 +67,13 @@ graft --appstore-claim --app example        # Get (free): only for an app the Ap
   UnfairPlay couldn't verify, with a warning.
 - `--again` with `--appstore-get` downloads even when that version is already
   staged.
+- `--appstore-versions` reads the number and date of ten versions at a time,
+  starting at `--offset` (`--limit` reads up to 50), and remembers them. The
+  rest are listed by id.
+- `--version-id` holds the app at the version it gets: `preferred_version` pins
+  it, and `--appstore-check` doesn't call a newer one an update. A plain
+  `--appstore-get` lets go of the hold. See
+  [Get an older version](app-store.md#get-an-older-version).
 
 To set up decryption in Terminal, list the apps that can do it, save the
 script, run it as root, then finish as yourself:
@@ -130,8 +139,38 @@ graft example --skip-install        # build (and sign, for sideload) only
 graft example --device <UDID>       # a specific device instead of the default
 graft example --for-playcover       # also make the build loadable on this Mac under PlayCover
 graft --install-to-mac <filename>   # hand a staged IPA or an archived build to PlayCover
+graft example --export-ipa ~/Desktop/Example.ipa   # inject the tweaks, save the IPA unsigned
 graft example -v                    # verbose, and keep the temp directory
 ```
+
+`--export-ipa` signs nothing and touches no device (see
+[Exporting an IPA](building-and-delivery.md#exporting-an-ipa)). It takes one
+app, refuses `--device`, `--skip-install` and `--for-playcover`, and won't
+replace a file that's already there unless you add `--overwrite`. Under
+`--json` its last event before `build-end` is `ipa-exported`, with the file's
+`path`.
+
+Before it builds, it checks where the file goes, and that it can write a file
+in that folder. It writes the IPA to a hidden `.<name>.<random>.partial` file
+beside the path, then moves it into place, so a failed or stopped export
+leaves nothing behind. If graft is killed outright mid-write, that hidden file
+can be left there: it's safe to delete. The file's permissions are a new
+file's, as your umask sets them.
+
+How an export ends, by its exit status and, under `--json`, `build-end`'s
+`reason`. The reason is null when the export worked, was stopped, or failed
+another way (cyan failing, say), which the exit status tells as it does for a
+build.
+
+| Exit | `reason` | Meaning |
+|---|---|---|
+| 0 | null | The IPA was written |
+| 2 | `exists` | A file is already at the path. `--overwrite` replaces it |
+| 2 | `bad-destination` | The path is a folder, its folder isn't there or is one of Graft's own, or it starts with `~name` for a user this Mac doesn't have |
+| 1 | `unwritable` | graft can't write in that folder: its permissions, macOS's privacy controls, or a read-only disk |
+| 1 | `no-space` | The disk is full |
+| 1 | `write-failed` | Writing the file failed another way |
+| 4 | `no-ipa` | No IPA is staged for the app |
 
 `--skip-decrypt-check` skips the decryption check. A Stop (SIGTERM) ends the
 build where it is: nothing is recorded as a failure, and under `--json` the
@@ -151,9 +190,10 @@ graft --delivery-state [--app example]   # would building now produce something 
 graft --reconcile [--app example]        # check the device first, then report
 ```
 
-`--dry-run` previews only a build, `--prune-builds`, `--init --account` and
-`--remove-data --items`. Every other command refuses it, before doing
-anything, rather than running for real under a flag that said it wouldn't.
+`--dry-run` previews only a build, `--export-ipa`, `--prune-builds`,
+`--init --account` and `--remove-data --items`. Every other command refuses
+it, before doing anything, rather than running for real under a flag that
+said it wouldn't.
 
 ## LiveContainer
 

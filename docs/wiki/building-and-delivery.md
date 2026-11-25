@@ -10,6 +10,9 @@ Press **Build & Install**.
 - **Sideload delivery (paid only):** Graft signs the IPA with your
   certificate and installs it as a normal app.
 
+To sign on the phone instead, or install with TrollStore, **Export IPA…** in
+Build options saves the IPA unsigned. See [Exporting an IPA](#exporting-an-ipa).
+
 Builds lists every build, with its log and archive. See [Building](#building).
 
 ## Delivery
@@ -55,7 +58,8 @@ refused.
 ## Building
 
 Build & Install runs this pipeline. Build options (beside it) picks the
-device and can build without installing.
+device and can build without installing. It can also export the IPA unsigned
+instead (see [Exporting an IPA](#exporting-an-ipa)).
 
 ![An app pane with two tweaks attached and the Build & Install button shown, under a yellow bar saying no device is connected.](img/app-ready.png "An app with two tweaks attached. The yellow bar says no device is connected.")
 
@@ -162,3 +166,42 @@ are never changed this way.
 Graft.app carries that stand-in prebuilt, so a Mac build needs no Xcode. A
 `graft` installed with pipx builds it on demand and needs full Xcode for that;
 see [The CLI without the app](cli-install.md#the-cli-without-the-app-pipx).
+
+Graft doesn't include PlayCover, and doesn't download or install it. When
+PlayCover isn't installed, Build options says so above Build for this Mac, and
+**Get PlayCover** opens
+[PlayCover's releases page](https://github.com/PlayCover/PlayCover/releases)
+on GitHub in your browser. You can still build first: once PlayCover is
+installed, Install to Mac… on the build's row in Builds hands it over. If a
+handover fails because PlayCover isn't installed, the error names the same
+page.
+
+## Exporting an IPA
+
+If you sign apps on the phone, with an on-device signer and a certificate
+service, or install them with TrollStore, Graft can give you the IPA instead
+of delivering it. **Export IPA…** in Build options builds the app as far as
+injecting its tweaks, then saves that IPA where you choose.
+
+- **What the file is.** The app's decrypted IPA with its tweaks injected and
+  the app's options applied, with your Apple ID's purchase data removed. It
+  isn't signed: the binaries cyan changed need re-signing before iOS runs
+  them.
+- **What to do with it.** Put it on the phone (in Files, say) and open it in
+  your on-device signer, which signs it with your certificate and installs
+  it. Or install it with TrollStore.
+- **What Graft doesn't do.** It signs nothing and sends nothing to a device,
+  whatever the app's delivery mode, so a free Apple ID can export a Sideload
+  app too. Graft only saves the file; moving it to the phone is up to you.
+- **It isn't a build in Builds.** An export adds no row to the build history
+  and keeps no log, and archive clean-up never touches the file.
+- **For your own devices.** It's an app your Apple ID owns or got for free.
+
+The Save panel asks before replacing a file that's already there. Graft
+builds the file in a temporary folder of its own and moves it to where you
+chose once it's done, so a stopped or failed export leaves nothing in your
+folder. Graft won't save into its own folders for staged IPAs and archived
+builds, which it cleans up itself.
+
+In Terminal, `graft example --export-ipa ~/Desktop/Example.ipa` does the same;
+see [Building](cli-reference.md#building) in the CLI Reference.

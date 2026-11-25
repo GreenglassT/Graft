@@ -141,6 +141,10 @@ struct BuildLogView: View {
     ///     archived IPA and calling that "build start" would be a lie. Stage
     ///     text, log lines and the outcome are the caller's business nowhere:
     ///     a panel that wants to phrase those differently is drift.
+    ///   - startDetail: what the first line's parenthesis says, when the
+    ///     caller knows better than `build-start`'s `delivery`. An export's is
+    ///     null by design — it delivers nothing — and "delivery unknown" would
+    ///     read as a problem; the pane passes "unsigned" instead.
     /// Where a dry run's LiveContainer push *would* have gone, off the
     /// `lc-push` stage's end (C-DRYRUN: `dry_run`, `documents_path`, beside
     /// the `bundle_id` and `size_bytes` it already carried), or nil.
@@ -161,7 +165,18 @@ struct BuildLogView: View {
         return "    would push \(size) to \(destination)\(bundleId)"
     }
 
-    static func lines(for event: BuildEvent, startVerb: String = "build start") -> [LogLine] {
+    /// The transcript's line for what an export wrote, or would have.
+    static func exportLine(_ record: IPAExportedRecord) -> String {
+        if record.dryRun {
+            return "    would write \(record.path), unsigned — dry run, nothing was written"
+        }
+        let size = record.sizeBytes.map { ", \(fileSize($0))" } ?? ""
+        return "  ✓ wrote \(record.path) (unsigned\(size))"
+    }
+
+    static func lines(
+        for event: BuildEvent, startVerb: String = "build start", startDetail: String? = nil
+    ) -> [LogLine] {
         // Everything outside the build stream — `build-record`, the per-file
         // `build-pruned` rows — is no panel's business.
         guard let progress = event.progress else { return [] }
@@ -169,7 +184,7 @@ struct BuildLogView: View {
         case .start(let appName, let delivery):
             return [LogLine(
                 kind: .arrow,
-                text: "→ \(startVerb): \(appName) (\(delivery.buildLogLabel))"
+                text: "→ \(startVerb): \(appName) (\(startDetail ?? delivery.buildLogLabel))"
             )]
         case .stage(let name, let status):
             switch status {
@@ -196,6 +211,10 @@ struct BuildLogView: View {
             // it is about to push, swallowing the answer is the defect this
             // case exists to close.
             return [LogLine(kind: .warn, text: record.logLine)]
+        case .exported(let record):
+            // Where the file went, which the `export` stage's own `✓` above
+            // it doesn't say. A dry run's names where it would have gone.
+            return [LogLine(kind: record.dryRun ? .dim : .ok, text: exportLine(record))]
         case .liveContainerChoice(let record):
             // Which container to import from. The re-install sheet needs this
             // more than the build panel does, not less — it re-ships an old

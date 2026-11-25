@@ -46,7 +46,7 @@ libimobiledevice's `iproxy` and tools you install yourself (see
 | Download from the App Store | An Apple ID signed in in Graft. Any Apple ID works, free or paid; it's separate from the account above. The app must be one that Apple ID owns, or a free one Graft can get for it. |
 | Decrypt App Store downloads | An iPhone or iPad app installed on this Mac from the Mac App Store, with the same Apple ID, and opened once. Any free one will do. |
 | Decrypt on a jailbroken device | A jailbroken iPhone or iPad with frida-server 16.x and OpenSSH, plus tools you install yourself (see [Decrypt on a jailbroken device](getting-an-ipa.md#decrypt-on-a-jailbroken-device)). |
-| Run a build on this Mac | [PlayCover](https://github.com/PlayCover/PlayCover). |
+| Run a build on this Mac | [PlayCover](https://github.com/PlayCover/PlayCover/releases), a free app you install yourself. Graft doesn't include it. |
 
 ## The five steps
 

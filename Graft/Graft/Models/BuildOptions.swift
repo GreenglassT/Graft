@@ -30,6 +30,27 @@ struct BuildOptions: Equatable {
     /// `default_device_udid` from config.yaml. Note nil and "" are equivalent
     /// to `cliArgs` and `isDefault`, but not to `==`.
     var deviceUDID: String?
+    /// Write the tweak-injected IPA, unsigned, to this file instead of signing
+    /// and delivering it (`--export-ipa`). For a real export it is a file in
+    /// the export's staging folder, which the app then moves to where the
+    /// user chose (`ExportStaging`); for a dry run, which writes nothing, the
+    /// user's own path.
+    ///
+    /// **An action's field, like `forPlaycover`.** `AppDetailView`'s Export
+    /// IPA… sets it on a copy of the pane's options for one launch
+    /// (`exporting(to:replacing:)`), so the pane's own options never carry it
+    /// and no pill for it appears in the header.
+    ///
+    /// It rules out every option about the device, and the rule lives in
+    /// `activeOptions`: an export never signs, installs or looks for a phone,
+    /// and the CLI refuses `--device`, `--skip-install` and `--for-playcover`
+    /// beside it.
+    var exportPath: String?
+    /// The Save panel asked about a file already at `exportPath`, and the user
+    /// chose Replace (`--overwrite`). Without it the CLI refuses to replace one.
+    /// Only a dry run's preview sends it now: a real export writes into a new
+    /// staging folder, and the app does the replacing (`ExportStaging.place`).
+    var exportReplacing = false
 
     /// One active, non-default selection. Typed so consumers can map a pill
     /// back to the field that produced it with an exhaustive switch, rather
@@ -53,6 +74,9 @@ struct BuildOptions: Equatable {
         case skipInstall
         case skipDecryptCheck
         case device(udid: String)
+        /// An export: the IPA as far as cyan, unsigned, written to `path`.
+        /// `replacing` sends `--overwrite`.
+        case exportIPA(path: String, replacing: Bool)
 
         /// Fallback label. Consumers that can do better — e.g. resolving a
         /// UDID to a device name — should.
@@ -70,6 +94,7 @@ struct BuildOptions: Equatable {
             case .skipInstall: return "skip-install"
             case .skipDecryptCheck: return "skip-decrypt-check"
             case .device(let udid): return "device: \(udid)"
+            case .exportIPA: return "export-ipa"
             }
         }
 
@@ -96,6 +121,9 @@ struct BuildOptions: Equatable {
             case .dryRun: return "Dry run"
             case .forPlaycover: return "Built for this Mac"
             case .skipInstall: return "Install skipped"
+            // Its own reason, for `.forPlaycover`'s: "Install skipped" would
+            // describe a phone build held back, and an export is a file.
+            case .exportIPA: return "Exported to a file"
             case .skipDecryptCheck, .device: return nil
             }
         }
@@ -135,7 +163,9 @@ struct BuildOptions: Equatable {
         var stillResolvesDevice: Bool {
             switch self {
             case .dryRun: return true
-            case .forPlaycover, .skipInstall: return false
+            // An export never asks for a device, dry run or not: the CLI
+            // gates every device step on it (`_build_one`'s `exporting`).
+            case .forPlaycover, .skipInstall, .exportIPA: return false
             case .skipDecryptCheck, .device: return true
             }
         }
@@ -150,6 +180,9 @@ struct BuildOptions: Equatable {
             case .skipInstall: return [CLIContract.Flag.skipInstall]
             case .skipDecryptCheck: return [CLIContract.Flag.skipDecryptCheck]
             case .device(let udid): return [CLIContract.Flag.device, udid]
+            case let .exportIPA(path, replacing):
+                return [CLIContract.Flag.exportIPA, path]
+                    + (replacing ? [CLIContract.Flag.overwrite] : [])
             }
         }
     }
@@ -168,13 +201,38 @@ struct BuildOptions: Equatable {
     /// `DeviceExposure` and the header pills all read this list, and a build
     /// whose argv said "not installing" while this list did not would be the
     /// drift `effectiveDelivery`'s own doc records happening once already.
+    ///
+    /// **An export drops every option about the device, here for the same
+    /// reason.** The CLI refuses `--device`, `--skip-install` and
+    /// `--for-playcover` beside `--export-ipa` (`_ModifierGate`), so a pane
+    /// left with a device picked or Skip install on would otherwise fail its
+    /// export before it began. Dry run and the decryption check still apply.
+    /// The export comes straight after the dry run, so it is the
+    /// `deliverySuppressor` unless the run is a preview.
     var activeOptions: [Option] {
         var options: [Option] = []
         if dryRun { options.append(.dryRun) }
+        if let path = exportPath, !path.isEmpty {
+            options.append(.exportIPA(path: path, replacing: exportReplacing))
+            if skipDecryptCheck { options.append(.skipDecryptCheck) }
+            return options
+        }
         if forPlaycover { options.append(.forPlaycover) }
         if skipInstall || forPlaycover { options.append(.skipInstall) }
         if skipDecryptCheck { options.append(.skipDecryptCheck) }
         if let udid = deviceUDID, !udid.isEmpty { options.append(.device(udid: udid)) }
+        return options
+    }
+
+    /// These options, for one export to `path`: what the pane set, plus the
+    /// export. `activeOptions` drops what an export can't take.
+    ///
+    /// - Parameter replacing: the Save panel asked about a file already at
+    ///   `path` and the user chose Replace.
+    func exporting(to path: String, replacing: Bool) -> BuildOptions {
+        var options = self
+        options.exportPath = path
+        options.exportReplacing = replacing
         return options
     }
 

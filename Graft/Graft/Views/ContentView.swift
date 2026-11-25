@@ -211,6 +211,9 @@ struct ContentView: View {
     /// menu reaches it too. Nil only in a test that hosts this window for
     /// something else: no check runs and no banner shows.
     private let updates: UpdateStore?
+    /// Handed to each app pane, for Build options' "This Mac" section. See
+    /// `PlayCover`.
+    private let playCover: PlayCover
 
     /// - Parameter selection: what to open on, for a test that needs to reach a
     ///   pane it cannot click its way to.
@@ -243,14 +246,20 @@ struct ContentView: View {
     /// `openApp` is Set Up Decryption's "Open <App>": `GraftApp` passes
     /// NSWorkspace's, and the default, which every test here takes, opens
     /// nothing.
+    /// `playCover` is the app pane's: whether PlayCover is installed, and Get
+    /// PlayCover's page. `GraftApp` passes LaunchServices and the browser; the
+    /// default, which every test here takes, finds no PlayCover and opens
+    /// nothing.
     init(
         store: ConfigStore, selection: SidebarItem? = nil, adminShell: PrivilegedShell,
         updates: UpdateStore? = nil,
-        openApp: @escaping @MainActor (URL) -> Void = { _ in }
+        openApp: @escaping @MainActor (URL) -> Void = { _ in },
+        playCover: PlayCover = .inert
     ) {
         self._store = Bindable(store)
         self._selection = State(initialValue: selection)
         self.updates = updates
+        self.playCover = playCover
         self._tweaksStore = State(initialValue: TweaksStore(runner: store.runner))
         self._canisterStore = State(initialValue: CanisterStore(runner: store.runner))
         self._repoStore = State(initialValue: RepoStore(runner: store.runner))
@@ -567,6 +576,14 @@ struct ContentView: View {
             guard let completed else { return }
             Task { await artworkStore.load(app: completed.app, refresh: true) }
         }
+        // A get held an app at a chosen version, or Get latest let go. The
+        // hold is the app's `preferred_version` in config.yaml, which the
+        // pane's subtitle shows and its cached-IPA card resolves by, so the
+        // list is read again; the pane re-reads its card on the new pin.
+        .onChange(of: appStoreStore.lastHoldChange) { _, changed in
+            guard changed != nil else { return }
+            Task { try? await store.reload() }
+        }
         // Settings' `--check` reported a different account from the one the
         // app list was read under: config.yaml changed account while the app
         // was open (`graft --init` in Terminal). Re-read the list, which
@@ -576,26 +593,30 @@ struct ContentView: View {
             guard let reported, reported != store.account else { return }
             Task { try? await store.reload() }
         }
-        // Check for Updates…'s answer. The daily check never sets one.
+        // Check for Updates…'s answer, as it stood once any download the
+        // check started had started (`UpdateStore.answerAlert`): it says what
+        // the banner says, and never offers Update for a download under way.
+        // The daily check never sets one. Its buttons are the banner's
+        // (`UpdateStore.perform`): Update and Try Again are `update()`, as
+        // the banner's Update is, and Restart to Update is
+        // `restartToUpdate()`, as the banner's is.
         .alert(
-            updates?.answer?.title ?? "",
+            updates?.answerAlert?.title ?? "",
             isPresented: Binding(
-                get: { updates?.answer != nil },
-                set: { if !$0 { updates?.answer = nil } }
+                get: { updates?.answerAlert != nil },
+                set: { if !$0 { updates?.dismissAnswer() } }
             ),
-            presenting: updates?.answer
-        ) { answer in
-            if case let .available(release) = answer {
-                if updates?.canUpdate == true {
-                    Button(UpdateNotice.updateTitle) { updates?.update() }
-                }
-                Button("Open Release Page") { updates?.openReleasePage(release) }
-                Button("Later", role: .cancel) {}
-            } else {
-                Button("OK", role: .cancel) {}
+            presenting: updates?.answerAlert
+        ) { alert in
+            if let action = alert.action {
+                Button(action.title) { updates?.perform(action) }
             }
-        } message: { answer in
-            Text(answer.message(appVersion: updates?.appVersion ?? "", canUpdate: updates?.canUpdate ?? false))
+            if let release = alert.release {
+                Button("Open Release Page") { updates?.openReleasePage(release) }
+            }
+            Button(alert.cancel, role: .cancel) {}
+        } message: { alert in
+            Text(alert.message)
         }
         // The daily check: now, then hourly while the app is open, each a
         // no-op until a day has passed since the last success
@@ -827,7 +848,10 @@ struct ContentView: View {
                     // owned here, so the pane is handed the navigation rather
                     // than a binding into this view's state — it has no other
                     // business knowing what a `SidebarItem` is.
-                    showSettings: { selection = .section(.settings) }
+                    showSettings: { selection = .section(.settings) },
+                    // Build options says when PlayCover isn't installed, and
+                    // offers Get PlayCover.
+                    playCover: playCover
                 )
             } else {
                 // A removal clears the selection, so this is the narrow window
@@ -1091,7 +1115,7 @@ struct UpdateNotice: View {
                 Text(Self.text(notice))
                     .font(AppFont.body)
                     .foregroundStyle(Palette.text)
-                if case let .failed(why) = notice.state {
+                if case let .failed(why, _) = notice.state {
                     Text(why)
                         .font(AppFont.body)
                         .foregroundStyle(Palette.textMuted)

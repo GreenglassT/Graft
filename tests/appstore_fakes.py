@@ -179,6 +179,11 @@ if argv[:1] == ["download"]:
     if scenario.get("download_raw") is not None:
         print(scenario["download_raw"])
         done(scenario.get("download_exit", 0))
+    wanted = argv[argv.index("--external-version-id") + 1] if "--external-version-id" in argv else None
+    if wanted is not None and wanted in (scenario.get("gone_versions") or []):
+        print(json.dumps({"level": "error", "error": "received error: This item is no longer available.",
+                          "success": False}))
+        done(1)
     if scenario.get("download_error"):
         stream = sys.stderr if scenario.get("error_on_stderr") else sys.stdout
         print(json.dumps({"level": "error", "error": scenario["download_error"],
@@ -383,6 +388,42 @@ if argv[:1] == ["purchase"]:
         done(1)
     print(json.dumps({"level": "info", "alreadyOwned": bool(scenario.get("already_owned")),
                       "success": True}))
+    done()
+
+# The older-versions commands, as ipatool 2.8.0 prints them with `--format
+# json`: zerolog's `level` and `time` around the fields each command logs
+# (cmd/list_versions.go, cmd/get_version_metadata.go), and on failure the
+# root command's `{"level":"error","error":...,"success":false}` (cmd/root.go).
+if argv[:1] == ["list-versions"]:
+    if KC:
+        kc_account_or_fail()
+    bundle = argv[argv.index("-b") + 1]
+    if scenario.get("list_versions_error"):
+        print(json.dumps({"level": "error", "error": scenario["list_versions_error"],
+                          "success": False, "time": "2026-11-24T00:00:00Z"}))
+        done(1)
+    print(json.dumps({"level": "info", "externalVersionIdentifiers": scenario.get("versions", []),
+                      "bundleID": bundle, "success": True, "time": "2026-11-24T00:00:00Z"}))
+    done()
+
+if argv[:1] == ["get-version-metadata"]:
+    if KC:
+        kc_account_or_fail()
+    wanted = argv[argv.index("--external-version-id") + 1]
+    meta = (scenario.get("version_metadata") or {}).get(wanted)
+    error = scenario.get("metadata_error") or (meta or {}).get("error")
+    if meta is None and not error:
+        # What a version Apple no longer serves looks like: the download
+        # request's customer message (appstore_get_version_metadata.go).
+        error = "received error: This item is no longer available."
+    if error:
+        print(json.dumps({"level": "error", "error": error, "success": False,
+                          "time": "2026-11-24T00:00:00Z"}))
+        done(1)
+    # `releaseDate` is zerolog's `Time`, RFC 3339 by default.
+    print(json.dumps({"level": "info", "externalVersionID": wanted,
+                      "displayVersion": meta["version"], "releaseDate": meta["date"],
+                      "success": True, "time": "2026-11-24T00:00:00Z"}))
     done()
 
 print(f"fake ipatool: unexpected argv {argv}", file=sys.stderr)

@@ -11,21 +11,32 @@ Nothing here touches /Applications or the real Trash.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 from collections.abc import Iterator
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from graft_ipa import app_update
 
 from .app_update_fakes import TEAM, dummy_app
+from .cli_ast import REPO_ROOT, strip_swift_comments
 
 
 class Rig:
     """Graft 2.0.1 installed, 2.0.2 downloaded, an empty Trash, and the
     stand-in tools, all under one temp dir."""
+
+    #: The helper's time zone (`env`), whatever this Mac's is or the test
+    #: run's TZ says, so a test reading its times reads them in the same
+    #: one. Graft's helper inherits the CLI's environment (`spawn_detached`),
+    #: but `env` is all this one gets. UTC+14: a helper that didn't use it
+    #: would be hours off here.
+    TZ = "Pacific/Kiritimati"
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -79,6 +90,7 @@ echo "source=Notarized Developer ID" >&2
             log=self.log, trash=self.trash, team=TEAM, tools=self.tools, wait_ticks=wait_ticks,
         )
         env["ANSWERS"] = str(self.answers)
+        env["TZ"] = self.TZ
         return env
 
     def run(self, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -143,6 +155,66 @@ def test_it_swaps_the_app_trashes_the_old_one_registers_and_reopens(rig: Rig, go
         f"fake-open {rig.app}",
     ]
     assert "installed Graft 2.0.2" in rig.log.read_text()
+
+
+def test_the_installed_line_is_the_one_the_app_reads(rig: Rig, gone_pid: int) -> None:
+    """The app reads this line at its next launch (`UpdateStore.installLogged`
+    in the Swift app): a launch still on the version it replaced, whose
+    attempt was written down before this line, is a copy put back by hand
+    since, not a failed install. So its shape is a contract: the time, to
+    the second, with its offset from UTC, then "installed Graft <version>
+    at <app>;" (UpdateStoreTests writes it the same way). The time is in
+    the zone of the helper's environment: in Graft, the CLI's, which has
+    any TZ the login shell sets, and the app may not. With the offset, the
+    app reads it exactly whatever its own zone. Every line the helper
+    writes has its time so."""
+    zone = ZoneInfo(Rig.TZ)
+    before = datetime.now(zone).replace(microsecond=0)
+    assert rig.run(rig.env(pid=gone_pid)).returncode == 0
+    after = datetime.now(zone)
+
+    written = rig.log.read_text().splitlines()
+    assert written and all(re.match(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [+-]\d{4} \S", line)
+                           for line in written), written
+    lines = [line for line in written if " installed Graft " in line]
+    assert len(lines) == 1, written
+    said = re.fullmatch(
+        r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [+-]\d{4}) installed Graft 2\.0\.2 at (.+?); .*", lines[0],
+    )
+    assert said is not None, lines[0]
+    assert said.group(2) == str(rig.app)
+    when = datetime.strptime(said.group(1), "%Y-%m-%d %H:%M:%S %z")
+    assert when.utcoffset() == after.utcoffset(), "the offset is the helper's zone's"
+    assert before <= when <= after
+
+
+#: The Swift tests, and the folder their copy of the helper's line names
+#: where the rig's is (`UpdateStoreTests.helperInstalledLine`).
+SWIFT_TESTS = REPO_ROOT / "Graft" / "GraftTests" / "UpdateStoreTests.swift"
+FIXTURE_ROOT = "/private/var/empty/Example"
+
+
+def test_the_swift_tests_read_the_line_the_helper_writes(rig: Rig, gone_pid: int) -> None:
+    """The round trip. `UpdateStoreTests.helperInstalledLine` is the line
+    the Swift tests hand the app's reader (`UpdateStore.installLogged`), so
+    it must be this helper's line for an install that worked, as the helper
+    writes it, but for its time (the same shape and the same offset, the
+    rig's zone's, but another second) and the rig's folder, which it names
+    FIXTURE_ROOT. A plain literal, read with comments stripped."""
+    source = strip_swift_comments(SWIFT_TESTS.read_text())
+    found = re.search(r'static let helperInstalledLine = "([^"\\]*)"\n', source)
+    assert found, "helperInstalledLine is gone from UpdateStoreTests.swift, or isn't a plain literal"
+    fixture = found.group(1)
+
+    assert rig.run(rig.env(pid=gone_pid)).returncode == 0
+    [written] = [line for line in rig.log.read_text().splitlines() if " installed Graft " in line]
+
+    stamp = re.compile(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [+-]\d{4} ")
+    assert stamp.match(written), written
+    assert stamp.match(fixture), fixture
+    datetime.strptime(fixture[:25], "%Y-%m-%d %H:%M:%S %z")
+    assert fixture[19:25] == written[19:25], "the fixture's offset is the helper's, in Rig.TZ"
+    assert fixture[26:] == written[26:].replace(str(rig.root), FIXTURE_ROOT)
 
 
 def test_without_relaunch_nothing_is_opened(rig: Rig, gone_pid: int) -> None:

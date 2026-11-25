@@ -70,7 +70,7 @@ final class LastBuildLogTests: XCTestCase {
             devices: DevicesStore(runner: sh), tweaksStore: TweaksStore(runner: sh),
             staged: StagedIPAStore(runner: sh), appStore: AppStoreStore(runner: sh, shell: NoAdminShell()),
             liveContainer: LiveContainerStore(runner: sh),
-            settings: SettingsStore(runner: sh), showSettings: {}
+            settings: SettingsStore(runner: sh), showSettings: {}, playCover: .inert
         )
         let hosted = hosted(pane, size: NSSize(width: 900, height: 1200))
         // Awaited, not pumped: the pane's `.task` reads `--builds` and resumes
@@ -198,7 +198,8 @@ final class StoppedBuildPaneTests: XCTestCase {
             tweaksStore: TweaksStore(runner: sh), staged: StagedIPAStore(runner: sh),
             appStore: AppStoreStore(runner: sh, shell: NoAdminShell()), liveContainer: LiveContainerStore(runner: sh),
             settings: SettingsStore(runner: sh),
-            showSettings: {}
+            showSettings: {},
+            playCover: .inert
         )
         let box = hosted(view, size: NSSize(width: 1000, height: 1000))
         try await Task.sleep(nanoseconds: 300_000_000)
@@ -273,7 +274,8 @@ final class StoppedBuildPaneTests: XCTestCase {
             tweaksStore: TweaksStore(runner: sh), staged: StagedIPAStore(runner: sh),
             appStore: AppStoreStore(runner: sh, shell: NoAdminShell()), liveContainer: LiveContainerStore(runner: sh),
             settings: SettingsStore(runner: sh),
-            showSettings: {}
+            showSettings: {},
+            playCover: .inert
         )
         let probe = try await CLIRunner(executable: cli).runOnce(
             arguments: ["--json", "--builds", "--builds-app", "example", "--builds-limit", "1"])

@@ -1679,7 +1679,15 @@ def test_the_source_archive_covers_every_copyleft_component(tmp_path, monkeypatc
     assert "go mod vendor" in md and "-trimpath" in md and "com.apple.security.cs.allow-jit" in md
     assert "com.apple.security.cs.disable-library-validation" in md and gb.LICENCE_STATEMENT in md
     assert "libunicorn" not in md and not [m for m in members if "unicorn" in m.lower()], "no Unicorn source"
-    assert "unpatched" in _section(md, "ipatool") and "IPATOOL_UNICORN_LIBRARY" not in md
+    assert "unpatched" not in _section(md, "ipatool") and "IPATOOL_UNICORN_LIBRARY" not in md
+    # 2.1: the shipped ipatool carries its range-reader patch, named with its
+    # hash in ipatool's own section, applied before the steps that build it.
+    ((patch, sha),) = gb.patch_hashes("ipatool")
+    ipatool_md = _section(md, "ipatool")
+    assert f"`bundle/patches/{patch}` (SHA-256 `{sha}`)" in ipatool_md
+    applied = gb.shell_line([*gb.PATCH_ARGV, f"$GRAFT/bundle/patches/{patch}"])
+    assert applied in ipatool_md
+    assert ipatool_md.index(applied) < ipatool_md.index(gb.shell_line(["go", "mod", "vendor"]))
     # Review #58: every bundled package's source, copyleft or not; one PyPI
     # has none for is named, with where its source is.
     for name, version, _licence in packages:
@@ -2055,10 +2063,74 @@ def test_the_printed_steps_run_in_a_shell_as_the_build_ran_them(tmp_path):
 # ------------------------------------------------- review #4: ipatool, without Unicorn
 
 
-def test_ipatool_is_built_unpatched():
-    """Option (a): no library-path patch; ipatool fetches Unicorn as upstream does."""
-    assert gb.PATCHES.get("ipatool", ()) == ()
+IPATOOL_PATCH = REPO / "bundle" / "patches" / "ipatool-range-readahead.patch"
+
+
+def test_ipatool_s_one_patch_is_its_range_reader():
+    """2.1: get-version-metadata read an IPA's Info.plist with one range
+    request per small read, hundreds per version, and failed on any one that
+    stalled. The one patch changes only that reader and its tests; no
+    library-path patch (option (a): ipatool fetches Unicorn as upstream does),
+    and nothing on the full download's path or the restore image's checks."""
+    assert gb.PATCHES["ipatool"] == ("ipatool-range-readahead.patch",)
     assert not (REPO / "bundle" / "patches" / "ipatool-unicorn-library-env.patch").exists()
+    text = IPATOOL_PATCH.read_text()
+    touched = re.findall(r"^\+\+\+ b/(\S+)", text, re.MULTILINE)
+    assert touched == ["pkg/appstore/appstore_partial_zip.go", "pkg/appstore/appstore_get_version_metadata_test.go",
+                       "pkg/appstore/appstore_partial_zip_readahead_test.go"]
+    assert re.findall(r"^--- (\S+)", text, re.MULTILINE) == [
+        "a/pkg/appstore/appstore_partial_zip.go", "a/pkg/appstore/appstore_get_version_metadata_test.go", "/dev/null"]
+
+
+def test_the_ipatool_patch_applies_to_its_reader_as_the_build_applies_it(tmp_path):
+    """PATCH_ARGV, from the source's top directory, to upstream's text as the
+    patch expects it: the reader reads ahead, and a second run refuses."""
+    top = tmp_path / "ipatool"
+    reader = top / "pkg" / "appstore" / "appstore_partial_zip.go"
+    test = top / "pkg" / "appstore" / "appstore_get_version_metadata_test.go"
+    reader.parent.mkdir(parents=True)
+    # Each file's hunks, as the upstream text they expect, padded to their
+    # line numbers (`patch --fuzz=0` places a hunk by its context alone, but
+    # never moves one past an earlier hunk's lines).
+    for path, name in ((reader, "appstore_partial_zip.go"), (test, "appstore_get_version_metadata_test.go")):
+        path.write_text(_upstream_of(IPATOOL_PATCH, f"pkg/appstore/{name}"))
+    gb.apply_patches("ipatool", top)
+    patched = reader.read_text()
+    assert "rangeTailSize = 1 << 20" in patched and "r.mu.Lock()" in patched
+    assert "context.WithTimeout(context.Background(), rangeRequestTimeout)" in patched
+    assert (top / "pkg" / "appstore" / "appstore_partial_zip_readahead_test.go").is_file()
+    with pytest.raises(subprocess.CalledProcessError):
+        gb.apply_patches("ipatool", top)      # --forward: never applied twice
+
+
+def _upstream_of(patch: Path, name: str) -> str:
+    """The text a unified diff's hunks for file `name` expect (their context
+    and `-` lines), each at the line its hunk header names, blank lines
+    between."""
+    out: list[str] = []
+    current = None
+    for line in patch.read_text().splitlines():
+        if line.startswith("--- "):
+            current = None
+        elif line.startswith("+++ "):
+            current = line[len("+++ b/"):]
+        elif current == name and (m := re.match(r"@@ -(\d+)", line)):
+            out += [""] * (int(m[1]) - 1 - len(out))
+        elif current == name and line[:1] in (" ", "-"):
+            out.append(line[1:])
+    return "\n".join(out) + "\n"
+
+
+def test_every_patch_reaches_the_source_archive():
+    """The source archive is `git archive` of the commit built, without
+    SOURCE_EXCLUDES: each patch the build applies has to be a tracked file
+    outside them, or SOURCES.md names a patch the archive lacks."""
+    listed = subprocess.run(["git", "-C", str(REPO), "ls-files", "--", ".",
+                             *(f":(exclude){p}" for p in gb.SOURCE_EXCLUDES)],
+                            check=True, capture_output=True, text=True).stdout.splitlines()
+    for name, patches in gb.PATCHES.items():
+        for patch in patches:
+            assert f"bundle/patches/{patch}" in listed, (name, patch)
 
 
 def test_ipatool_is_patched_then_vendored_then_built_offline_and_its_key_covers_every_input(tmp_path, monkeypatch):

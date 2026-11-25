@@ -245,7 +245,7 @@ def test_a_newer_store_version_is_an_update(cfg: Config, monkeypatch: pytest.Mon
     assert _check(cfg) == {
         "type": "appstore-version", "app": "example",
         "bundle_id": "com.example.app", "store_version": "21.46.3",
-        "cached_version": "21.9.1", "update_available": True, "error": None,
+        "cached_version": "21.9.1", "update_available": True, "held_version": None, "error": None,
     }
 
 

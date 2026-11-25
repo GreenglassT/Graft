@@ -71,10 +71,35 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "appstore-status",
         # One app's App Store version against what is cached: `app`,
         # `bundle_id`, `store_version`, `cached_version`, `update_available`,
-        # `error`. One per app, always — a lookup that failed is this event
-        # with `store_version: null` and the reason in `error`, never silence,
-        # so the GUI can tell "not asked" from "couldn't tell".
+        # `held_version`, `error`. One per app, always — a lookup that failed
+        # is this event with `store_version: null` and the reason in `error`,
+        # never silence, so the GUI can tell "not asked" from "couldn't tell".
+        # `held_version` is the version the app is held at (its
+        # `preferred_version` pin), or null; a held app's `update_available`
+        # is always false (`appstore.held_version`).
         "appstore-version",
+        # `--appstore-versions`, one per version the App Store serves this
+        # Apple ID for the app, newest first: `app`, `bundle_id`,
+        # `external_id` (the id `--appstore-get --version-id` takes), `index`
+        # (0 is the newest), `newest`, `version` and `release_date` (RFC 3339)
+        # once read, else null, `staged` (that version's IPA is in the cache
+        # under the name a get gives it) and `error` (why Apple wouldn't
+        # describe this version, or null). Only `--limit` versions from
+        # `--offset` on are read; what was read before is remembered, so other
+        # rows may have theirs too.
+        "appstore-release",
+        # `--appstore-versions`' sentinel, after the last `appstore-release`,
+        # even when there are none: `app`, `bundle_id`, `count`, `offset`,
+        # `limit`, `held_version` (as on `appstore-version`).
+        "appstore-releases-end",
+        # A get changed the app's hold, after it staged (or found staged)
+        # what it was asked for: `app`, `bundle_id`, `version` (the version
+        # it is now held at, or null when a get of the latest let go) and
+        # `previous` (the one before, or null). Only when it changed. The
+        # hold is the app's `preferred_version`, so the GUI reads the app
+        # list again. When the preferred version was changed while the get
+        # ran (Edit App), the get leaves it and warns (`log`) instead.
+        "appstore-hold",
         # `--appstore-get` (and an encrypted `--provide-ipa`) moving on to
         # `stage`: "download", "decrypt" or "stage". Its own event rather than
         # a `stage` name: STAGE_NAMES is the *build's* vocabulary and is held
@@ -209,9 +234,17 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # wire and the human-readable path is the only place a miss is
         # explained.
         "artwork",
+        # `app`, `ok`, `stopped`, `elapsed_seconds`, and `error` when it
+        # failed. An `--export-ipa`'s also carries `reason`: null, or why the
+        # export failed, one of `cli.EXPORT_FAILURE_REASONS` ("exists",
+        # "bad-destination", "unwritable", "no-space", "write-failed",
+        # "no-ipa"), for an agent that must ask before `--overwrite`.
         "build-end",
         "build-pruned",
         "build-record",
+        # `app`, `bundle_id` and `delivery`, the app's delivery mode. An
+        # `--export-ipa` delivers nothing, so its `delivery` is null and it
+        # also carries `export_to`, the path it will write.
         "build-start",
         "cached-ipa",
         "canister-fetch-end",
@@ -366,6 +399,14 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # `init-result`. The password is never in either event.
         "init-result",
         "init-step",
+        # `--export-ipa` wrote the tweak-injected IPA, unsigned, where it was
+        # told: `app`, `version` (the staged IPA's), `path` (absolute),
+        # `filename`, `size_bytes`, `tweaks` (the app's, as config.yaml lists
+        # them), `replaced` (a file was there and `--overwrite` replaced it)
+        # and `dry_run`. Emitted once the file is in place, as the export's
+        # last event before `build-end`; under `--dry-run` it says where the
+        # file would go, with `size_bytes` null, and nothing is written.
+        "ipa-exported",
         "ipa-provided",
         # Which LiveContainer the IPA was pushed into, when more than one is
         # installed. The count used to ride in the `stage` event's extra fields
@@ -603,6 +644,9 @@ STAGE_NAMES: frozenset[str] = frozenset(
         "archive",
         # Stage 3 — inject the tweaks with cyan.
         "cyan",
+        # Stage 4 of `--export-ipa`, its last — write cyan's output, unsigned,
+        # where the user chose. An export has no sign, archive or delivery stage.
+        "export",
         # Stage 5 (sideload delivery) — install over usbmux (`device_install`).
         "install",
         # Stage 5 (livecontainer delivery) — push the IPA over usbmux,

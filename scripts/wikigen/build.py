@@ -19,7 +19,7 @@ from pathlib import Path
 from . import WikiError
 from .links import build_index, make_resolver
 from .manifest import load_manifest
-from .page import SITE, read_chrome, render_page
+from .page import OG_HEIGHT, OG_IMAGE, OG_WIDTH, SITE, read_chrome, render_page
 from .render import render_markdown
 from .scrub import Hit, load_denylist, scan
 from .search import search_entries
@@ -54,6 +54,23 @@ def _check_cname(out: Path) -> None:
         raise WikiError(f"{cname}: not found; {out} is not the graftipa.com site") from None
     if value != "graftipa.com":
         raise WikiError(f"{cname}: reads {value!r}, expected 'graftipa.com'")
+
+
+def _check_og_image(out: Path) -> None:
+    """The site's link-preview card is there, at the size every page's tags give it."""
+    path = out / OG_IMAGE
+    try:
+        with path.open("rb") as f:
+            head = f.read(24)
+    except OSError:
+        raise WikiError(f"{path}: not found; every page's og:image points at it") from None
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        raise WikiError(f"{path}: not a PNG")
+    width, height = struct.unpack(">II", head[16:24])
+    if (width, height) != (OG_WIDTH, OG_HEIGHT):
+        raise WikiError(
+            f"{path}: is {width}x{height}; the pages' og:image tags say {OG_WIDTH}x{OG_HEIGHT}"
+        )
 
 
 def _check_home_links(home_html: str, pages) -> None:
@@ -173,6 +190,7 @@ def build(
     if not _DATE.fullmatch(lastmod):
         raise WikiError(f"lastmod {lastmod!r} is not YYYY-MM-DD")
     _check_cname(out)
+    _check_og_image(out)
     terms: tuple[str, ...] = ()
     if denylist is not None:
         denylist = Path(denylist)

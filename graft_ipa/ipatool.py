@@ -3,7 +3,9 @@ say what its failures mean.
 
 ipatool (github.com/majd/ipatool) downloads the App Store's *encrypted,
 account-personalized* IPA for an app the signed-in Apple ID owns. This module
-runs `--version`, `auth info`, `auth revoke`, `download` and `purchase`.
+runs `--version`, `auth info`, `auth revoke`, `download`, `purchase`,
+`list-versions` and `get-version-metadata` (the last two for an app's older
+versions, `appstore.list_versions`).
 `auth login` is `appstore_login`'s: it types the Apple ID, the password and
 the 2FA code into ipatool's own prompts under a pseudo-terminal, so none of
 them is ever on argv or in the environment, and Graft saves none of them.
@@ -134,6 +136,26 @@ def run_ipatool(
         raise TypeError("run_ipatool builds ipatool's environment itself")
     kwargs.setdefault("stdin", subprocess.DEVNULL)
     return run([str(path), *args], env=child_env.child_env(), **kwargs)
+
+
+#: An http(s) URL's query and fragment, up to whitespace or a quote: Go's
+#: errors quote the URL they failed on.
+_URL_QUERY = re.compile(r"(\bhttps?://[^\s\"'<>?#]*)[?#][^\s\"'<>]*", re.IGNORECASE)
+
+
+def without_url_queries(text: str) -> str:
+    """`text` with every http(s) URL's query string (and fragment) cut to
+    `?…`, its host and path kept, so an error still says where it failed.
+
+    ipatool's errors can carry a version's signed download URL: Go's
+    transport names the URL a request failed on (`Get "https://iosapps.
+    itunes.apple.com/…?accessKey=…": net/http: timeout awaiting response
+    headers`), and that query is what lets anyone fetch the file. Applied
+    where ipatool's words first become a Python string (`_failure`), and
+    again by what explains them, so no message, hint, `--json` event,
+    stderr line or file written from one carries it.
+    """
+    return _URL_QUERY.sub(r"\1?…", text)
 
 
 def present(path: Path) -> bool:
@@ -661,12 +683,10 @@ def revoke(path: Path, *, run: Runner = subprocess.run) -> None:
         )
     except (OSError, subprocess.SubprocessError) as e:
         raise AppStoreError(f"couldn't run ipatool at {path}: {e}") from e
-    verdict = next(
-        (o for o in reversed(_json_lines(proc.stdout, proc.stderr)) if "success" in o), None
-    )
+    verdict = _verdict(proc)
     if verdict is not None and verdict.get("success") is True:
         return
-    error = str((verdict or {}).get("error") or "") or f"exited {proc.returncode} without saying why"
+    error = _failure(proc, verdict)
     if "could not be found" in error.lower():
         return
     raise AppStoreError(f"ipatool couldn't sign out: {error}")
@@ -689,6 +709,7 @@ def _renewal_needs_code(error: str, *, hint: str) -> AppStoreError:
 
 def explain_purchase(error: str, *, bundle_id: str, path: Path) -> AppStoreError:
     """ipatool's `purchase` errors, in words (pkg/appstore/appstore_purchase.go)."""
+    error = without_url_queries(error)
     if (first_use := unicorn_failure(error) or restore_image_failure(error)) is not None:
         return first_use
     lower = error.lower()
@@ -743,13 +764,10 @@ def purchase(path: Path, bundle_id: str, *, run: Runner = subprocess.run) -> boo
         ) from e
     except OSError as e:
         raise AppStoreError(f"couldn't run ipatool at {path}: {e}") from e
-    verdict = next(
-        (o for o in reversed(_json_lines(proc.stdout, proc.stderr)) if "success" in o), None
-    )
+    verdict = _verdict(proc)
     if verdict is not None and verdict.get("success") is True:
         return verdict.get("alreadyOwned") is True
-    error = str((verdict or {}).get("error") or "") or f"exited {proc.returncode} without saying why"
-    raise explain_purchase(error, bundle_id=bundle_id, path=path)
+    raise explain_purchase(_failure(proc, verdict), bundle_id=bundle_id, path=path)
 
 
 class LicenseRequired(AppStoreError):
@@ -758,14 +776,20 @@ class LicenseRequired(AppStoreError):
     `needs-license` refusal, with the price."""
 
 
-def explain(error: str, *, bundle_id: str, path: Path, reported_version: str | None) -> AppStoreError:
-    """Turn one of ipatool's error strings into an error with something to do.
+def account_error(error: str, *, bundle_id: str, path: Path) -> AppStoreError | None:
+    """The error to raise when ipatool's `error` isn't about this app or this
+    version at all, else None: ipatool's first-use downloads failing, a
+    sign-in that expired, is gone or the Keychain refused, or a license the
+    Apple ID doesn't have. Every other request this run makes would fail the
+    same way, so a version list stops on these (`version_metadata`) rather
+    than saying it once per version.
 
     Matched on words rather than whole sentences: these are ipatool's own Go
     error strings (`license is required`, `password token is expired`, the
     keyring lookup's "could not be found in the keyring"), which are stable
     across 2.x but wrapped differently by different commands.
     """
+    error = without_url_queries(error)
     if (first_use := unicorn_failure(error) or restore_image_failure(error)) is not None:
         return first_use
     lower = error.lower()
@@ -792,6 +816,22 @@ def explain(error: str, *, bundle_id: str, path: Path, reported_version: str | N
                 "iPad signed in to the same Apple ID, then try again"
             ),
         )
+    return None
+
+
+def explain(
+    error: str, *, bundle_id: str, path: Path, reported_version: str | None,
+    doing: str | None = None,
+) -> AppStoreError:
+    """Turn one of ipatool's error strings into an error with something to do.
+
+    `account_error` first; then ipatool's own error, said as what it was
+    `doing` ("download <bundle id>" unless told otherwise).
+    """
+    error = without_url_queries(error)
+    if (found := account_error(error, bundle_id=bundle_id, path=path)) is not None:
+        return found
+    what = doing or f"download {bundle_id}"
     if reported_version in KNOWN_BAD_VERSIONS:
         # Install advice only for a version known to be bad, and the advice
         # that takes effect for this copy: never "install to <path>" when
@@ -799,50 +839,197 @@ def explain(error: str, *, bundle_id: str, path: Path, reported_version: str | N
         # alone was 2.8.1's bug, but from any other version it is just
         # ipatool's error (the whole-diff review's get-2).
         return AppStoreError(
-            f"ipatool couldn't download {bundle_id}: {error}",
+            f"ipatool couldn't {what}: {error}",
             hint=bad_version_hint(
                 reported_version, path=path,
                 source=tools.SOURCE_BUNDLED if is_bundled(path) else None,
             ),
         )
     return AppStoreError(
-        f"ipatool couldn't download {bundle_id}: {error}",
+        f"ipatool couldn't {what}: {error}",
         hint=(
-            "that is ipatool's own error — running the same download in "
-            "Terminal may say more"
+            f"that is ipatool's own error — running the same {'command' if doing else 'download'} "
+            "in Terminal may say more"
         ),
     )
 
 
-def download(
-    path: Path, bundle_id: str, out_dir: Path, *, run: Runner = subprocess.run
-) -> Path:
-    """Download `bundle_id`'s latest encrypted IPA into `out_dir`; return the file.
+def _verdict(proc: subprocess.CompletedProcess[str]) -> dict[str, Any] | None:
+    """The last line of `proc`'s output that says `success`, or None."""
+    return next((o for o in reversed(_json_lines(proc.stdout, proc.stderr)) if "success" in o), None)
 
-    No timeout: a ~1 GB app on a slow line is legitimately slow, and the GUI's
-    Stop is the way out of one that is not.
+
+def _failure(proc: subprocess.CompletedProcess[str], verdict: dict[str, Any] | None) -> str:
+    """What a failed run said: its verdict's `error`, else its last line,
+    with no URL's query (`without_url_queries`). Every command's failure
+    is read here."""
+    error = str((verdict or {}).get("error") or "")
+    if not error:
+        tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:]
+        error = tail[0] if tail else f"exited {proc.returncode} without saying why"
+    return without_url_queries(error)
+
+
+#: How long `list-versions` may take: one App Store request.
+LIST_VERSIONS_TIMEOUT = 180
+#: How long `get-version-metadata` may take for one version: one App Store
+#: request, then the version's Info.plist read out of its IPA by range
+#: requests (appstore_get_version_metadata.go). Shorter than the list's: a
+#: listing reads up to `appstore.VERSIONS_LIMIT_MAX` of these in a row.
+VERSION_METADATA_TIMEOUT = 90
+
+#: An external version id as the App Store gives one: digits. Anything else
+#: is dropped from a listing, and refused as `--version-id`, so nothing that
+#: reaches ipatool's argv after `--external-version-id` can read as a flag.
+_EXTERNAL_ID = re.compile(r"[0-9]{1,20}")
+
+
+def is_external_version_id(value: str) -> bool:
+    """Whether `value` is an id `list_versions` could have listed."""
+    return _EXTERNAL_ID.fullmatch(value) is not None
+
+
+def list_versions(path: Path, bundle_id: str, *, run: Runner = subprocess.run) -> list[str]:
+    """`list-versions -b BUNDLE`: the external version ids the App Store
+    serves the signed-in Apple ID for `bundle_id`, in the order ipatool gives
+    them (cmd/list_versions.go logs `externalVersionIdentifiers`, a list of
+    strings, beside `bundleID` and `success`). Ids that aren't numbers are
+    dropped (`is_external_version_id`); when ipatool listed some and every
+    one was dropped, that is an error, not "no versions".
+
+    Apple answers only for an app the Apple ID has: otherwise `LicenseRequired`.
+    """
+    if not present(path):
+        raise AppStoreError(f"ipatool not found at {path}", hint=install_hint(path))
+    try:
+        proc = run_ipatool(
+            path, ["list-versions", "-b", bundle_id, "--format", "json", "--non-interactive"],
+            run=run, capture_output=True, text=True, timeout=LIST_VERSIONS_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise AppStoreError(
+            "ipatool's list of versions didn't answer within 3 minutes",
+            hint="check the connection and try again",
+        ) from e
+    except OSError as e:
+        raise AppStoreError(f"couldn't run ipatool at {path}: {e}") from e
+    verdict = _verdict(proc)
+    if verdict is None or verdict.get("success") is not True:
+        raise explain(
+            _failure(proc, verdict), bundle_id=bundle_id, path=path,
+            reported_version=version(path, run=run), doing=f"list the versions of {bundle_id}",
+        )
+    ids = verdict.get("externalVersionIdentifiers")
+    if not isinstance(ids, list):
+        raise AppStoreError("ipatool reported success but listed no versions")
+    usable = [str(i).strip() for i in ids if isinstance(i, (str, int)) and is_external_version_id(str(i).strip())]
+    if ids and not usable:
+        raise AppStoreError(
+            f"ipatool listed {len(ids)} version id(s) for {bundle_id}, and none is an App Store "
+            "version id (a number) that Graft can get",
+            hint="that is ipatool's own answer — running the same command in Terminal shows what it listed",
+        )
+    return usable
+
+
+@dataclass(frozen=True)
+class VersionMetadata:
+    """What `get-version-metadata` says of one version: its version string
+    (the IPA's CFBundleShortVersionString) and its release date as ipatool
+    prints it (RFC 3339, or None when it printed none)."""
+
+    version: str
+    release_date: str | None
+
+
+class VersionUnavailable(AppStoreError):
+    """`get-version-metadata` failed for this one version, and not for a
+    reason every other would share (`account_error`): Apple doesn't serve it
+    any more, or its IPA couldn't be read. A listing says so on that version's
+    row and goes on."""
+
+
+class VersionMetadataTimeout(AppStoreError):
+    """`get-version-metadata` didn't answer within
+    `VERSION_METADATA_TIMEOUT`. Not `VersionUnavailable`: a dropped connection
+    looks like this, and every version after it would wait as long and fail
+    the same way, so a listing stops at the first (`appstore.list_versions`)."""
+
+
+def version_metadata(
+    path: Path, bundle_id: str, external_id: str, *, run: Runner = subprocess.run
+) -> VersionMetadata:
+    """`get-version-metadata -b BUNDLE --external-version-id ID`: that
+    version's version string and release date (cmd/get_version_metadata.go
+    logs `externalVersionID`, `displayVersion`, `releaseDate` and `success`).
+
+    Raises `account_error`'s errors as they are, `VersionMetadataTimeout`
+    when ipatool doesn't answer in time, and anything else about this version
+    as `VersionUnavailable`.
     """
     if not present(path):
         raise AppStoreError(f"ipatool not found at {path}", hint=install_hint(path))
     try:
         proc = run_ipatool(
             path,
-            ["download", "-b", bundle_id, "-o", str(out_dir), "--format", "json", "--non-interactive"],
+            ["get-version-metadata", "-b", bundle_id, "--external-version-id", external_id,
+             "--format", "json", "--non-interactive"],
+            run=run, capture_output=True, text=True, timeout=VERSION_METADATA_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise VersionMetadataTimeout(
+            f"version {external_id} didn't answer within {VERSION_METADATA_TIMEOUT} seconds",
+            hint="check the connection and try again",
+        ) from e
+    except OSError as e:
+        raise AppStoreError(f"couldn't run ipatool at {path}: {e}") from e
+    verdict = _verdict(proc)
+    if verdict is None or verdict.get("success") is not True:
+        error = _failure(proc, verdict)
+        if (found := account_error(error, bundle_id=bundle_id, path=path)) is not None:
+            raise found
+        raise VersionUnavailable(f"Apple didn't describe this version (ipatool: {error})")
+    shown = verdict.get("displayVersion")
+    if not isinstance(shown, str) or not shown.strip():
+        raise VersionUnavailable("ipatool described this version without its version number")
+    released = verdict.get("releaseDate")
+    return VersionMetadata(
+        version=shown.strip(),
+        release_date=released if isinstance(released, str) and released else None,
+    )
+
+
+def download(
+    path: Path, bundle_id: str, out_dir: Path, *, external_version_id: str | None = None,
+    run: Runner = subprocess.run,
+) -> Path:
+    """Download `bundle_id`'s encrypted IPA into `out_dir`; return the file.
+
+    The latest version, or the one `external_version_id` names (an id
+    `list_versions` listed: ipatool's `--external-version-id`).
+
+    No timeout: a ~1 GB app on a slow line is legitimately slow, and the GUI's
+    Stop is the way out of one that is not.
+    """
+    if not present(path):
+        raise AppStoreError(f"ipatool not found at {path}", hint=install_hint(path))
+    if external_version_id is not None and not is_external_version_id(external_version_id):
+        raise AppStoreError(f"{external_version_id!r} isn't an App Store version id")
+    chosen = ["--external-version-id", external_version_id] if external_version_id is not None else []
+    try:
+        proc = run_ipatool(
+            path,
+            ["download", "-b", bundle_id, *chosen, "-o", str(out_dir), "--format", "json",
+             "--non-interactive"],
             run=run, capture_output=True, text=True,
         )
     except OSError as e:
         raise AppStoreError(f"couldn't run ipatool at {path}: {e}") from e
 
-    lines = _json_lines(proc.stdout, proc.stderr)
-    verdict = next((obj for obj in reversed(lines) if "success" in obj), None)
+    verdict = _verdict(proc)
     if verdict is None or verdict.get("success") is not True:
-        error = ""
-        if verdict is not None:
-            error = str(verdict.get("error") or "")
-        if not error:
-            tail = (proc.stderr.strip() or proc.stdout.strip()).splitlines()[-1:]
-            error = tail[0] if tail else f"exited {proc.returncode} without saying why"
-        raise explain(error, bundle_id=bundle_id, path=path, reported_version=version(path, run=run))
+        raise explain(_failure(proc, verdict), bundle_id=bundle_id, path=path,
+                      reported_version=version(path, run=run))
 
     named = verdict.get("output")
     if not isinstance(named, str) or not named.strip():

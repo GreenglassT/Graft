@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 private typealias Flag = CLIContract.Flag
 
@@ -80,6 +81,10 @@ struct AppDetailView: View {
     /// to know the sidebar exists. See `BuildTargetBar.onChange` for why Change
     /// navigates instead of showing the picker inline.
     let showSettings: () -> Void
+    /// Whether PlayCover is installed, and the way to its releases page, for
+    /// Build options' "This Mac" section (`MacBuildSection`). `ContentView`
+    /// passes `GraftApp`'s, which asks LaunchServices and opens the browser.
+    let playCover: PlayCover
 
     @State private var buildState: BuildState = .idle
     @State private var logLines: [LogLine] = []
@@ -91,11 +96,16 @@ struct AppDetailView: View {
     @State private var buildOptions = BuildOptions()
     @State private var showingOptions = false
     @State private var showingEditSheet = false
+    /// Get an older version…'s sheet (`AppStoreVersionsSheet`).
+    @State private var showingOlderVersions = false
     @State private var deviceCheck: DeviceCheck?
     @State private var pendingCancel: AppRecord?
     /// The app whose unverified decrypt the user is being asked about, while
     /// "Use it anyway…"'s confirmation is up (C-UNVERIFIED).
     @State private var confirmingUnverified: String?
+    /// What the last export from this pane wrote, for its confirmation and
+    /// Show in Finder. Goes when the next build starts or the app changes.
+    @State private var exported: IPAExportedRecord?
 
     /// What the last `--reconcile` said about itself, as opposed to what it
     /// changed — which arrives separately, as a re-reported delivery state on
@@ -130,7 +140,8 @@ struct AppDetailView: View {
         appStore: AppStoreStore,
         liveContainer: LiveContainerStore,
         settings: SettingsStore,
-        showSettings: @escaping () -> Void
+        showSettings: @escaping () -> Void,
+        playCover: PlayCover
     ) {
         self.app = app
         self.runner = runner
@@ -143,6 +154,7 @@ struct AppDetailView: View {
         self.liveContainer = liveContainer
         self.settings = settings
         self.showSettings = showSettings
+        self.playCover = playCover
     }
 
     var body: some View {
@@ -167,6 +179,7 @@ struct AppDetailView: View {
                     metaStrip
                     encryptedBinariesCard
                     lastBuildFailureCard
+                    exportedCard
                     deliverySection
                     ipaSection
                     tweaksSection
@@ -206,6 +219,7 @@ struct AppDetailView: View {
             buildOptions = BuildOptions()
             buildState = .idle
             logLines = []
+            exported = nil
             // The note belongs to the app it was run for, so it goes. The
             // *spinner* deliberately does not live here any more: it is
             // `store.checkingApp`, because a view-local flag reset on every
@@ -728,24 +742,45 @@ struct AppDetailView: View {
             //    implied, so nothing would reach the phone and nothing would
             //    say why. `startMacBuild` sets the flag on a copy for one
             //    launch, which is what keeps that impossible.
+            //
+            // When PlayCover isn't installed, the section says so above the
+            // button and offers Get PlayCover (`MacBuildSection`).
+            MacBuildSection(
+                playCover: playCover,
+                // The same gate as Build & Install, and for the same
+                // reason: there is one build slot. Not `isBuilding`, which
+                // is this pane's own state and says nothing about a build
+                // running for another app. Also not while this app's
+                // source IPA is being replaced, as Build & Install.
+                isBuildDisabled: store.buildingApp != nil || appStore.isBusy(app.name)
+                    || buildRefusal != nil,
+                // A Mac build of a sideload app is refused too: the
+                // refusal is the build's first step, whatever its target.
+                buildHelp: buildRefusal ?? ("Build with the stub framework PlayCover needs, then "
+                    + "hand it to PlayCover to install here. Nothing is "
+                    + "sent to the phone, and the artifact is not one a "
+                    + "phone can use."),
+                onBuild: { startMacBuild() }
+            )
+
+            Divider().background(Palette.line)
+
+            // An action too, beside Build for this Mac and for its reasons:
+            // a toggle left on would turn the next Build & Install into a
+            // file on disk. Not gated on `buildRefusal`: an export signs
+            // nothing, so a sideload app on a free Apple ID can still have one.
             VStack(alignment: .leading, spacing: 6) {
-                Text("This Mac")
+                Text("Export")
                     .labelCaps()
-                Button("Build for this Mac") { startMacBuild() }
+                Text(Self.exportBlurb)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(Self.exportLabel) { chooseExportDestination() }
                     .controlSize(.small)
-                    // The same gate as Build & Install, and for the same
-                    // reason: there is one build slot. Not `isBuilding`, which
-                    // is this pane's own state and says nothing about a build
-                    // running for another app. Also not while this app's
-                    // source IPA is being replaced, as Build & Install.
-                    .disabled(store.buildingApp != nil || appStore.isBusy(app.name)
-                              || buildRefusal != nil)
-                    // A Mac build of a sideload app is refused too: the
-                    // refusal is the build's first step, whatever its target.
-                    .help(buildRefusal ?? ("Build with the stub framework PlayCover needs, then "
-                          + "hand it to PlayCover to install here. Nothing is "
-                          + "sent to the phone, and the artifact is not one a "
-                          + "phone can use."))
+                    // The build slot, as Build for this Mac: there is one.
+                    .disabled(store.buildingApp != nil || appStore.isBusy(app.name))
+                    .help(Self.exportHelp)
             }
         }
         .font(AppFont.body)
@@ -796,6 +831,163 @@ struct AppDetailView: View {
             // promising a LiveContainer import that is never going to happen.
             delivery: options.effectiveDelivery(for: app.delivery)
         ) { await runBuild(options: options) }
+    }
+
+    static let exportLabel = "Export IPA…"
+    static let exportBlurb = "The IPA with its tweaks injected, unsigned, for an on-device "
+        + "signer or TrollStore. For your own devices."
+    static let exportHelp = "Build as far as injecting the tweaks, then save the IPA, "
+        + "unsigned. Nothing is signed or sent to a device."
+    static let exportedNote = "Unsigned, with its tweaks injected. Sign it on your device "
+        + "with an on-device signer, or install it with TrollStore."
+    static let showInFinderLabel = "Show in Finder"
+
+    /// Ask where to save the export, then start it there.
+    ///
+    /// A Save panel and nothing else: no share sheet, no upload, nothing that
+    /// sends the file anywhere. Where it goes from the folder is the user's.
+    ///
+    /// On the next turn of the run loop, after the popover has closed: a
+    /// sheet attached while it is still up lands on the popover's window.
+    private func chooseExportDestination() {
+        showingOptions = false
+        // Graft's own folders, which `startExport` refuses: read now, while
+        // the user picks a place, if nothing has read them yet.
+        if settings.paths == nil {
+            Task { _ = try? await settings.loadSettings() }
+        }
+        let filename = Self.exportFilename(
+            name: app.displayName ?? app.name,
+            version: cachedIPA.flatMap { $0.exists ? $0.version : nil }
+        )
+        DispatchQueue.main.async {
+            let panel = NSSavePanel()
+            panel.title = "Export IPA"
+            panel.message = Self.exportBlurb
+            panel.prompt = "Export"
+            panel.nameFieldStringValue = filename
+            panel.allowedContentTypes = [UTType(filenameExtension: "ipa") ?? .data]
+            panel.canCreateDirectories = true
+            panel.isExtensionHidden = false
+            let chosen = { (response: NSApplication.ModalResponse) in
+                guard response == .OK, let url = panel.url else { return }
+                startExport(to: url)
+            }
+            // A sheet on Graft's window. Right after the popover closes there
+            // may be no main window yet, so the frontmost one that can be.
+            if let window = Self.sheetParent(
+                main: NSApp.mainWindow, frontToBack: NSApp.orderedWindows,
+                usable: { $0.isVisible && $0.canBecomeMain && !($0 is NSPanel) }
+            ) {
+                panel.beginSheetModal(for: window, completionHandler: chosen)
+            } else {
+                chosen(panel.runModal())
+            }
+        }
+    }
+
+    /// The window Export IPA's Save panel attaches to as a sheet: the main
+    /// window, or, while there is none (the Build options popover has just
+    /// closed), the frontmost usable one. Nil only when no window can take
+    /// it, and then the panel runs on its own.
+    static func sheetParent<Window>(
+        main: Window?, frontToBack: [Window], usable: (Window) -> Bool
+    ) -> Window? {
+        main ?? frontToBack.first(where: usable)
+    }
+
+    /// Export this app to `url`: the build as far as cyan, written unsigned
+    /// (`--export-ipa`) into a staging folder of its own, then moved to `url`
+    /// by the app, which holds the Save panel's grant (`ExportStaging`).
+    /// Started through `store.launchExport`, which is `launchBuild` for their
+    /// reason (one build slot, one Stop, one log) and removes the staging
+    /// folder however the run ends.
+    ///
+    /// On a copy of the pane's options, as `startMacBuild` does: Dry run and
+    /// the decryption check carry over, and `activeOptions` drops the device
+    /// options an export can't take.
+    ///
+    /// Whatever stops it here is said (`store.lastError`): Graft's own folder,
+    /// no staging folder to be had, or the build slot taken while the Save
+    /// panel was up. Export IPA… used to do nothing at all for the last.
+    private func startExport(to url: URL) {
+        // The panel's answer, read as it closes: it returns a file that's
+        // already there only once the user has chosen Replace. A file that
+        // turns up later, while the build runs, is left alone.
+        let replacing = FileManager.default.fileExists(atPath: url.path)
+        Task { @MainActor in
+            // Graft's own folders, which an export won't save in: read them
+            // first if nothing has, and refuse without them.
+            if settings.paths == nil {
+                _ = try? await settings.loadSettings()
+            }
+            if let refusal = ExportStaging.refusal(for: url, paths: settings.paths) {
+                store.lastError = refusal
+                return
+            }
+            beginExport(to: url, replacing: replacing)
+        }
+    }
+
+    private func beginExport(to url: URL, replacing: Bool) {
+        if buildOptions.dryRun {
+            // A dry run writes nothing anywhere, a staging folder included:
+            // the CLI previews the user's own path, told whether the user
+            // chose Replace.
+            let options = buildOptions.exporting(to: url.path, replacing: replacing)
+            store.launchExport(
+                appName: app.name,
+                delivery: options.effectiveDelivery(for: app.delivery),
+                staging: nil
+            ) { await runBuild(options: options) }
+            return
+        }
+        let staging: ExportStaging
+        do {
+            staging = try ExportStaging.prepare(for: url, replacing: replacing)
+        } catch {
+            store.lastError = error.localizedDescription
+            return
+        }
+        // Never `--overwrite`: the staging folder is new, and the replacing
+        // is the app's (`ExportStaging.place`).
+        let options = buildOptions.exporting(to: staging.stagedFile.path, replacing: false)
+        store.launchExport(
+            appName: app.name,
+            delivery: options.effectiveDelivery(for: app.delivery),
+            staging: staging
+        ) { await runBuild(options: options, placing: staging) }
+    }
+
+    /// The Save panel's suggested name: the app's name and the version the
+    /// export will build from, as an .ipa — "Example 1.2.3.ipa".
+    ///
+    /// `/` and `:` are path separators to Finder and the file system, so they
+    /// become `-`; leading dots would hide the file.
+    static func exportFilename(name: String, version: String?) -> String {
+        func safe(_ text: String) -> String {
+            var cleaned = text.replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ":", with: "-")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            while cleaned.hasPrefix(".") { cleaned.removeFirst() }
+            return cleaned
+        }
+        let base = safe(name).isEmpty ? "App" : safe(name)
+        guard let version = version.map(safe), !version.isEmpty else { return "\(base).ipa" }
+        return "\(base) \(version).ipa"
+    }
+
+    /// The file a finished export wrote, off its stream, or nil — for a dry
+    /// run, which wrote nothing, as for a run that never got that far.
+    static func exportedRecord(in events: [BuildEvent]) -> IPAExportedRecord? {
+        events.compactMap { event -> IPAExportedRecord? in
+            if case let .ipaExported(record) = event, !record.dryRun { return record }
+            return nil
+        }.last
+    }
+
+    static func exportedTitle(_ record: IPAExportedRecord) -> String {
+        "Exported \(record.filename)"
     }
 
     /// Re-run the full scan directly, the same call the sidebar's own retry
@@ -849,6 +1041,8 @@ struct AppDetailView: View {
         case .skipInstall: buildOptions.skipInstall = false
         case .skipDecryptCheck: buildOptions.skipDecryptCheck = false
         case .device: buildOptions.deviceUDID = nil
+        // Never drawn either: `startExport` sets it on a copy.
+        case .exportIPA: buildOptions.exportPath = nil
         }
     }
 
@@ -1069,6 +1263,43 @@ struct AppDetailView: View {
                     Pasteboard.copy(message)
                 }
                 .controlSize(.small)
+            }
+            .padding(Metrics.cardPadding)
+            .cardStyle()
+        }
+    }
+
+    /// An export's short confirmation, and the way to the file.
+    ///
+    /// A card, like the failure card above it, because it says how the last
+    /// run ended; it goes when the next one starts. Show in Finder selects the
+    /// file and does nothing else with it.
+    @ViewBuilder
+    private var exportedCard: some View {
+        if let exported {
+            HStack(alignment: .top, spacing: 10) {
+                Symbols.ok.image(size: 14)
+                    .foregroundStyle(Palette.success)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(Self.exportedTitle(exported))
+                        .font(AppFont.bodyMedium)
+                        .foregroundStyle(Palette.text)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(Self.exportedNote)
+                        .font(AppFont.monoSmall)
+                        .foregroundStyle(Palette.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Button(Self.showInFinderLabel) {
+                    NSWorkspace.shared.activateFileViewerSelecting(
+                        [URL(fileURLWithPath: exported.path)]
+                    )
+                }
+                .controlSize(.small)
+                .help(exported.path)
             }
             .padding(Metrics.cardPadding)
             .cardStyle()
@@ -1372,7 +1603,8 @@ struct AppDetailView: View {
                 },
                 appName: app.displayName ?? app.name,
                 claimBlockedReason: appStore.claimBlockedReason,
-                getBlockedReason: appStore.getBlockedReason
+                getBlockedReason: appStore.getBlockedReason,
+                onOlderVersions: { showingOlderVersions = true }
             )
             // What the last get or drop staged, until the next action — a
             // drop that worked used to look exactly like one that did nothing.
@@ -1424,6 +1656,27 @@ struct AppDetailView: View {
         } message: { _ in
             Text(UnverifiedDecrypt.confirmMessage)
         }
+        .sheet(isPresented: $showingOlderVersions) {
+            AppStoreVersionsSheet(
+                app: app.name,
+                held: appStore.versions[app.name]?.heldVersion,
+                displayName: app.displayName ?? app.name,
+                store: appStore.olderVersions,
+                getBlockedReason: Self.olderVersionBlockedReason(
+                    accountBusy: appStore.getBlockedReason,
+                    busy: appStore.isBusy(app.name) || store.buildingApp == app.name
+                ),
+                onGet: { appStore.startGet(app: app.name, versionId: $0.externalId) }
+            )
+        }
+    }
+
+    /// Why the older-versions sheet's Get can't start: what blocks Get
+    /// latest, or a get, drop or build already running for this app (it
+    /// could start one while the sheet is open).
+    static func olderVersionBlockedReason(accountBusy: String?, busy: Bool) -> String? {
+        if let accountBusy { return accountBusy }
+        return busy ? "Wait for the get, drop or build running for this app to finish." : nil
     }
 
     /// One row of the attached list: the filename `config.yaml` carries, and
@@ -1707,8 +1960,11 @@ struct AppDetailView: View {
     ///   over the pane's own; `startMacBuild` hands over a copy with
     ///   `forPlaycover` set, which is what keeps the Mac target an action
     ///   instead of a state the pane can be left in.
+    /// - Parameter placing: a staged export's folder: the CLI writes there,
+    ///   and the file is moved to where the user chose once it has
+    ///   (`finishExport`).
     @MainActor
-    private func runBuild(options: BuildOptions) async {
+    private func runBuild(options: BuildOptions, placing: ExportStaging? = nil) async {
         // Captured once: `self` is a value copy, so `app` inside the event
         // callback would still name the app that started the build even after
         // the user selects a different one. That's what we want for `owner`,
@@ -1720,7 +1976,13 @@ struct AppDetailView: View {
         // Remove — before the two refreshes below go out. Neither of them is
         // part of the build, and neither should extend how long the app looks
         // like one is running.
-        let built = await runBuildProcess(owner: owner, options: options)
+        let events = await runBuildProcess(owner: owner, options: options, placing: placing)
+        let built = events != nil
+        // An export's confirmation, only once it finished cleanly: a stop or a
+        // failure after the file went down says so in the pane instead.
+        if options.exportPath != nil, logOwner == owner {
+            exported = events.flatMap(Self.exportedRecord(in:))
+        }
         // One read of the build log serving both things that want it: the meta
         // strip, and — for a Mac build — the filename PlayCover is handed. Two
         // `--builds` runs would be two answers about one build, and the second
@@ -1774,20 +2036,25 @@ struct AppDetailView: View {
         }
     }
 
-    /// - Returns: whether the CLI finished this build cleanly — not canceled,
-    ///   no throw, exit 0. The three `return false` sites below are exactly the
-    ///   three that already report a failure, so the answer cannot drift from
-    ///   what the pane paints.
+    /// - Returns: the stream's events when the CLI finished this build
+    ///   cleanly — not canceled, no throw, exit 0 — and nil otherwise. The
+    ///   three `return nil` sites below are exactly the three that already
+    ///   report a failure, so the answer cannot drift from what the pane paints.
     ///
-    ///   Only `runBuild`'s PlayCover handoff reads it, and it has to: after a
+    ///   `runBuild`'s export confirmation reads the events, for the file
+    ///   the export wrote. Its PlayCover handoff reads only whether they
+    ///   came back, and it has to: after a
     ///   cancel or a failure the newest row in the build log belongs to some
     ///   *earlier* run, which for an app built for this Mac yesterday is a
     ///   perfectly good Mac archive — handing that over would install a
     ///   stale app and look like it worked.
     @MainActor
     @discardableResult
-    private func runBuildProcess(owner: String, options: BuildOptions) async -> Bool {
+    private func runBuildProcess(
+        owner: String, options: BuildOptions, placing: ExportStaging? = nil
+    ) async -> [BuildEvent]? {
         logLines = []
+        exported = nil
         buildState = .running(stage: "starting")
         // The note describes a check of the *previous* delivery, and this build
         // is about to replace it. Leaving "the record still stands" under a
@@ -1805,8 +2072,9 @@ struct AppDetailView: View {
             // --dry-run silently became an app called "--dry-run" while the
             // real build ran for real, installing to the device.
             let arguments = [Flag.json] + options.cliArgs + [app.name]
+            let exporting = options.exportPath != nil
             let result = try await runner.stream(arguments: arguments) { event in
-                handle(event: event, owner: owner)
+                handle(event: event, owner: owner, exporting: exporting, placing: placing != nil)
             }
             // Ordered on the cancel, not on the exit status. A Stop pressed
             // after the child has already exited 0 — the continuation waits for
@@ -1824,12 +2092,16 @@ struct AppDetailView: View {
             // handoff, which would hand over an *earlier* build's archive.
             if store.wasCancelled(owner) || BuildProgress.stopReported(in: result.events) {
                 noteCancelled(result: result, owner: owner)
-                return false
+                return nil
             } else if result.exitCode != 0 {
                 report(unexplained: result, owner: owner)
-                return false
+                return nil
             }
-            return true
+            // Still holding the build slot, so the move is part of the run.
+            if let placing {
+                return finishExport(placing, events: result.events, owner: owner)
+            }
+            return result.events
         } catch {
             // `stream` throws rather than returning only when the Task was
             // already canceled before the child launched — `ProcessHandle`
@@ -1845,7 +2117,44 @@ struct AppDetailView: View {
                 store.noteBuildFailure(appName: owner, message: error.localizedDescription)
                 setBuildState(.failed(message: error.localizedDescription), owner: owner)
             }
-            return false
+            return nil
+        }
+    }
+
+    /// Move a staged export's file to where the user chose, then say how the
+    /// run ended: the line naming the file and the `build-end` the pane held
+    /// back (`ExportStaging.holdsUntilPlaced`), or a failure saying why the
+    /// file isn't there. Through `handle`, so the store's banner and failure
+    /// card, the header and the transcript all hear it the way they hear the
+    /// CLI.
+    ///
+    /// - Returns: the events, with the placed record last for the pane's
+    ///   confirmation (`exportedRecord(in:)`), or nil when it wasn't placed.
+    @MainActor
+    private func finishExport(
+        _ staging: ExportStaging, events: [BuildEvent], owner: String
+    ) -> [BuildEvent]? {
+        let elapsed = events.lazy.reversed().compactMap { event -> Double? in
+            if case let .buildEnd(_, _, _, elapsedSeconds, _) = event { return elapsedSeconds }
+            return nil
+        }.first
+        switch staging.finish(events: events) {
+        case let .success(placed):
+            handle(event: .ipaExported(placed), owner: owner)
+            handle(
+                event: .buildEnd(app: owner, ok: true, error: nil, elapsedSeconds: elapsed),
+                owner: owner
+            )
+            return events + [.ipaExported(placed)]
+        case let .failure(error):
+            handle(
+                event: .buildEnd(
+                    app: owner, ok: false, error: error.localizedDescription,
+                    elapsedSeconds: elapsed
+                ),
+                owner: owner
+            )
+            return nil
         }
     }
 
@@ -2151,10 +2460,18 @@ struct AppDetailView: View {
         }
     }
 
+    /// - Parameter exporting: the run is an export, whose first line says so:
+    ///   `→ export: example (unsigned)`. Its `build-start` names no delivery.
+    /// - Parameter placing: the export writes into a staging folder, and the
+    ///   pane moves the file into place after it: the CLI's `ipa-exported`
+    ///   and its successful `build-end` wait for that (`finishExport`).
     @MainActor
-    private func handle(event: BuildEvent, owner: String) {
+    private func handle(
+        event: BuildEvent, owner: String, exporting: Bool = false, placing: Bool = false
+    ) {
         // Everything outside the build stream is not this panel's business.
         guard let progress = event.progress else { return }
+        if placing, ExportStaging.holdsUntilPlaced(progress) { return }
         // Recorded ahead of the ownership guard, and the only line here that
         // is: these records belong to the store, not to the panel, and it is
         // the build the user navigated away from that needs them most — that
@@ -2194,6 +2511,8 @@ struct AppDetailView: View {
         default:
             break
         }
-        logLines += BuildLogView.lines(for: event)
+        logLines += exporting
+            ? BuildLogView.lines(for: event, startVerb: "export", startDetail: "unsigned")
+            : BuildLogView.lines(for: event)
     }
 }

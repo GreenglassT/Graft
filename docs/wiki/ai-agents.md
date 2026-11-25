@@ -10,9 +10,11 @@ from a request in plain English.
 An agent can take the same steps you would, in order:
 
 - search the App Store and add an app;
-- get the app's IPA from the App Store, or stage an IPA you give it;
+- get the app's IPA from the App Store, the latest version or an older one,
+  or stage an IPA you give it;
 - search Canister or your repos for tweaks, download them and attach them;
-- build the app and deliver it to your iPhone or iPad;
+- build the app and deliver it to your iPhone or iPad, or export its IPA
+  unsigned, for a signer on your phone;
 - check what's out of date, what was last delivered, and why a build failed.
 
 It reads Graft's results and its hints as it goes, so it can tell you what
@@ -46,12 +48,18 @@ if you typed the commands yourself.
 - "Check whether any of my apps has a newer version on the App Store, or any
   of my tweaks a newer release, and tell me what you'd rebuild."
 - "My last build of Example App failed. Find out why and tell me what to do."
+- "The new version of Example App broke my tweak. Get the version before it
+  from the App Store, and rebuild it once I say yes."
 
 ## What it does, and what it leaves to you
 
 AGENTS.md lets an agent search, list and check things, add an app, download
 an app your Apple ID already has, fetch and attach tweaks, and preview a
 build with `--dry-run`, without asking.
+
+It exports an IPA only when you ask, saves it only where you say, and never
+sends the file anywhere. It asks before it replaces a file that's already
+there.
 
 It tells the agent to ask you first before:
 
@@ -60,6 +68,9 @@ It tells the agent to ask you first before:
 - getting a free app your Apple ID doesn't have yet. Graft never buys
   anything: the agent asks before it adds a free app to your Apple ID's
   purchases, and a paid app is yours to buy in the App Store;
+- getting the latest version of an app that's held at an older one, or at a
+  preferred version you set in Edit App: that lets go of the hold (see
+  [Get an older version](app-store.md#get-an-older-version));
 - removing anything: an app, a tweak, a staged IPA or old builds.
 
 And it tells the agent never to:

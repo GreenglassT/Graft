@@ -165,6 +165,11 @@ DRIVERS: dict[str, Callable[[FakeTools, Path], object]] = {
     "download": _download,
     "auth login": _sign_in,
     "auth revoke": lambda f, _: ipatool.revoke(f.ipatool),
+    "list-versions": lambda f, _: f.set(versions=["800100"]) and ipatool.list_versions(
+        f.ipatool, "com.example.app"),
+    "get-version-metadata": lambda f, _: f.set(
+        version_metadata={"800100": {"version": "1.0", "date": "2026-01-01T00:00:00Z"}}
+    ) and ipatool.version_metadata(f.ipatool, "com.example.app", "800100"),
 }
 
 

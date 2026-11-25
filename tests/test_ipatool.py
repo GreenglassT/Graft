@@ -415,8 +415,9 @@ def test_a_failure_trying_again_can_fix_is_not_called_a_gone_image(error: str) -
 
 
 def test_graft_names_no_unicorn_to_any_ipatool(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Graft.app bundles no Unicorn and its ipatool is unpatched: nothing
-    sets IPATOOL_UNICORN_LIBRARY, in the app's ipatool or another."""
+    """Graft.app bundles no Unicorn, and its ipatool's one patch (the range
+    reader) leaves how it finds one alone: nothing sets
+    IPATOOL_UNICORN_LIBRARY, in the app's ipatool or another."""
     monkeypatch.delenv("IPATOOL_UNICORN_LIBRARY", raising=False)
     contents = tmp_path / "Graft.app" / "Contents"
     fakes = FakeTools(contents / "Helpers" / "bin")

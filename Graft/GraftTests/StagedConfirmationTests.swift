@@ -173,7 +173,7 @@ final class StagedConfirmationTests: XCTestCase {
             devices: DevicesStore(runner: sh), tweaksStore: TweaksStore(runner: sh),
             staged: StagedIPAStore(runner: sh), appStore: appStore,
             liveContainer: LiveContainerStore(runner: sh),
-            settings: SettingsStore(runner: sh), showSettings: {}
+            settings: SettingsStore(runner: sh), showSettings: {}, playCover: .inert
         )
         let hosted = hosted(pane, size: NSSize(width: 900, height: 900))
 
@@ -232,7 +232,7 @@ final class StagedConfirmationTests: XCTestCase {
             devices: DevicesStore(runner: sh), tweaksStore: TweaksStore(runner: sh),
             staged: StagedIPAStore(runner: sh), appStore: appStore,
             liveContainer: LiveContainerStore(runner: sh),
-            settings: SettingsStore(runner: sh), showSettings: {}
+            settings: SettingsStore(runner: sh), showSettings: {}, playCover: .inert
         )
         let hosted = hosted(pane, size: NSSize(width: 900, height: 1100))
 

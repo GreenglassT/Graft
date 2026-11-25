@@ -3,6 +3,52 @@
 What changed in each release of Graft, newest first. Each release's download
 is on [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
 
+## 2.1 (2026-11-24)
+
+### New
+
+- **Get an older version.** When a new version of an app breaks a tweak, Get
+  an older version… on the app's pane lists the versions the App Store still
+  has for your Apple ID, newest first, with their dates, and gets the one you
+  pick. Graft then holds the app at that version: builds use it, and the pane
+  says "Held at 1.2.0 · newest 1.4.0" instead of "update available", until you
+  press Get latest from App Store. Only apps your Apple ID has, Apple doesn't
+  serve every old version, and some apps refuse to run once they're too old.
+  In Terminal: `graft --appstore-versions --app <name>`, then
+  `graft --appstore-get --app <name> --version-id <id>`.
+- A preferred version set in Edit App is now a hold too: the pane says "Held
+  at", not "update available", and Get latest from App Store sets it back to
+  latest.
+- If PlayCover isn't installed, Build options on an app's pane now says so
+  above Build for this Mac, with a Get PlayCover button that opens
+  PlayCover's releases page on GitHub. Graft doesn't download or install
+  PlayCover. When handing a build to PlayCover fails because it isn't
+  installed, the error names that page too.
+- **Export IPA…** in Build options saves the app's IPA with its tweaks
+  injected, unsigned, where you choose, for an on-device signer or TrollStore
+  on your own devices. Nothing is signed or sent to a device, whatever the
+  app's delivery mode, and the export doesn't appear in Builds. In Terminal:
+  `graft example --export-ipa <file>.ipa`, which checks it can write there
+  before it builds. Under `--json`, a failed export's `build-end` says why in
+  `reason`, such as `exists` or `unwritable`.
+
+- Help › Star Graft on GitHub and Help › Support Graft on Ko-fi open those
+  pages in your browser. The same two buttons are in Settings › Version, and
+  Graft › About Graft links them too.
+
+### Fixes
+
+- Help › Check for Updates… no longer offers Update for an update Graft is
+  already downloading. It used to, and still said the update was available
+  after the banner said it was ready. Now it says the download has started
+  and the banner shows how it's going. For an update that's ready it offers
+  Restart to Update, as the banner does, and after a failed try it says why,
+  and offers Try Again when trying again can help.
+- If you put an older Graft back after an update installed, Graft no longer
+  says it couldn't update, as long as the copy you put back is 2.1 or later.
+  It now checks the update log before it says an update failed. The log's
+  times now include their offset from UTC.
+
 ## 2.0.2 (2026-11-24)
 
 Graft now updates itself.

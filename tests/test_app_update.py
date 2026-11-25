@@ -1024,3 +1024,23 @@ def test_the_app_does_not_retry_what_no_retry_can_fix() -> None:
         app_update.SIGNATURE, app_update.REQUIREMENT_FAILED, app_update.NOTARIZATION,
         app_update.NOT_NEWER, app_update.NO_TEAM,
     }
+
+
+def test_the_app_offers_try_again_only_where_trying_again_can_help() -> None:
+    """`UpdateStore.retryCantHelp` (Swift) names the reasons Check for
+    Updates… offers no Try Again for: those `refusedForWhatItIs` names, and
+    where the running copy is, which no retry changes. Each of the latter
+    must be one this module sends. Read with comments stripped."""
+    import re
+
+    from tests.cli_ast import REPO_ROOT, strip_swift_comments
+
+    swift = strip_swift_comments(
+        (REPO_ROOT / "Graft" / "Graft" / "Services" / "UpdateStore.swift").read_text()
+    )
+    found = re.search(
+        r"static let retryCantHelp: Set<String> = refusedForWhatItIs\.union\(\[(.*?)\]\)", swift, re.S,
+    )
+    assert found, "retryCantHelp is gone from UpdateStore.swift, or isn't refusedForWhatItIs and more"
+    named = set(re.findall(r'"([^"]+)"', found.group(1)))
+    assert named == {app_update.TRANSLOCATED, app_update.NOT_WRITABLE, app_update.NOT_GRAFT}

@@ -158,19 +158,24 @@ def acquire_ipa(cfg: Config, app: AppConfig) -> CachedIPA:
     if pinned == "latest":
         message = f"no IPA found for {app.name}"
         what = f"a decrypted IPA of {app.bundle_id}"
-        store_caveat = ""
+        from_store = f"(--appstore-get --app {app.name})"
     else:
         # Other versions may well be cached; saying only "no IPA found" would
-        # be false. And the App Store route cannot satisfy a pin, so say so.
+        # be false. A plain get fetches the latest and lets go of the pin
+        # (`appstore.release_hold`), so the App Store route for the pinned
+        # version is a get of that version, by its id in the list.
         message = f"no IPA found for {app.name}: version {pinned} of {app.bundle_id}"
         what = f"a decrypted IPA of version {pinned} of {app.bundle_id}"
-        store_caveat = f"; that fetches the current release, not {pinned}"
+        from_store = (
+            f"(find {pinned} in --appstore-versions --app {app.name}, then "
+            f"--appstore-get --app {app.name} --version-id <its id>)"
+        )
     raise IPANotFoundError(
         message,
         hint=(
             f"stage {what} in {cfg.cache_dir}: bring your own (--provide-ipa "
             f"<file.ipa> --app {app.name}), decrypt it on a jailbroken device "
             f"(--decrypt {app.bundle_id}), or get it from the App Store "
-            f"(--appstore-get --app {app.name}{store_caveat})"
+            f"{from_store}"
         ),
     )

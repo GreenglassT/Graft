@@ -69,13 +69,13 @@ def test_a_miss_names_all_three_remaining_sources(tmp_path: Path) -> None:
     assert str(cfg.cache_dir) in hint
 
 
-def test_a_pinned_miss_names_the_version_and_what_the_app_store_would_fetch(
+def test_a_pinned_miss_names_the_version_and_how_the_app_store_gets_it(
     tmp_path: Path,
 ) -> None:
     """A pinned app can miss with other versions cached; "no IPA found" alone
-    would be wrong. And `--appstore-get` fetches the current release, which
-    is not the pinned one — the hint has to say so rather than send the user
-    round a loop that cannot satisfy the pin."""
+    would be wrong. And a plain `--appstore-get` fetches the current release
+    and lets go of the pin, so the hint names the get of a chosen version
+    rather than send the user round a loop that drops what they pinned."""
     cfg = _cfg(tmp_path)
     _fake_ipa(cfg.cache_dir, "2.0.0")
     app = _app()
@@ -88,8 +88,8 @@ def test_a_pinned_miss_names_the_version_and_what_the_app_store_would_fetch(
     hint = exc.value.hint or ""
     assert "--provide-ipa" in hint
     assert f"--decrypt {BUNDLE}" in hint
-    assert "--appstore-get --app example" in hint
-    assert "fetches the current release, not 1.2.3" in hint
+    assert "find 1.2.3 in --appstore-versions --app example" in hint
+    assert "--appstore-get --app example --version-id <its id>" in hint
 
 
 def test_a_miss_keeps_the_old_exit_code(tmp_path: Path) -> None:

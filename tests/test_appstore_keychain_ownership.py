@@ -1223,8 +1223,9 @@ def test_the_renew_hint_is_used_only_where_status_reads_signed_in() -> None:
                         uses[f"{module.__name__.rsplit('.', 1)[-1]}.{fn.name}"] += 1
     assert uses == {
         # Each once: ipatool asked for a code to renew a sign-in `auth info`
-        # still reads (AUTH_CODE_REQUIRED).
-        "ipatool.explain": 1, "ipatool.explain_purchase": 1,
+        # still reads (AUTH_CODE_REQUIRED). `account_error` is a download's
+        # (`explain`), and a version list's and its versions' too.
+        "ipatool.account_error": 1, "ipatool.explain_purchase": 1,
         # After `account` read signed in (and not another ipatool's).
         "appstore._require_signed_in": 1,
     }

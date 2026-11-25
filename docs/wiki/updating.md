@@ -11,9 +11,11 @@ in the background, then shows **Restart to Update** in a banner at the bottom
 of the main window. If you don't restart, it installs the update when you quit
 Graft.
 - Before it calls a download ready, Graft checks it: the SHA-256 GitHub lists
-  for it, then that the app inside is Graft, newer than yours, signed by
-  Graft's developer and notarized by Apple. A download that fails any check is
-  deleted, and the banner links to the release page instead.
+  for it, then that the app inside is Graft, newer than yours, signed with
+  the same developer's Developer ID as yours and notarized by Apple. A download
+  that fails any check is deleted, and the banner links to the release page
+  instead. A Graft you built yourself, which has no Developer ID, doesn't
+  update itself.
 - The old Graft.app goes to the Trash, so you can put it back.
 - Graft never installs while it's working (a build, an install, an App Store
   download and so on). It waits until that's done, or until you quit.

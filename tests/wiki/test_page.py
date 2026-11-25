@@ -80,10 +80,21 @@ def test_page_marks_current_in_sidebar_and_header(repo, site):
     assert '<script src="/wiki/wiki.js" defer></script>' in html
     assert "family=Schibsted+Grotesk" in html
     assert '<meta property="og:url" content="https://graftipa.com/wiki/first/">' in html
-    assert '<meta property="og:image" content="https://graftipa.com/screenshot.png">' in html
     assert '<meta name="twitter:card" content="summary_large_image">' in html
     assert '<meta name="description" content="The first page.">' in html
     assert "<h1>First Page</h1>\n<p>Body.</p>" in html
+
+
+def test_page_link_preview_is_the_1200x630_card(repo, site):
+    """A shared link shows og.png, sized so feeds don't crop it, not the tall screenshot."""
+    html = _render(repo, site, "first")
+    assert '<meta property="og:image" content="https://graftipa.com/og.png">' in html
+    assert '<meta property="og:image:width" content="1200">' in html
+    assert '<meta property="og:image:height" content="630">' in html
+    assert re.search(r'<meta property="og:image:alt" content="Graft[^"]+">', html)
+    assert '<meta property="og:site_name" content="Graft">' in html
+    assert '<meta name="twitter:image" content="https://graftipa.com/og.png">' in html
+    assert "screenshot.png" not in html
 
 
 def test_page_title_and_canonical(repo, site):

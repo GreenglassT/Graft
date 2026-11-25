@@ -10,10 +10,14 @@ import SwiftUI
 /// existing `ErrorBanner` with the CLI's hint; a get the Apple ID has no
 /// license for shows Get (free) or Open in App Store instead.
 ///
-/// Always the App Store's *latest* version: there is no version picker, by
-/// the spec's decision. A get of the version already staged downloads nothing
-/// and says so (`appstore-already-staged`); Get Again, behind a confirmation,
-/// downloads it anyway.
+/// Get latest fetches the App Store's *latest* version. A get of the version
+/// already staged downloads nothing and says so (`appstore-already-staged`);
+/// Get Again, behind a confirmation, downloads it anyway.
+///
+/// **Get an older version…** opens `AppStoreVersionsSheet`, where a version
+/// the App Store still serves can be picked. Getting one holds the app at it
+/// (its `preferred_version`): the line then says "Held at 1.2.0 · newest
+/// 1.4.0", never "update available", and Get latest lets go.
 struct AppStoreSourceRow: View {
     let version: AppStoreVersionRecord?
     let isGetting: Bool
@@ -53,6 +57,8 @@ struct AppStoreSourceRow: View {
     var claimBlockedReason: String? = nil
     /// Why Get latest can't run now (`AppStoreStore.getBlockedReason`).
     var getBlockedReason: String? = nil
+    /// Get an older version… pressed: the pane opens the sheet.
+    var onOlderVersions: () -> Void = {}
 
     /// Get Again's confirmation is up.
     @State private var confirmingGetAgain = false
@@ -70,10 +76,16 @@ struct AppStoreSourceRow: View {
     /// still offers Get latest. An answer kept from that get could outlive
     /// the file it was about (deleted in the Cache pane), and Get Again's
     /// question would then call a missing file staged.
+    ///
+    /// A held app is always Get latest: that is how the hold is let go, and
+    /// it downloads nothing when the latest is staged already. Get Again
+    /// there would download the held version's newest twin again for
+    /// nothing, and leave the user wondering how to stop holding.
     static func primaryAction(
         license: AppStoreStore.LicenseNeed?, version: AppStoreVersionRecord? = nil
     ) -> PrimaryAction {
         if let license { return license.offersClaim ? .claimFree : .openInStore }
+        if version?.heldVersion != nil { return .getLatest }
         guard let store = version?.storeVersion else { return .getLatest }
         return store == version?.cachedVersion ? .getAgain : .getLatest
     }
@@ -90,8 +102,17 @@ struct AppStoreSourceRow: View {
         )
     }
 
+    static let olderVersionsButton = "Get an older version…"
+
+    /// What Get latest's help says: what it does, and that it lets go of a hold.
+    static func getLatestHelp(held: String?) -> String {
+        guard let held else { return "Download, decrypt and stage the App Store's latest version" }
+        return "Download, decrypt and stage the App Store's latest version, and stop holding this app at \(held)"
+    }
+
     static func versionLine(_ record: AppStoreVersionRecord?) -> String {
         guard let record else { return "Checking the App Store…" }
+        if let held = record.heldVersion { return heldLine(held, record) }
         guard let store = record.storeVersion else {
             return "Couldn't check the App Store: \(record.error ?? "no answer")"
         }
@@ -103,12 +124,38 @@ struct AppStoreSourceRow: View {
             : "App Store \(store) · cached \(cached) — up to date"
     }
 
+    /// The line for a held app: the version its builds use, and the newest
+    /// the App Store has. "(not staged)" when the held version's IPA isn't in
+    /// the cache any more (deleted in the Cache pane): a build would stop.
+    static func heldLine(_ held: String, _ record: AppStoreVersionRecord) -> String {
+        let staged = record.cachedVersion == held ? "" : " (not staged)"
+        guard let store = record.storeVersion else {
+            return "Held at \(held)\(staged) · couldn't check the App Store: \(record.error ?? "no answer")"
+        }
+        return store == held
+            ? "Held at \(held)\(staged) · the App Store's newest"
+            : "Held at \(held)\(staged) · newest \(store)"
+    }
+
+    /// Whether Get an older version… is offered: not while a get or claim
+    /// runs, and not while the Apple ID lacks the app (Get (free) or Open in
+    /// App Store first): the App Store lists versions only of apps it has.
+    static func offersOlderVersions(license: AppStoreStore.LicenseNeed?, isGetting: Bool, isClaiming: Bool) -> Bool {
+        license == nil && !isGetting && !isClaiming
+    }
+
     static func progressLabel(_ stage: AppStoreStage?) -> String {
         stage?.label ?? "Starting…"
     }
 
     var body: some View {
         HStack(spacing: Metrics.controlGap) {
+            if !isGetting, version?.heldVersion != nil {
+                // The line beside it says which version; the pin is drawing.
+                Symbols.held.image(size: 10)
+                    .foregroundStyle(Palette.textDim)
+                    .accessibilityHidden(true)
+            }
             // One line, truncated: a long `error` must not widen the pane
             // (see `AppDetailLayoutTests` on what unbounded text does here).
             Text(isGetting ? Self.progressLabel(stage) : Self.versionLine(version))
@@ -138,11 +185,16 @@ struct AppStoreSourceRow: View {
                 // The same Stop as a get's: the CLI is SIGTERMed.
                 Button("Stop", action: onStop)
             } else {
+                if Self.offersOlderVersions(license: license, isGetting: isGetting, isClaiming: isClaiming) {
+                    Button(Self.olderVersionsButton, action: onOlderVersions)
+                        .disabled(isBlocked || getBlockedReason != nil)
+                        .help(getBlockedReason ?? "Pick a version the App Store still has for this Apple ID, and get that one")
+                }
                 switch Self.primaryAction(license: license, version: version) {
                 case .getLatest:
                     Button("Get latest from App Store", action: onGet)
                         .disabled(isBlocked || getBlockedReason != nil)
-                        .help(getBlockedReason ?? "Download, decrypt and stage the App Store's latest version")
+                        .help(getBlockedReason ?? Self.getLatestHelp(held: version?.heldVersion))
                 case .getAgain:
                     getAgain
                 case .claimFree:

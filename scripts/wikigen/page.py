@@ -11,6 +11,14 @@ from .manifest import Manifest, Page
 from .render import Rendered
 
 SITE = "https://graftipa.com"
+# The link-preview card at the site root, which the homepage's tags name too. Feeds show
+# 1.91:1 without cropping it; build() checks the site's file is this size.
+OG_IMAGE = "og.png"
+OG_WIDTH, OG_HEIGHT = 1200, 630
+OG_ALT = (
+    "Graft's icon and name beside “Pick an app. Pick your tweaks. Graft does the rest.”, "
+    "above the Graft window with example apps and its Build & Install button."
+)
 _HEADER = re.compile(r'<header class="bar">.*?</header>', re.DOTALL)
 _FOOTER = re.compile(r"<footer>.*?</footer>", re.DOTALL)
 _ATTR = re.compile(r"""(\b(?:href|src)=)(["'])(.*?)\2""", re.DOTALL)
@@ -120,8 +128,13 @@ def render_page(page: Page, body: Rendered, manifest: Manifest, chrome: Chrome) 
 <meta property="og:title" content="{_esc(title)}">
 <meta property="og:description" content="{desc}">
 <meta property="og:url" content="{_esc(url)}">
-<meta property="og:image" content="{SITE}/screenshot.png">
+<meta property="og:site_name" content="Graft">
+<meta property="og:image" content="{SITE}/{OG_IMAGE}">
+<meta property="og:image:width" content="{OG_WIDTH}">
+<meta property="og:image:height" content="{OG_HEIGHT}">
+<meta property="og:image:alt" content="{_esc(OG_ALT)}">
 <meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="{SITE}/{OG_IMAGE}">
 <link rel="icon" href="/favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
