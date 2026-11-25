@@ -510,3 +510,56 @@ def test_the_tracked_files_and_the_source_archive_are_scanned_for_them(owner, tm
 def test_the_devices_command_takes_only_its_own_forms():
     for args in (["devices"], ["devices", "scan", "x"], ["devices", "tracked", "x"], ["devices", "app"]):
         assert _cli(*args).returncode == 2, args
+
+
+# ------------------------------------------------------- #public-allow phrases
+
+PHRASED = LIST + "#public-allow: Zed+  Chat\n#public-allow: zed+.example/AbC123\n"
+
+
+@pytest.fixture
+def phrased(tmp_path):
+    path = tmp_path / "scrub-denylist.txt"
+    path.write_text(PHRASED)
+    return dl_mod.load(path)
+
+
+@pytest.mark.parametrize("phrase", ["Zed+", "  zed+  ", "ZED+!", "zed+ zed+", "Example   game", "(zed+)"])
+def test_a_public_allow_phrase_that_is_only_a_listed_term_is_refused_by_its_line(tmp_path, phrase):
+    """`#public-allow: Zed+` would let the bare term through everywhere: refused
+    loudly, naming the line and never the phrase or the term."""
+    path = tmp_path / "scrub-denylist.txt"
+    path.write_text(LIST + f"#public-allow: {phrase}\n")
+    line = len(LIST.splitlines()) + 1
+    with pytest.raises(dl_mod.DenylistError) as e:
+        dl_mod.load(path)
+    assert f"line {line}" in str(e.value)
+    for word in ("Zed", "zed", "Example", "game"):
+        assert word not in str(e.value).split(", line")[1]
+
+
+def test_a_public_allow_phrase_with_more_than_a_term_still_loads(phrased):
+    assert len(phrased.phrases) == 2
+
+
+@pytest.mark.parametrize("text, lines", [
+    (b"join the Zed+ Chat today", []),                   # the term only inside an allowed phrase
+    (b"join the zed+   chat today", []),                 # any case, any run of whitespace
+    (b"see https://zed+.example/abc123 now", []),         # an exact link, any case
+    (b"join the Zed+ Chat, or use Zed+ itself", [ZED]),   # the same term elsewhere still hits
+    (b"zed+.example/abc124", [ZED]),                     # one character off is not the phrase
+    (b"the Zed+ app", [ZED]),
+    (b"Example Game in the Zed+ Chat", [GAME]),          # other terms are untouched
+])
+def test_a_public_allow_phrase_is_blanked_and_the_term_elsewhere_still_hits(phrased, text, lines):
+    assert phrased.lines_in(text) == lines
+
+
+def test_a_public_allow_phrase_is_blanked_inside_a_zlib_stream_too(phrased):
+    assert phrased.lines_in(zlib.compress(b"the Zed+ Chat")) == []
+    assert phrased.lines_in(zlib.compress(b"the Zed+ Chat and Zed+")) == [ZED]
+
+
+def test_a_public_allow_line_is_a_comment_not_a_term_and_allows_nothing_by_itself(phrased, listed):
+    assert [n for n, _ in phrased.entries] == [n for n, _ in listed.entries]
+    assert len(phrased.phrases) == 2 and listed.phrases == ()

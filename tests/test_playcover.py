@@ -467,3 +467,20 @@ def test_a_build_with_nothing_to_stub_never_looks_for_xcode(tmp_path, monkeypatc
     monkeypatch.setattr(playcover, "developer_dir", unasked)
 
     assert prepare_frameworks_dir(frameworks) == []
+
+
+def test_the_bundled_install_name_tool_is_in_the_folder_cyan_runs_helpers_from(tmp_path, monkeypatch):
+    """cyan runs its helpers from tools/Darwin/<platform.machine()>: arm64 in
+    Graft.zip, x86_64 in Graft-Intel.zip, whose Python reports x86_64 even
+    under Rosetta. The bundled install_name_tool is looked for in the same
+    folder, so the Intel bundle's is found."""
+    assert playcover.bundled_install_name_tool("arm64") == playcover.BUNDLED_INSTALL_NAME_TOOL
+    assert str(playcover.bundled_install_name_tool("x86_64")).endswith("cyan/tools/Darwin/x86_64/install_name_tool")
+    contents = tmp_path / "Graft.app" / "Contents"
+    helpers = contents / "Helpers" / "bin"
+    helpers.mkdir(parents=True)
+    intel = _fake_tool((contents / playcover.bundled_install_name_tool("x86_64")).parent, "install_name_tool")
+    monkeypatch.setattr(playcover.tools, "bundled_tools_dir", lambda: helpers)
+    monkeypatch.setattr(playcover, "developer_dir", lambda: None)
+    monkeypatch.setattr(playcover.platform, "machine", lambda: "x86_64")
+    assert playcover.install_name_tool() == intel

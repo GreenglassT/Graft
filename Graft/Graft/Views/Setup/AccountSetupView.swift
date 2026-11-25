@@ -20,6 +20,8 @@ struct AccountSetupView: View {
 
     @State private var choosing: Choice = .p12
     @State private var showingImporter = false
+    /// What this Mac can't do, said on Welcome (`MacSupport.firstRunLine`).
+    @Environment(\.macSupport) private var mac
 
     enum Choice { case p12, profile }
 
@@ -95,6 +97,9 @@ struct AccountSetupView: View {
         VStack(alignment: .leading, spacing: Metrics.rowGap) {
             title(Self.welcomeTitle)
             prose(Self.welcomeBody)
+            if let line = mac.firstRunLine {
+                note(line)
+            }
             Button(Self.startLabel) { store.begin() }
                 .keyboardShortcut(.defaultAction)
         }

@@ -39,7 +39,7 @@ from .app_update_fakes import (
 )
 
 TAG = "v2.0.2"
-ZIP_PATH = f"/download/{TAG}/{app_update.ASSET_NAME}"
+ZIP_PATH = f"/download/{TAG}/Graft.zip"
 
 
 @pytest.fixture
@@ -66,6 +66,10 @@ def tools(monkeypatch: pytest.MonkeyPatch) -> FakeTools:
     # The Graft.app this CLI runs from, whose signature names the team to
     # trust: a test's interpreter runs from no bundle at all.
     monkeypatch.setattr(app_update, "own_bundle", lambda: RUNNING_APP)
+    # Which build it is: asked of that bundle's Info.plist and Python
+    # (`own_flavor`), which a path to nowhere doesn't have. The tests of
+    # `own_flavor` itself build a bundle that does.
+    monkeypatch.setattr(app_update, "own_flavor", lambda app=None: fake.flavor)
     return fake
 
 
@@ -85,7 +89,7 @@ def publish(server: FixtureServer, tmp_path: Path, *, version: str = "2.0.2",
     src.mkdir()
     data = zip_app(dummy_app(src, version, bundle_id=bundle_id, marker="new"), src / "Graft.zip")
     server.serve_json("/latest", release_json(server.base, tag, data, **asset_fields))
-    server.routes[f"/download/{tag}/{app_update.ASSET_NAME}"] = Route(
+    server.routes[f"/download/{tag}/Graft.zip"] = Route(
         body=data, headers={"Content-Type": "application/octet-stream"},
     )
     return data
@@ -244,8 +248,9 @@ def _release(**asset_fields: Any) -> dict[str, Any]:
 
 
 def test_the_asset_is_read_off_the_release() -> None:
-    asset = app_update.release_asset(_release())
+    asset = app_update.release_asset(_release(), flavor=app_update.ARM64)
     assert asset == app_update.Asset(
+        name="Graft.zip",
         url=f"https://github.com/GreenglassT/Graft/releases/download/{TAG}/Graft.zip",
         size=len(b"zip bytes"), sha256=hashlib.sha256(b"zip bytes").hexdigest(),
     )
@@ -267,27 +272,29 @@ def test_the_asset_is_read_off_the_release() -> None:
 ])
 def test_an_asset_without_a_usable_url_size_or_digest_is_refused(fields: dict, reason: str) -> None:
     with pytest.raises(app_update.UpdateError) as caught:
-        app_update.release_asset(_release(**fields))
+        app_update.release_asset(_release(**fields), flavor=app_update.ARM64)
     assert caught.value.reason == reason
 
 
-def test_no_graft_zip_or_two_of_them_is_no_asset() -> None:
+def test_no_graft_zip_is_no_update_for_this_mac_and_two_of_them_is_no_asset() -> None:
     data = _release()
     data["assets"] = [a for a in data["assets"] if a["name"] != "Graft.zip"]
     with pytest.raises(app_update.UpdateError) as caught:
-        app_update.release_asset(data)
-    assert caught.value.reason == app_update.NO_ASSET
+        app_update.release_asset(data, flavor=app_update.ARM64)
+    assert caught.value.reason == app_update.NOT_FOR_THIS_MAC
+    assert "has no Graft.zip, the download for Macs with Apple silicon" in caught.value.message
+    assert "no update for this Mac" in caught.value.message
 
     data = _release()
     data["assets"].append(dict(data["assets"][1]))
     with pytest.raises(app_update.UpdateError) as caught:
-        app_update.release_asset(data)
+        app_update.release_asset(data, flavor=app_update.ARM64)
     assert caught.value.reason == app_update.NO_ASSET
 
 
 def test_an_answer_without_assets_is_malformed() -> None:
     with pytest.raises(app_update.UpdateError) as caught:
-        app_update.release_asset({"tag_name": TAG})
+        app_update.release_asset({"tag_name": TAG}, flavor=app_update.ARM64)
     assert caught.value.reason == app_update.MALFORMED
 
 
@@ -395,7 +402,7 @@ def test_each_signature_check_fails_on_its_own(tmp_path: Path, setting: str, rea
     fake = FakeTools()
     setattr(fake, setting, False)
     with pytest.raises(app_update.UpdateError) as caught:
-        app_update.verify_app(app, newer_than="2.0.1", team=TEAM, run=fake, progress=lambda _: None)
+        app_update.verify_app(app, newer_than="2.0.1", team=TEAM, flavor=app_update.ARM64, run=fake, progress=lambda _: None)
     assert caught.value.reason == reason
 
 
@@ -404,7 +411,7 @@ def test_developer_id_that_is_not_notarized_is_refused(tmp_path: Path) -> None:
     fake = FakeTools()
     fake.source = "Developer ID"
     with pytest.raises(app_update.UpdateError) as caught:
-        app_update.verify_app(app, newer_than="2.0.1", team=TEAM, run=fake, progress=lambda _: None)
+        app_update.verify_app(app, newer_than="2.0.1", team=TEAM, flavor=app_update.ARM64, run=fake, progress=lambda _: None)
     assert caught.value.reason == app_update.NOTARIZATION
 
 
@@ -412,9 +419,9 @@ def test_the_checks_run_in_order_with_the_pinned_requirement(tmp_path: Path) -> 
     app = dummy_app(tmp_path, "2.0.2")
     fake = FakeTools()
     events: list[dict] = []
-    assert app_update.verify_app(app, newer_than="2.0.1", team=TEAM, run=fake, progress=events.append) == "2.0.2"
+    assert app_update.verify_app(app, newer_than="2.0.1", team=TEAM, flavor=app_update.ARM64, run=fake, progress=events.append) == "2.0.2"
     assert fake.tools_run() == ["signature", "requirement", "stapled", "spctl"]
-    assert [e["check"] for e in events] == ["bundle", "signature", "requirement", "notarization"]
+    assert [e["check"] for e in events] == ["bundle", "architecture", "signature", "requirement", "notarization"]
     signature, requirement, stapled, gatekeeper = fake.calls
     assert signature == ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)]
     assert requirement == ["/usr/bin/codesign", "--verify", "--strict", "-R", "=" + app_update.requirement(TEAM),
@@ -428,7 +435,7 @@ def test_a_failed_check_stops_the_rest(tmp_path: Path) -> None:
     fake = FakeTools()
     fake.signature_ok = False
     with pytest.raises(app_update.UpdateError):
-        app_update.verify_app(app, newer_than="2.0.1", team=TEAM, run=fake, progress=lambda _: None)
+        app_update.verify_app(app, newer_than="2.0.1", team=TEAM, flavor=app_update.ARM64, run=fake, progress=lambda _: None)
     assert fake.tools_run() == ["signature"]
 
 
@@ -823,7 +830,7 @@ def test_install_update_starts_the_helper_and_says_so(
     ((argv, env),) = spawned.calls
     assert argv == ["/bin/sh", "-c", app_update.HELPER, "graft-update-helper"]
     assert env == app_update.helper_env(
-        pid=waiting_pid, app=installed, staged=staged, version="2.0.2", relaunch=True,
+        pid=waiting_pid, app=installed, staged=staged, version="2.0.2", flavor=app_update.ARM64, relaunch=True,
         log=log, trash=Path.home() / ".Trash", team=TEAM,
     )
     assert env["GRAFT_UPDATE_REQUIREMENT"] == app_update.requirement(TEAM)
@@ -1021,8 +1028,8 @@ def test_the_app_does_not_retry_what_no_retry_can_fix() -> None:
     named = set(re.findall(r'"([^"]+)"', found.group(1)))
     assert named == {
         app_update.NO_ASSET, app_update.DIGEST, app_update.ARCHIVE, app_update.BUNDLE,
-        app_update.SIGNATURE, app_update.REQUIREMENT_FAILED, app_update.NOTARIZATION,
-        app_update.NOT_NEWER, app_update.NO_TEAM,
+        app_update.ARCHITECTURE, app_update.SIGNATURE, app_update.REQUIREMENT_FAILED,
+        app_update.NOTARIZATION, app_update.NOT_NEWER, app_update.NO_TEAM, app_update.MIXED_BUILD,
     }
 
 
@@ -1030,7 +1037,9 @@ def test_the_app_offers_try_again_only_where_trying_again_can_help() -> None:
     """`UpdateStore.retryCantHelp` (Swift) names the reasons Check for
     Updates… offers no Try Again for: those `refusedForWhatItIs` names, and
     where the running copy is, which no retry changes. Each of the latter
-    must be one this module sends. Read with comments stripped."""
+    must be one this module sends. Not a release without this build's zip
+    (`NOT_FOR_THIS_MAC`): the zip can be added to the release at any time,
+    and Try Again then gets it. Read with comments stripped."""
     import re
 
     from tests.cli_ast import REPO_ROOT, strip_swift_comments
@@ -1039,8 +1048,34 @@ def test_the_app_offers_try_again_only_where_trying_again_can_help() -> None:
         (REPO_ROOT / "Graft" / "Graft" / "Services" / "UpdateStore.swift").read_text()
     )
     found = re.search(
-        r"static let retryCantHelp: Set<String> = refusedForWhatItIs\.union\(\[(.*?)\]\)", swift, re.S,
+        r"static let retryCantHelp: Set<String> = refusedForWhatItIs\.subtracting\(worthTryingAgain\)"
+        r"\.union\(\[(.*?)\]\)", swift, re.S,
     )
-    assert found, "retryCantHelp is gone from UpdateStore.swift, or isn't refusedForWhatItIs and more"
+    assert found, ("retryCantHelp is gone from UpdateStore.swift, or isn't refusedForWhatItIs, "
+                   "less worthTryingAgain, and more")
     named = set(re.findall(r'"([^"]+)"', found.group(1)))
     assert named == {app_update.TRANSLOCATED, app_update.NOT_WRITABLE, app_update.NOT_GRAFT}
+
+
+def test_the_app_offers_try_again_after_a_corrupt_transfer() -> None:
+    """`UpdateStore.worthTryingAgain` (Swift): of the reasons refused for
+    what the download is, the one where what arrived may not be what was
+    published, so the next try can work: bytes that didn't match GitHub's
+    SHA-256 or ran past its size (`DIGEST`). Check for Updates… offers Try
+    Again for it; it still isn't downloaded again on its own
+    (`refusedForWhatItIs` keeps it), since a release that is broken for
+    everyone would cost a whole download each time.
+
+    Not `ARCHIVE`: it comes only after the bytes matched GitHub's SHA-256
+    and there was room to unpack them, so another download of the same
+    bytes fails the same way. Read with comments stripped."""
+    import re
+
+    from tests.cli_ast import REPO_ROOT, strip_swift_comments
+
+    swift = strip_swift_comments(
+        (REPO_ROOT / "Graft" / "Graft" / "Services" / "UpdateStore.swift").read_text()
+    )
+    found = re.search(r"static let worthTryingAgain: Set<String> = \[(.*?)\]", swift, re.S)
+    assert found, "worthTryingAgain is gone from UpdateStore.swift"
+    assert set(re.findall(r'"([^"]+)"', found.group(1))) == {app_update.DIGEST}

@@ -1,12 +1,23 @@
 # Every artifact the release bundles, by exact URL and SHA-256.
 # scripts/graft_bundle.py refuses anything whose hash differs. `version` is
 # what Resources/Licenses/components.json reports (cyan's is its commit).
+#
+# Each table is what the arm64 bundle (Graft.zip, for Apple silicon) takes.
+# The x86_64 bundle (Graft-Intel.zip, for Intel Macs) takes the same, but
+# for a table's `[<pin>.x86_64]`, which swaps in its own url and sha256 (and
+# `build = "source"` for a source archive the stage builds), and leaves out
+# a pin whose `archs` doesn't name x86_64. Source, and the Go toolchain that
+# cross-compiles, are the same for both; the one source archive covers both.
 
 [python]
 version = "3.13.18+20261026"
 url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18+20261026-aarch64-apple-darwin-install_only.tar.gz"
 sha256 = "e5af2fde6a937a0e0c795a0c595c4efb70578d57463a2657c819992b9b9acbac"
 license = "PSF-2.0"
+
+[python.x86_64]
+url = "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/cpython-3.13.18+20261026-x86_64-apple-darwin-install_only.tar.gz"
+sha256 = "708be9e7df297f68bdae589ea9e62a621db5abe7708f79e851c41410347452d1"
 
 # ipatool is built here from its v2.8.0 source (commit 72c47d5, the tag's),
 # with [go] and one patch, to how get-version-metadata reads an IPA
@@ -47,12 +58,24 @@ version = "0.4.0"
 url = "https://github.com/DrWhax/unfairplay/archive/d7503082a59e3dcfdd3ea7a70434dcecaaaf07df.tar.gz"
 sha256 = "0bbaacd1ef45887fa29c20a46dfdef2ca015b792769962b9ae31193ba40a32b4"
 license = "MIT AND Apache-2.0 AND BSD-3-Clause"
+# It decrypts by running the iOS app, which only Apple silicon can: the
+# Intel bundle doesn't carry it, and the CLI refuses decryption there.
+archs = ["arm64"]
 
 [zsign]
 version = "1.1.3"
 url = "https://github.com/zhlynn/zsign/releases/download/v1.1.3/zsign-macos-arm64.tar.gz"
 sha256 = "2790ec58a55db5f4282843d0cdbb0b587d19b972331b5285aee2de67f4ab705e"
 license = "MIT"
+
+# zsign publishes no macOS x86_64 build, so the Intel bundle's is built here
+# from the same release's source: v1.1.3, the tag's commit (9299685), with
+# its own Makefile and the bundled OpenSSL. Its archive also carries
+# prebuilt Windows libraries and test dylibs, which the build never reads.
+[zsign.x86_64]
+url = "https://github.com/zhlynn/zsign/archive/9299685bab7ef99827e06e5dfda93af747386590.tar.gz"
+sha256 = "97bcc2dbbc0dc5f092dc4a33cbe1f9fdbd5c83bdc291da23db45044d4396270e"
+build = "source"
 
 [openssl]
 version = "3.5.9"
@@ -67,7 +90,8 @@ sha256 = "18ae976100c518c4b80ed485d13a4b515ca7bf5d47cc818df47efd12d5929b05"
 license = "Unlicense"
 
 # ---- Built from source: cyan's helpers, in place of the prebuilt copies its
-# archive carries. Each is compiled for arm64, macOS 14.0 (MACOS_MIN), outside any .app.
+# archive carries. Each is compiled for the bundle's architecture, macOS 14.0
+# (MACOS_MIN), outside any .app.
 #
 # The three `archive/<commit>.tar.gz` URLs are tarballs GitHub generates on
 # request, not files anyone uploaded. If GitHub ever changes how it makes

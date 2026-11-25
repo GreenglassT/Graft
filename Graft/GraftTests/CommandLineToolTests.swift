@@ -666,6 +666,11 @@ final class CommandLineToolTests: XCTestCase {
         XCTAssertEqual(SupportLinks.koFi.absoluteString, "https://ko-fi.com/greenglasst")
         XCTAssertEqual(SupportLinks.starTitle, "Star Graft on GitHub")
         XCTAssertEqual(SupportLinks.supportTitle, "Support Graft on Ko-fi")
+        XCTAssertEqual(SupportLinks.communityInvite.absoluteString, "https://discord.gg/dnJTnu3X7X")
+        XCTAssertEqual(SupportLinks.communityTitle, "Join the Graft Discord")
+        XCTAssertEqual(SupportLinks.all.map(\.title), [
+            SupportLinks.starTitle, SupportLinks.supportTitle, SupportLinks.communityTitle,
+        ])
     }
 
     /// About Graft links both pages under their titles, after the notice
@@ -675,7 +680,7 @@ final class CommandLineToolTests: XCTestCase {
         let text = credits.string as NSString
         XCTAssertTrue(credits.string.hasPrefix(AboutGraft.notice(version: "2.1")), credits.string)
         let release = text.range(of: AboutGraft.releasesURL.absoluteString)
-        for (title, url) in [(SupportLinks.starTitle, SupportLinks.repository), (SupportLinks.supportTitle, SupportLinks.koFi)] {
+        for (title, url) in SupportLinks.all {
             let range = text.range(of: title)
             XCTAssertNotEqual(range.location, NSNotFound, credits.string)
             XCTAssertGreaterThan(range.location, release.location, "\(title) comes after the release page")
@@ -690,6 +695,7 @@ final class CommandLineToolTests: XCTestCase {
         let titles = help.items.map(\.title)
         XCTAssertTrue(titles.contains(SupportLinks.starTitle), "\(titles)")
         XCTAssertTrue(titles.contains(SupportLinks.supportTitle), "\(titles)")
+        XCTAssertTrue(titles.contains(SupportLinks.communityTitle), "\(titles)")
     }
 
     /// The old Credits.rtf, which said "Graft is MIT licensed", no longer

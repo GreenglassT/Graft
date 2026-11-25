@@ -40,6 +40,12 @@ letter or digit just before or after it. Lines starting with `#` are
 comments. One kind of comment means something here and nothing to the wiki
 build: `#release-allow: <term>` lets the release carry a listed term (a
 component the app has to name, say) while the wiki stays scrubbed of it.
+Another, `#public-allow: <phrase>`, means the same to both: wherever that
+exact phrase appears (case-insensitively, its words separated by any run of
+whitespace), it is blanked before the terms are looked for, so a listed term
+inside it is allowed and the same term anywhere else is still a hit. It is
+for one exact public string, such as a project's own invite link, never a
+bare term.
 
 A list that can't be read is a failure, never a pass. GRAFT_SKIP_DENYLIST=1
 skips the scans, and every one says so loudly.
@@ -80,6 +86,8 @@ PATH_ENV = "GRAFT_SCRUB_DENYLIST"
 SKIP_ENV = "GRAFT_SKIP_DENYLIST"
 #: The comment that lets the release carry a listed term.
 _ALLOW = re.compile(r"#\s*release-allow:\s*(.*)")
+#: The comment that allows one exact phrase holding a term, everywhere.
+_PUBLIC = re.compile(r"#\s*public-allow:\s*(.*)")
 
 
 def default_path() -> Path:
@@ -109,6 +117,20 @@ def _normal(term: str) -> str:
     return " ".join(term.split()).lower()
 
 
+def only_a_term(phrase: str, terms: list[str]) -> bool:
+    """Whether a `#public-allow` phrase is nothing but a listed term: with
+    every listed term taken out (case and whitespace aside), no letter or
+    digit is left. Such a phrase would allow the bare term everywhere, which
+    `#public-allow` never means. scripts/wikigen/scrub.py asks the same."""
+    rest = _normal(phrase)
+    for term in terms:
+        if (t := _normal(term)) and t in rest:
+            stripped = rest.replace(t, "")
+            if not any(ch.isalnum() for ch in stripped):
+                return True
+    return False
+
+
 def _body(term: str) -> bytes:
     """A term as the wiki build's pattern (scripts/wikigen/scrub.py), for
     lowercased bytes: ASCII letters fold, as bytes.lower() folds them."""
@@ -130,6 +152,8 @@ class Denylist:
     #: all, and each entry's own pattern runs only where one does. Hits are
     #: rare, and the app and the source archive are hundreds of MB.
     any_term: re.Pattern[bytes] | None
+    #: The `#public-allow:` phrases, blanked before the terms are looked for.
+    phrases: tuple[re.Pattern[bytes], ...] = ()
 
     def lines_in(self, data: bytes, *, inflate: bool = True) -> list[int]:
         """The line numbers of the terms `data` holds, in its bytes or (with
@@ -142,6 +166,8 @@ class Denylist:
         found: set[int] = set()
         for text in itertools.chain((data,), inflated_streams(data) if inflate else ()):
             low = text.lower()
+            for phrase in self.phrases:
+                low = phrase.sub(lambda m: b" " * len(m[0]), low)
             if self.any_term.search(low):
                 found.update(line for line, p in self.entries if line not in found and p.search(low))
         return sorted(found)
@@ -159,21 +185,32 @@ def load(path: Path | None = None) -> Denylist:
         raise DenylistError(f"the deny-list at {path} isn't UTF-8 (byte {e.start})") from None
     except OSError as e:
         raise DenylistError(f"can't read the deny-list at {path}: {e.strerror}") from None
-    allow, terms = set(), []
+    allow, terms, phrases, public = set(), [], [], []
     for number, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if m := _ALLOW.fullmatch(line):
             if m[1].strip():
                 allow.add(_normal(m[1]))
+        elif m := _PUBLIC.fullmatch(line):
+            if m[1].strip():
+                public.append((number, m[1]))
         elif line and not line.startswith("#"):
             terms.append((number, line))
     if not terms:
         raise DenylistError(f"the deny-list at {path} holds no term")
+    for number, phrase in public:
+        if only_a_term(phrase, [t for _, t in terms]):
+            raise DenylistError(
+                f"the deny-list at {path}, line {number}: a #public-allow phrase must be more than "
+                "a listed term, or it would let the bare term through everywhere"
+            )
+        phrases.append(re.compile(_body(phrase)))
     scanned = [(n, t) for n, t in terms if _normal(t) not in allow]
     bodies = sorted({_body(t) for _, t in scanned}, key=len, reverse=True)
     return Denylist(path=path, entries=tuple((n, _bounded(_body(t))) for n, t in scanned),
                     allowed=tuple(n for n, t in terms if _normal(t) in allow),
-                    any_term=_bounded(rb"(?:" + rb"|".join(bodies) + rb")") if bodies else None)
+                    any_term=_bounded(rb"(?:" + rb"|".join(bodies) + rb")") if bodies else None,
+                    phrases=tuple(phrases))
 
 
 # ------------------------------------------------------------ zlib streams
@@ -713,7 +750,8 @@ def main(argv: list[str]) -> int:
         return 1
     if argv[0] == "check":
         allowed = f", {len(dl.allowed)} of them allowed in a release (#release-allow)" if dl.allowed else ""
-        print(f"  deny-list: {len(dl.entries) + len(dl.allowed)} terms from {dl.path}{allowed}")
+        phrases = f", {len(dl.phrases)} exact phrases allowed (#public-allow)" if dl.phrases else ""
+        print(f"  deny-list: {len(dl.entries) + len(dl.allowed)} terms from {dl.path}{allowed}{phrases}")
         return 0
     if argv[0] == "tracked":
         return _report(scan_tracked(Path(argv[1]), argv[2], dl), f"the tracked files a public export of {argv[2]} carries")

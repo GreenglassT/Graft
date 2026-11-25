@@ -123,6 +123,9 @@ REASON_IPATOOL_CHANGED = "ipatool-changed"
 #: Store's frameworks from, the first time (`ipatool.restore_image_failure`).
 #: Its own reason, not "network": trying again can't fix it.
 REASON_RESTORE_IMAGE = "restore-image-gone"
+#: An Intel Mac, or the Intel build of Graft: no App Store request runs there
+#: (`appstore.store_requests_blocker`). Its own sentence, with the reason.
+REASON_NEEDS_APPLE_SILICON = "needs-apple-silicon"
 REASON_OTHER = "other"
 
 #: What the sign-in sheet says for each, in words a person can act on.
@@ -169,6 +172,7 @@ MESSAGES: dict[str, str] = {
         "didn't sign in."
     ),
     REASON_RESTORE_IMAGE: ipatool.RESTORE_IMAGE_GONE,
+    REASON_NEEDS_APPLE_SILICON: "App Store sign-in and downloads need a Mac with Apple silicon and Graft.zip.",
     REASON_OTHER: "ipatool couldn't sign in.",
 }
 
@@ -850,6 +854,12 @@ def run(
     progress = Progress()
     source = ""
     try:
+        # First: before stdin is read, ipatool is looked for or anything in
+        # the login keychain is touched.
+        from .appstore import store_requests_blocker
+
+        if (refusal := store_requests_blocker()) is not None:
+            raise LoginFailed(REASON_NEEDS_APPLE_SILICON, refusal.message, hint=refusal.hint)
         tools_cfg = cfg.appstore
         explicit = "ipatool" in tools_cfg.explicit
         path = ipatool.locate(tools_cfg.ipatool, explicit=explicit)

@@ -25,6 +25,9 @@ struct ExportFileOps {
     /// the old file's, which `replaceItemAt` does by default.
     var replaceItem: (_ original: URL, _ replacement: URL) throws -> Void
     var moveItem: (_ from: URL, _ to: URL) throws -> Void
+    /// Copy `from` to the new file `to`. Run off the main actor
+    /// (`ExportStaging.place`), and stopped by canceling the task it runs in:
+    /// `live`'s throws `CancellationError` and leaves nothing at `to`.
     var copyItem: (_ from: URL, _ to: URL) throws -> Void
     var removeItem: (URL) throws -> Void
 
@@ -46,9 +49,77 @@ struct ExportFileOps {
                 )
             },
             moveItem: { try files.moveItem(at: $0, to: $1) },
-            copyItem: { try files.copyItem(at: $0, to: $1) },
+            copyItem: { try copyStoppably(from: $0, to: $1) },
             removeItem: { try files.removeItem(at: $0) }
         )
+    }
+
+    /// `copyfile(3)` with what `FileManager.copyItem` copies of a file (its
+    /// data, mode and extended attributes), never over a file at `to`, and
+    /// stopped when the task it runs in is canceled: a Stop mid-copy. Between
+    /// chunks, copyfile asks its status callback whether to go on, and
+    /// `COPYFILE_QUIT` ends the copy with ECANCELED and removes what it wrote.
+    ///
+    /// - Parameter eachChunk: told how many bytes are copied after each chunk
+    ///   is written, just before the callback asks whether to go on: a test's
+    ///   way to stop a copy partway through. Nil in the app.
+    static func copyStoppably(
+        from: URL, to: URL, eachChunk: ((_ copied: Int64) -> Void)? = nil
+    ) throws {
+        guard let state = copyfile_state_alloc() else {
+            throw copyFailure(errno: errno, saving: to)
+        }
+        defer { copyfile_state_free(state) }
+        let goOn: copyfile_callback_t = { what, stage, state, _, _, context in
+            if what == COPYFILE_COPY_DATA, stage == COPYFILE_PROGRESS, let context {
+                var copied: off_t = 0
+                copyfile_state_get(state, UInt32(COPYFILE_STATE_COPIED), &copied)
+                Unmanaged<ChunkWatch>.fromOpaque(context).takeUnretainedValue().eachChunk(Int64(copied))
+            }
+            return Task.isCancelled ? COPYFILE_QUIT : COPYFILE_CONTINUE
+        }
+        copyfile_state_set(
+            state, UInt32(COPYFILE_STATE_STATUS_CB), unsafeBitCast(goOn, to: UnsafeRawPointer.self)
+        )
+        let watch = eachChunk.map(ChunkWatch.init)
+        if let watch {
+            copyfile_state_set(
+                state, UInt32(COPYFILE_STATE_STATUS_CTX), Unmanaged.passUnretained(watch).toOpaque()
+            )
+        }
+        let (status, code) = withExtendedLifetime(watch) {
+            (copyfile(from.path, to.path, state, copyfile_flags_t(COPYFILE_ALL | COPYFILE_EXCL)), errno)
+        }
+        guard status != 0 else { return }
+        if code == ECANCELED { throw CancellationError() }
+        throw copyFailure(errno: code, saving: to)
+    }
+
+    /// A failed copy's `errno` as FileManager says it, naming `file`, the
+    /// file being saved: "You don't have permission to save the file “X.ipa”
+    /// in the folder “Exports”". Never the file read, which for Export IPA…
+    /// is in the staging folder.
+    static func copyFailure(errno code: Int32, saving file: URL) -> CocoaError {
+        let cocoa: CocoaError.Code
+        switch code {
+        case ENOSPC, EDQUOT: cocoa = .fileWriteOutOfSpace
+        case EACCES, EPERM: cocoa = .fileWriteNoPermission
+        case EROFS: cocoa = .fileWriteVolumeReadOnly
+        case EEXIST: cocoa = .fileWriteFileExists
+        case ENOENT: cocoa = .fileNoSuchFile
+        default: cocoa = .fileWriteUnknown
+        }
+        return CocoaError(cocoa, userInfo: [
+            NSFilePathErrorKey: file.path,
+            NSUnderlyingErrorKey: NSError(domain: NSPOSIXErrorDomain, code: Int(code)),
+        ])
+    }
+
+    /// `copyStoppably`'s `eachChunk`, for copyfile's callback, which takes a
+    /// pointer and no closure.
+    private final class ChunkWatch {
+        let eachChunk: (Int64) -> Void
+        init(_ eachChunk: @escaping (Int64) -> Void) { self.eachChunk = eachChunk }
     }
 }
 
@@ -118,12 +189,21 @@ struct ExportStaging {
     /// the build ran, with no Replace, is left alone and nothing is saved:
     /// the CLI's own "appeared while building" guard never sees this path.
     /// Otherwise a move, which itself refuses to write over a file that
-    /// appears at the last moment. The fallback's folder may be on
+    /// appears at the last moment, or while the copy below runs: that's
+    /// the same refusal, `appeared`. The fallback's folder may be on
     /// another volume, so its file is copied in beside the destination first
     /// and moved or replaced from there: a copy that fails leaves the old
     /// file as it was and nothing half-written in its place.
+    ///
+    /// On the main actor, as the pane is, but the copy isn't (`copyOffMain`):
+    /// a big IPA copied to another volume froze the window, Stop with it.
+    /// A Stop during the copy ends it, removes what it wrote, places nothing
+    /// and throws `CancellationError`, as itself, so the pane says stopped.
+    /// The copy's errors name the user's file and folder, not the hidden
+    /// copy's name or the staging folder.
+    @MainActor
     @discardableResult
-    func place() throws -> Bool {
+    func place() async throws -> Bool {
         let there = ops.fileExists(destination)
         if there && !replacing {
             throw ExportStagingError.appeared(destination: destination)
@@ -136,33 +216,168 @@ struct ExportStaging {
                     ".\(destination.lastPathComponent).graft-\(UUID().uuidString.prefix(8))"
                 )
                 beside = copy
-                try ops.copyItem(stagedFile, copy)
+                do {
+                    try await copyOffMain(stagedFile, to: copy)
+                } catch let error as CocoaError {
+                    throw sayingTheDestination(error)
+                }
+                // A Stop as the copy finished: still nothing placed.
+                try Task.checkCancellation()
                 source = copy
             }
             if there {
                 try ops.replaceItem(destination, source)
             } else {
-                try ops.moveItem(source, destination)
+                do {
+                    try ops.moveItem(source, destination)
+                } catch let error where Self.alreadyThere(error) {
+                    // A file saved at the destination since the check above,
+                    // while the copy ran: the move left it alone.
+                    throw ExportStagingError.appeared(destination: destination)
+                }
             }
         } catch {
             if let beside { try? ops.removeItem(beside) }
+            if error is CancellationError { throw error }
+            if case .appeared? = error as? ExportStagingError { throw error }
             throw ExportStagingError.notPlaced(destination: destination, underlying: error)
         }
         return there
     }
 
+    /// A copy's error said as the file the user chose: the copy names the
+    /// hidden file it was saving beside it.
+    private func sayingTheDestination(_ error: CocoaError) -> CocoaError {
+        var info = error.userInfo
+        info[NSFilePathErrorKey] = destination.path
+        info[NSURLErrorKey] = nil
+        return CocoaError(error.code, userInfo: info)
+    }
+
+    /// Whether a move failed because a file is already at its destination,
+    /// as FileManager says it or as the system call does.
+    private static func alreadyThere(_ error: Error) -> Bool {
+        let said = error as NSError
+        return (said.domain == NSCocoaErrorDomain && said.code == NSFileWriteFileExistsError)
+            || (said.domain == NSPOSIXErrorDomain && said.code == Int(EEXIST))
+    }
+
+    /// `ops.copyItem`, in a task of its own off the main actor, canceled
+    /// when the calling task is (Stop).
+    private func copyOffMain(_ from: URL, to: URL) async throws {
+        let copyItem = ops.copyItem
+        let copying = Task.detached(priority: .userInitiated) { try copyItem(from, to) }
+        try await withTaskCancellationHandler {
+            try await copying.value
+        } onCancel: {
+            copying.cancel()
+        }
+    }
+
     /// What a finished export wrote, placed: the CLI's `ipa-exported`, moved
     /// to `destination` and said as being there, or why it isn't.
-    func finish(events: [BuildEvent]) -> Result<IPAExportedRecord, Error> {
+    @MainActor
+    func finish(events: [BuildEvent]) async -> Result<IPAExportedRecord, Error> {
         guard let made = AppDetailView.exportedRecord(in: events) else {
             return .failure(ExportStagingError.notReported(destination: destination))
         }
         do {
-            let replaced = try place()
+            let replaced = try await place()
             return .success(made.placed(at: destination, replaced: replaced))
         } catch {
             return .failure(error)
         }
+    }
+
+    /// How a staged export's run ended, once the CLI exited 0 (`finishRun`).
+    enum Ending {
+        /// The file is in place: the stream's events, and the placed record.
+        case placed([BuildEvent])
+        /// It isn't, and the pane heard why.
+        case failed
+        /// Stop was pressed while the file was being placed.
+        case stopped
+    }
+
+    /// Place the CLI's file, then tell the pane (`say`, its event handler)
+    /// how the run ended: the line naming the file where the user chose it
+    /// and the successful `build-end` it held back (`holdsUntilPlaced`), or
+    /// a failed `build-end` saying why the file isn't there, with the CLI's
+    /// time. A Stop during the placing says nothing here: the pane says it
+    /// was stopped (`AppDetailView.finishExport`).
+    @MainActor
+    func finishRun(events: [BuildEvent], app: String, say: (BuildEvent) -> Void) async -> Ending {
+        let elapsed = events.lazy.reversed().compactMap { event -> Double? in
+            if case let .buildEnd(_, _, _, elapsedSeconds, _) = event { return elapsedSeconds }
+            return nil
+        }.first
+        switch await finish(events: events) {
+        case let .success(placed):
+            say(.ipaExported(placed))
+            say(.buildEnd(app: app, ok: true, error: nil, elapsedSeconds: elapsed))
+            return .placed(events + [.ipaExported(placed)])
+        case let .failure(error) where error is CancellationError:
+            return .stopped
+        case let .failure(error):
+            say(.buildEnd(app: app, ok: false, error: error.localizedDescription, elapsedSeconds: elapsed))
+            return .failed
+        }
+    }
+
+    /// A CLI event as the pane hears it during a staged export, or nil while
+    /// it waits for the file to be placed (`holdsUntilPlaced`). Its words
+    /// name the user's file, not the staging folder (`userFacing`).
+    func heard(_ event: BuildEvent) -> BuildEvent? {
+        if let progress = event.progress, Self.holdsUntilPlaced(progress) { return nil }
+        switch event {
+        case let .buildEnd(app, ok, error, elapsed, stopped):
+            return .buildEnd(
+                app: app, ok: ok, error: error.map(userFacing), elapsedSeconds: elapsed, stopped: stopped
+            )
+        case let .log(source, line):
+            return .log(source: source, line: userFacing(line))
+        default:
+            return event
+        }
+    }
+
+    /// `text` with the staging paths the CLI was given said as the user's:
+    /// the staged file as the file they chose, and the folder alone as "the
+    /// export's temporary folder". The CLI's errors name the only path it
+    /// knows, and a failure card naming /var/folders/…/NSIRD_Graft_… tells
+    /// the user nothing. Each path as given and as /private/var spells it.
+    func userFacing(_ text: String) -> String {
+        var said = text
+        for (path, words) in [
+            (stagedFile.path, destination.path), (folder.path, "the export's temporary folder"),
+        ] {
+            for spelling in Self.spellings(of: path) {
+                said = said.replacingOccurrences(of: spelling, with: words)
+            }
+        }
+        return said
+    }
+
+    /// A run's result with `userFacing` stderr, for the failure card and the
+    /// transcript when the CLI fails without a `build-end` of its own.
+    func userFacing(_ result: CLIRunner.RunResult) -> CLIRunner.RunResult {
+        CLIRunner.RunResult(
+            exitCode: result.exitCode, stdout: result.stdout, stderr: userFacing(result.stderr),
+            events: result.events
+        )
+    }
+
+    /// `path`, and the same path through /private, which macOS's /var, /tmp
+    /// and /etc are links to: longest first, so neither is half-replaced.
+    private static func spellings(of path: String) -> [String] {
+        let privately = "/private"
+        if path.hasPrefix(privately + "/") {
+            return [path, String(path.dropFirst(privately.count))]
+        }
+        if ["/var/", "/tmp/", "/etc/"].contains(where: path.hasPrefix) {
+            return [privately + path, path]
+        }
+        return [path]
     }
 
     /// Remove the staging folder and whatever is left in it. Quiet: once the

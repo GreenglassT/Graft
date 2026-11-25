@@ -23,6 +23,11 @@ struct AppStoreVersionsSheet: View {
     /// A version picked. The pane starts its get; the sheet closes.
     let onGet: (AppStoreReleaseRecord) -> Void
     @Environment(\.dismiss) private var dismiss
+    /// Where App Store requests can't run (`MacSupport.unavailableLine`), the
+    /// sheet asks for nothing and says why. Get an older version… is disabled
+    /// there already; this is the second wall, as `list_versions` runs
+    /// ipatool's emulator (`appstore.store_requests_blocker`).
+    @Environment(\.macSupport) private var mac
 
     static let title = "Older Versions"
 
@@ -33,6 +38,12 @@ struct AppStoreVersionsSheet: View {
         + "Get latest from App Store."
 
     static let loadingLine = "Asking the App Store for this app's versions…"
+
+    /// Whether the sheet asks the App Store for the list: only where App
+    /// Store requests can run (`unavailable` is nil).
+    static func loads(unavailable: String?) -> Bool {
+        unavailable == nil
+    }
     static let emptyLine = "The App Store lists no versions of this app for this Apple ID."
 
     var body: some View {
@@ -47,7 +58,10 @@ struct AppStoreVersionsSheet: View {
         }
         .frame(width: 520, height: 540)
         .background(Palette.bg)
-        .task { store.load(app: app, held: held) }
+        .task {
+            guard Self.loads(unavailable: mac.unavailableLine) else { return }
+            store.load(app: app, held: held)
+        }
         .onDisappear { store.reset() }
     }
 
@@ -65,7 +79,14 @@ struct AppStoreVersionsSheet: View {
 
     @ViewBuilder
     private var content: some View {
-        if store.releases.isEmpty {
+        if let line = mac.unavailableLine {
+            VStack {
+                Spacer()
+                Text(line).font(AppFont.body).foregroundStyle(Palette.textDim)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+        } else if store.releases.isEmpty {
             VStack(spacing: 10) {
                 Spacer()
                 switch store.phase {
@@ -105,15 +126,18 @@ struct AppStoreVersionsSheet: View {
                     .truncationMode(.tail)
             }
             Spacer()
-            if state == .reading {
+            switch Self.accessory(release, in: store) {
+            case .reading:
                 ProgressView().controlSize(.small)
-            } else if Self.offersGet(release, held: store.heldVersion, state: state) {
+            case .get:
                 Button("Get") {
                     onGet(release)
                     dismiss()
                 }
                 .disabled(getBlockedReason != nil)
                 .help(getBlockedReason ?? Self.getHelp(release, held: store.heldVersion))
+            case .nothing:
+                EmptyView()
             }
         }
         .padding(.vertical, 2)
@@ -168,6 +192,25 @@ struct AppStoreVersionsSheet: View {
         }
         parts.append("id \(release.externalId)")
         return parts.joined(separator: " · ")
+    }
+
+    /// What a row shows at its end, as `row` draws it.
+    enum Accessory: Equatable {
+        /// Its version is being read.
+        case reading
+        /// Get (`offersGet`).
+        case get
+        case nothing
+    }
+
+    /// What `row` shows at the end of `release`'s row, from `store` as the
+    /// sheet reads it: the row's state and the held version the list said,
+    /// or the one the sheet opened with until it says.
+    @MainActor
+    static func accessory(_ release: AppStoreReleaseRecord, in store: AppStoreVersionsStore) -> Accessory {
+        let state = AppStoreVersionsStore.rowState(release, phase: store.phase, readingUpTo: store.readingUpTo)
+        if state == .reading { return .reading }
+        return offersGet(release, held: store.heldVersion, state: state) ? .get : .nothing
     }
 
     /// Whether a row offers Get: once its version is read, unless the app is

@@ -18,6 +18,7 @@ import os
 import stat
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -602,6 +603,203 @@ def test_a_version_read_that_times_out_stops_the_listing(
     assert "check the connection" in words and "read so far are remembered" in words
 
 
+#: A stalled read now ends inside ipatool: the bundled patch fails a range
+#: request that receives nothing for 30 seconds, twice in a row
+#: (bundle/patches/ipatool-range-readahead.patch), with Go's words for a
+#: deadline, well before Graft's own 90 seconds.
+#: As ipatool 2.8.0 wraps them on the way out: the reader's errors through
+#: get-version-metadata (appstore_get_version_metadata.go,
+#: appstore_partial_zip.go), the Store transport's (internal/store/backend.go),
+#: and net/http's own. The signed URL's query is Apple's, and secret.
+_SIGNED = 'Get "https://iosapps.itunes.apple.com/itunes-assets/x/app.ipa?accessKey=1_secret"'
+IPATOOL_TIMEOUTS = [
+    # The patch's stall timeout, waiting for a range request's answer.
+    "failed to read version metadata: failed to open zip reader: request failed: "
+    "received nothing for 30s: context deadline exceeded",
+    # The same, while its body came in.
+    "failed to read version metadata: failed to open zip reader: failed to read response body: "
+    "received nothing for 30s: context deadline exceeded",
+    # A Go deadline as the Store transport passes it on.
+    f"failed to read version metadata: failed to open zip reader: request failed: received error: "
+    f"store request: store HTTP transport: {_SIGNED}: context deadline exceeded",
+    # The size request, through the transport's header timeout.
+    f"failed to read version metadata: failed to read remote file size: request failed: received error: "
+    f"store request: store HTTP transport: {_SIGNED}: net/http: timeout awaiting response headers",
+    f"request failed: store HTTP transport: {_SIGNED}: net/http: TLS handshake timeout",
+    f"request failed: {_SIGNED}: dial tcp 17.253.0.1:443: i/o timeout",
+    f"request failed: {_SIGNED}: context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+]
+
+
+@pytest.mark.parametrize("said", IPATOOL_TIMEOUTS)
+def test_a_version_read_ipatool_gave_up_on_stops_the_listing(
+    config: Path, fakes: FakeTools, said: str
+) -> None:
+    """A timeout is a timeout whoever's clock ran out. As
+    `VersionUnavailable` it went on through the page, at up to a minute a
+    version, every row saying the same."""
+    assert _run(["--json", "--appstore-versions", "--app", "example", "--limit", "1"]).exit_code == 0
+    fakes.set(version_metadata={**META, "800300": {"error": said}})
+
+    result = _run(["--json", "--appstore-versions", "--app", "example", "--limit", "3"])
+
+    assert result.exit_code == 20, result.output
+    assert _metadata_calls(fakes) == ["800400", "800300"], "it stops at the first"
+    assert [r["version"] for r in _events(result, "appstore-release")] == ["1.4.0"], "what came before stays"
+    assert _events(result, "appstore-releases-end") == []
+    words = " ".join(result.stderr.split())
+    assert "the list of example's versions stopped: reading version 800300 timed out" in words
+    assert "check the connection" in words and "read so far are remembered" in words
+    assert "secret" not in result.output, "never the signed URL's query"
+
+
+@pytest.mark.parametrize("said", IPATOOL_TIMEOUTS)
+def test_ipatool_s_own_timeouts_are_timeouts(fakes: FakeTools, said: str) -> None:
+    fakes.set(version_metadata={"800300": {"error": said}})
+
+    with pytest.raises(ipatool.VersionMetadataTimeout) as caught:
+        ipatool.version_metadata(fakes.ipatool, "com.example.app", "800300")
+
+    assert caught.value.hint == "check the connection and try again"
+    assert "secret" not in caught.value.message
+
+
+@pytest.mark.parametrize("said", [
+    "received error: This item is no longer available.",
+    "failed to read version metadata: could not find Info.plist",
+    "failed to read version metadata: failed to open zip reader: zip: not a valid zip file",
+    "failed to read version metadata: expected partial content response, got status 403",
+])
+def test_what_isnt_a_timeout_is_this_version_alone(fakes: FakeTools, said: str) -> None:
+    fakes.set(version_metadata={"800300": {"error": said}})
+
+    with pytest.raises(ipatool.VersionUnavailable):
+        ipatool.version_metadata(fakes.ipatool, "com.example.app", "800300")
+
+
+def test_graft_s_own_cap_ends_a_read_that_keeps_trickling(fakes: FakeTools, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ipatool's own deadline now counts silence, so a read that keeps a
+    little coming never ends there (bundle/patches/ipatool-range-readahead.
+    patch). Graft's cap on the whole run still ends it, and kills it. The cap
+    is cut to 3 seconds; the stand-in sends a line every 0.1 s for 20."""
+    monkeypatch.setattr(ipatool, "VERSION_METADATA_TIMEOUT", 3)
+    fakes.warm_up()
+    fakes.set(metadata_trickle={"every": 0.1, "for": 20})
+    started = time.monotonic()
+
+    with pytest.raises(ipatool.VersionMetadataTimeout) as caught:
+        ipatool.version_metadata(fakes.ipatool, "com.example.app", "800300")
+
+    assert time.monotonic() - started < 15, "it waited for the trickle to end"
+    assert caught.value.message == "version 800300 didn't answer within 3 seconds"
+    (trickling,) = [c for c in fakes.calls("ipatool") if c.get("trickling")]
+    with pytest.raises(ProcessLookupError):
+        os.kill(trickling["pid"], 0)
+
+
+# --- A version that stalls every time doesn't hold the list up ------------------
+
+#: How ipatool says a version's read stalled, with the bundled patch: nothing
+#: received for 30 seconds (bundle/patches/ipatool-range-readahead.patch).
+STALLED = {"error": "failed to read version metadata: failed to open zip reader: failed to read response "
+                    "body: received nothing for 30s: context deadline exceeded"}
+
+
+def _versions(*args: str):
+    return _run(["--json", "--appstore-versions", "--app", "example", *args])
+
+
+def _past_graft_s_cap(monkeypatch: pytest.MonkeyPatch, external_id: str) -> None:
+    """`external_id`'s read runs past Graft's own cap (`TimeoutExpired`, as
+    `subprocess.run` raises once it has killed the child). Every other run
+    is the stand-in's."""
+    real = ipatool.run_ipatool
+
+    def run(path: Path, args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[:1] == ["get-version-metadata"] and args[args.index("--external-version-id") + 1] == external_id:
+            raise subprocess.TimeoutExpired([str(path), *args], kwargs["timeout"])
+        return real(path, args, **kwargs)
+
+    monkeypatch.setattr(ipatool, "run_ipatool", run)
+
+
+@pytest.mark.parametrize("whose", ["ipatool's", "Graft's"])
+def test_a_version_that_stalls_twice_in_a_row_is_unavailable_and_the_list_goes_on(
+    config: Path, fakes: FakeTools, cache_dir: Path, monkeypatch: pytest.MonkeyPatch, whose: str
+) -> None:
+    """Try Again picks up at the version that stalled, so one that stalls
+    every time stopped the list there for good. The first time, the list
+    stops; the second time in a row, that version is said on its row, as one
+    Apple won't describe is, and the rest are read."""
+    if whose == "ipatool's":
+        fakes.set(version_metadata={**META, "800300": STALLED})
+    else:
+        _past_graft_s_cap(monkeypatch, "800300")
+
+    first = _versions("--limit", "3")
+
+    assert first.exit_code == 20, first.output
+    assert [r["version"] for r in _events(first, "appstore-release")] == ["1.4.0"]
+    assert _events(first, "appstore-releases-end") == []
+    assert "if this one stalls again, the list goes on without it" in " ".join(first.stderr.split())
+    assert json.loads(_cache(cache_dir).read_text())["stalled"] == {"com.example.app": "800300"}, (
+        "remembered for Try Again, a run of its own"
+    )
+
+    again = _versions("--limit", "3")
+
+    assert again.exit_code == 0, again.output
+    rows = {r["external_id"]: r for r in _events(again, "appstore-release")}
+    assert rows["800300"]["version"] is None
+    assert rows["800300"]["error"].startswith("Timed out twice in a row, so the list went on without it: ")
+    assert "800300" in rows["800300"]["error"], "with what timed out"
+    assert rows["800200"]["version"] == "1.2.0", "and the list went on"
+    assert rows["800400"]["version"] == "1.4.0"
+    assert len(_events(again, "appstore-releases-end")) == 1
+
+
+def test_a_stall_on_another_version_in_between_starts_the_count_again(config: Path, fakes: FakeTools) -> None:
+    fakes.set(version_metadata={**META, "800400": STALLED, "800300": STALLED})
+    assert _versions("--offset", "1", "--limit", "1").exit_code == 20
+    assert _versions("--limit", "1").exit_code == 20
+
+    third = _versions("--offset", "1", "--limit", "1")
+
+    assert third.exit_code == 20, "800300 stalled twice, but not in a row"
+    assert _metadata_calls(fakes) == ["800300", "800400", "800300"]
+
+
+@pytest.mark.parametrize("between", [
+    META["800400"], {"error": "received error: This item is no longer available."},
+], ids=["read", "unavailable"])
+def test_a_version_read_in_between_starts_the_count_again(
+    config: Path, fakes: FakeTools, between: dict[str, str]
+) -> None:
+    """A read that ends with an answer, whatever it is, isn't a stall: the
+    connection was working."""
+    fakes.set(version_metadata={**META, "800400": between, "800300": STALLED})
+    assert _versions("--offset", "1", "--limit", "1").exit_code == 20
+    assert _versions("--limit", "1").exit_code == 0
+
+    third = _versions("--offset", "1", "--limit", "1")
+
+    assert third.exit_code == 20, "800300 stalled twice, but not in a row"
+    assert _metadata_calls(fakes) == ["800300", "800400", "800300"]
+
+
+def test_a_stall_is_counted_for_its_own_app(config: Path, fakes: FakeTools, cache_dir: Path) -> None:
+    """Another app's version, stalled last, is no count for this one."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    _cache(cache_dir).write_text(json.dumps({
+        "format": 1, "apps": {}, "stalled": {"com.example.other": "800300"},
+    }))
+    fakes.set(version_metadata={**META, "800300": STALLED})
+
+    result = _versions("--offset", "1", "--limit", "1")
+
+    assert result.exit_code == 20, result.output
+
+
 def test_a_licence_refused_partway_through_is_the_needs_license_refusal(config: Path, fakes: FakeTools) -> None:
     """As a get maps it, so the app says why in its own words and offers the
     way out, rather than ipatool's bare error."""
@@ -774,6 +972,109 @@ def test_a_cache_too_big_to_be_graft_s_is_no_cache(cache_dir: Path, monkeypatch:
     assert appstore._VersionCache.load(cache_dir).known("com.example.app") == {}
     monkeypatch.setattr(appstore, "_VERSIONS_CACHE_MAX", size)
     assert appstore._VersionCache.load(cache_dir).known("com.example.app")["800400"].version == "6.6.6"
+
+
+def _reads(patched: pytest.MonkeyPatch) -> list[tuple[int, int]]:
+    """Record each `os.read` the cache load makes, before it runs: (the
+    file type of what it reads, how many bytes it asks for). Recorded first
+    because a read of a directory raises."""
+    real_read, real_fstat = os.read, os.fstat
+    asked: list[tuple[int, int]] = []
+
+    def read(fd: int, n: int) -> bytes:
+        asked.append((stat.S_IFMT(real_fstat(fd).st_mode), n))
+        return real_read(fd, n)
+
+    patched.setattr(appstore.os, "read", read)
+    return asked
+
+
+def _grows_after_its_size_is_read(patched: pytest.MonkeyPatch) -> None:
+    """`os.fstat` says the file is empty, as it was an instant before a
+    writer filled it: what is read then is all that bounds the read."""
+    real = os.fstat
+
+    def fstat(fd: int) -> os.stat_result:
+        info = real(fd)
+        return os.stat_result((*info[:6], 0, *info[7:10]))
+
+    patched.setattr(appstore.os, "fstat", fstat)
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_only_a_regular_file_is_ever_read(
+    cache_dir: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Checked before the first read. Not left to what a read does: a
+    directory's raises and a FIFO opened without blocking reads as empty,
+    and each is no cache either way, so only the reads show the check."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    if kind == "directory":
+        _cache(cache_dir).mkdir()
+    else:
+        os.mkfifo(_cache(cache_dir))
+
+    with monkeypatch.context() as patched:
+        asked = _reads(patched)
+        loaded = appstore._VersionCache.load(cache_dir)
+
+    assert asked == [], f"read a {kind}"
+    assert loaded.known("com.example.app") == {}
+
+
+def test_a_file_over_the_cap_is_never_read(cache_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first of the three caps: its size, before any read."""
+    _cache_claiming(_cache(cache_dir))
+    monkeypatch.setattr(appstore, "_VERSIONS_CACHE_MAX", _cache(cache_dir).stat().st_size - 1)
+
+    with monkeypatch.context() as patched:
+        asked = _reads(patched)
+        loaded = appstore._VersionCache.load(cache_dir)
+
+    assert asked == []
+    assert loaded.known("com.example.app") == {}
+
+
+def test_a_file_that_grew_is_read_no_further_than_one_byte_past_the_cap(
+    cache_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second: the reads themselves. Each asks for no more than is left
+    of the cap and a byte, and none follows the one that passed it, so a file
+    that grows without end (a link swapped for /dev/zero's like) is read no
+    further."""
+    _cache_claiming(_cache(cache_dir))
+    cap = _cache(cache_dir).stat().st_size + 5
+    monkeypatch.setattr(appstore, "_VERSIONS_CACHE_MAX", cap)
+    with _cache(cache_dir).open("a") as f:
+        f.write(" " * (3 * cap))
+
+    with monkeypatch.context() as patched:
+        _grows_after_its_size_is_read(patched)
+        asked = _reads(patched)
+        appstore._VersionCache.load(cache_dir)
+
+    assert asked, "a file its size let through is read"
+    assert all(kind == stat.S_IFREG for kind, _ in asked)
+    assert sum(n for _, n in asked) == cap + 1, asked
+    assert all(n > 0 for _, n in asked), "no read after the one that passed the cap"
+
+
+def test_a_file_that_grew_past_the_cap_is_no_cache(cache_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The third: what was read. The cap and a byte of it is a whole cache
+    here, trailing spaces and all, and still no cache: it is more than the
+    cap."""
+    _cache_claiming(_cache(cache_dir))
+    cap = _cache(cache_dir).stat().st_size + 5
+    monkeypatch.setattr(appstore, "_VERSIONS_CACHE_MAX", cap)
+    with _cache(cache_dir).open("a") as f:
+        f.write(" " * (3 * cap))
+    assert json.loads(_cache(cache_dir).read_bytes()[: cap + 1]), "what the reads take parses"
+
+    with monkeypatch.context() as patched:
+        _grows_after_its_size_is_read(patched)
+        loaded = appstore._VersionCache.load(cache_dir)
+
+    assert loaded.known("com.example.app") == {}
 
 
 def test_a_cache_nested_too_deep_to_parse_is_no_cache(cache_dir: Path) -> None:

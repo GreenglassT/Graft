@@ -20,7 +20,32 @@ final class ExportStagingTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        for folder in locked {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+        }
         try? FileManager.default.removeItem(at: root)
+    }
+
+    /// Folders `readOnly` locked, opened again before `root` goes.
+    private var locked: [URL] = []
+
+    /// `folder`, made and then made read-only: nothing new can be saved in it.
+    private func readOnly(_ name: String) throws -> URL {
+        let folder = root.appendingPathComponent(name, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        locked.append(folder)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder.path)
+        return folder
+    }
+
+    /// The live file operations on a volume with no replacement directory:
+    /// a temp folder of the export's own in `root/tmp`, copied in beside.
+    private func fallbackLive() -> ExportFileOps {
+        var ops = ExportFileOps.live
+        ops.replacementDirectory = { _ in throw Refused() }
+        let temp = root.appendingPathComponent("tmp", isDirectory: true)
+        ops.temporaryDirectory = { temp }
+        return ops
     }
 
     private var destination: URL { root.appendingPathComponent("Example 1.0.ipa") }
@@ -61,6 +86,20 @@ final class ExportStagingTests: XCTestCase {
                 try step("removeItem", url)
             }
         )
+    }
+
+    /// The error placing `staging` fails with; a failure if it places.
+    @MainActor
+    private func placingFails(
+        _ staging: ExportStaging, file: StaticString = #filePath, line: UInt = #line
+    ) async throws -> Error {
+        do {
+            try await staging.place()
+        } catch {
+            return error
+        }
+        XCTFail("placed", file: file, line: line)
+        throw Refused()
     }
 
     // MARK: - where the CLI writes
@@ -108,12 +147,13 @@ final class ExportStagingTests: XCTestCase {
 
     // MARK: - moving it into place
 
-    func test_nothing_there_is_a_move() throws {
+    @MainActor
+    func test_nothing_there_is_a_move() async throws {
         let calls = Calls()
         let staging = try ExportStaging.prepare(for: destination, ops: recorded(calls))
         calls.made = []
 
-        let replaced = try staging.place()
+        let replaced = try await staging.place()
 
         XCTAssertFalse(replaced)
         XCTAssertEqual(calls.names, ["moveItem"])
@@ -122,14 +162,15 @@ final class ExportStagingTests: XCTestCase {
 
     /// The Save panel asked before Replace, so the app replaces, and sends
     /// the CLI no `--overwrite`.
-    func test_a_file_there_is_a_replace() throws {
+    @MainActor
+    func test_a_file_there_is_a_replace() async throws {
         let calls = Calls()
         let staging = try ExportStaging.prepare(
             for: destination, replacing: true, ops: recorded(calls, exists: true)
         )
         calls.made = []
 
-        let replaced = try staging.place()
+        let replaced = try await staging.place()
 
         XCTAssertTrue(replaced)
         XCTAssertEqual(calls.names, ["replaceItem"])
@@ -138,37 +179,40 @@ final class ExportStagingTests: XCTestCase {
 
     /// A file that appeared at the destination while the build ran, with no
     /// Replace in the Save panel, is left alone, and nothing is saved.
-    func test_a_file_that_appeared_while_building_is_left_alone() throws {
+    @MainActor
+    func test_a_file_that_appeared_while_building_is_left_alone() async throws {
         let calls = Calls()
         let staging = try ExportStaging.prepare(for: destination, ops: recorded(calls, exists: true))
         calls.made = []
 
-        XCTAssertThrowsError(try staging.place()) { error in
-            XCTAssertTrue(error.localizedDescription.contains("left it alone"), error.localizedDescription)
-        }
+        let error = try await placingFails(staging)
+        XCTAssertTrue(error.localizedDescription.contains("left it alone"), error.localizedDescription)
         XCTAssertEqual(calls.names, [], "no replace, move or copy over their file")
     }
 
     /// Replace was chosen, but the old file was gone by the time the build
     /// finished: a move, and nothing said to be replaced.
-    func test_replace_chosen_with_the_file_gone_is_a_move() throws {
+    @MainActor
+    func test_replace_chosen_with_the_file_gone_is_a_move() async throws {
         let calls = Calls()
         let staging = try ExportStaging.prepare(for: destination, replacing: true, ops: recorded(calls))
         calls.made = []
 
-        XCTAssertFalse(try staging.place())
+        let replaced = try await staging.place()
+        XCTAssertFalse(replaced)
         XCTAssertEqual(calls.names, ["moveItem"])
     }
 
     /// On disk: a file written at the destination mid-build keeps its
     /// contents.
-    func test_a_real_file_that_appeared_keeps_its_contents() throws {
+    @MainActor
+    func test_a_real_file_that_appeared_keeps_its_contents() async throws {
         let staging = try ExportStaging.prepare(for: destination)
         defer { staging.discard() }
         try writeStaged(staging, "ours")
         try Data("theirs".utf8).write(to: destination)
 
-        XCTAssertThrowsError(try staging.place())
+        _ = try await placingFails(staging)
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "theirs")
     }
 
@@ -178,7 +222,8 @@ final class ExportStagingTests: XCTestCase {
         XCTAssertEqual(ExportStaging.refusal(for: destination, paths: nil), ExportStaging.noSettings)
     }
 
-    func test_the_fallback_copies_in_beside_then_moves_or_replaces() throws {
+    @MainActor
+    func test_the_fallback_copies_in_beside_then_moves_or_replaces() async throws {
         for exists in [false, true] {
             let calls = Calls()
             let staging = try ExportStaging.prepare(
@@ -187,7 +232,7 @@ final class ExportStagingTests: XCTestCase {
             )
             calls.made = []
 
-            try staging.place()
+            try await staging.place()
 
             XCTAssertEqual(calls.names, ["copyItem", exists ? "replaceItem" : "moveItem"])
             let beside = try XCTUnwrap(calls.made.first?.urls.last)
@@ -201,7 +246,8 @@ final class ExportStagingTests: XCTestCase {
         }
     }
 
-    func test_a_failed_copy_leaves_the_old_file_and_no_copy() throws {
+    @MainActor
+    func test_a_failed_copy_leaves_the_old_file_and_no_copy() async throws {
         let calls = Calls()
         let staging = try ExportStaging.prepare(
             for: destination, replacing: true,
@@ -209,25 +255,345 @@ final class ExportStagingTests: XCTestCase {
         )
         calls.made = []
 
-        XCTAssertThrowsError(try staging.place()) { error in
-            XCTAssertTrue(error.localizedDescription.contains(self.destination.path))
-        }
+        let error = try await placingFails(staging)
+        XCTAssertTrue(error.localizedDescription.contains(destination.path))
         XCTAssertEqual(calls.names, ["copyItem", "removeItem"], "no replace over the old file")
     }
 
-    func test_a_failed_move_says_where_the_file_was_going() throws {
+    @MainActor
+    func test_a_failed_move_says_where_the_file_was_going() async throws {
         let calls = Calls()
         let staging = try ExportStaging.prepare(
             for: destination, ops: recorded(calls, failing: ["moveItem"])
         )
 
-        XCTAssertThrowsError(try staging.place()) { error in
-            XCTAssertEqual(
-                error.localizedDescription,
-                "The IPA was built, but Graft couldn't save it as \(self.destination.path). "
-                    + "refused by the test"
-            )
+        let error = try await placingFails(staging)
+        XCTAssertEqual(
+            error.localizedDescription,
+            "The IPA was built, but Graft couldn't save it as \(destination.path). "
+                + "refused by the test"
+        )
+    }
+
+    // MARK: - the fallback's copy, off the main actor
+
+    /// What a copy saw, written from the copy's thread.
+    private final class CopyProbe: @unchecked Sendable {
+        var onMain: Bool?
+        var released = false
+        var sawStop = false
+    }
+
+    /// A big IPA copied onto another volume froze the window, Stop with it:
+    /// the copy ran on the main actor. It runs off it, and the main actor
+    /// carries on while it does.
+    @MainActor
+    func test_the_fallbacks_copy_runs_off_the_main_actor_and_the_window_stays_live() async throws {
+        let calls = Calls()
+        let probe = CopyProbe()
+        let started = expectation(description: "the copy started")
+        let gate = DispatchSemaphore(value: 0)
+        var ops = recorded(calls, failing: ["replacementDirectory"])
+        ops.copyItem = { _, _ in
+            probe.onMain = Thread.isMainThread
+            started.fulfill()
+            // Let go by the test, which runs on the main actor: on time only
+            // if the main actor was free while this copy ran.
+            probe.released = gate.wait(timeout: .now() + 5) == .success
         }
+        let staging = try ExportStaging.prepare(for: destination, ops: ops)
+        calls.made = []
+
+        let placing = Task { try await staging.place() }
+        await fulfillment(of: [started], timeout: 5)
+        gate.signal()
+        let replaced = try await placing.value
+
+        XCTAssertFalse(replaced)
+        XCTAssertEqual(probe.onMain, false, "copied on the main thread")
+        XCTAssertTrue(probe.released, "the main actor was held for the whole copy")
+        XCTAssertEqual(calls.names, ["moveItem"], "then moved into place")
+    }
+
+    /// Stop while the file is copied in: the copy is told (`live`'s copyfile
+    /// quits between chunks), what it wrote is removed, nothing is placed,
+    /// and the stop comes back as a stop.
+    @MainActor
+    func test_a_stop_during_the_fallbacks_copy_places_nothing_and_leaves_no_copy() async throws {
+        let calls = Calls()
+        let probe = CopyProbe()
+        let started = expectation(description: "the copy started")
+        var ops = recorded(calls, exists: true, failing: ["replacementDirectory"])
+        ops.copyItem = { from, to in
+            calls.made.append(("copyItem", [from, to]))
+            started.fulfill()
+            // As copyfile's callback does, between chunks.
+            let deadline = Date().addingTimeInterval(10)
+            while !Task.isCancelled, Date() < deadline { usleep(1000) }
+            probe.sawStop = Task.isCancelled
+            if Task.isCancelled { throw CancellationError() }
+        }
+        let staging = try ExportStaging.prepare(for: destination, replacing: true, ops: ops)
+        calls.made = []
+
+        let placing = Task { try await staging.place() }
+        await fulfillment(of: [started], timeout: 5)
+        placing.cancel()
+        let ended = await placing.result
+
+        guard case let .failure(error) = ended else { return XCTFail("placed after a stop") }
+        XCTAssertTrue(error is CancellationError, "\(error)")
+        XCTAssertTrue(probe.sawStop, "the copy wasn't told of the stop")
+        XCTAssertEqual(calls.names, ["copyItem", "removeItem"], "no replace over the old file")
+        XCTAssertEqual(calls.made.last?.urls, calls.made.first?.urls.last.map { [$0] })
+    }
+
+    /// The live copy, stopped: copyfile quits and leaves no partial file.
+    @MainActor
+    func test_a_stop_ends_a_real_copy_and_leaves_nothing_beside() async throws {
+        var ops = ExportFileOps.live
+        ops.replacementDirectory = { _ in throw Refused() }
+        let temp = root.appendingPathComponent("tmp", isDirectory: true)
+        ops.temporaryDirectory = { temp }
+        let staging = try ExportStaging.prepare(for: destination, ops: ops)
+        defer { staging.discard() }
+        try Data(count: 8 << 20).write(to: staging.stagedFile)
+
+        let placing = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await staging.place()
+        }
+        let ended = await placing.result
+
+        guard case let .failure(error) = ended else { return XCTFail("placed after a stop") }
+        XCTAssertTrue(error is CancellationError, "\(error)")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["tmp"],
+                       "no file, and no copy beside where it would have gone")
+    }
+
+    /// The live copy in a task already stopped: copyfile asks before its
+    /// first chunk, quits, and leaves no file.
+    func test_the_live_copy_stops_when_its_task_is_canceled() async throws {
+        let from = root.appendingPathComponent("from.ipa")
+        let to = root.appendingPathComponent("to.ipa")
+        try Data(count: 8 << 20).write(to: from)
+
+        let copied = await Task.detached { () -> Result<Void, Error> in
+            withUnsafeCurrentTask { $0?.cancel() }
+            return Result { try ExportFileOps.copyStoppably(from: from, to: to) }
+        }.value
+
+        guard case let .failure(error) = copied else { return XCTFail("copied in a stopped task") }
+        XCTAssertTrue(error is CancellationError, "\(error)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: to.path))
+    }
+
+    /// The live copy never writes over a file, and says why it failed as
+    /// FileManager does, naming the file being saved.
+    func test_the_live_copy_never_writes_over_a_file() throws {
+        let from = root.appendingPathComponent("from.ipa")
+        try Data("new".utf8).write(to: from)
+        try Data("theirs".utf8).write(to: destination)
+
+        XCTAssertThrowsError(try ExportFileOps.copyStoppably(from: from, to: destination)) { error in
+            XCTAssertEqual((error as? CocoaError)?.code, .fileWriteFileExists)
+            let said = error.localizedDescription
+            XCTAssertTrue(said.contains("“Example 1.0.ipa”"), said)
+            XCTAssertFalse(said.contains("from.ipa"), said)
+        }
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "theirs")
+    }
+
+    /// A real refusal, from a folder the copy can't save in: it names the
+    /// file it was saving and that folder. It named the file it read, so a
+    /// refused export said "save the file … in the folder “Graft Export
+    /// <UUID>”", the staging folder.
+    func test_a_refused_live_copy_names_the_file_being_saved_and_its_folder() throws {
+        let staged = root.appendingPathComponent("Graft Export TEST", isDirectory: true)
+        try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
+        let from = staged.appendingPathComponent("Example 1.0.ipa")
+        try Data("new".utf8).write(to: from)
+        let exports = try readOnly("Exports")
+
+        XCTAssertThrowsError(try ExportFileOps.copyStoppably(
+            from: from, to: exports.appendingPathComponent("Example 1.0.ipa")
+        )) { error in
+            XCTAssertEqual((error as? CocoaError)?.code, .fileWriteNoPermission)
+            let said = error.localizedDescription
+            XCTAssertTrue(said.contains("“Example 1.0.ipa” in the folder “Exports”"), said)
+            XCTAssertFalse(said.contains("Graft Export"), said)
+        }
+    }
+
+    /// What every failure the copy maps says, as Foundation words it: the
+    /// file being saved, and for most its folder. EPERM and the unknown
+    /// ones can't be made to happen here, and read the same way.
+    func test_every_copy_failure_names_the_file_being_saved() {
+        let saving = root.appendingPathComponent("Exports/Example 1.0.ipa")
+        let withFolder: [Int32] = [EACCES, EPERM, EEXIST, EIO, EINVAL]
+        for code in withFolder + [ENOSPC, EDQUOT, EROFS, ENOENT] {
+            let said = ExportFileOps.copyFailure(errno: code, saving: saving).localizedDescription
+            XCTAssertTrue(said.contains("“Example 1.0.ipa”"), "\(code): \(said)")
+            XCTAssertFalse(said.contains(root.lastPathComponent), "\(code): \(said)")
+            if withFolder.contains(code) {
+                XCTAssertTrue(said.contains("folder “Exports”"), "\(code): \(said)")
+            }
+        }
+    }
+
+    /// An export to a folder that refuses the copy beside: the error names
+    /// the user's file and folder, never the staging folder or the hidden
+    /// copy's name.
+    @MainActor
+    func test_a_refused_fallback_copy_names_the_users_file_and_folder() async throws {
+        let exports = try readOnly("Exports")
+        let chosen = exports.appendingPathComponent("Example 1.0.ipa")
+        let staging = try ExportStaging.prepare(for: chosen, ops: fallbackLive())
+        defer { staging.discard() }
+        try writeStaged(staging, "new")
+
+        let said = try await placingFails(staging).localizedDescription
+
+        XCTAssertTrue(
+            said.hasPrefix("The IPA was built, but Graft couldn't save it as \(chosen.path). "), said
+        )
+        XCTAssertTrue(said.contains("save the file “Example 1.0.ipa” in the folder “Exports”"), said)
+        XCTAssertFalse(said.contains("Graft Export"), said)
+        XCTAssertFalse(said.contains(".graft-"), said)
+    }
+
+    // MARK: - a real copy, stopped partway
+
+    /// What a real copy had done when it was stopped, written from its
+    /// thread and read once it has ended.
+    private final class Partway: @unchecked Sendable {
+        var chunks: [Int64] = []
+        var besideThen: Bool?
+        var stop: (() -> Void)?
+    }
+
+    /// copyfile's chunk is the volume's I/O size, 1 MiB on APFS: two of them.
+    private let twoChunks = 2 << 20
+
+    /// The live copy, stopped once its first chunk is written: copyfile
+    /// quits at once, removes the part it wrote, and says it was stopped.
+    func test_the_live_copy_stopped_partway_removes_what_it_wrote() async throws {
+        let from = root.appendingPathComponent("from.ipa")
+        let to = root.appendingPathComponent("to.ipa")
+        try Data(count: twoChunks).write(to: from)
+        let partway = Partway()
+
+        let copied = await Task.detached { () -> Result<Void, Error> in
+            Result {
+                try ExportFileOps.copyStoppably(from: from, to: to) { copied in
+                    partway.chunks.append(copied)
+                    partway.besideThen = FileManager.default.fileExists(atPath: to.path)
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+        }.value
+
+        guard case let .failure(error) = copied else { return XCTFail("copied in full after a stop") }
+        XCTAssertTrue(error is CancellationError, "\(error)")
+        XCTAssertEqual(partway.chunks.count, 1, "it went on after the stop: \(partway.chunks)")
+        XCTAssertLessThan(partway.chunks.first ?? .max, Int64(twoChunks), "not partway")
+        XCTAssertEqual(partway.besideThen, true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: to.path))
+    }
+
+    /// Stop pressed while a real fallback copy is partway through: the
+    /// pane's task is canceled, the copy's own task with it, and the copy
+    /// ends at its next chunk. Nothing is left where the user chose, or
+    /// beside it.
+    @MainActor
+    func test_a_stop_partway_through_a_real_copy_leaves_nothing_at_the_destination() async throws {
+        let partway = Partway()
+        var ops = fallbackLive()
+        ops.copyItem = { from, to in
+            try ExportFileOps.copyStoppably(from: from, to: to) { copied in
+                partway.chunks.append(copied)
+                partway.besideThen = FileManager.default.fileExists(atPath: to.path)
+                partway.stop?()
+            }
+        }
+        let staging = try ExportStaging.prepare(for: destination, ops: ops)
+        defer { staging.discard() }
+        try Data(count: twoChunks).write(to: staging.stagedFile)
+
+        let placing = Task { try await staging.place() }
+        partway.stop = { placing.cancel() }
+        let ended = await placing.result
+
+        guard case let .failure(error) = ended else { return XCTFail("placed after a stop") }
+        XCTAssertTrue(error is CancellationError, "\(error)")
+        XCTAssertEqual(partway.chunks.count, 1, "it went on after the stop: \(partway.chunks)")
+        XCTAssertLessThan(partway.chunks.first ?? .max, Int64(twoChunks), "not partway")
+        XCTAssertEqual(partway.besideThen, true)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["tmp"])
+    }
+
+    // MARK: - a file that appears while the file is copied in
+
+    /// A file saved at the destination after the check before the copy:
+    /// the move refuses to write over it, and that's said as the refusal for
+    /// a file that appeared, not as FileManager's "already exists" about a
+    /// hidden file. With or without the copy, however the refusal is said.
+    @MainActor
+    func test_a_file_that_appears_before_the_move_is_the_appeared_refusal() async throws {
+        let refusals: [Error] = [
+            CocoaError(.fileWriteFileExists, userInfo: [NSFilePathErrorKey: "/elsewhere"]),
+            POSIXError(.EEXIST),
+        ]
+        for copies in [true, false] {
+            for refusal in refusals {
+                let calls = Calls()
+                var ops = recorded(calls, failing: copies ? ["replacementDirectory"] : [])
+                ops.moveItem = { from, to in
+                    calls.made.append(("moveItem", [from, to]))
+                    throw refusal
+                }
+                let staging = try ExportStaging.prepare(for: destination, ops: ops)
+                calls.made = []
+
+                let error = try await placingFails(staging)
+
+                guard case let .appeared(at)? = error as? ExportStagingError else {
+                    XCTFail("copies \(copies), \(refusal): \(error)")
+                    continue
+                }
+                XCTAssertEqual(at, destination)
+                XCTAssertEqual(
+                    calls.names, copies ? ["copyItem", "moveItem", "removeItem"] : ["moveItem"],
+                    "the copy beside is removed"
+                )
+            }
+        }
+    }
+
+    /// On disk: a file saved where the user chose while the fallback's copy
+    /// ran keeps its contents, the refusal says why, and no copy is left
+    /// beside it.
+    @MainActor
+    func test_a_real_file_that_appears_during_the_copy_is_left_alone_and_said() async throws {
+        var ops = fallbackLive()
+        let copy = ops.copyItem
+        let destination = self.destination
+        ops.copyItem = { from, to in
+            try copy(from, to)
+            try Data("theirs".utf8).write(to: destination)
+        }
+        let staging = try ExportStaging.prepare(for: destination, ops: ops)
+        defer { staging.discard() }
+        try writeStaged(staging, "ours")
+
+        let said = try await placingFails(staging).localizedDescription
+
+        XCTAssertTrue(said.hasPrefix("A file named Example 1.0.ipa appeared in that folder"), said)
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "theirs")
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: root.path).sorted(),
+            ["Example 1.0.ipa", "tmp"], "no copy left beside it"
+        )
     }
 
     // MARK: - the real thing, in a temp folder
@@ -246,7 +612,8 @@ final class ExportStagingTests: XCTestCase {
         )
     }
 
-    func test_a_real_export_is_moved_into_place_with_the_clis_mode() throws {
+    @MainActor
+    func test_a_real_export_is_moved_into_place_with_the_clis_mode() async throws {
         let staging = try ExportStaging.prepare(for: destination)
         defer { staging.discard() }
         XCTAssertFalse(staging.copies, "this volume has a replacement directory")
@@ -255,7 +622,8 @@ final class ExportStagingTests: XCTestCase {
         )
         try writeStaged(staging, "new")
 
-        XCTAssertFalse(try staging.place())
+        let replaced = try await staging.place()
+        XCTAssertFalse(replaced)
 
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "new")
         XCTAssertEqual(try mode(destination), 0o644)
@@ -266,14 +634,16 @@ final class ExportStagingTests: XCTestCase {
 
     /// `replaceItemAt` keeps the old file's permissions unless told not to,
     /// which would undo EX3 for every Replace.
-    func test_a_replace_keeps_the_clis_mode_not_the_old_files() throws {
+    @MainActor
+    func test_a_replace_keeps_the_clis_mode_not_the_old_files() async throws {
         try Data("old".utf8).write(to: destination)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
         let staging = try ExportStaging.prepare(for: destination, replacing: true)
         defer { staging.discard() }
         try writeStaged(staging, "new")
 
-        XCTAssertTrue(try staging.place())
+        let replaced = try await staging.place()
+        XCTAssertTrue(replaced)
 
         XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "new")
         XCTAssertEqual(try mode(destination), 0o644)
@@ -282,7 +652,8 @@ final class ExportStagingTests: XCTestCase {
         ])
     }
 
-    func test_the_fallbacks_copy_keeps_the_clis_mode_too() throws {
+    @MainActor
+    func test_the_fallbacks_copy_keeps_the_clis_mode_too() async throws {
         var ops = ExportFileOps.live
         ops.replacementDirectory = { _ in throw Refused() }
         let temp = root.appendingPathComponent("tmp", isDirectory: true)
@@ -298,7 +669,8 @@ final class ExportStagingTests: XCTestCase {
             XCTAssertTrue(staging.copies)
             try writeStaged(staging, "new", mode: 0o640)
 
-            XCTAssertEqual(try staging.place(), exists)
+            let replaced = try await staging.place()
+            XCTAssertEqual(replaced, exists)
             staging.discard()
 
             XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "new")
@@ -333,14 +705,15 @@ final class ExportStagingTests: XCTestCase {
 
     /// The confirmation, Show in Finder and the transcript name the file
     /// where the user chose it, not the staging folder the CLI named.
-    func test_finish_places_the_file_and_names_it_where_it_went() throws {
+    @MainActor
+    func test_finish_places_the_file_and_names_it_where_it_went() async throws {
         let calls = Calls()
         let staging = try ExportStaging.prepare(
             for: destination, replacing: true, ops: recorded(calls, exists: true)
         )
         let events: [BuildEvent] = [.ipaExported(exported(path: staging.stagedFile.path))]
 
-        let placed = try staging.finish(events: events).get()
+        let placed = try await staging.finish(events: events).get()
 
         XCTAssertEqual(placed.path, destination.path)
         XCTAssertEqual(placed.filename, "Example 1.0.ipa")
@@ -353,14 +726,16 @@ final class ExportStagingTests: XCTestCase {
         )
     }
 
-    func test_a_run_that_never_said_what_it_wrote_places_nothing() throws {
+    @MainActor
+    func test_a_run_that_never_said_what_it_wrote_places_nothing() async throws {
         let calls = Calls()
         let staging = try ExportStaging.prepare(for: destination, ops: recorded(calls))
         calls.made = []
 
-        XCTAssertThrowsError(try staging.finish(events: []).get()) { error in
-            XCTAssertTrue(error.localizedDescription.contains("nothing was saved"))
+        guard case let .failure(error) = await staging.finish(events: []) else {
+            return XCTFail("placed with no ipa-exported")
         }
+        XCTAssertTrue(error.localizedDescription.contains("nothing was saved"))
         XCTAssertEqual(calls.names, [])
     }
 
@@ -374,6 +749,160 @@ final class ExportStagingTests: XCTestCase {
         XCTAssertFalse(ExportStaging.holdsUntilPlaced(.finished(ok: false, error: "x", elapsed: 3)))
         XCTAssertFalse(ExportStaging.holdsUntilPlaced(.stopped(elapsed: 3)))
         XCTAssertFalse(ExportStaging.holdsUntilPlaced(.stage(name: "export", status: "end")))
+    }
+
+    // MARK: - what the pane hears
+
+    /// The CLI only ever saw the staging path, so its errors name it, and
+    /// the failure card read "couldn't write /var/folders/…/NSIRD_Graft_…".
+    /// The staged file is the user's file; the folder alone is the export's
+    /// temporary folder. As given and as /private/var spells it.
+    func test_cli_errors_name_the_users_file_not_the_staging_folder() throws {
+        let staging = ExportStaging(
+            destination: destination,
+            folder: URL(fileURLWithPath: "/var/folders/ab/xyz/T/NSIRD_Graft_1234", isDirectory: true),
+            copies: false, replacing: false, ops: recorded(Calls())
+        )
+        let staged = staging.stagedFile.path
+        XCTAssertEqual(staged, "/var/folders/ab/xyz/T/NSIRD_Graft_1234/Example 1.0.ipa")
+        let said = "couldn't write \(staged): No space left on device; free some space on the disk "
+            + "/private/var/folders/ab/xyz/T/NSIRD_Graft_1234 is on, or choose another folder "
+            + "(/private\(staged))"
+
+        XCTAssertEqual(
+            staging.userFacing(said),
+            "couldn't write \(destination.path): No space left on device; free some space on the disk "
+                + "the export's temporary folder is on, or choose another folder (\(destination.path))"
+        )
+        guard case let .buildEnd(app, ok, error, elapsed, stopped)? = staging.heard(
+            .buildEnd(app: "example", ok: false, error: said, elapsedSeconds: 2, stopped: false)
+        ) else { return XCTFail("a failure is heard as it comes") }
+        XCTAssertEqual(app, "example")
+        XCTAssertFalse(ok)
+        XCTAssertEqual(error, staging.userFacing(said))
+        XCTAssertEqual(elapsed, 2)
+        XCTAssertFalse(stopped)
+        XCTAssertFalse(error?.contains("NSIRD") ?? true)
+        guard case let .log(source, line)? = staging.heard(.log(source: "export", line: "wrote \(staged)"))
+        else { return XCTFail("a log line is heard") }
+        XCTAssertEqual(source, "export")
+        XCTAssertEqual(line, "wrote \(destination.path)")
+        let failed = CLIRunner.RunResult(exitCode: 1, stdout: "", stderr: "error: couldn't write \(staged)\n")
+        XCTAssertEqual(staging.userFacing(failed).stderr, "error: couldn't write \(destination.path)\n")
+        XCTAssertEqual(staging.userFacing("nothing of ours"), "nothing of ours")
+    }
+
+    /// What the pane holds back until the file is placed, as `handle` hears
+    /// it: the CLI's `ipa-exported`, naming the staging folder, and its
+    /// successful `build-end`.
+    func test_the_pane_hears_the_clis_record_and_done_only_once_placed() throws {
+        let staging = try ExportStaging.prepare(for: destination, ops: recorded(Calls()))
+        XCTAssertNil(staging.heard(.ipaExported(exported(path: staging.stagedFile.path))))
+        XCTAssertNil(staging.heard(.buildEnd(app: "example", ok: true, error: nil, elapsedSeconds: 3)))
+        XCTAssertNotNil(staging.heard(.stage(name: "export", status: "start", fields: [:])))
+        XCTAssertNotNil(staging.heard(.buildEnd(app: "example", ok: false, error: nil, elapsedSeconds: 3)))
+    }
+
+    private struct Said {
+        var events: [BuildEvent] = []
+        var names: [String] {
+            events.map { event -> String in
+                switch event {
+                case let .ipaExported(record): return "ipa-exported \(record.path)"
+                case let .buildEnd(_, ok, error, elapsed, _):
+                    return "build-end \(ok) \(error ?? "-") \(elapsed.map { "\($0)" } ?? "-")"
+                default: return "\(event)"
+                }
+            }
+        }
+    }
+
+    /// `finishExport`'s run, placed: the file moved, then the line naming it
+    /// where the user chose and the `build-end` the pane held back, with the
+    /// CLI's time, in that order.
+    @MainActor
+    func test_a_finished_run_places_then_says_where_and_done() async throws {
+        let calls = Calls()
+        let staging = try ExportStaging.prepare(for: destination, ops: recorded(calls))
+        calls.made = []
+        let cli: [BuildEvent] = [
+            .ipaExported(exported(path: staging.stagedFile.path)),
+            .buildEnd(app: "example", ok: true, error: nil, elapsedSeconds: 12.5),
+        ]
+        var said = Said()
+
+        let ending = await staging.finishRun(events: cli, app: "example") { event in
+            XCTAssertEqual(calls.names, ["moveItem"], "said before the file was placed")
+            said.events.append(event)
+        }
+
+        XCTAssertEqual(said.names, ["ipa-exported \(destination.path)", "build-end true - 12.5"])
+        guard case let .placed(events) = ending else { return XCTFail("\(ending)") }
+        XCTAssertEqual(events.count, 3)
+        XCTAssertEqual(AppDetailView.exportedRecord(in: events)?.path, destination.path)
+    }
+
+    @MainActor
+    func test_a_finished_run_that_couldnt_place_says_why_as_its_build_end() async throws {
+        let calls = Calls()
+        let staging = try ExportStaging.prepare(for: destination, ops: recorded(calls, failing: ["moveItem"]))
+        let cli: [BuildEvent] = [
+            .ipaExported(exported(path: staging.stagedFile.path)),
+            .buildEnd(app: "example", ok: true, error: nil, elapsedSeconds: 4),
+        ]
+        var said = Said()
+
+        let ending = await staging.finishRun(events: cli, app: "example") { said.events.append($0) }
+
+        guard case .failed = ending else { return XCTFail("\(ending)") }
+        XCTAssertEqual(said.names, [
+            "build-end false The IPA was built, but Graft couldn't save it as \(destination.path). "
+                + "refused by the test 4.0",
+        ])
+    }
+
+    /// A file saved at the destination while the build ran, on the app's own
+    /// path: the pane hears that it was left alone, and it keeps its contents.
+    @MainActor
+    func test_a_file_that_appeared_mid_build_is_said_and_left_alone_on_the_apps_path() async throws {
+        let staging = try ExportStaging.prepare(for: destination)
+        defer { staging.discard() }
+        try writeStaged(staging, "ours")
+        let cli: [BuildEvent] = [
+            .ipaExported(exported(path: staging.stagedFile.path)),
+            .buildEnd(app: "example", ok: true, error: nil, elapsedSeconds: 4),
+        ]
+        try Data("theirs".utf8).write(to: destination)
+        var said = Said()
+
+        let ending = await staging.finishRun(events: cli, app: "example") { said.events.append($0) }
+
+        guard case .failed = ending else { return XCTFail("\(ending)") }
+        guard case let .buildEnd(_, false, error?, _, _)? = said.events.first, said.events.count == 1 else {
+            return XCTFail("\(said.names)")
+        }
+        XCTAssertTrue(error.hasPrefix("A file named Example 1.0.ipa appeared in that folder"), error)
+        XCTAssertTrue(error.contains("left it alone"), error)
+        XCTAssertEqual(try String(contentsOf: destination, encoding: .utf8), "theirs")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["Example 1.0.ipa"])
+    }
+
+    /// Stopped while the file was copied in: nothing said here, for the pane
+    /// says it was stopped.
+    @MainActor
+    func test_a_finished_run_stopped_while_placing_is_a_stop() async throws {
+        let calls = Calls()
+        var ops = recorded(calls, failing: ["replacementDirectory"])
+        ops.copyItem = { _, _ in throw CancellationError() }
+        let staging = try ExportStaging.prepare(for: destination, ops: ops)
+        var said = Said()
+
+        let ending = await staging.finishRun(
+            events: [.ipaExported(exported(path: staging.stagedFile.path))], app: "example"
+        ) { said.events.append($0) }
+
+        guard case .stopped = ending else { return XCTFail("\(ending)") }
+        XCTAssertEqual(said.names, [])
     }
 
     // MARK: - launching it
@@ -437,7 +966,7 @@ final class ExportStagingTests: XCTestCase {
             XCTAssertTrue(store.launchExport(
                 appName: "example", delivery: .unknown, staging: staging
             ) {
-                if places { _ = try? staging.place() }
+                if places { _ = try? await staging.place() }
             })
 
             await fulfillment(of: [removed], timeout: 5)
@@ -515,6 +1044,42 @@ final class ExportStagingTests: XCTestCase {
         )
         XCTAssertNil(refusal("graft/ipas-exports"), "beside it is the user's")
         XCTAssertNil(refusal(""))
+    }
+
+    /// Graft's folder as config.yaml may spell it, composed (NFC), while
+    /// every path through URL, the destination's included, comes out
+    /// decomposed (NFD), as macOS's file system representation is: one
+    /// folder, two spellings that differ byte for byte. The refusal goes by
+    /// identity, so it holds either way round.
+    func test_graft_folders_are_refused_composed_or_decomposed() throws {
+        let composed = "Caf\u{E9}"
+        let decomposed = "Cafe\u{301}"
+        let base = root.resolvingSymlinksInPath().path
+        let cacheDir = base + "/" + composed + "/ipas"
+        let builtDir = base + "/" + composed + "/built"
+        for folder in [cacheDir, builtDir] {
+            try FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        }
+        let destination = URL(fileURLWithPath: cacheDir).appendingPathComponent("x.ipa")
+        let seen = destination.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath().path
+        guard seen.unicodeScalars.contains("\u{301}") else {
+            throw XCTSkip("Foundation kept the composed spelling here: nothing to tell apart")
+        }
+        XCTAssertFalse(seen.unicodeScalars.elementsEqual(cacheDir.unicodeScalars))
+
+        XCTAssertNotNil(ExportStaging.refusal(for: destination, cacheDir: cacheDir, builtDir: builtDir),
+                        "the cache folder, named composed")
+        XCTAssertNotNil(ExportStaging.refusal(
+            for: URL(fileURLWithPath: builtDir).appendingPathComponent("x.ipa"),
+            cacheDir: base + "/" + decomposed + "/ipas", builtDir: builtDir
+        ), "the built folder, named composed")
+        XCTAssertNotNil(ExportStaging.refusal(
+            for: destination, cacheDir: base + "/" + decomposed + "/ipas", builtDir: builtDir
+        ), "the cache folder, named decomposed")
+        XCTAssertNil(ExportStaging.refusal(
+            for: URL(fileURLWithPath: base + "/" + composed).appendingPathComponent("x.ipa"),
+            cacheDir: cacheDir, builtDir: builtDir
+        ), "their parent is the user's")
     }
 
     func test_a_graft_folder_that_isnt_there_holds_nothing() {

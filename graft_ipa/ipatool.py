@@ -951,9 +951,37 @@ class VersionUnavailable(AppStoreError):
 
 class VersionMetadataTimeout(AppStoreError):
     """`get-version-metadata` didn't answer within
-    `VERSION_METADATA_TIMEOUT`. Not `VersionUnavailable`: a dropped connection
+    `VERSION_METADATA_TIMEOUT`, or gave up itself on a request that ran out
+    of time (`timed_out`). Not `VersionUnavailable`: a dropped connection
     looks like this, and every version after it would wait as long and fail
     the same way, so a listing stops at the first (`appstore.list_versions`)."""
+
+
+#: How ipatool says a request it made ran out of time, in Go's own words,
+#: lower-cased. The bundled patch's reader fails a range request that
+#: receives nothing for 30 seconds with `received nothing for 30s: context
+#: deadline exceeded` (bundle/patches/ipatool-range-readahead.patch), Go's
+#: words for a deadline (context.go), which any other deadline ipatool runs
+#: into says too, however ipatool wraps it. The others are net/http's and the network's own:
+#: `net/http: timeout awaiting response headers` (ipatool's transport sets
+#: ResponseHeaderTimeout), `net/http: TLS handshake timeout`, http.Client's
+#: `(Client.Timeout exceeded while awaiting headers)` and `(Client.Timeout
+#: or context cancellation while reading body)`, and `i/o timeout` (net.go,
+#: a dial or a read past its deadline).
+_TIMED_OUT = (
+    "context deadline exceeded",
+    "timeout awaiting response headers",
+    "tls handshake timeout",
+    "client.timeout",
+    "i/o timeout",
+)
+
+
+def timed_out(error: str) -> bool:
+    """Whether ipatool's `error` says a request ran out of time: a stalled
+    or dropped connection, which the next version would wait on too."""
+    lower = error.lower()
+    return any(words in lower for words in _TIMED_OUT)
 
 
 def version_metadata(
@@ -964,8 +992,9 @@ def version_metadata(
     logs `externalVersionID`, `displayVersion`, `releaseDate` and `success`).
 
     Raises `account_error`'s errors as they are, `VersionMetadataTimeout`
-    when ipatool doesn't answer in time, and anything else about this version
-    as `VersionUnavailable`.
+    when ipatool doesn't answer in time or says a request of its own ran out
+    of time (`timed_out`), and anything else about this version as
+    `VersionUnavailable`.
     """
     if not present(path):
         raise AppStoreError(f"ipatool not found at {path}", hint=install_hint(path))
@@ -988,6 +1017,11 @@ def version_metadata(
         error = _failure(proc, verdict)
         if (found := account_error(error, bundle_id=bundle_id, path=path)) is not None:
             raise found
+        if timed_out(error):
+            raise VersionMetadataTimeout(
+                f"reading version {external_id} timed out (ipatool: {error})",
+                hint="check the connection and try again",
+            )
         raise VersionUnavailable(f"Apple didn't describe this version (ipatool: {error})")
     shown = verdict.get("displayVersion")
     if not isinstance(shown, str) or not shown.strip():

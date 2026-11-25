@@ -2,7 +2,10 @@ import SwiftUI
 import XCTest
 @testable import Graft
 
-/// Graft 2 on an Intel Mac: one screen that says so, and nothing else runs.
+/// Which Mac, and which download of Graft (`MacSupport`): the app with
+/// everything, the app without what needs Apple silicon (and a banner for the
+/// Intel download on Apple silicon), or one screen and nothing else running,
+/// for the Apple silicon download on an Intel Mac and for a mixed-up bundle.
 @MainActor
 final class AppleSiliconGateTests: XCTestCase {
     // MARK: - Detection
@@ -28,22 +31,234 @@ final class AppleSiliconGateTests: XCTestCase {
         XCTAssertNil(AppleSilicon.readSysctl("hw.optional.graft-test-no-such-entry"))
     }
 
+    // MARK: - Which download this is
+
+    func test_no_key_is_the_apple_silicon_download() {
+        XCTAssertEqual(MacSupport.build(infoValue: nil, python: .absent), .flavor(.arm64),
+                       "a Debug or Xcode build: no key, no embedded Python")
+        XCTAssertEqual(MacSupport.build(infoValue: nil, python: .architectures(["arm64"])), .flavor(.arm64),
+                       "2.0.2 and 2.1: arm64 only, from before the key")
+    }
+
+    func test_the_key_names_the_download_once_the_python_agrees() {
+        XCTAssertEqual(MacSupport.build(infoValue: "x86_64", python: .architectures(["x86_64"])), .flavor(.x86_64))
+        XCTAssertEqual(MacSupport.build(infoValue: "arm64", python: .architectures(["arm64"])), .flavor(.arm64))
+        XCTAssertEqual(MacSupport.build(infoValue: "x86_64", python: .architectures(["x86_64", "arm64"])),
+                       .flavor(.x86_64), "a universal Python agrees with either")
+        XCTAssertEqual(MacSupport.build(infoValue: "x86_64", python: .absent), .flavor(.x86_64))
+    }
+
+    func test_a_key_that_disagrees_with_the_python_is_mixed_up_never_a_guess() {
+        XCTAssertEqual(
+            MacSupport.build(infoValue: "x86_64", python: .architectures(["arm64"])),
+            .mixedUp("its Info.plist says it is the build for Intel Macs (x86_64), and its embedded Python "
+                     + "has code only for arm64")
+        )
+        for (key, python) in [(nil, ["x86_64"]), ("arm64", ["x86_64"]), ("arm64", ["arm64e"])] as [(String?, [String])] {
+            guard case .mixedUp = MacSupport.build(infoValue: key, python: .architectures(python)) else {
+                return XCTFail("\(String(describing: key)) with \(python) isn't mixed up")
+            }
+        }
+        let notBuilds: [Any] = ["universal", "x86_64h", "", "ARM64", 5, ["arm64"]]
+        for value in notBuilds {
+            guard case .mixedUp = MacSupport.build(infoValue: value, python: .architectures(["arm64"])) else {
+                return XCTFail("\(value) isn't a build")
+            }
+        }
+        guard case .mixedUp = MacSupport.build(infoValue: "arm64", python: .unreadable) else {
+            return XCTFail("an unreadable Python isn't any build")
+        }
+    }
+
+    // MARK: - The four Macs and downloads
+
+    private static let appleSiliconOnAppleSilicon = MacSupport(appleSiliconMac: true, build: .flavor(.arm64))
+    private static let intelOnAppleSilicon = MacSupport(appleSiliconMac: true, build: .flavor(.x86_64))
+    private static let appleSiliconOnIntel = MacSupport(appleSiliconMac: false, build: .flavor(.arm64))
+    private static let intelOnIntel = MacSupport(appleSiliconMac: false, build: .flavor(.x86_64))
+
+    func test_only_the_apple_silicon_download_on_apple_silicon_has_everything() {
+        XCTAssertTrue(Self.appleSiliconOnAppleSilicon.appleSiliconFeatures)
+        XCTAssertFalse(Self.intelOnAppleSilicon.appleSiliconFeatures, "no UnfairPlay or PlayCover handover in it")
+        XCTAssertFalse(Self.intelOnIntel.appleSiliconFeatures)
+        XCTAssertFalse(Self.appleSiliconOnIntel.appleSiliconFeatures)
+        XCTAssertFalse(MacSupport(appleSiliconMac: true, build: .mixedUp("x")).appleSiliconFeatures)
+    }
+
+    func test_which_combinations_run_and_which_get_one_screen() {
+        XCTAssertEqual(Self.appleSiliconOnAppleSilicon.verdict, .runs)
+        XCTAssertEqual(Self.intelOnAppleSilicon.verdict, .runs)
+        XCTAssertEqual(Self.intelOnIntel.verdict, .runs)
+        XCTAssertEqual(Self.appleSiliconOnIntel.verdict, .wrongDownload, "its Python can't run there")
+        XCTAssertEqual(MacSupport(appleSiliconMac: true, build: .mixedUp("why")).verdict, .mixedUp("why"))
+        XCTAssertEqual(MacSupport(appleSiliconMac: false, build: .mixedUp("why")).verdict, .mixedUp("why"))
+    }
+
+    func test_only_the_intel_download_on_apple_silicon_gets_the_banner() {
+        XCTAssertTrue(Self.intelOnAppleSilicon.isIntelBuildOnAppleSilicon)
+        for other in [Self.appleSiliconOnAppleSilicon, Self.intelOnIntel, Self.appleSiliconOnIntel] {
+            XCTAssertFalse(other.isIntelBuildOnAppleSilicon, "\(other)")
+        }
+    }
+
+    /// One runner, whichever Mac: it depends only on whether the app runs.
+    func test_the_runner_is_the_apps_cli_wherever_the_app_runs() {
+        XCTAssertEqual(GraftApp.runnerChoice(insideTests: false, support: Self.appleSiliconOnAppleSilicon), .app)
+        XCTAssertEqual(GraftApp.runnerChoice(insideTests: false, support: Self.intelOnIntel), .app)
+        XCTAssertEqual(GraftApp.runnerChoice(insideTests: false, support: Self.intelOnAppleSilicon), .app)
+        XCTAssertEqual(GraftApp.runnerChoice(insideTests: false, support: Self.appleSiliconOnIntel), .unused,
+                       "nothing runs it, so the login shell isn't asked")
+        XCTAssertEqual(GraftApp.runnerChoice(insideTests: false, support: .init(appleSiliconMac: true, build: .mixedUp("x"))),
+                       .unused)
+        for support in [Self.appleSiliconOnAppleSilicon, Self.intelOnIntel, Self.appleSiliconOnIntel] {
+            XCTAssertEqual(GraftApp.runnerChoice(insideTests: true, support: support), .testHost)
+        }
+    }
+
+    // MARK: - Reading a Mach-O's architectures
+
+    /// <mach/machine.h>, written out here rather than taken from the code
+    /// under test.
+    private static let arm64: Int32 = 0x0100_000C
+    private static let x86_64: Int32 = 0x0100_0007
+
+    /// A 64-bit Mach-O header, little-endian, with no load commands.
+    private func thin(_ cputype: Int32, subtype: UInt32 = 0) -> Data {
+        var data = Data()
+        for word in [0xFEED_FACF, UInt32(bitPattern: cputype), subtype, 2, 0, 0, 0, 0] as [UInt32] {
+            withUnsafeBytes(of: word.littleEndian) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
+
+    /// A universal file of `slices`, each (fat table cputype, slice bytes).
+    private func fat(_ slices: [(Int32, Data)]) -> Data {
+        var head = Data()
+        func be(_ word: UInt32) { withUnsafeBytes(of: word.bigEndian) { head.append(contentsOf: $0) } }
+        be(0xCAFE_BABE)
+        be(UInt32(slices.count))
+        var offset = UInt32(4096)
+        var body = Data()
+        for (cputype, data) in slices {
+            be(UInt32(bitPattern: cputype)); be(0); be(offset); be(UInt32(data.count)); be(12)
+            var padded = data
+            padded.append(Data(count: 4096 - data.count))
+            body.append(padded)
+            offset += 4096
+        }
+        head.append(Data(count: 4096 - head.count))
+        return head + body
+    }
+
+    private func file(_ data: Data) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("graft-macho-\(UUID().uuidString)")
+        try data.write(to: url)
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return url
+    }
+
+    func test_the_architectures_of_thin_and_universal_files() throws {
+        XCTAssertEqual(MachOArchitectures.read(try file(thin(Self.arm64))), ["arm64"])
+        XCTAssertEqual(MachOArchitectures.read(try file(thin(Self.x86_64, subtype: 3))), ["x86_64"])
+        XCTAssertEqual(MachOArchitectures.read(try file(thin(Self.arm64, subtype: 2))), ["arm64e"])
+        XCTAssertEqual(MachOArchitectures.read(try file(thin(Self.arm64, subtype: 0x8000_0002))), ["arm64e"],
+                       "the top byte is capability bits")
+        XCTAssertEqual(
+            MachOArchitectures.read(try file(fat([(Self.x86_64, thin(Self.x86_64)), (Self.arm64, thin(Self.arm64))]))),
+            ["x86_64", "arm64"]
+        )
+    }
+
+    /// A 64-bit fat file: its table entries are 32 bytes, offsets 64-bit.
+    private func fat64(_ slices: [(Int32, Data)]) -> Data {
+        var head = Data()
+        func be32(_ word: UInt32) { withUnsafeBytes(of: word.bigEndian) { head.append(contentsOf: $0) } }
+        func be64(_ word: UInt64) { withUnsafeBytes(of: word.bigEndian) { head.append(contentsOf: $0) } }
+        be32(0xCAFE_BABF)
+        be32(UInt32(slices.count))
+        var offset = UInt64(4096)
+        var body = Data()
+        for (cputype, data) in slices {
+            be32(UInt32(bitPattern: cputype)); be32(0); be64(offset); be64(UInt64(data.count)); be32(12); be32(0)
+            body.append(data + Data(count: 4096 - data.count))
+            offset += 4096
+        }
+        head.append(Data(count: 4096 - head.count))
+        return head + body
+    }
+
+    /// A 64-bit Mach-O header stored big-endian, as a PowerPC64 file was.
+    private func thinBigEndian(_ cputype: Int32) -> Data {
+        var data = Data()
+        for word in [0xFEED_FACF, UInt32(bitPattern: cputype), 0, 2, 0, 0, 0, 0] as [UInt32] {
+            withUnsafeBytes(of: word.bigEndian) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
+
+    /// The start of an `ar` archive: what a universal static library's
+    /// slices are, and no Mach-O.
+    private static let archive = Data("!<arch>\n/               0           0     0     644     4         `\n".utf8)
+
+    func test_a_fat64_file_a_big_endian_header_and_a_slice_that_is_no_mach_o() throws {
+        XCTAssertEqual(
+            MachOArchitectures.read(try file(fat64([(Self.x86_64, thin(Self.x86_64)), (Self.arm64, thin(Self.arm64))]))),
+            ["x86_64", "arm64"]
+        )
+        XCTAssertNil(MachOArchitectures.read(try file(fat64([(Self.x86_64, thin(Self.arm64))]))),
+                     "a fat64 table that disagrees with its slice")
+        XCTAssertEqual(MachOArchitectures.read(try file(thinBigEndian(Self.x86_64))), ["x86_64"])
+        XCTAssertEqual(MachOArchitectures.read(try file(thinBigEndian(Self.arm64))), ["arm64"])
+        XCTAssertEqual(MachOArchitectures.read(try file(fat([(Self.x86_64, Self.archive), (Self.arm64, thin(Self.arm64))]))),
+                       ["arm64"], "the slice that is no Mach-O is left out, the other read")
+        XCTAssertNil(MachOArchitectures.read(try file(fat([(Self.x86_64, Self.archive), (Self.arm64, Self.archive)]))),
+                     "a universal static library: no Mach-O at all")
+    }
+
+    func test_what_isnt_a_readable_mach_o_has_no_architectures() throws {
+        XCTAssertNil(MachOArchitectures.read(try file(Data("#!/bin/sh\nexit 0\n".utf8))))
+        XCTAssertNil(MachOArchitectures.read(try file(Data())))
+        XCTAssertNil(MachOArchitectures.read(try file(thin(Self.arm64).prefix(8))), "a truncated header")
+        XCTAssertNil(MachOArchitectures.read(try file(fat([(Self.x86_64, thin(Self.arm64))]))),
+                     "a fat table that disagrees with its slice")
+        XCTAssertNil(MachOArchitectures.read(FileManager.default.temporaryDirectory.appendingPathComponent("graft-none")))
+    }
+
+    /// A real file: the test host's own executable has code for the
+    /// processor this test runs as.
+    func test_the_running_executable_has_code_for_this_process() throws {
+        #if arch(arm64)
+        let running = "arm64"
+        #else
+        let running = "x86_64"
+        #endif
+        let found = try XCTUnwrap(MachOArchitectures.read(try XCTUnwrap(Bundle.main.executableURL)))
+        XCTAssertTrue(found.contains(running), "\(found)")
+    }
+
+    func test_a_bundles_embedded_python_is_read_where_the_cli_keeps_it() throws {
+        let app = FileManager.default.temporaryDirectory.appendingPathComponent("graft-app-\(UUID().uuidString)/Graft.app")
+        addTeardownBlock { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .absent)
+        let python = app.appending(path: "Contents/Resources/GraftPython/bin/python3.13")
+        try FileManager.default.createDirectory(at: python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("#!/bin/sh\n".utf8).write(to: python)
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .unreadable)
+        try thin(Self.x86_64).write(to: python)
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .architectures(["x86_64"]))
+    }
+
     // MARK: - The gate
 
-    /// Whole-diff review, docs-2: the button opens the upgrade guide's way
-    /// back to 1.1, whose pipx command is tagged `@v1.1`, not the v1.1
-    /// release page, whose own command isn't (and so installs 2.0's CLI).
-    func test_the_message_and_the_way_to_1_1() {
+    func test_the_wrong_download_says_which_one_this_mac_needs() {
         XCTAssertEqual(
-            AppleSiliconRequiredView.message,
-            "Graft 2.0 needs a Mac with Apple silicon. Graft 1.1 may work on an Intel Mac running macOS 15 or later, but it was never tested there."
+            WrongDownloadView.message,
+            "This download is for Macs with Apple silicon. For this Mac, download Graft-Intel.zip from Graft's releases page."
         )
-        XCTAssertEqual(AppleSiliconRequiredView.downloadLabel, "How to install Graft 1.1")
-        XCTAssertEqual(
-            AppleSiliconRequiredView.downloadURL.absoluteString,
-            "https://github.com/GreenglassT/Graft/blob/main/docs/upgrading.md#going-back-to-11"
-        )
-        XCTAssertFalse(AppleSiliconRequiredView.downloadURL.absoluteString.contains("/releases/"))
+        XCTAssertEqual(WrongDownloadView.buttonLabel, "Open the Releases Page")
+        XCTAssertEqual(WrongDownloadView.releasesURL.absoluteString, "https://github.com/GreenglassT/Graft/releases/latest")
+        XCTAssertTrue(WrongDownloadView.mixedUpMessage("its plist says so").hasPrefix(
+            "This copy of Graft.app is mixed up: its plist says so. Download Graft again"))
     }
 
     /// A stand-in CLI that notes every call, so a test can tell whether
@@ -71,9 +286,9 @@ final class AppleSiliconGateTests: XCTestCase {
         return (CLIRunner(executable: graft), calls)
     }
 
-    private func window(isAppleSilicon: Bool, store: ConfigStore) async throws -> (Hosted, [String]) {
+    private func window(support: MacSupport, store: ConfigStore) async throws -> (Hosted, [String]) {
         let pane = hosted(
-            AppleSiliconGate(isAppleSilicon: isAppleSilicon, openURL: { _ in }) {
+            AppleSiliconGate(support: support, openURL: { _ in }) {
                 ContentView(store: store, adminShell: NoAdminShell())
             },
             size: NSSize(width: Metrics.windowMinWidth, height: Metrics.windowMinHeight)
@@ -85,22 +300,23 @@ final class AppleSiliconGateTests: XCTestCase {
             try await Task.sleep(nanoseconds: 100_000_000)
             settle(pane, seconds: 0.05)
         }
+        addTeardownBlock { takeDown(pane) }
         let nodes = try AccessibilityTree.nodes(in: pane.window)
         let shown = nodes.flatMap { [$0.name, ($0.value as? String) ?? ""] }.filter { !$0.isEmpty }
         return (pane, shown)
     }
 
-    func test_an_intel_mac_shows_only_the_gate_and_runs_nothing() async throws {
+    func test_the_apple_silicon_download_on_an_intel_mac_shows_only_the_gate_and_runs_nothing() async throws {
         try AccessibilityTree.requireServed()
         let (runner, calls) = try recordingCLI()
         let store = ConfigStore(runner: runner, notify: { _ in })
-        let (pane, shown) = try await window(isAppleSilicon: false, store: store)
+        let (pane, shown) = try await window(support: Self.appleSiliconOnIntel, store: store)
 
-        XCTAssertTrue(shown.contains(AppleSiliconRequiredView.message), "\(shown)")
+        XCTAssertTrue(shown.contains(WrongDownloadView.message), "\(shown)")
         let nodes = try AccessibilityTree.nodes(in: pane.window)
         XCTAssertTrue(nodes.contains {
-            $0.role == kAXButtonRole && $0.name == AppleSiliconRequiredView.downloadLabel
-        }, "the button to 1.1's install steps")
+            $0.role == kAXButtonRole && $0.name == WrongDownloadView.buttonLabel
+        }, "the button to the releases page")
         XCTAssertFalse(FileManager.default.fileExists(atPath: calls.path),
                        "the CLI ran: \((try? String(contentsOf: calls, encoding: .utf8)) ?? "")")
         XCTAssertNil(store.setupNeed, "no setup screen")
@@ -118,19 +334,20 @@ final class AppleSiliconGateTests: XCTestCase {
         final class Opened { var given: [URL] = []; var viaEnvironment: [URL] = [] }
         let opened = Opened()
         let pane = hosted(
-            AppleSiliconGate(isAppleSilicon: false, openURL: { opened.given.append($0) }) { Text("the app") }
+            AppleSiliconGate(support: Self.appleSiliconOnIntel, openURL: { opened.given.append($0) }) { Text("the app") }
                 .environment(\.openURL, OpenURLAction { url in
                     opened.viaEnvironment.append(url)
                     return .handled
                 }),
             size: NSSize(width: Metrics.windowMinWidth, height: Metrics.windowMinHeight)
         )
+        addTeardownBlock { takeDown(pane) }
         settle(pane)
         XCTAssertEqual(opened.given, [], "nothing opens until the button is pressed")
 
-        try clickButton(named: AppleSiliconRequiredView.downloadLabel, in: pane.window)
+        try clickButton(named: WrongDownloadView.buttonLabel, in: pane.window)
         settle(pane, seconds: 0.2)
-        XCTAssertEqual(opened.given, [AppleSiliconRequiredView.downloadURL])
+        XCTAssertEqual(opened.given, [WrongDownloadView.releasesURL])
         XCTAssertEqual(opened.viaEnvironment, [], "not through SwiftUI's openURL")
     }
 
@@ -162,16 +379,70 @@ final class AppleSiliconGateTests: XCTestCase {
         // showing the placeholder is what proves its real UI never came up.
     }
 
-    /// The control: the same window on Apple silicon is the app, and its
+    /// The control: the same window where this copy runs is the app, and its
     /// first load runs the CLI — so "nothing ran" above is the gate's doing.
-    func test_apple_silicon_gets_the_app() async throws {
+    /// The Intel download runs on an Intel Mac exactly as the Apple silicon
+    /// one does on Apple silicon; only the Intel download on Apple silicon
+    /// adds the banner.
+    func test_where_this_copy_runs_it_gets_the_app_and_runs_its_cli() async throws {
+        try AccessibilityTree.requireServed()
+        for support in [Self.appleSiliconOnAppleSilicon, Self.intelOnIntel, Self.intelOnAppleSilicon] {
+            let (runner, calls) = try recordingCLI()
+            let store = ConfigStore(runner: runner, notify: { _ in })
+            let (pane, shown) = try await window(support: support, store: store)
+            takeDown(pane)
+
+            XCTAssertFalse(shown.contains(WrongDownloadView.message), "\(support): \(shown)")
+            XCTAssertTrue(FileManager.default.fileExists(atPath: calls.path), "\(support): the first load ran the CLI")
+            XCTAssertEqual(store.setupNeed?.step, 2, "\(support): the CLI's missing config is the setup screen")
+            XCTAssertEqual(shown.contains(MacSupport.intelBuildBanner), support == Self.intelOnAppleSilicon,
+                           "\(support): \(shown)")
+        }
+    }
+
+    func test_a_mixed_up_bundle_shows_only_the_gate_and_runs_nothing() async throws {
         try AccessibilityTree.requireServed()
         let (runner, calls) = try recordingCLI()
         let store = ConfigStore(runner: runner, notify: { _ in })
-        let (_, shown) = try await window(isAppleSilicon: true, store: store)
+        let why = "its Info.plist says it is the build for Intel Macs (x86_64), and its embedded Python has code only for arm64"
+        let (_, shown) = try await window(support: MacSupport(appleSiliconMac: true, build: .mixedUp(why)), store: store)
+        XCTAssertTrue(shown.contains(WrongDownloadView.mixedUpMessage(why)), "\(shown)")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: calls.path), "the CLI ran")
+    }
 
-        XCTAssertFalse(shown.contains(AppleSiliconRequiredView.message), "\(shown)")
-        XCTAssertTrue(FileManager.default.fileExists(atPath: calls.path), "the first load ran the CLI")
-        XCTAssertEqual(store.setupNeed?.step, 2, "the CLI's missing config is the setup screen")
+    /// What the gate passes down is what every view reads: the one source.
+    func test_the_gate_hands_its_support_to_the_app() throws {
+        try AccessibilityTree.requireServed()
+        struct Probe: View {
+            @Environment(\.macSupport) private var mac
+            var body: some View { Text("line: \(mac.unavailableLine ?? "none")") }
+        }
+        for support in [Self.appleSiliconOnAppleSilicon, Self.intelOnIntel, Self.intelOnAppleSilicon] {
+            let pane = hosted(AppleSiliconGate(support: support, openURL: { _ in }) { Probe() }, width: 700)
+            addTeardownBlock { takeDown(pane) }
+            defer { takeDown(pane) }
+            settle(pane, seconds: 0.2)
+            let shown = try AccessibilityTree.texts(in: pane.window)
+            XCTAssertTrue(shown.contains("line: \(support.unavailableLine ?? "none")"), "\(shown)")
+        }
+    }
+
+    /// The banner's button opens the releases page through the gate's
+    /// opener, like the gate's own.
+    func test_the_banners_button_opens_the_releases_page() throws {
+        try AccessibilityTree.requireServed()
+        final class Opened { var given: [URL] = [] }
+        let opened = Opened()
+        let pane = hosted(
+            AppleSiliconGate(support: Self.intelOnAppleSilicon, openURL: { opened.given.append($0) }) { Text("the app") },
+            size: NSSize(width: Metrics.windowMinWidth, height: Metrics.windowMinHeight)
+        )
+        addTeardownBlock { takeDown(pane) }
+        settle(pane)
+        let shown = try AccessibilityTree.texts(in: pane.window)
+        XCTAssertTrue(shown.contains("the app"), "\(shown)")
+        try clickButton(named: WrongDownloadView.buttonLabel, in: pane.window)
+        settle(pane, seconds: 0.2)
+        XCTAssertEqual(opened.given, [WrongDownloadView.releasesURL])
     }
 }

@@ -253,6 +253,28 @@ def test_on_an_intel_mac_a_failed_handoff_says_playcover_needs_apple_silicon(
     assert "Intel" in e.value.message
 
 
+def test_in_the_intel_build_a_failed_handoff_says_which_download_to_get(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Intel build of Graft on an Apple silicon Mac has no PlayCover
+    handover: the fix is Graft.zip, not installing PlayCover."""
+    from graft_ipa import host
+
+    monkeypatch.setattr(host, "_sysctl_arm64", lambda: 1)  # Apple silicon
+    monkeypatch.setattr(host, "_running_flavor", lambda: "x86_64")
+    cache = tmp_path / "cache"
+    path = _ipa(cache)
+    with patch.object(cli_mod.subprocess, "run") as run:
+        run.return_value = SimpleNamespace(
+            returncode=1, stdout="", stderr=OPEN_MISSING_BUNDLE_STDERR,
+        )
+        with pytest.raises(ConfigError) as e:
+            cli_mod._do_install_to_mac(_cfg(cache), filename=path.name, emitter=None)
+    assert e.value.message == ("PlayCover can't be handed this build here: this is the Intel build "
+                               "of Graft; on an Apple silicon Mac, download Graft.zip")
+    assert "get PlayCover" not in (e.value.hint or "")
+
+
 def test_it_turns_off_the_two_settings_that_make_a_handed_over_app_unusable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

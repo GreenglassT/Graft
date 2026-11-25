@@ -15,7 +15,7 @@ Device UDIDs never leave your Mac.
 | You search, fetch or update tweaks | canister.me, and the repos you add | Tweak listings and downloads |
 | A device's pane opens, Edit App opens for a LiveContainer app, or you install LiveContainer | GitHub | LiveContainer's releases |
 | Once a day while Graft is open, unless Settings › Updates turns it off, and when you choose Help › Check for Updates… | GitHub (`api.github.com`), with nothing that identifies you or your Mac | Whether a newer Graft is out |
-| A newer Graft is out, unless Settings › Updates turns automatic updates off (then when you choose Update) | GitHub's release files (`github.com`), with nothing that identifies you or your Mac | The new `Graft.zip`, about 150 MB, once |
+| A newer Graft is out, unless Settings › Updates turns automatic updates off (then when you choose Update) | GitHub's release files (`github.com`), with nothing that identifies you or your Mac | The new `Graft.zip` (`Graft-Intel.zip` for the Intel build), about 150 MB, once |
 | A paid account with an App Store Connect key makes a profile | Apple's App Store Connect API | Provisioning profiles |
 | You sign in, get an app or an older version of one, list an app's older versions, or get a free one | Apple's App Store, through the bundled ipatool | Your sign-in, the license, the IPA, the versions' numbers and dates |
 | The first App Store action on a Mac (usually the first sign-in) | PyPI (`files.pythonhosted.org`), and Apple's software CDN | ipatool's Unicorn emulator (a few MB) and its App Store components (about 320 MB), once |

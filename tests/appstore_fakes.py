@@ -410,6 +410,20 @@ if argv[:1] == ["get-version-metadata"]:
     if KC:
         kc_account_or_fail()
     wanted = argv[argv.index("--external-version-id") + 1]
+    if scenario.get("metadata_trickle"):
+        # A read that keeps a little coming and so never stalls, which the
+        # bundled patch's 30 s wait for silence lets run on: a debug line every
+        # `every` seconds for `for` seconds, and only then the answer. Says
+        # its pid first, so a test can tell it was killed.
+        import time
+        with open(here / "calls.jsonl", "a") as f:
+            f.write(json.dumps({**record, "trickling": True, "pid": os.getpid()}) + "\n")
+        trickle = scenario["metadata_trickle"]
+        until = time.monotonic() + trickle["for"]
+        while time.monotonic() < until:
+            print(json.dumps({"level": "debug", "message": "reading", "time": "2026-11-24T00:00:00Z"}),
+                  flush=True)
+            time.sleep(trickle["every"])
     meta = (scenario.get("version_metadata") or {}).get(wanted)
     error = scenario.get("metadata_error") or (meta or {}).get("error")
     if meta is None and not error:

@@ -717,6 +717,9 @@ struct CacheRow: View {
     let onInstall: (StagedIPARecord) -> Void
     let onAdd: (StagedIPARecord) -> Void
     let onDelete: (StagedIPARecord) -> Void
+    /// Whether Install to Mac can run here (`MacSupport`): PlayCover needs
+    /// Apple silicon, and the Apple silicon download.
+    @Environment(\.macSupport) private var mac
 
     var body: some View {
         // Bound once: the summary is drawn and then repeated as its own
@@ -775,9 +778,12 @@ struct CacheRow: View {
     /// `CachePaneTests`' click section passes if two of these swap.
     private var controls: some View {
         HStack(spacing: Self.controlSpacing) {
-            control(Symbols.installToMac, help: "Install \(record.displayName) on this Mac with PlayCover.") {
+            control(Symbols.installToMac,
+                    help: mac.unavailableLine ?? "Install \(record.displayName) on this Mac with PlayCover.") {
                 onInstall(record)
             }
+            // Disabled, not gone: the three keep their places (`CachePaneTests`).
+            .disabled(mac.unavailableLine != nil)
             control(Symbols.add, help: "Add \(record.displayName) to your apps, prefilled from this dump.") {
                 onAdd(record)
             }

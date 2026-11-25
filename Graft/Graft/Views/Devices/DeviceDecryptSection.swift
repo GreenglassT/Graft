@@ -213,6 +213,11 @@ struct DeviceDecryptSection: View {
     /// What the card says instead of its checks on such a phone.
     static let unavailableLine = "On-device decryption needs a jailbroken device with "
         + "frida-server. To get an IPA without one, use Get latest from App Store on an app."
+    /// The same, where App Store gets need Apple silicon (`MacSupport`):
+    /// without the way out it can't offer here.
+    static let unavailableLineWithoutAppStore = "On-device decryption needs a jailbroken device "
+        + "with frida-server."
+    @Environment(\.macSupport) private var mac
     /// Refuse the partial dump. Off by default, because dropping extensions no
     /// tool can decrypt is what makes a one-click dump possible at all — and
     /// what went is always named afterward.
@@ -444,7 +449,7 @@ struct DeviceDecryptSection: View {
                 Symbols.advisory.image(size: 11)
                     .foregroundStyle(Palette.textDim)
                     .accessibilityHidden(true)
-                Text(Self.unavailableLine)
+                Text(mac.appleSiliconFeatures ? Self.unavailableLine : Self.unavailableLineWithoutAppStore)
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.textMuted)
                     .fixedSize(horizontal: false, vertical: true)

@@ -1,0 +1,25 @@
+python $ROOT/scripts/graft_bundle.py check-python work=unset
+python $ROOT/scripts/denylist.py check work=unset
+python $WORK/export/scripts/denylist.py tracked $ROOT $HEAD work=unset
+python $WORK/export/scripts/denylist.py devices check work=unset
+python $WORK/export/scripts/denylist.py devices tracked $ROOT $HEAD work=unset
+python $WORK/export/scripts/graft_bundle.py hotspot-check work=$ROOT/build/bundle-work
+xcodebuild -project $WORK/export/Graft/Graft.xcodeproj -scheme Graft -configuration Release -destination generic/platform=macOS -derivedDataPath $WORK/derived -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution ARCHS=arm64 x86_64 ONLY_ACTIVE_ARCH=NO ENABLE_CODE_COVERAGE=NO CLANG_COVERAGE_MAPPING=NO DEPLOYMENT_POSTPROCESSING=YES STRIP_INSTALLED_PRODUCT=YES STRIP_STYLE=debugging CODE_SIGN_IDENTITY=- build
+python $WORK/export/scripts/graft_bundle.py stage $WORK/stage work=$ROOT/build/bundle-work
+ditto $WORK/derived/Build/Products/Release/Graft.app $OUT/Graft.app
+ditto $WORK/stage/Resources $OUT/Graft.app/Contents/Resources
+ditto $WORK/stage/Helpers $OUT/Graft.app/Contents/Helpers
+ditto $WORK/stage/Frameworks $OUT/Graft.app/Contents/Frameworks
+python - $OUT/Graft.app/Contents $WORK/stage/macho-list.txt $WORK/export/scripts work=$ROOT/build/bundle-work
+codesign [GraftBundleArch=none] --force --options runtime --timestamp --sign Developer ID Application: Nobody (ZZZZZZZZZZ) $OUT/Graft.app/Contents/Helpers/bin/zsign
+codesign [GraftBundleArch=none] --force --options runtime --timestamp --entitlements $WORK/export/bundle/entitlements/ipatool.plist --sign Developer ID Application: Nobody (ZZZZZZZZZZ) $OUT/Graft.app/Contents/Helpers/bin/ipatool
+codesign [GraftBundleArch=none] --force --options runtime --timestamp --identifier unfairplay --sign Developer ID Application: Nobody (ZZZZZZZZZZ) $OUT/Graft.app/Contents/Helpers/bin/unfairplay
+codesign [GraftBundleArch=none] --force --options runtime --timestamp --sign Developer ID Application: Nobody (ZZZZZZZZZZ) $OUT/Graft.app
+codesign [GraftBundleArch=none] --verify --deep --strict --verbose=2 $OUT/Graft.app
+codesign [GraftBundleArch=none] -dv --verbose=2 $OUT/Graft.app
+ditto -c -k --keepParent $OUT/Graft.app $OUT/Graft.zip
+python $WORK/export/scripts/verify-bundle $OUT/Graft.app work=$ROOT/build/bundle-work
+python $WORK/export/scripts/denylist.py devices app $OUT/Graft.app work=$ROOT/build/bundle-work
+python $WORK/export/scripts/graft_bundle.py sources $OUT/components.json $OUT/Graft-9.9-sources.tar.gz --commit $HEAD --repo $ROOT work=$ROOT/build/bundle-work
+python $WORK/export/scripts/denylist.py sources $OUT/Graft-9.9-sources.tar.gz work=$ROOT/build/bundle-work
+python $WORK/export/scripts/denylist.py devices sources $OUT/Graft-9.9-sources.tar.gz work=$ROOT/build/bundle-work

@@ -501,6 +501,114 @@ def test_a_stop_mid_write_leaves_nothing_behind(
     assert end["type"] == "build-end" and end["stopped"] is True
 
 
+#: The real CLI, with cyan's output a FIFO the test feeds: the export's write
+#: then blocks partway, reading it, until the test stops the process. Tools
+#: are looked up, never run, as in `_setup`.
+_STOP_DRIVER = '''
+import os, sys
+from pathlib import Path
+from types import SimpleNamespace
+
+repo, tools_dir, ready = sys.argv[1:4]
+sys.path.insert(0, repo)
+from graft_ipa import cli, tools
+from tests.tool_fakes import fake_path
+
+tools.which = fake_path(Path(tools_dir))
+
+
+def cyan(_cfg, _app, _src, dst, *, dry_run=False):
+    os.mkfifo(dst)
+    Path(ready + ".part").write_text(str(dst))
+    os.replace(ready + ".part", ready)
+    return SimpleNamespace(output_ipa=Path(dst), stdout="", stderr="")
+
+
+cli.run_cyan = cyan
+sys.exit(cli.app(args=sys.argv[4:], prog_name="graft"))
+'''
+
+
+def _waited_for(found, what: str, proc, timeout: float = 20):
+    """`found()` once it is truthy, failing if `proc` exits first."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (got := found()):
+            return got
+        if proc.poll() is not None:
+            pytest.fail(f"the CLI exited {proc.returncode} before {what}: {proc.stderr.read()}")
+        time.sleep(0.02)
+    pytest.fail(f"no {what} within {timeout} s")
+
+
+def test_a_real_stop_mid_write_leaves_nothing_behind(paid, out_dir: Path, tmp_path: Path) -> None:
+    """End to end, as the app's Stop does it: SIGTERM to a real CLI process
+    whose write is under way, a MiB of the IPA in its temp file and the read
+    of the rest blocked. The stop must unwind through the write's `finally`
+    (`_verb_export_ipa`'s `exit_on_termination`); Python's default for
+    SIGTERM kills the process where it stands and leaves the temp file,
+    hidden, beside the user's."""
+    import signal
+    import subprocess
+    import sys
+
+    from tests.conftest import REPO_ROOT
+
+    driver = tmp_path / "driver" / "stop_mid_write.py"
+    driver.parent.mkdir()
+    driver.write_text(_STOP_DRIVER)
+    ready = tmp_path / "fifo-path"
+    temp = tmp_path / "tmp"
+    temp.mkdir()
+    dest = out_dir / "Example.ipa"
+    chunk = 1 << 20  # what `_write_export` copies at a time
+    proc = subprocess.Popen(
+        [sys.executable, str(driver), str(REPO_ROOT), str(tmp_path / "path-bin"), str(ready),
+         "--json", "example", "--export-ipa", str(dest)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=REPO_ROOT,
+        env={**os.environ, "TMPDIR": str(temp)},
+    )
+    writer: int | None = None
+    try:
+        fifo = Path(_waited_for(lambda: ready.exists() and ready.read_text(), "cyan's output", proc))
+
+        def opened() -> int | None:
+            # ENXIO until the write has the FIFO open for reading.
+            try:
+                return os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError as e:
+                if e.errno != errno.ENXIO:
+                    raise
+                return None
+
+        writer = _waited_for(opened, "the write's read of cyan's output", proc)
+        os.set_blocking(writer, True)
+        data = memoryview(b"\x00" * chunk)
+        while data:
+            data = data[os.write(writer, data):]
+        _waited_for(
+            lambda: [p for p in out_dir.iterdir() if p.name.endswith(".partial") and p.stat().st_size == chunk],
+            "a MiB in the write's temp file", proc,
+        )
+
+        proc.send_signal(signal.SIGTERM)
+        stdout, stderr = proc.communicate(timeout=15)
+    finally:
+        if writer is not None:
+            os.close(writer)
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+
+    assert proc.returncode == 143, stderr
+    assert list(out_dir.iterdir()) == [], "no file, and no temp file beside it"
+    assert not fifo.parent.exists(), "the build's own temp folder went too"
+    end = json.loads(stdout.splitlines()[-1])
+    assert end["type"] == "build-end" and end["stopped"] is True, stdout
+
+
 # --- where it can write --------------------------------------------------------------
 
 

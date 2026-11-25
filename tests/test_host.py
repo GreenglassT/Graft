@@ -15,6 +15,7 @@ from __future__ import annotations
 import errno
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -180,3 +181,63 @@ def test_an_apps_store_is_its_own_else_this_macs_mapped_then_the_us(
 def test_no_test_reads_the_real_region() -> None:
     """conftest's pin is in place: a suite run never depends on the Mac's locale."""
     assert host.mac_region() is None
+
+
+# --- What needs Apple silicon: the Mac, and which build of Graft ---------------------
+
+
+def _running(monkeypatch: pytest.MonkeyPatch, flavor: str | None) -> None:
+    monkeypatch.setattr(host, "_running_flavor", lambda: flavor)
+
+
+@pytest.mark.parametrize(("reading", "flavor", "blocker"), [
+    (1, None, None),              # Apple silicon, from no bundle (pipx, a checkout)
+    (1, "arm64", None),           # the Apple silicon build
+    (1, "x86_64", host.INTEL_BUILD),  # the Intel build on Apple silicon
+    (None, None, host.INTEL_MAC),     # an Intel Mac, whatever runs
+    (None, "x86_64", host.INTEL_MAC),
+    (0, "arm64", host.INTEL_MAC),
+])
+def test_what_needs_apple_silicon_is_blocked_by_the_mac_or_by_the_intel_build(
+    monkeypatch: pytest.MonkeyPatch, reading: int | None, flavor: str | None, blocker: str | None
+) -> None:
+    monkeypatch.setattr(host, "_sysctl_arm64", lambda: reading)
+    _running(monkeypatch, flavor)
+    assert host.apple_silicon_blocker() == blocker
+
+
+def test_a_mac_that_cant_be_read_blocks_only_for_the_intel_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Can't tell leaves every message as it was; the Intel build is still
+    the Intel build."""
+    def fails() -> int:
+        raise OSError(errno.EPERM, "denied")
+
+    monkeypatch.setattr(host, "_sysctl_arm64", fails)
+    _running(monkeypatch, None)
+    assert host.apple_silicon_blocker() is None
+    _running(monkeypatch, "x86_64")
+    assert host.apple_silicon_blocker() == host.INTEL_BUILD
+
+
+def test_the_intel_build_says_which_download_to_get() -> None:
+    assert host.INTEL_BUILD == "this is the Intel build of Graft; on an Apple silicon Mac, download Graft.zip"
+
+
+def test_the_running_build_is_read_from_the_bundle_around_this_python(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Graft.app around the interpreter running this, its Info.plist's
+    GraftBundleArch; nothing outside a bundle, or for a plist without it."""
+    from graft_ipa import app_update
+
+    from .app_update_fakes import dummy_app
+
+    assert host._running_flavor() is None, "this test's interpreter runs from no bundle"
+    for flavor in ("x86_64", "arm64", None):
+        where = tmp_path / str(flavor)
+        where.mkdir()
+        app = dummy_app(where, "2.2", flavor=flavor)
+        monkeypatch.setattr(sys, "executable", str(app.joinpath(*app_update.EMBEDDED_PYTHON, "python3.13")))
+        assert host._running_flavor() == flavor
+    (app / "Contents" / "Info.plist").write_bytes(b"<plist><dict><key>")
+    assert host._running_flavor() is None, "a plist that can't be read says nothing"

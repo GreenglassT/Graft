@@ -131,6 +131,7 @@ func hosted<V: View>(_ view: V, width: CGFloat) -> Hosted {
     host.frame = NSRect(x: 0, y: 0, width: size.width, height: size.height)
     host.layoutSubtreeIfNeeded()
     window.makeKeyAndOrderFront(nil)
+    HostedWindows.track(window)
     window.displayIfNeeded()
     return Hosted(window: window, size: size)
 }
@@ -162,9 +163,53 @@ func hosted<V: View>(
     window.animationBehavior = .none
     window.contentView = host
     window.makeKeyAndOrderFront(nil)
+    HostedWindows.track(window)
     host.layoutSubtreeIfNeeded()
     window.displayIfNeeded()
     return Hosted(window: window, size: size)
+}
+
+/// Every window `hosted(...)` put on screen, taken down when the test that
+/// made it ends: ordered out, and its view dropped so whatever the view
+/// started (a hosted `ContentView`'s `.task`s, a store's polling) ends too.
+///
+/// `hosted` has to order its window front, since the accessibility tree is
+/// served only for a window in front and a synthetic click needs a key
+/// window, and nothing took one down: the suite left some 70 open on the
+/// screen, and on 2026-11-24 its new Intel gating tests took the test host
+/// to 99 windows on the owner's screen mid-run. No test uses a window made by
+/// another test, so each goes when its own test does. A test that takes its
+/// windows down sooner (`takeDown`) loses nothing.
+@MainActor
+enum HostedWindows {
+    private static var open: [NSWindow] = []
+
+    /// Registered once, on the first window: XCTest calls it on the main
+    /// thread as each test case finishes, after its teardown.
+    private static let observer: Observer = {
+        let observer = Observer()
+        XCTestObservationCenter.shared.addTestObserver(observer)
+        return observer
+    }()
+
+    static func track(_ window: NSWindow) {
+        _ = observer
+        open.append(window)
+    }
+
+    static func takeDownAll() {
+        for window in open {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        open.removeAll()
+    }
+
+    final class Observer: NSObject, XCTestObservation {
+        func testCaseDidFinish(_ testCase: XCTestCase) {
+            MainActor.assumeIsolated { HostedWindows.takeDownAll() }
+        }
+    }
 }
 
 /// Give SwiftUI a chance to apply an observation and lay the result out.

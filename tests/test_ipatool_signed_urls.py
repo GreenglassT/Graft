@@ -34,6 +34,12 @@ STALLED = (
     f'failed to open zip reader: request failed: received error: Get "{SIGNED}": '
     "net/http: timeout awaiting response headers"
 )
+#: As Go's net/http reports a request the server dropped: no timeout, so
+#: one version's failure, said on its row.
+RESET = (
+    f'failed to open zip reader: request failed: received error: Get "{SIGNED}": '
+    "read tcp 192.0.2.10:50000->192.0.2.20:443: read: connection reset by peer"
+)
 #: What is left of it: the host and path, so the error still says where.
 LEFT = "https://iosapps.itunes.apple.com/itunes-assets/Purple221/v4/aa/bb/cc/0000-1111/example.signed.dpkg.ipa?…"
 
@@ -97,12 +103,23 @@ def _run(args: list[str]):
 def test_a_version_ipatool_couldnt_read_never_shows_its_link(
     config: Path, fakes: FakeTools, tmp_path: Path, json_mode: bool
 ) -> None:
-    fakes.set(version_metadata={"800100": {"error": STALLED}})
+    fakes.set(version_metadata={"800100": {"error": RESET}})
     result = _run([*(["--json"] if json_mode else []), "--appstore-versions", "--app", "example"])
     assert result.exit_code == 0, result.output
     if json_mode:
         (row,) = [e for e in map(json.loads, result.stdout.splitlines()) if e["type"] == "appstore-release"]
         assert LEFT in row["error"], "the row still says where it failed"
+    _never_kept(tmp_path, result.stdout, result.stderr)
+
+
+def test_a_version_read_that_timed_out_never_shows_its_link(
+    config: Path, fakes: FakeTools, tmp_path: Path
+) -> None:
+    """A timeout stops the list (`ipatool.timed_out`), and says so on stderr."""
+    fakes.set(version_metadata={"800100": {"error": STALLED}})
+    result = _run(["--json", "--appstore-versions", "--app", "example"])
+    assert result.exit_code == 20, result.output
+    assert "iosapps.itunes.apple.com" in result.stderr, "it still says where it failed"
     _never_kept(tmp_path, result.stdout, result.stderr)
 
 

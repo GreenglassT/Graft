@@ -45,6 +45,56 @@ def test_builds_pages_index_assets_and_sitemap(repo, site):
     assert not (site / ".wiki-build").exists()
 
 
+BEACON = (
+    '<script defer src="https://static.cloudflareinsights.com/beacon.min.js" '
+    "data-cf-beacon='{\"token\": \"0123456789abcdef\"}'></script>"
+)
+
+
+def _pages(site):
+    return {p: p.read_text() for p in (site / "wiki").rglob("*.html")}
+
+
+def test_without_analytics_pages_end_as_before(repo, site):
+    run(repo, site)
+    for path, page in _pages(site).items():
+        assert page.endswith("</div>\n</body>\n</html>\n"), path
+        assert "cloudflareinsights" not in page, path
+
+
+def test_analytics_snippet_goes_just_before_body_end_on_every_page(repo, site):
+    write(site / "analytics.html", "\n" + BEACON + "\n\n")
+    run(repo, site)
+    pages = _pages(site)
+    assert len(pages) == 3
+    for path, page in pages.items():
+        assert page.count(BEACON) == 1, path
+        assert page.endswith(BEACON + "\n</body>\n</html>\n"), path
+    assert not (site / "wiki" / "analytics.html").exists(), "read, never copied into wiki/"
+    assert "cloudflareinsights" not in (site / "wiki" / "search-index.json").read_text()
+    assert (site / "analytics.html").read_text() == "\n" + BEACON + "\n\n", "the site's own file is left alone"
+
+
+def test_analytics_snippet_is_scrubbed_with_the_pages(repo, site, tmp_path):
+    write(site / "analytics.html", "<!-- Alphaterm -->\n" + BEACON + "\n")
+    deny = write(tmp_path / "deny.txt", "Alphaterm\n")
+    before = snapshot(site)
+    with pytest.raises(WikiError, match="Alphaterm"):
+        run(repo, site, denylist=deny)
+    assert snapshot(site) == before
+
+
+def test_analytics_snippet_must_be_a_plain_small_file(repo, site, tmp_path):
+    real = write(tmp_path / "elsewhere.html", BEACON + "\n")
+    (site / "analytics.html").symlink_to(real)
+    with pytest.raises(WikiError, match="plain file"):
+        run(repo, site)
+    (site / "analytics.html").unlink()
+    write(site / "analytics.html", "x" * (16 * 1024 + 1))
+    with pytest.raises(WikiError, match="bytes"):
+        run(repo, site)
+
+
 def test_deterministic(repo, site, tmp_path):
     other = tmp_path / "site2"
     shutil.copytree(site, other)

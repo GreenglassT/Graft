@@ -32,6 +32,9 @@ _DESCRIPTION_MAX = 160
 class Chrome:
     header: str
     footer: str
+    #: The site's analytics snippet (`build.ANALYTICS`), just before `</body>`
+    #: on every page; empty without one.
+    body_end: str = ""
 
 
 def _absolute(value: str) -> str:
@@ -161,6 +164,6 @@ def render_page(page: Page, body: Rendered, manifest: Manifest, chrome: Chrome) 
 </div>
 {chrome.footer}
 </div>
-</body>
+{chrome.body_end}</body>
 </html>
 """

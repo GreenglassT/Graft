@@ -10,9 +10,13 @@ Graft asks GitHub whether a newer version is out. If one is, it downloads it
 in the background, then shows **Restart to Update** in a banner at the bottom
 of the main window. If you don't restart, it installs the update when you quit
 Graft.
+- Each download updates from its own zip: `Graft.zip` for Apple silicon,
+  `Graft-Intel.zip` for the Intel build. A release without yours has no
+  update for your Mac yet, and Graft never installs the other one.
 - Before it calls a download ready, Graft checks it: the SHA-256 GitHub lists
-  for it, then that the app inside is Graft, newer than yours, signed with
-  the same developer's Developer ID as yours and notarized by Apple. A download
+  for it, then that the app inside is Graft, newer than yours, the same build
+  as yours, signed with the same developer's Developer ID as yours and
+  notarized by Apple. A download
   that fails any check is deleted, and the banner links to the release page
   instead. A Graft you built yourself, which has no Developer ID, doesn't
   update itself.
@@ -40,7 +44,8 @@ Graft can't update itself when it runs straight from Downloads (macOS runs a
 read-only copy of an app it hasn't moved), or from a folder your account
 can't change. The banner then says so and links to
 [GitHub Releases](https://github.com/GreenglassT/Graft/releases): download the
-new `Graft.zip` there and replace the `Graft.app` in `/Applications`.
+new `Graft.zip` (or `Graft-Intel.zip`) there and replace the `Graft.app` in
+`/Applications`.
 
 If an update can't be installed, Graft keeps the version you have, says so the
 next time it opens, and writes what happened to

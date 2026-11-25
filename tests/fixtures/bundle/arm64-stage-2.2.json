@@ -1,0 +1,339 @@
+{
+ "TARGET": [
+  "-arch",
+  "arm64",
+  "-mmacosx-version-min=14.0"
+ ],
+ "openssl": [
+  [
+   "./Configure",
+   "darwin64-arm64-cc",
+   "shared",
+   "no-tests",
+   "no-docs",
+   "--prefix=/opt/graft/openssl",
+   "--openssldir=/opt/graft/openssl/ssl",
+   "-mmacosx-version-min=14.0"
+  ],
+  [
+   "make",
+   "-j8"
+  ],
+  [
+   "make",
+   "install_sw",
+   "DESTDIR=$DESTDIR"
+  ]
+ ],
+ "libplist": [
+  [
+   "./configure",
+   "--prefix=/opt/graft/libplist",
+   "--enable-shared",
+   "--disable-static",
+   "--without-cython",
+   "--without-tools",
+   "--without-tests",
+   "CC=clang",
+   "CXX=clang++",
+   "CFLAGS=-arch arm64 -mmacosx-version-min=14.0 -O2",
+   "CXXFLAGS=-arch arm64 -mmacosx-version-min=14.0 -O2",
+   "LDFLAGS=-arch arm64 -mmacosx-version-min=14.0"
+  ],
+  [
+   "make",
+   "-j8"
+  ],
+  [
+   "make",
+   "install",
+   "DESTDIR=$DESTDIR"
+  ]
+ ],
+ "ldid": [
+  [
+   "make",
+   "-j8",
+   "ldid",
+   "CXX=clang++",
+   "CXXFLAGS=-arch arm64 -mmacosx-version-min=14.0 -O2",
+   "LDFLAGS=-arch arm64 -mmacosx-version-min=14.0 -Wl,-headerpad_max_install_names",
+   "LIBPLIST_INCLUDES=-I$LIBPLIST/include",
+   "LIBPLIST_LIBS=$LIBPLIST/libplist-2.0.dylib",
+   "LIBCRYPTO_INCLUDES=-I$OPENSSL/include",
+   "LIBCRYPTO_LIBS=$OPENSSL/lib/libcrypto.3.dylib"
+  ]
+ ],
+ "cctools": [
+  [
+   "./configure",
+   "--prefix=/opt/graft/cctools",
+   "--disable-lto-support",
+   "--disable-tapi-support",
+   "--disable-xar-support",
+   "CC=clang",
+   "CXX=clang++",
+   "CFLAGS=-arch arm64 -mmacosx-version-min=14.0 -O2",
+   "CXXFLAGS=-arch arm64 -mmacosx-version-min=14.0 -O2",
+   "LDFLAGS=-arch arm64 -mmacosx-version-min=14.0"
+  ],
+  [
+   "make",
+   "-j8",
+   "-C",
+   "libstuff"
+  ],
+  [
+   "make",
+   "-j8",
+   "-C",
+   "libmacho"
+  ],
+  [
+   "make",
+   "-j8",
+   "-C",
+   "misc",
+   "lipo",
+   "install_name_tool"
+  ],
+  [
+   "make",
+   "-j8",
+   "-C",
+   "otool"
+  ]
+ ],
+ "insert_dylib": [
+  [
+   "clang",
+   "-arch",
+   "arm64",
+   "-mmacosx-version-min=14.0",
+   "-O2",
+   "-o",
+   "insert_dylib/insert_dylib",
+   "insert_dylib/main.c"
+  ]
+ ],
+ "ipatool": [
+  [
+   "go",
+   "mod",
+   "vendor"
+  ],
+  [
+   "go",
+   "mod",
+   "verify"
+  ],
+  [
+   "go",
+   "build",
+   "-mod=vendor",
+   "-trimpath",
+   "-buildvcs=false",
+   "-ldflags=-X github.com/majd/ipatool/v2/cmd.version=2.8.0",
+   "-o",
+   "ipatool",
+   "."
+  ]
+ ],
+ "IPATOOL_ENV": {
+  "CGO_ENABLED": "1",
+  "CC": "clang",
+  "CGO_CFLAGS": "-mmacosx-version-min=14.0",
+  "CGO_LDFLAGS": "-mmacosx-version-min=14.0",
+  "GOOS": "darwin",
+  "GOARCH": "arm64",
+  "GOTOOLCHAIN": "local",
+  "GOFLAGS": "",
+  "GOWORK": "off",
+  "GOENV": "off",
+  "GOPROXY": "https://proxy.golang.org",
+  "GOSUMDB": "sum.golang.org",
+  "GONOSUMDB": "",
+  "GOPRIVATE": "",
+  "GOINSECURE": ""
+ },
+ "unfairplay": [
+  [
+   "git",
+   "init",
+   "-q"
+  ],
+  [
+   "git",
+   "-c",
+   "credential.helper=",
+   "fetch",
+   "-q",
+   "--depth=1",
+   "--no-tags",
+   "https://github.com/DrWhax/unfairplay.git",
+   "+refs/tags/v0.4.0:refs/tags/v0.4.0"
+  ],
+  [
+   "git",
+   "update-ref",
+   "--no-deref",
+   "HEAD",
+   "d7503082a59e3dcfdd3ea7a70434dcecaaaf07df"
+  ],
+  [
+   "git",
+   "read-tree",
+   "HEAD"
+  ],
+  [
+   "/bin/sh",
+   "-c",
+   "echo /vendor/ >> .git/info/exclude"
+  ],
+  [
+   "go",
+   "mod",
+   "vendor"
+  ],
+  [
+   "go",
+   "mod",
+   "verify"
+  ],
+  [
+   "go",
+   "build",
+   "-mod=vendor",
+   "-trimpath",
+   "-buildvcs=true",
+   "-ldflags=-s -w -X main.version=v0.4.0",
+   "-o",
+   "unfairplay",
+   "./cmd/unfairplay"
+  ]
+ ],
+ "UNFAIRPLAY_ENV": {
+  "CGO_ENABLED": "0",
+  "GOOS": "darwin",
+  "GOARCH": "arm64",
+  "GOTOOLCHAIN": "local",
+  "GOFLAGS": "",
+  "GOWORK": "off",
+  "GOENV": "off",
+  "GOPROXY": "https://proxy.golang.org",
+  "GOSUMDB": "sum.golang.org",
+  "GONOSUMDB": "",
+  "GOPRIVATE": "",
+  "GOINSECURE": "",
+  "GIT_CONFIG_NOSYSTEM": "1",
+  "GIT_CONFIG_GLOBAL": "/dev/null",
+  "GIT_TERMINAL_PROMPT": "0"
+ },
+ "WHEEL_TARGET": [
+  "--platform",
+  "macosx_14_0_arm64",
+  "--python-version",
+  "3.13",
+  "--implementation",
+  "cp",
+  "--abi",
+  "cp313"
+ ],
+ "PRUNE": [
+  "bin/pip*",
+  "bin/idle*",
+  "bin/pydoc*",
+  "bin/2to3*",
+  "bin/python3*-config",
+  "include",
+  "lib/tcl*",
+  "lib/tk*",
+  "lib/itcl*",
+  "lib/thread*",
+  "lib/libtcl*",
+  "lib/libtk*",
+  "lib/python3.13/lib-dynload/_tkinter*",
+  "lib/python3.13/site-packages/PIL/_imagingtk*",
+  "lib/python3.13/ensurepip",
+  "lib/python3.13/idlelib",
+  "lib/python3.13/tkinter",
+  "lib/python3.13/turtledemo",
+  "lib/python3.13/test",
+  "lib/python3.13/*/tests",
+  "lib/python3.13/site-packages/pip",
+  "lib/python3.13/site-packages/pip-*.dist-info",
+  "lib/python3.13/site-packages/cyan/tools/Darwin/x86_64",
+  "lib/python3.13/site-packages/cyan/tools/Darwin/iOS",
+  "lib/python3.13/site-packages/cyan/tools/Linux",
+  "lib/python3.13/config-3.13-*/python.o",
+  "lib/python3.13/site-packages/test_data",
+  "share",
+  "lib/pkgconfig",
+  "lib/python3.13/site-packages/pytun_pmd3/wintun",
+  "lib/python3.13/site-packages/jedi/third_party",
+  "lib/python3.13/site-packages/Crypto/SelfTest",
+  "lib/python3.13/site-packages/*/tests",
+  "lib/python3.13/site-packages/*/*/tests",
+  "lib/python3.13/site-packages/ifaddr/test_ifaddr.py",
+  "lib/python3.13/site-packages/annotated_types/test_cases.py",
+  "lib/python3.13/site-packages/gifs",
+  "lib/python3.13/site-packages/misc",
+  "lib/python3.13/site-packages/overrides",
+  "lib/python3.13/site-packages/*/.agents"
+ ],
+ "CYAN_TOOLS": "Resources/GraftPython/lib/python3.13/site-packages/cyan/tools/Darwin/arm64",
+ "stub": [
+  [
+   "xcrun",
+   "-sdk",
+   "iphoneos",
+   "clang",
+   "-arch",
+   "arm64",
+   "-dynamiclib",
+   "-install_name",
+   "@rpath/Preferences.framework/Preferences",
+   "-framework",
+   "UIKit",
+   "-framework",
+   "Foundation",
+   "-mios-version-min=11.0",
+   "-o",
+   "Preferences.framework/Preferences",
+   "stub.m"
+  ]
+ ],
+ "launchers": [
+  [
+   "/usr/bin/clang",
+   "-O2",
+   "-arch",
+   "arm64",
+   "-mmacosx-version-min=14.0",
+   "-Wall",
+   "-Werror",
+   "-DMODULE=\"graft_ipa\"",
+   "-DPY_REL=\"../Resources/GraftPython/bin/python3.13\"",
+   "$REPO/bundle/launcher.c",
+   "-o",
+   "$TMP/Contents/Helpers/graft"
+  ],
+  [
+   "/usr/bin/clang",
+   "-O2",
+   "-arch",
+   "arm64",
+   "-mmacosx-version-min=14.0",
+   "-Wall",
+   "-Werror",
+   "-DMODULE=\"cyan\"",
+   "-DPY_REL=\"../../Resources/GraftPython/bin/python3.13\"",
+   "$REPO/bundle/launcher.c",
+   "-o",
+   "$TMP/Contents/Helpers/bin/cyan"
+  ]
+ ],
+ "ENTITLED": {
+  "Helpers/bin/ipatool": "ipatool.plist"
+ }
+}

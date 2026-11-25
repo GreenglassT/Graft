@@ -6,7 +6,7 @@ import SwiftUI
 /// `OsascriptAdminShell`), the user's login shell (`ShellEnvironment.shared`),
 /// the notification center (`BuildNotifier.post`), the rebuild installer and
 /// relaunch, the rebuild marker under Caches, the real UserDefaults, the clock,
-/// the browser (`AppleSiliconGate`'s download button, `UpdateStore`'s
+/// the browser (`AppleSiliconGate`'s releases-page buttons, `UpdateStore`'s
 /// release page, What's New's links, Get PlayCover), and LaunchServices'
 /// answer for whether PlayCover is installed. A test that forgets a fake
 /// then doesn't compile; `NoRealDefaultsTests` keeps a default of any of them
@@ -22,6 +22,12 @@ struct GraftApp: App {
     /// `AdminShellTests`.
     private let shellImportsRemoved = AdminShell.removeShellImports()
 
+    /// What this copy of Graft can do on this Mac (`MacSupport`), read once:
+    /// whether the window runs at all (`AppleSiliconGate`), and which
+    /// actions need Apple silicon. Every view gets it from the gate, as
+    /// `\.macSupport`.
+    private let support = MacSupport.thisMac
+
     /// Answers macOS's quit while Graft works (`GraftAppDelegate`).
     @NSApplicationDelegateAdaptor(GraftAppDelegate.self) private var appDelegate
 
@@ -29,9 +35,9 @@ struct GraftApp: App {
         runInstaller: RebuildCoordinator.installFromRepo,
         relaunch: RebuildCoordinator.quitAndReopen
     )
-    /// On an Intel Mac `AppleSiliconGate` stands in for every view that would
-    /// use this, so nothing runs it, and its runner is built without `forApp`,
-    /// whose `ShellEnvironment.shared` would start asking the login shell.
+    /// Its runner is the app's CLI on an Intel Mac as on Apple silicon
+    /// (`runnerChoice`): the Intel download runs its own bundled CLI exactly
+    /// as the Apple silicon one does.
     @State private var store: ConfigStore
     /// Whether a newer Graft is out, and updating to it: the window's banner
     /// and daily check, Help › Check for Updates…, and the install on the
@@ -56,11 +62,12 @@ struct GraftApp: App {
         // lookup finds ~/.local/bin/graft first, the owner's real CLI, and
         // its App Store status asked macOS for ipatool's keychain item
         // (2.0.1). Its runner points nowhere, and its window is a placeholder.
-        let runner = AdminShell.insideTests
-            ? CLIRunner(executable: Self.testHostExecutable)
-            : AppleSilicon.thisMac
-            ? CLIRunner.forApp(shell: .shared)
-            : CLIRunner(executable: GraftExecutable.bundled(in: Bundle.main.bundleURL))
+        let runner: CLIRunner
+        switch Self.runnerChoice(insideTests: AdminShell.insideTests, support: support) {
+        case .testHost: runner = CLIRunner(executable: Self.testHostExecutable)
+        case .app: runner = CLIRunner.forApp(shell: .shared)
+        case .unused: runner = CLIRunner(executable: GraftExecutable.bundled(in: Bundle.main.bundleURL))
+        }
         _store = State(initialValue: ConfigStore(runner: runner, notify: { BuildNotifier.post($0) }))
         _updates = State(initialValue: UpdateStore(
             runner: runner, defaults: .standard, now: Date.init,
@@ -78,9 +85,9 @@ struct GraftApp: App {
             },
             quit: { NSApp.terminate(nil) }
         ))
-        // An Intel Mac gets `AppleSiliconGate`'s one screen and nothing else:
-        // not even the login shell is asked. Nor does a test host.
-        guard AppleSilicon.thisMac, !AdminShell.insideTests else { return }
+        // A copy that can't run here gets `AppleSiliconGate`'s one screen and
+        // nothing else: not even the login shell is asked. Nor does a test host.
+        guard support.runsApp, !AdminShell.insideTests else { return }
         // Before any view reads a preference: settings saved while the app
         // was TweakBuild live under the old bundle id. See `LegacyDefaults`.
         LegacyDefaults.migrateOnLaunch(store: UserDefaults.standard)
@@ -95,10 +102,11 @@ struct GraftApp: App {
             if AdminShell.insideTests {
                 TestHostWindow()
             } else {
-            // Outermost, so on an Intel Mac neither the app nor these tasks run.
+            // Outermost, so where this copy can't run, neither the app nor
+            // these tasks do.
             AppleSiliconGate(
-                isAppleSilicon: AppleSilicon.thisMac,
-                // The way to 1.1, in the browser. Named here, not taken
+                support: support,
+                // The releases page, in the browser. Named here, not taken
                 // from SwiftUI's environment in the view (delta audit try13, #15).
                 openURL: { NSWorkspace.shared.open($0) }
             ) {
@@ -215,11 +223,11 @@ struct GraftApp: App {
             }
             CommandGroup(after: .help) {
                 // Says what it found in the window's alert (`UpdateStore.answerAlert`).
-                // Not on an Intel Mac, which runs no CLI at all.
+                // Not where this copy can't run, which runs no CLI at all.
                 Button("Check for Updates…") {
                     Task { await updates.checkNow() }
                 }
-                .disabled(!AppleSilicon.thisMac)
+                .disabled(!support.runsApp)
                 WhatsNewCommand()
                 Button("Licenses") {
                     if let folder = BundledLicenses.installed { NSWorkspace.shared.open(folder) }
@@ -227,14 +235,15 @@ struct GraftApp: App {
                 .disabled(BundledLicenses.installed == nil)
                 Divider()
                 // Pages Graft opens only when chosen, in the browser (docs/network.md).
-                Button(SupportLinks.starTitle) { NSWorkspace.shared.open(SupportLinks.repository) }
-                Button(SupportLinks.supportTitle) { NSWorkspace.shared.open(SupportLinks.koFi) }
+                ForEach(SupportLinks.all, id: \.title) { link in
+                    Button(link.title) { NSWorkspace.shared.open(link.url) }
+                }
                 Divider()
                 // What Graft keeps outside Graft.app, before moving it to the
-                // Trash. Not on an Intel Mac, which runs no CLI, nor while a
-                // rebuild replaces the app.
+                // Trash. Not where this copy can't run, which runs no CLI, nor
+                // while a rebuild replaces the app.
                 Button(RemoveDataSheet.menuTitle) { removeData.open() }
-                    .disabled(!AppleSilicon.thisMac || rebuild.phase != .ready)
+                    .disabled(!support.runsApp || rebuild.phase != .ready)
             }
         }
 
@@ -274,15 +283,17 @@ final class GraftAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 extension SelfUpdateHost {
-    /// This app, when it may replace itself: a release build, on Apple
-    /// silicon, outside a test host, and not one `graft-install` built from
-    /// source (`SourceWatch.repoRoot`), which its own rebuild replaces. Nil
+    /// This app, when it may replace itself: a release build that runs on
+    /// this Mac (`MacSupport.runsApp`: either download, on a Mac that can run
+    /// it; the CLI fetches this download's own zip, `app_update.own_flavor`),
+    /// outside a test host, and not one `graft-install` built from source
+    /// (`SourceWatch.repoRoot`), which its own rebuild replaces. Nil
     /// otherwise, and the banner links the release page instead.
     static func running() -> SelfUpdateHost? {
         #if DEBUG
         return nil
         #else
-        guard AppleSilicon.thisMac, !AdminShell.insideTests, SourceWatch.repoRoot == nil else { return nil }
+        guard MacSupport.thisMac.runsApp, !AdminShell.insideTests, SourceWatch.repoRoot == nil else { return nil }
         return SelfUpdateHost(
             appPath: Bundle.main.bundleURL.path,
             pid: ProcessInfo.processInfo.processIdentifier,
@@ -400,7 +411,7 @@ enum AboutGraft {
     }
 
     /// The panel's credits: the notice for `version`, then the release page,
-    /// linked, then Star on GitHub and Support on Ko-fi (`SupportLinks`).
+    /// linked, then each of `SupportLinks.all`.
     static func credits(version: String) -> NSAttributedString {
         let font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
         let body: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.labelColor]
@@ -409,8 +420,7 @@ enum AboutGraft {
         link[.link] = releasesURL
         text.append(NSAttributedString(string: releasesURL.absoluteString, attributes: link))
         text.append(NSAttributedString(string: "\n\n", attributes: body))
-        for (index, (title, url)) in [(SupportLinks.starTitle, SupportLinks.repository),
-                                      (SupportLinks.supportTitle, SupportLinks.koFi)].enumerated() {
+        for (index, (title, url)) in SupportLinks.all.enumerated() {
             if index > 0 { text.append(NSAttributedString(string: "  ·  ", attributes: body)) }
             var support = body
             support[.link] = url
@@ -424,14 +434,24 @@ enum AboutGraft {
     }
 }
 
-/// Help › Star Graft on GitHub and Support Graft on Ko-fi, and the same two
-/// links in About Graft. Graft opens them only when they're chosen, in the
-/// browser, like every other page it links (docs/network.md).
+/// Help's Star on GitHub, Support on Ko-fi and the community invite (the Graft Discord),
+/// with the same links in About Graft and Settings › Version. Graft opens them
+/// only when they're chosen, in the browser, like every other page it links
+/// (docs/network.md).
 enum SupportLinks {
     static let starTitle = "Star Graft on GitHub"
     static let supportTitle = "Support Graft on Ko-fi"
     static let repository = URL(string: "https://github.com/GreenglassT/Graft")!
     static let koFi = URL(string: "https://ko-fi.com/greenglasst")!
+    /// Always "Graft Discord" in full: the release scans allow that exact
+    /// phrase (`#public-allow`), not the word on its own.
+    static let communityTitle = "Join the Graft Discord"
+    static let communityInvite = URL(string: "https://discord.gg/dnJTnu3X7X")!
+
+    /// Each, in the order the Help menu, About Graft and Settings show them.
+    static let all: [(title: String, url: URL)] = [
+        (starTitle, repository), (supportTitle, koFi), (communityTitle, communityInvite),
+    ]
 }
 
 /// Help › Licenses: the GPL text and every bundled component's license and
@@ -457,6 +477,28 @@ extension GraftApp {
     /// window fails at once instead of running a real `graft`. Out here, so
     /// `shellImportsRemoved` stays the first thing `GraftApp` declares.
     static let testHostExecutable = URL(fileURLWithPath: "/var/empty/graft-test-host-runs-nothing")
+
+    /// Which runner the app's stores share.
+    enum RunnerChoice: Equatable {
+        /// A test host's: `testHostExecutable`, which runs nothing.
+        case testHost
+        /// The app's own CLI, as `CLIRunner.forApp` finds it in the login
+        /// shell's environment: on an Intel Mac as on Apple silicon, since
+        /// the Intel download runs its CLI just as the other one does.
+        case app
+        /// A copy that can't run here (`MacSupport.runsApp`): the gate stands
+        /// in for every view that would use the runner, so nothing does.
+        /// Built without `forApp`, whose `ShellEnvironment.shared` would start
+        /// asking the login shell for nothing.
+        case unused
+    }
+
+    /// The runner for `support`: it depends on whether the app runs at all,
+    /// never on which Mac it runs on.
+    static func runnerChoice(insideTests: Bool, support: MacSupport) -> RunnerChoice {
+        if insideTests { return .testHost }
+        return support.runsApp ? .app : .unused
+    }
 }
 
 /// The app's own window in a test host: what it says, and nothing else.

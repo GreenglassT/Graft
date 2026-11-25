@@ -9,7 +9,9 @@ changes for someone coming from 1.0 or 1.1, and how to go back.
 
 1. Check your Mac: 2.0 needs macOS 14 or later. Graft 2.0 needs a Mac with
    Apple silicon. Graft 1.1 may work on an Intel Mac running macOS 15 or
-   later, but it was never tested there.
+   later, but it was never tested there. From 2.2, an Intel Mac can run
+   `Graft-Intel.zip` instead (a test build), without App Store downloads,
+   decryption or PlayCover.
 2. Replace `Graft.app` in `/Applications` with 2.0's, and open it.
 3. Settings › App Store › **Sign In…** once. It replaces the sign-in your own
    ipatool made under 1.x.
@@ -241,7 +243,9 @@ To pin an app to one store, set App Store in its Edit sheet, or run `graft
 
 **Graft 1.1 needs macOS 15 or later:** its app doesn't open on macOS 14.
 Graft 2.0 needs a Mac with Apple silicon. Graft 1.1 may work on an Intel Mac
-running macOS 15 or later, but it was never tested there.
+running macOS 15 or later, but it was never tested there. From 2.2, an Intel
+Mac can run `Graft-Intel.zip` instead (a test build); see
+[Requirements](../README.md#requirements).
 
 Graft 1.1 stays available:
 - the app: `Graft.zip` on the

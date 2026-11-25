@@ -156,7 +156,8 @@ None of this blocks a build.
 ## Running builds on this Mac
 
 On an Apple silicon Mac, an app's pane has **Build for this Mac**, which makes
-the build loadable under PlayCover and hands it to PlayCover. A staged IPA or
+the build loadable under PlayCover and hands it to PlayCover. (On an Intel
+Mac, PlayCover can't run, and the button is disabled.) A staged IPA or
 an archived build can be handed over too.
 
 Some tweak libraries import iOS private frameworks that macOS doesn't have;

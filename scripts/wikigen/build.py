@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import html
 import json
 import os
@@ -21,7 +22,7 @@ from .links import build_index, make_resolver
 from .manifest import load_manifest
 from .page import OG_HEIGHT, OG_IMAGE, OG_WIDTH, SITE, read_chrome, render_page
 from .render import render_markdown
-from .scrub import Hit, load_denylist, scan
+from .scrub import Hit, load_allowed, load_denylist, scan
 from .search import search_entries
 from .sitemap import merge_sitemap
 
@@ -54,6 +55,34 @@ def _check_cname(out: Path) -> None:
         raise WikiError(f"{cname}: not found; {out} is not the graftipa.com site") from None
     if value != "graftipa.com":
         raise WikiError(f"{cname}: reads {value!r}, expected 'graftipa.com'")
+
+
+#: A snippet in the site checkout's root (Cloudflare Web Analytics' beacon,
+#: say) that every wiki page carries just before `</body>`, as the homepage
+#: does, so a rebuild never drops it. Optional: without it, pages are as
+#: before. It's read, never copied into `wiki/`, and the scrub reads it in
+#: every page like the rest of the page.
+ANALYTICS = "analytics.html"
+ANALYTICS_MAX = 16 * 1024
+
+
+def _read_analytics(out: Path) -> str:
+    """The site's analytics snippet, with one trailing newline, or "" when the
+    checkout has none. A plain file only: a link, a folder or anything over
+    `ANALYTICS_MAX` is refused rather than followed or read."""
+    path = out / ANALYTICS
+    if not path.exists() and not path.is_symlink():
+        return ""
+    if path.is_symlink() or not path.is_file():
+        raise WikiError(f"{path}: must be a plain file, not a link or a folder")
+    data = path.read_bytes()
+    if len(data) > ANALYTICS_MAX:
+        raise WikiError(f"{path}: is {len(data)} bytes; a snippet over {ANALYTICS_MAX} isn't one")
+    try:
+        text = data.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        raise WikiError(f"{path}: not UTF-8") from None
+    return text + "\n" if text else ""
 
 
 def _check_og_image(out: Path) -> None:
@@ -192,11 +221,13 @@ def build(
     _check_cname(out)
     _check_og_image(out)
     terms: tuple[str, ...] = ()
+    allowed: tuple[str, ...] = ()
     if denylist is not None:
         denylist = Path(denylist)
         if not denylist.is_file():
             raise WikiError(f"{denylist}: scrub list not found")
         terms = load_denylist(denylist)
+        allowed = load_allowed(denylist)
 
     wiki_dir = repo_root / "docs" / "wiki"
     img_dir = wiki_dir / "img"
@@ -205,6 +236,7 @@ def build(
         chrome = read_chrome((out / "index.html").read_text(encoding="utf-8"))
     except OSError as e:
         raise WikiError(f"{out / 'index.html'}: {e.strerror}") from None
+    chrome = dataclasses.replace(chrome, body_end=_read_analytics(out))
     index = build_index(manifest)
     pages = manifest.pages()
 
@@ -241,18 +273,18 @@ def build(
     hits: list[Hit] = []
     if check_images and image_files:
         for image, text in ocr_texts(image_files).items():
-            hits += scan(f"wiki/img/{image.name} (OCR)", text, terms)
+            hits += scan(f"wiki/img/{image.name} (OCR)", text, terms, allowed)
     for image in image_files:
-        hits += scan(f"wiki/img/{image.name} (png text)", _png_text(image), terms)
+        hits += scan(f"wiki/img/{image.name} (png text)", _png_text(image), terms, allowed)
     for rel, content in outputs.items():
         where = f"wiki/{rel}"
-        hits += scan(where, content, terms)
+        hits += scan(where, content, terms, allowed)
         if rel.endswith(".html"):
-            hits += scan(f"{where} (text)", _text_view(content), terms)
-            hits += scan(f"{where} (joined)", _text_view(content, ""), terms)
+            hits += scan(f"{where} (text)", _text_view(content), terms, allowed)
+            hits += scan(f"{where} (joined)", _text_view(content, ""), terms, allowed)
             # Tags kept, so attribute values (alt text) are seen with `&` and `'` decoded.
-            hits += scan(f"{where} (unescaped)", html.unescape(content), terms)
-    hits += scan("sitemap.xml", sitemap, terms)
+            hits += scan(f"{where} (unescaped)", html.unescape(content), terms, allowed)
+    hits += scan("sitemap.xml", sitemap, terms, allowed)
     if hits:
         raise WikiError("\n".join(_format(h) for h in hits))
 

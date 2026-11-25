@@ -38,14 +38,14 @@ class Rig:
     #: would be hours off here.
     TZ = "Pacific/Kiritimati"
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, staged_flavor: str | None = app_update.ARM64) -> None:
         self.root = root
         self.apps = root / "Applications"
         self.apps.mkdir()
         self.app = dummy_app(self.apps, "2.0.1", marker="old")
         work = root / "cache" / "graft" / "updates" / "Graft-x.noindex" / "app"
         work.mkdir(parents=True)
-        self.staged = dummy_app(work, "2.0.2", marker="new")
+        self.staged = dummy_app(work, "2.0.2", marker="new", flavor=staged_flavor)
         self.trash = root / "Trash"
         self.log = root / "Logs" / "update.log"
         self.log.parent.mkdir()
@@ -84,9 +84,9 @@ echo "source=Notarized Developer ID" >&2
         path.chmod(0o755)
 
     def env(self, *, pid: int, relaunch: bool = True, version: str = "2.0.2",
-            wait_ticks: int = 50) -> dict[str, str]:
+            flavor: str = app_update.ARM64, wait_ticks: int = 50) -> dict[str, str]:
         env = app_update.helper_env(
-            pid=pid, app=self.app, staged=self.staged, version=version, relaunch=relaunch,
+            pid=pid, app=self.app, staged=self.staged, version=version, flavor=flavor, relaunch=relaunch,
             log=self.log, trash=self.trash, team=TEAM, tools=self.tools, wait_ticks=wait_ticks,
         )
         env["ANSWERS"] = str(self.answers)
@@ -287,6 +287,40 @@ def test_a_copy_of_another_version_is_refused(rig: Rig, gone_pid: int) -> None:
     assert rig.marker(rig.app) == "old"
     assert rig.leftovers_beside_the_app() == []
     assert "not 2.0.3" in rig.log.read_text()
+
+
+@pytest.mark.parametrize(("staged", "wanted", "said"), [
+    ("x86_64", "arm64", "it is the build for 'x86_64', not arm64"),
+    ("arm64", "x86_64", "it is the build for 'arm64', not x86_64"),
+    (None, "x86_64", "it is the build for 'arm64', not x86_64"),
+])
+def test_a_copy_of_another_build_is_refused(
+    tmp_path: Path, gone_pid: int, staged: str | None, wanted: str, said: str
+) -> None:
+    """The CLI checked this build; the other build of the same version, put
+    in its place since, is genuine and passes every check above it. Its
+    plist's GraftBundleArch, sealed by the signature, keeps it out; none at
+    all is the Apple silicon build."""
+    rig = Rig(tmp_path, staged_flavor=staged)
+
+    done = rig.run(rig.env(pid=gone_pid, flavor=wanted))
+
+    assert done.returncode == 1
+    assert rig.marker(rig.app) == "old"
+    assert not (rig.trash / "Graft.app").exists()
+    assert rig.leftovers_beside_the_app() == []
+    assert said in rig.log.read_text()
+    assert rig.tool_calls()[-1] == f"fake-open {rig.app}"
+
+
+@pytest.mark.parametrize(("staged", "wanted"), [("x86_64", "x86_64"), ("arm64", "arm64"), (None, "arm64")])
+def test_a_copy_of_its_own_build_is_installed(
+    tmp_path: Path, gone_pid: int, staged: str | None, wanted: str
+) -> None:
+    rig = Rig(tmp_path, staged_flavor=staged)
+    done = rig.run(rig.env(pid=gone_pid, flavor=wanted))
+    assert done.returncode == 0, rig.log.read_text()
+    assert rig.marker(rig.app) == "new"
 
 
 def test_when_the_new_app_will_not_move_in_the_old_one_is_put_back(rig: Rig, gone_pid: int) -> None:

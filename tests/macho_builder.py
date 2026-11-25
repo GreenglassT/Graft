@@ -46,6 +46,12 @@ FAT_MAGIC_64 = 0xCAFEBABF
 
 CPU_ARM64 = 0x0100000C
 CPU_X86_64 = 0x01000007
+CPU_I386 = 7
+# <mach/machine.h>: arm64e is arm64 with this subtype; the top byte of a
+# subtype is capability bits.
+CPU_SUBTYPE_ARM64E = 2
+CPU_SUBTYPE_X86_64_ALL = 3
+CPU_SUBTYPE_LIB64 = 0x80000000
 MH_EXECUTE = 2
 MH_DYLIB = 6
 
@@ -93,29 +99,34 @@ def rpath_cmd(path: str, *, little: bool = True) -> bytes:
 
 def thin(
     cmds: list[bytes], *, is64: bool = True, little: bool = True,
-    cputype: int = CPU_ARM64, filetype: int = MH_EXECUTE,
+    cputype: int = CPU_ARM64, filetype: int = MH_EXECUTE, cpusubtype: int = 0,
 ) -> bytes:
     e = "<" if little else ">"
     magic = MH_MAGIC_64 if is64 else MH_MAGIC
     blob = b"".join(cmds)
-    header = struct.pack(e + "IiiIIII", magic, cputype, 0, filetype, len(cmds), len(blob), 0)
+    header = struct.pack(e + "IiIIIII", magic, cputype, cpusubtype, filetype, len(cmds), len(blob), 0)
     if is64:
         header += struct.pack(e + "I", 0)  # reserved
     return header + blob
 
 
-def fat(slices: list[tuple[int, bytes]], *, is64: bool = False, align: int = 0x4000) -> bytes:
-    """`slices` is (cputype, thin bytes). Fat headers are always big-endian."""
+def fat(slices: list[tuple[int, bytes]] | list[tuple[int, int, bytes]], *, is64: bool = False,
+        align: int = 0x4000) -> bytes:
+    """`slices` is (cputype, thin bytes), or (cputype, cpusubtype, thin
+    bytes); the subtype is 0 when not given. Fat headers are always
+    big-endian."""
     magic = FAT_MAGIC_64 if is64 else FAT_MAGIC
     entry = 32 if is64 else 20
     header_len = 8 + entry * len(slices)
     offset = -(-header_len // align) * align
     table, body = b"", b""
-    for cputype, data in slices:
+    for entry_fields in slices:
+        cputype, data = entry_fields[0], entry_fields[-1]
+        subtype = entry_fields[1] if len(entry_fields) == 3 else 0
         if is64:
-            table += struct.pack(">iiQQII", cputype, 0, offset, len(data), 14, 0)
+            table += struct.pack(">iIQQII", cputype, subtype, offset, len(data), 14, 0)
         else:
-            table += struct.pack(">iiIII", cputype, 0, offset, len(data), 14)
+            table += struct.pack(">iIIII", cputype, subtype, offset, len(data), 14)
         body += data + b"\0" * (-len(data) % align)
         offset += len(data) + (-len(data) % align)
     head = struct.pack(">II", magic, len(slices)) + table

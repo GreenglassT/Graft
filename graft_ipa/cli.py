@@ -3411,9 +3411,12 @@ def _do_install_to_mac(
         #
         # Except on an Intel Mac, where the release app also runs: there the
         # reason is the processor, and "not installed" would send the user to
-        # install something that cannot run. Asked only after the failure, so
-        # a working handoff costs nothing extra.
-        if host.apple_silicon() is False:
+        # install something that cannot run. Likewise in the Intel build of
+        # Graft on an Apple silicon Mac, which has no PlayCover handover: the
+        # fix is the other download. Asked only after the failure, so a
+        # working handoff costs nothing extra.
+        blocker = host.apple_silicon_blocker()
+        if blocker == host.INTEL_MAC:
             raise ConfigError(
                 f"PlayCover needs an Apple silicon Mac, and {host.INTEL_MAC}",
                 hint=(
@@ -3421,6 +3424,11 @@ def _do_install_to_mac(
                     "Deliver the build to an iPhone or iPad instead "
                     "(LiveContainer or sideload)"
                 ),
+            )
+        if blocker is not None:
+            raise ConfigError(
+                f"PlayCover can't be handed this build here: {blocker}",
+                hint="Deliver the build to an iPhone or iPad instead (LiveContainer or sideload)",
             )
         # The hint says where PlayCover comes from, which is the fix for the
         # first of the two states, and installing it again is the fix for the
@@ -7767,7 +7775,7 @@ def main(
     # `str | None` defaulting to None: a verb-only flag, passed when not None.
     data_items: str | None = typer.Option(None, "--items", help="With --remove-data: what to remove, as a comma list of the ids it lists, or all (every item marked 'removed with all'; the .p12 and SSH passwords only by name: all,passwords). This can't be undone. With --dry-run, says what would go and removes nothing."),
     current_version: str | None = typer.Option(None, "--current-version", help="With --check-update or --download-update: the version to compare against (default: this CLI's own). Graft.app passes its own."),
-    download_update: bool = typer.Option(False, "--download-update", help="When the latest release is newer, download its Graft.zip into Graft's cache and check it: GitHub's SHA-256, the signature, Graft's team and bundle id, and Apple's notarization. Deletes it if any check fails. Installs nothing (see --install-update)."),
+    download_update: bool = typer.Option(False, "--download-update", help="When the latest release is newer, download its zip of this build (Graft.zip, or Graft-Intel.zip for the Intel build) into Graft's cache and check it: GitHub's SHA-256, the build, the signature, Graft's team and bundle id, and Apple's notarization. Deletes it if any check fails. Installs nothing (see --install-update)."),
     # `str | None` / `int | None` / `bool | None` defaulting to None, like
     # `--current-version`: modifiers `_ModifierGate` refuses beside any verb
     # whose handler doesn't read them.

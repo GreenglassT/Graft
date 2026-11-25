@@ -24,6 +24,7 @@ from Preferences, one class and one ivar.
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -118,24 +119,31 @@ def has_ios_sdk(dev: Path | None) -> bool:
     return any((dev / "Platforms" / "iPhoneOS.platform" / "Developer" / "SDKs").glob("iPhoneOS*.sdk"))
 
 
-#: Graft.app's own install_name_tool, relative to Contents: cyan's, built
-#: from cctools-port with its fake-sign hook compiled out
-#: (bundle/patches/cctools-port-no-fake-sign.patch).
-BUNDLED_INSTALL_NAME_TOOL = Path(
-    "Resources/GraftPython/lib/python3.13/site-packages/cyan/tools/Darwin/arm64/install_name_tool")
+def bundled_install_name_tool(machine: str | None = None) -> Path:
+    """Graft.app's own install_name_tool, relative to Contents: cyan's, built
+    from cctools-port with its fake-sign hook compiled out
+    (bundle/patches/cctools-port-no-fake-sign.patch), in the folder cyan runs
+    its helpers from, tools/Darwin/<platform.machine()>: arm64 in Graft.zip,
+    x86_64 in Graft-Intel.zip (its Python says x86_64 even under Rosetta)."""
+    return (Path("Resources/GraftPython/lib/python3.13/site-packages/cyan/tools/Darwin")
+            / (machine or platform.machine()) / "install_name_tool")
+
+
+#: The arm64 bundle's (bundled_install_name_tool).
+BUNDLED_INSTALL_NAME_TOOL = bundled_install_name_tool("arm64")
 
 
 def install_name_tool() -> Path:
     """The `install_name_tool` a retarget runs, by absolute path.
 
-    Graft.app's own copy (BUNDLED_INSTALL_NAME_TOOL) when this is the app's
+    Graft.app's own copy (bundled_install_name_tool) when this is the app's
     CLI, else the active developer directory's. Not PATH: there it is the
     xcrun shim `developer_dir` explains. Raises `PlayCoverPrepError` naming
     the fix when neither is there.
     """
     bundled = tools.bundled_tools_dir()
-    if bundled is not None and tools.executable(bundled.parent.parent / BUNDLED_INSTALL_NAME_TOOL):
-        return bundled.parent.parent / BUNDLED_INSTALL_NAME_TOOL
+    if bundled is not None and tools.executable(bundled.parent.parent / bundled_install_name_tool()):
+        return bundled.parent.parent / bundled_install_name_tool()
     dev = developer_dir()
     if dev is not None:
         for candidate in (

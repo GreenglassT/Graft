@@ -163,9 +163,10 @@ enum CLIContract {
         /// With `--check-update` or `--download-update`: the version to
         /// compare against, the app's own.
         static let currentVersion = "--current-version"
-        /// Download the newer release's Graft.zip into Graft's cache and
-        /// check it (signature, team and bundle id, notarization, GitHub's
-        /// SHA-256). Installs nothing.
+        /// Download the newer release's zip of this build (Graft.zip, or
+        /// Graft-Intel.zip for the Intel build) into Graft's cache and check
+        /// it (signature, team and bundle id, the build, notarization,
+        /// GitHub's SHA-256). Installs nothing.
         static let downloadUpdate = "--download-update"
         /// Start the helper that installs a checked download once this app
         /// has quit. Takes the download's path.

@@ -22,6 +22,8 @@ struct BuildsView: View {
     @State private var pendingPrune: PruneSummary?
     @State private var checkingPrune = false
     @State private var pruneCheckError: String?
+    /// Whether Install to Mac can run here (`MacSupport`).
+    @Environment(\.macSupport) private var mac
 
     /// The confirmation "Clean up old builds…" shows, from the dry run.
     ///
@@ -159,13 +161,22 @@ struct BuildsView: View {
     /// itself, on `success && ipaPath != nil`, and so offered Re-install… on a
     /// Mac build: the stub-linked archive this type exists to keep off phones
     /// (the CLI refuses it too, after the sheet is already open).
-    static func installItem(for build: BuildRecord, refusal: String?) -> MenuItem {
+    ///
+    /// `unavailable` is this Mac's reason Install to Mac can't run here
+    /// (`MacSupport.unavailableLine`): PlayCover needs Apple silicon, and the
+    /// handover is in the Apple silicon download only. Said in the title, as
+    /// the paid account is.
+    static func installItem(for build: BuildRecord, refusal: String?, unavailable: String? = nil) -> MenuItem {
         switch action(for: build) {
         case .reinstall:
             return refusal == nil
                 ? MenuItem(title: "Re-install…", enabled: true)
                 : MenuItem(title: "Re-install… (needs a paid account)", enabled: false)
         case .installToMac:
+            if let unavailable {
+                let note = unavailable.prefix(1).lowercased() + unavailable.dropFirst()
+                return MenuItem(title: "Install to Mac… (\(note))", enabled: false)
+            }
             return MenuItem(title: "Install to Mac…", enabled: true)
         case .none:
             // Labeled for the target it *is*, so a failed Mac build never
@@ -344,7 +355,8 @@ struct BuildsView: View {
                         .disabled(!log.enabled)
                     // Disabled rather than missing, so the menu keeps its
                     // shape — with the reason in the title (`MenuItem`).
-                    let install = Self.installItem(for: record, refusal: reinstallRefusal(for: record))
+                    let install = Self.installItem(for: record, refusal: reinstallRefusal(for: record),
+                                                    unavailable: mac.unavailableLine)
                     Button(install.title) { self.install(record) }
                         .disabled(!install.enabled)
                     let reveal = Self.revealItem(for: record)
@@ -375,7 +387,8 @@ struct BuildsView: View {
                 // Only an artifact there is something to do with; which verb
                 // is `action(for:)`'s, as in the row menu.
                 if Self.action(for: record) != .none {
-                    let install = Self.installItem(for: record, refusal: reinstallRefusal(for: record))
+                    let install = Self.installItem(for: record, refusal: reinstallRefusal(for: record),
+                                                    unavailable: mac.unavailableLine)
                     Button(install.title) { self.install(record) }
                         .disabled(!install.enabled)
                 }

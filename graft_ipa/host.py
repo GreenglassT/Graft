@@ -68,6 +68,44 @@ def apple_silicon() -> bool | None:
 #: The phrase both callers use, so the two messages cannot drift apart.
 INTEL_MAC = "this Mac has an Intel processor"
 
+#: The same callers' phrase for the Intel build of Graft.app on an Apple
+#: silicon Mac: it carries neither UnfairPlay nor the PlayCover handover, and
+#: the fix is the other download, not anything the Mac lacks.
+INTEL_BUILD = "this is the Intel build of Graft; on an Apple silicon Mac, download Graft.zip"
+
+
+def _running_flavor() -> str | None:
+    """The Info.plist `GraftBundleArch` of the Graft.app this graft runs
+    from (`app_update.own_bundle`), or None outside one (pipx, a checkout),
+    for a plist without it, or for one that can't be read. The seam tests
+    pin, as `_sysctl_arm64` is."""
+    from . import app_update
+
+    app = app_update.own_bundle()
+    if app is None:
+        return None
+    flavor = (app_update.read_info_plist(app) or {}).get(app_update.FLAVOR_KEY)
+    return flavor if isinstance(flavor, str) else None
+
+
+def apple_silicon_blocker() -> str | None:
+    """Why what needs Apple silicon, App Store decryption (UnfairPlay) and
+    the PlayCover handover, can't run from this graft, as a clause: on an
+    Intel Mac, `INTEL_MAC`; in the Intel build of Graft.app on an Apple
+    silicon Mac, `INTEL_BUILD`. None when nothing stands in the way, or
+    when the Mac can't be read and this isn't the Intel build: callers change
+    what they say only for a reason, so "can't tell" leaves every message as
+    it was.
+
+    The one check the decryption and PlayCover refusals ask (`appstore`,
+    `cli._do_install_to_mac`), so they can't disagree about which Macs and
+    builds they cover."""
+    if apple_silicon() is False:
+        return INTEL_MAC
+    if _running_flavor() == "x86_64":
+        return INTEL_BUILD
+    return None
+
 
 #: `defaults` by absolute path. The CLI can run with a bare PATH (the 2.0
 #: acceptance test's `/usr/bin:/bin:/usr/sbin:/sbin`), and this needs no other.

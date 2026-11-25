@@ -118,6 +118,9 @@ version set in Edit App is a hold too; Get latest sets it back to latest.
 - Only apps your Apple ID has. If it doesn't have the app yet, get it first.
 - Apple doesn't serve every old version. One it won't describe or hand over
   says so, and you can pick another.
+- If the connection stalls, the list stops, and Try Again picks up where it
+  stopped. A version that stalls twice in a row is marked as unavailable, and
+  the list goes on.
 - Some apps refuse to run once they're too old, and ask you to update.
 - A version that's already staged is held without downloading it again.
 - An old version may be one UnfairPlay can't verify (see

@@ -1,10 +1,13 @@
 #!/bin/bash
-# Regenerate the bundle's two hash-locked sets, resolved for the bundled
+# Regenerate the bundle's hash-locked sets, resolved for the bundled
 # CPython 3.13 on arm64 macOS:
 #   bundle/requirements.lock        graft-ipa's runtime dependencies (from pyproject.toml)
 #   bundle/build-requirements.lock  the build backends for graft and cyan (from
 #                                   bundle/build-requirements.in), constrained to
 #                                   the runtime lock wherever the two overlap
+#   bundle/requirements-x86_64.lock the Intel bundle's runtime lock: the first,
+#                                   with bundle/x86_64-overrides.txt's packages
+#                                   at their own versions
 #
 # Run from the repo root with relative paths, so the locks' headers and their
 # "# via" comments name pyproject.toml rather than this checkout's absolute
@@ -21,6 +24,9 @@ compile() {
 }
 compile bundle/requirements.lock pyproject.toml
 compile bundle/build-requirements.lock bundle/build-requirements.in
-for lock in bundle/requirements.lock bundle/build-requirements.lock; do
+# The Intel bundle's: requirements.lock, but for bundle/x86_64-overrides.txt's
+# packages (no macOS x86_64 wheel at the locked version), each pip-compiled.
+.venv/bin/python scripts/graft_bundle.py x86_64-lock
+for lock in bundle/requirements.lock bundle/build-requirements.lock bundle/requirements-x86_64.lock; do
   echo "wrote $lock ($(grep -c '==' "$lock") packages)"
 done

@@ -3,9 +3,12 @@
 
 Run with the repo venv's Python (it imports graft_ipa.macho):
 
-    .venv/bin/python scripts/graft_bundle.py stage <staging-dir>
+    .venv/bin/python scripts/graft_bundle.py stage [--arch arm64|x86_64] <staging-dir>
 
-`<staging-dir>` comes out shaped like `Graft.app/Contents`:
+arm64 (the default) stages Graft.zip's bundle, for Apple silicon; x86_64
+stages Graft-Intel.zip's, for Intel Macs: the same, built for x86_64, with
+no UnfairPlay (see stage()). `<staging-dir>` comes out shaped like
+`Graft.app/Contents`:
 Resources/GraftPython, Resources/Licenses, Helpers/graft, Helpers/bin/*,
 Frameworks/libssl.3.dylib, Frameworks/libcrypto.3.dylib, Frameworks/ossl-modules/,
 Frameworks/libplist-2.0.dylib, plus `macho-list.txt` (every Mach-O to sign,
@@ -20,6 +23,7 @@ a SHA-256 check against bundle/pins.toml.
 from __future__ import annotations
 
 import csv
+import dataclasses
 import email.message
 import email.parser
 import functools
@@ -101,30 +105,85 @@ class Pin:
     member_sha256: str = ""
     #: The pin whose archive is this binary's source, for the source archive.
     source: str = ""
+    #: The architecture whose variant (`[<pin>.<arch>]`) this is; empty for
+    #: a table's own url and sha256, which are the arm64 bundle's.
+    arch: str = ""
+    #: A source archive the stage builds (`build = "source"`), though the
+    #: pin's other architectures take a release's file (x86_64 zsign).
+    from_source: bool = False
 
     @property
     def filename(self) -> str:
         return self.url.rsplit("/", 1)[-1]
 
 
-def load_pins(path: Path) -> dict[str, Pin]:
+#: The Macs a release is built for: arm64 (Apple silicon), whose bundle is
+#: Graft.zip and the default, and x86_64 (Intel), whose is Graft-Intel.zip.
+ARCHS = ("arm64", "x86_64")
+DEFAULT_ARCH = "arm64"
+#: Pins whose file is a Mac binary for one architecture: each needs a
+#: variant for every other architecture it is in. The rest are source the
+#: stage builds for either, the host's Go toolchain, or the same for both.
+PER_ARCH_PINS = ("python", "zsign")
+#: What a variant may set: its own file, and that the file is source to build.
+VARIANT_KEYS = {"url", "sha256", "build"}
+
+
+def load_pins(path: Path, arch: str = DEFAULT_ARCH) -> dict[str, Pin]:
+    """The pins of the bundle for `arch`: each table as it is for arm64, and
+    for another architecture with its `[<pin>.<arch>]` variant's url and
+    sha256 in their place; a pin whose `archs` leaves `arch` out is left out."""
+    if arch not in ARCHS:
+        raise BundleError(f"no release is built for {arch!r}: {', '.join(ARCHS)}")
     data = tomllib.loads(path.read_text())
+    others = set(ARCHS) - {DEFAULT_ARCH}
+    pins = {}
     for name, v in data.items():
         missing = {"url", "sha256", "license", "version"} - set(v)
         if missing:
             raise BundleError(f"{path.name}: [{name}] has no {', '.join(sorted(missing))}")
-    pins = {
-        name: Pin(name=name, url=v["url"], sha256=v["sha256"].lower(), license=v["license"],
-                  version=v["version"], builds=tuple(v.get("builds", ())), member=v.get("member", ""),
-                  member_sha256=v.get("member_sha256", "").lower(), source=v.get("source", ""))
-        for name, v in data.items()
-    }
+        variants = {key: value for key, value in v.items() if isinstance(value, dict)}
+        for key, variant in variants.items():
+            if key not in others:
+                raise BundleError(f"{path.name}: [{name}] has a table [{name}.{key}], which names no architecture "
+                                  f"a variant is for ({', '.join(sorted(others))})")
+            if set(variant) - VARIANT_KEYS:
+                raise BundleError(f"{path.name}: [{name}.{key}] may set only {', '.join(sorted(VARIANT_KEYS))}, "
+                                  f"not {', '.join(sorted(set(variant) - VARIANT_KEYS))}")
+            if not {"url", "sha256"} <= set(variant):
+                raise BundleError(f"{path.name}: [{name}.{key}] needs both url and sha256")
+        archs = v.get("archs", list(ARCHS))
+        if DEFAULT_ARCH not in archs or set(archs) - set(ARCHS):
+            raise BundleError(f"{path.name}: [{name}] archs = {archs}: it must include {DEFAULT_ARCH}, whose table "
+                              f"it is, and name only {', '.join(ARCHS)}")
+        if arch not in archs:
+            continue
+        fields = {key: value for key, value in v.items() if key not in variants}
+        if arch != DEFAULT_ARCH:
+            if arch not in variants and name in PER_ARCH_PINS:
+                raise BundleError(f"{path.name}: [{name}] has no [{name}.{arch}]: its file is a Mac binary for "
+                                  f"{DEFAULT_ARCH}, and the {arch} bundle needs its own")
+            fields.update(variants.get(arch, {}))
+        build = fields.get("build", "")
+        if build not in ("", "source"):
+            raise BundleError(f'{path.name}: [{name}] build = "{build}": the only kind is "source"')
+        pins[name] = Pin(name=name, url=fields["url"], sha256=fields["sha256"].lower(), license=fields["license"],
+                         version=fields["version"], builds=tuple(fields.get("builds", ())),
+                         member=fields.get("member", ""), member_sha256=fields.get("member_sha256", "").lower(),
+                         source=fields.get("source", ""), arch=arch if arch in variants else "",
+                         from_source=build == "source")
     for pin in pins.values():
         if bool(pin.member) != bool(pin.member_sha256):
             raise BundleError(f"{path.name}: [{pin.name}] needs both member and member_sha256, or neither")
         if pin.source and pin.source not in pins:
             raise BundleError(f"{path.name}: [{pin.name}] names source {pin.source!r}, which isn't pinned")
     return pins
+
+
+def load_pins_by_arch(path: Path) -> dict[str, dict[str, Pin]]:
+    """Every architecture's pins (load_pins), in ARCHS order: what the one
+    source archive covers, and SOURCES.md describes."""
+    return {arch: load_pins(path, arch) for arch in ARCHS}
 
 
 def _sha256(path: Path) -> str:
@@ -259,17 +318,21 @@ def _run(*args: str | Path, cwd: Path | None = None) -> None:
     subprocess.run([str(a) for a in args], cwd=cwd, env=_build_env(), check=True)
 
 
-def openssl_steps(destdir: str, jobs: list[str]) -> list[list[str]]:
+#: OpenSSL's Configure target for each architecture, which sets its -arch.
+OPENSSL_TARGETS = {"arm64": "darwin64-arm64-cc", "x86_64": "darwin64-x86_64-cc"}
+
+
+def openssl_steps(destdir: str, jobs: list[str], arch: str = DEFAULT_ARCH) -> list[list[str]]:
     """Run in openssl-3.5.9/, with the release machine's environment."""
     return [
-        ["./Configure", "darwin64-arm64-cc", "shared", "no-tests", "no-docs",
+        ["./Configure", OPENSSL_TARGETS[arch], "shared", "no-tests", "no-docs",
          f"--prefix={OPENSSL_BAKED_PREFIX}", f"--openssldir={OPENSSL_BAKED_PREFIX}/ssl", f"-mmacosx-version-min={MACOS_MIN}"],
         ["make", *jobs],
         ["make", "install_sw", f"DESTDIR={destdir}"],
     ]
 
 
-def build_openssl(pin: Pin, work: Path = WORK) -> Path:
+def build_openssl(pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
     """OpenSSL built from its pinned source: the installed prefix, holding
     lib/libssl.3.dylib, lib/libcrypto.3.dylib, lib/ossl-modules/legacy.dylib,
     include/ and the source's LICENSE.txt.
@@ -282,16 +345,17 @@ def build_openssl(pin: Pin, work: Path = WORK) -> Path:
     """
     def build(tmp: Path, out: Path) -> None:
         src = _unpack(pin, tmp)
-        _build_steps(openssl_steps(str(tmp / "dest"), _jobs()), src)
+        _build_steps(openssl_steps(str(tmp / "dest"), _jobs(), arch), src)
         built = tmp / "dest" / OPENSSL_BAKED_PREFIX.lstrip("/")
         shutil.copytree(built, out / "prefix", symlinks=True)
         shutil.copy2(src / "LICENSE.txt", out / "prefix" / "LICENSE.txt")
-    key = build_key(pin.sha256, openssl_steps("$DESTDIR", []), toolchain_id())
+    key = build_key(pin.sha256, openssl_steps("$DESTDIR", [], arch), toolchain_id())
     return _cached_build("openssl", key, work, build) / "prefix"
 
 
 def stage_openssl_and_zsign(prefix: Path, zsign_src: Path, contents: Path) -> None:
-    """libssl, libcrypto and the legacy provider into Frameworks; zsign repointed."""
+    """libssl, libcrypto and the legacy provider into Frameworks; zsign (the
+    arm64 release's binary, or the x86_64 build_zsign) repointed."""
     fw = contents / "Frameworks"
     (fw / "ossl-modules").mkdir(parents=True, exist_ok=True)
     for lib in OPENSSL_LIBS:
@@ -317,12 +381,21 @@ def stage_openssl_and_zsign(prefix: Path, zsign_src: Path, contents: Path) -> No
 
 # ------------------------------------------------- cyan's helpers, from source
 
-#: cyan's own helpers, in cyan/tools/Darwin/arm64: the names cyan's code runs
+#: cyan's own helpers, in cyan/tools/Darwin/<arch>: the names cyan's code runs
 #: them by (cyan.tbhtypes.executable). Each is built from pinned source.
 CYAN_HELPERS = ("ldid", "insert_dylib", "lipo", "install_name_tool", "otool")
 
-#: Where cyan runs them from (tbhutils.get_tools_dir), relative to Contents.
-CYAN_TOOLS = Path("Resources/GraftPython/lib/python3.13/site-packages/cyan/tools/Darwin/arm64")
+
+def cyan_tools(arch: str = DEFAULT_ARCH) -> Path:
+    """Where cyan runs its helpers from, relative to Contents:
+    tools/<platform.system()>/<platform.machine()> (tbhutils.get_tools_dir),
+    which the bundled Python reports as Darwin/arm64 or Darwin/x86_64, the
+    architecture it was built for, even under Rosetta."""
+    return Path(f"Resources/GraftPython/lib/python3.13/site-packages/cyan/tools/Darwin/{arch}")
+
+
+#: The arm64 bundle's (cyan_tools).
+CYAN_TOOLS = cyan_tools()
 #: cyan's iOS frameworks, relative to Contents: see CYAN_FRAMEWORKS.
 CYAN_EXTRAS = Path("Resources/GraftPython/lib/python3.13/site-packages/cyan/extras")
 
@@ -339,8 +412,20 @@ CCTOOLS_BAKED_PREFIX = "/opt/graft/cctools"
 #: (Observation and onChange(of:initial:)); everything the stage builds targets
 #: it too, and verify-bundle checks Info.plist promises exactly this.
 MACOS_MIN = "14.0"
-#: Every helper built from source targets this, as the rest of the bundle does.
-TARGET = ("-arch", "arm64", f"-mmacosx-version-min={MACOS_MIN}")
+
+
+def target(arch: str = DEFAULT_ARCH) -> tuple[str, ...]:
+    """What every helper built from source targets, as the rest of the
+    bundle does: the bundle's architecture, and MACOS_MIN. An x86_64 build
+    is a cross-compile on an Apple silicon Mac; a configure script's test
+    programs then run under Rosetta."""
+    if arch not in ARCHS:
+        raise BundleError(f"no release is built for {arch!r}: {', '.join(ARCHS)}")
+    return ("-arch", arch, f"-mmacosx-version-min={MACOS_MIN}")
+
+
+#: The arm64 bundle's (target).
+TARGET = target()
 #: Room in ldid's header for the @loader_path install names it gets after the link.
 HEADERPAD = "-Wl,-headerpad_max_install_names"
 #: What a staged helper may link besides the bundle's own libraries.
@@ -384,40 +469,51 @@ def _jobs() -> list[str]:
     return [f"-j{os.cpu_count() or 4}"]
 
 
-def _flags(*extra: str) -> str:
-    return " ".join((*TARGET, *extra))
+def _flags(*extra: str, arch: str = DEFAULT_ARCH) -> str:
+    return " ".join((*target(arch), *extra))
 
 
 # The build commands, as data: the builds below run them, the cache key
 # covers them (with placeholders for the build's own paths), and the source
-# archive can print exactly what ran. `jobs` is make's -j.
+# archive can print exactly what ran. `jobs` is make's -j. `arch` changes
+# only the -arch every compile and link is given, OpenSSL's target, and for
+# x86_64 the host an autotools configure is told (AUTOTOOLS_HOST).
 
 
-def libplist_steps(destdir: str, jobs: list[str]) -> list[list[str]]:
+#: What an autotools configure is told it builds for when that isn't the
+#: Mac it runs on: the x86_64 builds are cross-compiles. Without it,
+#: cctools-port's configure takes the host from `uname` and compiles its x86_64
+#: objects with -D__arm64__, which pulls in both byte-order headers.
+AUTOTOOLS_HOST = {"arm64": (), "x86_64": ("--host=x86_64-apple-darwin",)}
+
+
+def libplist_steps(destdir: str, jobs: list[str], arch: str = DEFAULT_ARCH) -> list[list[str]]:
     """Run in libplist-2.8.0/."""
     return [
-        ["./configure", f"--prefix={LIBPLIST_BAKED_PREFIX}", "--enable-shared", "--disable-static",
+        ["./configure", f"--prefix={LIBPLIST_BAKED_PREFIX}", *AUTOTOOLS_HOST[arch], "--enable-shared", "--disable-static",
          "--without-cython", "--without-tools", "--without-tests", "CC=clang", "CXX=clang++",
-         f"CFLAGS={_flags('-O2')}", f"CXXFLAGS={_flags('-O2')}", f"LDFLAGS={_flags()}"],
+         f"CFLAGS={_flags('-O2', arch=arch)}", f"CXXFLAGS={_flags('-O2', arch=arch)}", f"LDFLAGS={_flags(arch=arch)}"],
         ["make", *jobs],
         ["make", "install", f"DESTDIR={destdir}"],
     ]
 
 
-def ldid_steps(libplist: str, openssl: str, jobs: list[str]) -> list[list[str]]:
+def ldid_steps(libplist: str, openssl: str, jobs: list[str], arch: str = DEFAULT_ARCH) -> list[list[str]]:
     """Run in ldid's source; `libplist` and `openssl` hold include/ and the dylibs."""
-    return [["make", *jobs, "ldid", "CXX=clang++", f"CXXFLAGS={_flags('-O2')}", f"LDFLAGS={_flags(HEADERPAD)}",
+    return [["make", *jobs, "ldid", "CXX=clang++", f"CXXFLAGS={_flags('-O2', arch=arch)}",
+             f"LDFLAGS={_flags(HEADERPAD, arch=arch)}",
              f"LIBPLIST_INCLUDES=-I{libplist}/include", f"LIBPLIST_LIBS={libplist}/{LIBPLIST}",
              f"LIBCRYPTO_INCLUDES=-I{openssl}/include", f"LIBCRYPTO_LIBS={openssl}/lib/{LIBCRYPTO}"]]
 
 
-def cctools_steps(jobs: list[str]) -> list[list[str]]:
+def cctools_steps(jobs: list[str], arch: str = DEFAULT_ARCH) -> list[list[str]]:
     """Run in cctools-port's cctools/. Only libstuff and libmacho, then the
     three tools: no ld64, no LTO, libtapi or xar."""
     return [
-        ["./configure", f"--prefix={CCTOOLS_BAKED_PREFIX}", "--disable-lto-support", "--disable-tapi-support",
+        ["./configure", f"--prefix={CCTOOLS_BAKED_PREFIX}", *AUTOTOOLS_HOST[arch], "--disable-lto-support",
+         "--disable-tapi-support",
          "--disable-xar-support", "CC=clang", "CXX=clang++",
-         f"CFLAGS={_flags('-O2')}", f"CXXFLAGS={_flags('-O2')}", f"LDFLAGS={_flags()}"],
+         f"CFLAGS={_flags('-O2', arch=arch)}", f"CXXFLAGS={_flags('-O2', arch=arch)}", f"LDFLAGS={_flags(arch=arch)}"],
         ["make", *jobs, "-C", "libstuff"],
         ["make", *jobs, "-C", "libmacho"],
         ["make", *jobs, "-C", "misc", "lipo", "install_name_tool"],
@@ -425,10 +521,26 @@ def cctools_steps(jobs: list[str]) -> list[list[str]]:
     ]
 
 
-def insert_dylib_steps() -> list[list[str]]:
+def insert_dylib_steps(arch: str = DEFAULT_ARCH) -> list[list[str]]:
     """Run in insert_dylib's source: its one file. (The output goes beside it:
     `insert_dylib` at the top is the source directory.)"""
-    return [["clang", *TARGET, "-O2", "-o", "insert_dylib/insert_dylib", "insert_dylib/main.c"]]
+    return [["clang", *target(arch), "-O2", "-o", "insert_dylib/insert_dylib", "insert_dylib/main.c"]]
+
+
+def zsign_steps(openssl: str, jobs: list[str], version: str, arch: str) -> list[list[str]]:
+    """Run in zsign's source (the x86_64 bundle's: build_zsign): upstream's
+    build/macos/Makefile, as its release workflow runs it (`make
+    VERSION=<tag>`), told the compiler, the bundled OpenSSL's headers and
+    libraries (`$OPENSSL`, for the pkg-config it would ask) and the target.
+    Its zlib and minizip objects and its link use only CC and CXX, so the
+    target goes there; CXXFLAGS is the Makefile's own with the version it
+    adds. The link gets room for the @executable_path names zsign's links
+    to OpenSSL are changed to (stage_openssl_and_zsign)."""
+    return [["make", *jobs, "-C", "build/macos", f"VERSION={version}",
+             f"CC=clang {_flags(arch=arch)}", f"CXX=clang++ {_flags(arch=arch)}",
+             f"CXXFLAGS=-std=c++11 -O3 -MMD -MP -DZSIGN_VERSION={version}",
+             f"OPENSSL_INCLUDE=-I{openssl}/include",
+             f"LIBS={openssl}/lib/libssl.3.dylib {openssl}/lib/{LIBCRYPTO} {HEADERPAD}"]]
 
 
 #: Patches applied to a pin's unpacked source before it is built, in order:
@@ -534,20 +646,21 @@ def _build_steps(steps: list[list[str]], cwd: Path) -> None:
         subprocess.run(step, cwd=cwd, env=_build_env(), check=True)
 
 
-def build_libplist(pin: Pin, work: Path = WORK) -> Path:
+def build_libplist(pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
     """libplist, shared: out/libplist-2.0.dylib, out/include, its COPYING files."""
     def build(tmp: Path, out: Path) -> None:
         src = _unpack(pin, tmp)
-        _build_steps(libplist_steps(str(tmp / "dest"), _jobs()), src)
+        _build_steps(libplist_steps(str(tmp / "dest"), _jobs(), arch), src)
         installed = tmp / "dest" / LIBPLIST_BAKED_PREFIX.lstrip("/")
         shutil.copy2((installed / "lib" / LIBPLIST).resolve(), out / LIBPLIST)
         shutil.copytree(installed / "include", out / "include")
         for f in HELPER_LICENCES["libplist"]:
             shutil.copy2(src / f, out / f)
-    return _cached_build("libplist", build_key(pin.sha256, libplist_steps("$DESTDIR", []), toolchain_id()), work, build)
+    return _cached_build("libplist", build_key(pin.sha256, libplist_steps("$DESTDIR", [], arch), toolchain_id()), work,
+                         build)
 
 
-def build_ldid(pin: Pin, libplist: Path, openssl: Path, work: Path = WORK) -> Path:
+def build_ldid(pin: Pin, libplist: Path, openssl: Path, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
     """ldid, linked to `libplist` (build_libplist's) and the bundled OpenSSL's
     libcrypto. Its cache key covers both: they are build_libplist's and
     build_openssl's own cache directories, named by their keys."""
@@ -559,11 +672,11 @@ def build_ldid(pin: Pin, libplist: Path, openssl: Path, work: Path = WORK) -> Pa
         shutil.copytree(openssl / "include", ossl / "include")
         (ossl / "lib").mkdir()
         shutil.copy2(openssl / "lib" / LIBCRYPTO, ossl / "lib" / LIBCRYPTO)
-        _build_steps(ldid_steps(str(plist), str(ossl), _jobs()), src)
+        _build_steps(ldid_steps(str(plist), str(ossl), _jobs(), arch), src)
         shutil.copy2(src / "ldid", out / "ldid")
         for f in HELPER_LICENCES["ldid"]:
             shutil.copy2(src / f, out / f)
-    key = build_key(pin.sha256, libplist.name, openssl.parent.name, ldid_steps("$LIBPLIST", "$OPENSSL", []),
+    key = build_key(pin.sha256, libplist.name, openssl.parent.name, ldid_steps("$LIBPLIST", "$OPENSSL", [], arch),
                     toolchain_id())
     return _cached_build("ldid", key, work, build)
 
@@ -584,7 +697,7 @@ def check_no_shell(path: Path, name: str) -> None:
         raise BundleError(f"the built {name} imports {', '.join(found)}, which start a shell")
 
 
-def build_cctools(pin: Pin, work: Path = WORK) -> Path:
+def build_cctools(pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
     """lipo, install_name_tool and otool from cctools-port, patched
     (PATCHES), and APPLE_LICENSE. A tool importing system() or popen() is
     refused."""
@@ -592,24 +705,58 @@ def build_cctools(pin: Pin, work: Path = WORK) -> Path:
         top = _unpack(pin, tmp)
         apply_patches("cctools", top)
         src = top / "cctools"
-        _build_steps(cctools_steps(_jobs()), src)
+        _build_steps(cctools_steps(_jobs(), arch), src)
         for tool in pin.builds:
             shutil.copy2(src / ("otool" if tool == "otool" else "misc") / tool, out / tool)
             check_no_shell(out / tool, tool)
         for f in HELPER_LICENCES["cctools"]:
             shutil.copy2(src / f, out / f)
-    key = build_key(pin.sha256, pin.builds, cctools_steps([]), patch_hashes("cctools"), toolchain_id())
+    key = build_key(pin.sha256, pin.builds, cctools_steps([], arch), patch_hashes("cctools"), toolchain_id())
     return _cached_build("cctools", key, work, build)
 
 
-def build_insert_dylib(pin: Pin, work: Path = WORK) -> Path:
+def build_insert_dylib(pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
     def build(tmp: Path, out: Path) -> None:
         src = _unpack(pin, tmp)
-        _build_steps(insert_dylib_steps(), src)
+        _build_steps(insert_dylib_steps(arch), src)
         shutil.copy2(src / "insert_dylib" / "insert_dylib", out / "insert_dylib")
         for f in HELPER_LICENCES["insert_dylib"]:
             shutil.copy2(src / f, out / f)
-    return _cached_build("insert_dylib", build_key(pin.sha256, insert_dylib_steps(), toolchain_id()), work, build)
+    return _cached_build("insert_dylib", build_key(pin.sha256, insert_dylib_steps(arch), toolchain_id()), work, build)
+
+
+#: What the zsign built from source may import that starts a shell: the
+#: `_popen` verify-bundle audited in zsign's arm64 release binary (its
+#: SHELL_IMPORT_EXCEPTIONS), the same code: SlotParseRequirements in
+#: src/signing.cpp runs `/usr/bin/csreq -r '<a /tmp file it wrote>' -t`, only
+#: when printing a bare Mach-O's signature, which Graft never asks for.
+ZSIGN_SHELL_IMPORTS = ("_popen",)
+
+
+def build_zsign(pin: Pin, openssl: Path, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
+    """zsign from its pinned source (the x86_64 bundle's: upstream releases
+    no macOS x86_64 build), linked to the bundled OpenSSL's libssl and
+    libcrypto (`openssl`, build_openssl's prefix for `arch`): a directory
+    holding `zsign` and its LICENSE. The archive must be the commit its pin
+    names. A build importing system(), or a shell-starting call the release
+    binary didn't have, is refused."""
+    def build(tmp: Path, out: Path) -> None:
+        check_archive_commit(pin, fetch(pin))
+        src = _unpack(pin, tmp)
+        ossl = tmp / "openssl"  # copies without a space in their path, for the Makefile
+        shutil.copytree(openssl / "include", ossl / "include")
+        (ossl / "lib").mkdir()
+        for lib in OPENSSL_LIBS:
+            shutil.copy2(openssl / "lib" / lib, ossl / "lib" / lib)
+        _build_steps(zsign_steps(str(ossl), _jobs(), pin.version, arch), src)
+        shutil.copy2(src / "bin" / "zsign", out / "zsign")
+        found = sorted(imported_symbols(out / "zsign") & set(SHELL_IMPORTS))
+        if set(found) - set(ZSIGN_SHELL_IMPORTS):
+            raise BundleError(f"the built zsign imports {', '.join(found)}, which start a shell; only "
+                              f"{', '.join(ZSIGN_SHELL_IMPORTS)} was audited (ZSIGN_SHELL_IMPORTS)")
+        shutil.copy2(src / "LICENSE", out / "LICENSE")
+    key = build_key(pin.sha256, openssl.parent.name, zsign_steps("$OPENSSL", [], pin.version, arch), toolchain_id())
+    return _cached_build("zsign", key, work, build)
 
 
 # ---------------------------------------------------- ipatool, from source
@@ -671,12 +818,23 @@ GO_HERMETIC = {
     "GOPROXY": GOPROXY, "GOSUMDB": GOSUMDB, "GONOSUMDB": "", "GOPRIVATE": "", "GOINSECURE": "",
 }
 
-#: ipatool's build settings, as upstream's release workflow has them (cgo on)
-#: but for the oldest macOS Graft supports.
-IPATOOL_ENV = {
-    "CGO_ENABLED": "1", "CC": "clang", "CGO_CFLAGS": f"-mmacosx-version-min={MACOS_MIN}",
-    "CGO_LDFLAGS": f"-mmacosx-version-min={MACOS_MIN}", "GOOS": "darwin", "GOARCH": "arm64", **GO_HERMETIC,
-}
+#: Go's name for each architecture.
+GOARCH = {"arm64": "arm64", "x86_64": "amd64"}
+
+
+def ipatool_env(arch: str = DEFAULT_ARCH) -> dict[str, str]:
+    """ipatool's build settings, as upstream's release workflow has them (cgo
+    on) but for the oldest macOS Graft supports, and for `arch`: Go gives
+    clang `-arch arm64`, or `-arch x86_64 -m64` (`go env GOGCCFLAGS`), so the
+    x86_64 build is a cross-compile with the same settings but GOARCH."""
+    return {
+        "CGO_ENABLED": "1", "CC": "clang", "CGO_CFLAGS": f"-mmacosx-version-min={MACOS_MIN}",
+        "CGO_LDFLAGS": f"-mmacosx-version-min={MACOS_MIN}", "GOOS": "darwin", "GOARCH": GOARCH[arch], **GO_HERMETIC,
+    }
+
+
+#: The arm64 bundle's (ipatool_env).
+IPATOOL_ENV = ipatool_env()
 
 
 def go_modcache(cache: Path | None = None) -> Path:
@@ -1069,7 +1227,7 @@ def vendor_tar_gz(vendor: Path, dest: Path) -> None:
     deterministic_tar_gz(vendor, dest, "vendor", spelled)
 
 
-def build_ipatool(pin: Pin, go_pin: Pin, work: Path = WORK) -> Path:
+def build_ipatool(pin: Pin, go_pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
     """ipatool, from its pinned source (and its patches, if any), with the pinned Go: a
     directory holding `ipatool`, `vendor.tar.gz` (its modules as `go mod
     vendor` wrote them, for the source archive), `modules/` (each compiled-in
@@ -1080,7 +1238,7 @@ def build_ipatool(pin: Pin, go_pin: Pin, work: Path = WORK) -> Path:
         src = _unpack(pin, tmp)
         apply_patches("ipatool", src)
         modcache = go_modcache()
-        env = go_env(go, tmp, IPATOOL_ENV, modcache)
+        env = go_env(go, tmp, ipatool_env(arch), modcache)
         for step in ipatool_steps(pin.version):
             subprocess.run(step, cwd=src, env=env, check=True)
         record_go_modules(modcache, pin, src / "vendor" / "modules.txt")
@@ -1093,20 +1251,21 @@ def build_ipatool(pin: Pin, go_pin: Pin, work: Path = WORK) -> Path:
         shutil.copy2(src / "LICENSE", out / "LICENSE")
         for f in ("LICENSE", "PATENTS"):
             shutil.copy2(go / f, out / f"go-{f}")
-    return _cached_build("ipatool", ipatool_key(pin, go_pin), work, build)
+    return _cached_build("ipatool", ipatool_key(pin, go_pin, arch), work, build)
 
 
-def ipatool_key(pin: Pin, go_pin: Pin) -> str:
+def ipatool_key(pin: Pin, go_pin: Pin, arch: str = DEFAULT_ARCH) -> str:
     """build_ipatool's cache key."""
-    return build_key(pin.sha256, go_pin.sha256, ipatool_steps(pin.version), IPATOOL_ENV, patch_hashes("ipatool"),
+    return build_key(pin.sha256, go_pin.sha256, ipatool_steps(pin.version), ipatool_env(arch), patch_hashes("ipatool"),
                      toolchain_id())
 
 
-def stage_ipatool(pins: dict[str, Pin], contents: Path, licences: Path, work: Path = WORK) -> Path:
+def stage_ipatool(pins: dict[str, Pin], contents: Path, licences: Path, work: Path = WORK,
+                  arch: str = DEFAULT_ARCH) -> Path:
     """ipatool into Helpers/bin; its licenses into `licences`: ipatool's,
     Go's, and every compiled-in Go module's under ipatool-modules/. No
     Unicorn: ipatool downloads that itself. Returns build_ipatool's directory."""
-    built = build_ipatool(pins["ipatool"], pins["go"], work)
+    built = build_ipatool(pins["ipatool"], pins["go"], work, arch)
     bindir = contents / "Helpers" / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(built / "ipatool", bindir / "ipatool")
@@ -1264,14 +1423,15 @@ def stage_unfairplay(pins: dict[str, Pin], contents: Path, licences: Path, work:
 
 
 def build_cyan_helpers(pins: dict[str, Pin], openssl: Path, work: Path = WORK,
-                       licences: Path | None = None) -> dict[str, Path]:
+                       licences: Path | None = None, arch: str = DEFAULT_ARCH) -> dict[str, Path]:
     """Each of cyan's five helpers, and libplist's dylib, built from their
-    pins (outside any .app, cached by source hash): name -> built file.
+    pins for `arch` (outside any .app, cached by source hash): name -> built
+    file. `openssl` is build_openssl's prefix for the same `arch`.
     `licences`, if given, gets each source's license files as `<pin>-<file>`."""
-    plist = build_libplist(pins["libplist"], work)
-    ldid = build_ldid(pins["ldid"], plist, openssl, work)
-    cctools = build_cctools(pins["cctools"], work)
-    idylib = build_insert_dylib(pins["insert_dylib"], work)
+    plist = build_libplist(pins["libplist"], work, arch)
+    ldid = build_ldid(pins["ldid"], plist, openssl, work, arch)
+    cctools = build_cctools(pins["cctools"], work, arch)
+    idylib = build_insert_dylib(pins["insert_dylib"], work, arch)
     built = {"ldid": ldid / "ldid", "insert_dylib": idylib / "insert_dylib", "libplist": plist / LIBPLIST,
              **{tool: cctools / tool for tool in pins["cctools"].builds}}
     if licences is not None:
@@ -1321,19 +1481,19 @@ def _check_system_only(path: Path, contents: Path) -> None:
         raise BundleError(f"{path.relative_to(contents)} links {', '.join(other)}, which the bundle doesn't carry")
 
 
-def cyan_original_hashes(archive: Path) -> dict[str, str]:
+def cyan_original_hashes(archive: Path, arch: str = DEFAULT_ARCH) -> dict[str, str]:
     """name -> SHA-256 of each prebuilt helper cyan's pinned archive carries
-    in cyan/tools/Darwin/arm64: the bytes check_originals_gone() keeps out of
-    the stage. All five must be there, or that check would be empty."""
+    in cyan/tools/Darwin/<arch>: the bytes check_originals_gone() keeps out
+    of the stage. All five must be there, or that check would be empty."""
     found = {}
     with zipfile.ZipFile(archive) as z:
         for n in z.namelist():
             parts = n.split("/")
-            if parts[-1] in CYAN_HELPERS and parts[-5:-1] == ["cyan", "tools", "Darwin", "arm64"]:
+            if parts[-1] in CYAN_HELPERS and parts[-5:-1] == ["cyan", "tools", "Darwin", arch]:
                 found[parts[-1]] = hashlib.sha256(z.read(n)).hexdigest()
     missing = [n for n in CYAN_HELPERS if n not in found]
     if missing:
-        raise BundleError(f"{archive.name} has no cyan/tools/Darwin/arm64/{', '.join(missing)}")
+        raise BundleError(f"{archive.name} has no cyan/tools/Darwin/{arch}/{', '.join(missing)}")
     return found
 
 
@@ -1347,21 +1507,24 @@ def check_originals_gone(contents: Path, originals: dict[str, str]) -> None:
         raise BundleError(f"cyan's prebuilt helpers are still in the stage: {', '.join(left)}")
 
 
-def stage_cyan_helpers(built: dict[str, Path], contents: Path, originals: dict[str, str]) -> None:
-    """The builds in place of cyan's five helpers, under the names cyan runs;
-    libplist into Frameworks; ldid pointed at Frameworks' libcrypto and
-    libplist. Then nothing of cyan's prebuilt five may be left."""
+def stage_cyan_helpers(built: dict[str, Path], contents: Path, originals: dict[str, str],
+                       arch: str = DEFAULT_ARCH) -> None:
+    """The builds in place of cyan's five helpers for `arch`, under the
+    names cyan runs (cyan_tools); libplist into Frameworks; ldid pointed at
+    Frameworks' libcrypto and libplist. Then nothing of cyan's prebuilt five
+    may be left."""
     fw = contents / "Frameworks"
     fw.mkdir(parents=True, exist_ok=True)
     lib = fw / LIBPLIST
     shutil.copy2(built["libplist"], lib)
     _run(INSTALL_NAME_TOOL, "-id", f"@rpath/{LIBPLIST}", lib)
     _check_system_only(lib, contents)
-    tools = contents / CYAN_TOOLS
+    tools = contents / cyan_tools(arch)
     for name in CYAN_HELPERS:
         dest = tools / name
         if not dest.is_file():
-            raise BundleError(f"cyan has no {CYAN_TOOLS / name} to replace, and that is where it runs {name} from")
+            raise BundleError(f"cyan has no {cyan_tools(arch) / name} to replace, and that is where it runs {name} "
+                              "from")
         dest.unlink()
         shutil.copy2(built[name], dest)
         dest.chmod(0o755)
@@ -1421,7 +1584,8 @@ def stage_preferences_stub(contents: Path, work: Path | None = None) -> Path:
 # ------------------------------------------------------------ the Python stage
 
 #: Removed from the staged Python: nothing in the bundle runs them. Paths
-#: relative to GraftPython.
+#: relative to GraftPython. The arm64 bundle's: prune_patterns(arch) gives
+#: each bundle's, which differ only in which of cyan's Mac helpers go.
 PRUNE = (
     "bin/pip*", "bin/idle*", "bin/pydoc*", "bin/2to3*", "bin/python3*-config",
     "include",
@@ -1436,7 +1600,8 @@ PRUNE = (
     "lib/python3.13/site-packages/pip", "lib/python3.13/site-packages/pip-*.dist-info",
     # cyan runs tools/<platform.system()>/<platform.machine()> (tbhutils.get_tools_dir),
     # which for this arm64-only Python on a Mac is always tools/Darwin/arm64. iOS
-    # is chosen only when machine() names an iPhone or iPad.
+    # is chosen only when machine() names an iPhone or iPad. (The x86_64
+    # bundle's prunes Darwin/arm64 in its place: prune_patterns.)
     "lib/python3.13/site-packages/cyan/tools/Darwin/x86_64",
     "lib/python3.13/site-packages/cyan/tools/Darwin/iOS",
     "lib/python3.13/site-packages/cyan/tools/Linux",
@@ -1468,6 +1633,16 @@ PRUNE = (
     "lib/python3.13/site-packages/overrides",
     "lib/python3.13/site-packages/*/.agents",
 )
+_OTHER_MAC_TOOLS = {arch: f"lib/python3.13/site-packages/cyan/tools/Darwin/{other}"
+                    for arch, other in (("arm64", "x86_64"), ("x86_64", "arm64"))}
+
+
+def prune_patterns(arch: str = DEFAULT_ARCH) -> tuple[str, ...]:
+    """PRUNE for the bundle of `arch`: cyan's helpers for the other Mac
+    architecture go, where the arm64 bundle's prune the x86_64 ones."""
+    if arch not in ARCHS:
+        raise BundleError(f"no release is built for {arch!r}: {', '.join(ARCHS)}")
+    return tuple(_OTHER_MAC_TOOLS[arch] if p == _OTHER_MAC_TOOLS[DEFAULT_ARCH] else p for p in PRUNE)
 
 
 #: The only thing kept in GraftPython/bin: the interpreter the launchers
@@ -1502,11 +1677,11 @@ def windows_binaries(root: Path) -> list[Path]:
     return sorted(p for p in root.rglob("*") if p.is_file() and not p.is_symlink() and _is_windows_binary(p))
 
 
-def prune_python(py: Path) -> None:
+def prune_python(py: Path, arch: str = DEFAULT_ARCH) -> None:
     for p in (py / "bin").iterdir():
         if p.name not in BIN_KEEP:
             _remove(p)
-    for pattern in PRUNE:
+    for pattern in prune_patterns(arch):
         for p in py.glob(pattern):
             _remove(p)
     links = sorted(str(p.relative_to(py)) for p in py.rglob("*") if p.is_symlink())
@@ -1590,25 +1765,34 @@ def _archs(path: Path) -> list[str]:
                           check=True).stdout.split()
 
 
-def thin_to_arm64(contents: Path) -> list[Path]:
-    """Cut every universal Mach-O under `contents` down to its arm64 slice;
+def thin_to_arch(contents: Path, arch: str = DEFAULT_ARCH) -> list[Path]:
+    """Cut every universal Mach-O under `contents` down to its `arch` slice;
     returns the files thinned.
 
-    Everything the app bundles is arm64 only (verify-bundle checks it); only
-    the app's own executable is universal, and graft-release builds that.
-    Some wheels are universal2 (pycryptodome, bcrypt, PyNaCl, ...). A file
-    with no arm64 slice is refused: it could never run in the app.
+    Everything the app bundles is of the bundle's one architecture
+    (verify-bundle checks it); only the app's own executable is universal,
+    and graft-release builds that. Some wheels are universal2 (pycryptodome,
+    bcrypt, PyNaCl, ...). A file with no `arch` slice is refused: it could
+    never run in the app. iOS code is left as shipped: it is arm64 in both
+    bundles, for the phone.
     """
+    if arch not in ARCHS:
+        raise BundleError(f"no release is built for {arch!r}: {', '.join(ARCHS)}")
     thinned = []
     for p in signed_machos(contents):  # iOS code stays as shipped
         archs = _archs(p)
-        if archs == ["arm64"]:
+        if archs == [arch]:
             continue
-        if "arm64" not in archs:
-            raise BundleError(f"{p.relative_to(contents)} is {' '.join(archs)}, with no arm64 slice")
-        _run(LIPO, p, "-thin", "arm64", "-output", p)
+        if arch not in archs:
+            raise BundleError(f"{p.relative_to(contents)} is {' '.join(archs)}, with no {arch} slice")
+        _run(LIPO, p, "-thin", arch, "-output", p)
         thinned.append(p)
     return thinned
+
+
+def thin_to_arm64(contents: Path) -> list[Path]:
+    """thin_to_arch for the arm64 bundle."""
+    return thin_to_arch(contents, "arm64")
 
 
 #: The path compiled .pyc files record for their sources, in place of the
@@ -1621,6 +1805,91 @@ PYC_PREFIX = "/Applications/Graft.app/Contents/Resources/GraftPython"
 #: scripts/lock-bundle, both installed with --require-hashes.
 RUNTIME_LOCK = REPO / "bundle" / "requirements.lock"
 BUILD_LOCK = REPO / "bundle" / "build-requirements.lock"
+#: The Intel bundle's runtime lock: RUNTIME_LOCK, but for each package
+#: X86_64_OVERRIDES names, which has no macOS x86_64 wheel at its locked
+#: version (scripts/lock-bundle writes it: x86_64_lock_text).
+X86_64_LOCK = REPO / "bundle" / "requirements-x86_64.lock"
+X86_64_OVERRIDES = REPO / "bundle" / "x86_64-overrides.txt"
+
+
+def runtime_lock(arch: str = DEFAULT_ARCH) -> Path:
+    """The runtime lock the bundle of `arch` installs. The build lock is
+    the same for both: its packages are all pure Python."""
+    return {"arm64": RUNTIME_LOCK, "x86_64": X86_64_LOCK}[arch]
+
+
+def lock_overrides(path: Path | None = None) -> dict[str, str]:
+    """normalized name -> version of each `name==version` line of
+    X86_64_OVERRIDES (comments after `#`)."""
+    path = path or X86_64_OVERRIDES
+    found = {}
+    for line in path.read_text().splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        m = re.fullmatch(r"([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9.+!-]+)", line)
+        if m is None:
+            raise BundleError(f"{path.name}: {line!r} is not a name==version line")
+        found[_norm(m[1])] = m[2]
+    return found
+
+
+def lock_entries(text: str) -> tuple[list[str], list[tuple[str, list[str]]]]:
+    """A pip-compile lock as (its header lines, [(normalized name, the
+    entry's lines)]): an entry is its `name==version \\` line, its hash
+    lines and its `# via` comments."""
+    header: list[str] = []
+    entries: list[tuple[str, list[str]]] = []
+    for line in text.splitlines():
+        if m := re.match(r"([A-Za-z0-9][A-Za-z0-9._-]*)==", line):
+            entries.append((_norm(m[1]), [line]))
+        elif entries:
+            entries[-1][1].append(line)
+        else:
+            header.append(line)
+    return header, entries
+
+
+def x86_64_lock_text(runtime: str, overrides: dict[str, str], hashes: Callable[[str, str], list[str]]) -> str:
+    """The Intel lock from the runtime lock's text: each entry as it is, but
+    an overridden package's version and hashes, which `hashes(name,
+    version)` gives (pip_compile_hashes: every file of that version, as
+    pip-compile --generate-hashes lists them). Its `# via` lines stay."""
+    header, entries = lock_entries(runtime)
+    unknown = sorted(set(overrides) - {name for name, _ in entries})
+    if unknown:
+        raise BundleError(f"{X86_64_OVERRIDES.name} names {', '.join(unknown)}, which the runtime lock doesn't pin")
+    out = [*header[:1],
+           "# The Intel (x86_64) bundle's runtime lock: bundle/requirements.lock, but for",
+           "# each package bundle/x86_64-overrides.txt names (it has no macOS x86_64 wheel",
+           "# at the version locked there), at that version with pip-compile's hashes.",
+           "# scripts/lock-bundle writes it after requirements.lock.", *header[1:]]
+    for name, lines in entries:
+        if name not in overrides:
+            out += lines
+            continue
+        got = sorted(hashes(name, overrides[name]))
+        if not got:
+            raise BundleError(f"pip-compile gave no hashes for {name}=={overrides[name]}")
+        spelled = lines[0].split("==", 1)[0]
+        out += [f"{spelled}=={overrides[name]} \\",
+                *(f"    --hash=sha256:{h}" + (" \\" if i < len(got) - 1 else "") for i, h in enumerate(got)),
+                *(line for line in lines[1:] if line.lstrip().startswith("#"))]
+    return "\n".join(out) + "\n"
+
+
+def pip_compile_hashes(name: str, version: str) -> list[str]:
+    """Every SHA-256 pip-compile --generate-hashes gives name==version (each
+    file PyPI has of it), as scripts/lock-bundle's own pip-compile runs."""
+    with tempfile.TemporaryDirectory(prefix="graft-lock-") as tmp:
+        (Path(tmp) / "x86_64.in").write_text(f"{name}=={version}\n")
+        subprocess.run([str(Path(sys.executable).with_name("pip-compile")), "--quiet", "--generate-hashes",
+                        "--strip-extras", "--allow-unsafe", "--no-emit-index-url", "--no-header", "--no-annotate",
+                        "--output-file", "x86_64.lock", "x86_64.in"], cwd=tmp, check=True, env=_pip_env())
+        got = lock_hashes(Path(tmp) / "x86_64.lock").get(_norm(name))
+    if got is None or got[0] != version:
+        raise BundleError(f"pip-compile didn't lock {name}=={version}")
+    return sorted(got[1])
 
 #: What the bundled CLI imports, checked straight after staging.
 IMPORT_CHECK = "import graft_ipa, cryptography, pymobiledevice3, paramiko, yaml, rich, cyan"
@@ -1644,11 +1913,20 @@ def _pip_env() -> dict[str, str]:
     return env
 
 
-#: The one platform the bundled wheels are chosen for, whatever macOS the
-#: release Mac runs: pip would otherwise rank wheels by the running macOS and
-#: could bundle one built for a newer macOS than MACOS_MIN (review #36).
-WHEEL_TARGET = ("--platform", f"macosx_{MACOS_MIN.replace('.', '_')}_arm64", "--python-version", "3.13",
-                "--implementation", "cp", "--abi", "cp313")
+def wheel_target(arch: str = DEFAULT_ARCH) -> tuple[str, ...]:
+    """The one platform the bundled wheels are chosen for, whatever macOS and
+    processor the release Mac has: pip would otherwise rank wheels by the
+    running macOS and could bundle one built for a newer macOS than
+    MACOS_MIN (review #36). For x86_64, pip takes x86_64 and universal2
+    wheels, which thin_to_arch then cuts to x86_64."""
+    if arch not in ARCHS:
+        raise BundleError(f"no release is built for {arch!r}: {', '.join(ARCHS)}")
+    return ("--platform", f"macosx_{MACOS_MIN.replace('.', '_')}_{arch}", "--python-version", "3.13",
+            "--implementation", "cp", "--abi", "cp313")
+
+
+#: The arm64 bundle's (wheel_target).
+WHEEL_TARGET = wheel_target()
 _PIP = ("-I", "-m", "pip")
 # --retries and --timeout: pip's defaults (5, 15 s) gave up on a slow or
 # briefly dropped network and ended the whole build.
@@ -1736,17 +2014,18 @@ def _report_files(report: Path) -> dict[str, tuple[str, str]]:
     return out
 
 
-def check_same_files(plan: Path, installed: Path) -> None:
-    """Every file pip installed is the one the plan chose for WHEEL_TARGET (macOS MACOS_MIN)."""
+def check_same_files(plan: Path, installed: Path, arch: str = DEFAULT_ARCH) -> None:
+    """Every file pip installed is the one the plan chose for wheel_target(arch) (macOS MACOS_MIN)."""
     want, got = _report_files(plan), _report_files(installed)
     wrong = [f"{n} {v} ({sha[:12]})" for n, (v, sha) in sorted(got.items()) if want.get(n) != (v, sha)]
     if wrong:
-        raise BundleError(f"pip installed files the plan for macOS {MACOS_MIN} ({WHEEL_TARGET[1]}) didn't choose: "
-                          + ", ".join(wrong))
+        raise BundleError(f"pip installed files the plan for macOS {MACOS_MIN} ({wheel_target(arch)[1]}) didn't "
+                          "choose: " + ", ".join(wrong))
 
 
-def install_locked(py: Path, lock: Path, plan: Path, scratch: Path, env: dict[str, str]) -> None:
-    """Install a hash-locked set as chosen for WHEEL_TARGET, not for this Mac.
+def install_locked(py: Path, lock: Path, plan: Path, scratch: Path, env: dict[str, str],
+                   arch: str = DEFAULT_ARCH) -> None:
+    """Install a hash-locked set as chosen for wheel_target(arch), not for this Mac.
 
     pip resolves the lock for that platform (`--dry-run`, its report is
     `plan`, which components.json is made from), downloads those files, then
@@ -1757,7 +2036,7 @@ def install_locked(py: Path, lock: Path, plan: Path, scratch: Path, env: dict[st
     the download takes what the plan's resolution fetched, and a later build
     takes both from it; the install from the downloaded files needs none.
     Every step keeps --require-hashes."""
-    target = [*WHEEL_TARGET, "--only-binary=:all:", "--require-hashes", "--no-deps"]
+    target = [*wheel_target(arch), "--only-binary=:all:", "--require-hashes", "--no-deps"]
     scratch.mkdir(parents=True, exist_ok=True)
     wheels = scratch / "wheels"
     cache = pip_cache()
@@ -1778,12 +2057,17 @@ def install_locked(py: Path, lock: Path, plan: Path, scratch: Path, env: dict[st
                     "--no-compile", "--no-index", "--find-links", str(wheels), "--only-binary=:all:",
                     "--require-hashes", "--no-deps", "--report", str(installed), "-r", str(lock)],
                    check=True, env=env)
-    check_same_files(plan, installed)
+    check_same_files(plan, installed, arch)
     record_cached_wheels(plan, cache)
 
 
-def stage_python(pins: dict[str, Pin], contents: Path, reports: Path | None = None) -> Path:
+def stage_python(pins: dict[str, Pin], contents: Path, reports: Path | None = None,
+                 arch: str = DEFAULT_ARCH) -> Path:
     """CPython + locked deps + graft + cyan in contents/Resources/GraftPython, pruned and compiled.
+
+    For `arch`: pins["python"] is that architecture's CPython, and the wheels
+    are chosen for it (wheel_target). An x86_64 CPython staged on an Apple
+    silicon Mac runs its own pip, compileall and checks under Rosetta.
 
     Every `pip install` writes its installation report (`--report`) into
     `reports`, outside the stage: each distribution's exact file and SHA-256,
@@ -1818,8 +2102,8 @@ def stage_python(pins: dict[str, Pin], contents: Path, reports: Path | None = No
         # installed (Homebrew's libraries, say), which a user's Mac doesn't. The
         # build backends go first; the build lock is constrained to the runtime
         # one, so the second install never swaps a version the first put in.
-        for name, lock in (("1-build-lock", BUILD_LOCK), ("2-runtime-lock", RUNTIME_LOCK)):
-            install_locked(py, lock, reports / f"{name}.json", tmp / name, env)
+        for name, lock in (("1-build-lock", BUILD_LOCK), ("2-runtime-lock", runtime_lock(arch))):
+            install_locked(py, lock, reports / f"{name}.json", tmp / name, env, arch)
         # graft, from this checkout (the source being released), and cyan, from
         # its pinned archive, are built with the backends just installed. Build
         # isolation would have pip fetch each backend from PyPI, unpinned and
@@ -1836,7 +2120,7 @@ def stage_python(pins: dict[str, Pin], contents: Path, reports: Path | None = No
         subprocess.run([*local, *report("3-graft"), str(wheels[0])], check=True, env=env)
         subprocess.run([*local, *report("4-cyan"), str(fetch(pins["cyan"]))], check=True, env=env)
     # The backends were only for building; nothing at run time imports them.
-    runtime = set(lock_names(RUNTIME_LOCK))
+    runtime = set(lock_names(runtime_lock(arch)))
     build_only = [n for n in lock_names(BUILD_LOCK) if n not in runtime]
     subprocess.run([str(py), "-I", "-m", "pip", "uninstall", "--yes", "--disable-pip-version-check",
                     *build_only], check=True, env=env)
@@ -1849,7 +2133,7 @@ def stage_python(pins: dict[str, Pin], contents: Path, reports: Path | None = No
         f.unlink()
 
     # Pip can't be pruned before it has installed everything.
-    prune_python(gp)
+    prune_python(gp, arch)
     # Precompile everything: the standalone build ships three .pyc, and the
     # launcher runs with -B, so nothing may need writing at run time. -f
     # because running pip already wrote .pyc for the stdlib it imported, and
@@ -1890,12 +2174,12 @@ LAUNCHERS = {
 }
 
 
-def build_launchers(contents: Path) -> None:
+def build_launchers(contents: Path, arch: str = DEFAULT_ARCH) -> None:
     for rel, (module, py_rel) in LAUNCHERS.items():
         out = contents / rel
         out.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run([
-            CLANG, "-O2", "-arch", "arm64", f"-mmacosx-version-min={MACOS_MIN}", "-Wall", "-Werror",
+            CLANG, "-O2", *target(arch), "-Wall", "-Werror",
             f'-DMODULE="{module}"', f'-DPY_REL="{py_rel}"',
             str(REPO / "bundle" / "launcher.c"), "-o", str(out),
         ], env=_build_env(), check=True)
@@ -2725,6 +3009,10 @@ def collect_licenses(contents: Path, pins: dict[str, Pin], extra_dir: Path) -> P
         out = lic / fw.licence_file
         out.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(CYAN_EXTRAS_LICENSES / fw.known.text, out)
+    # The Intel bundle has no UnfairPlay, so no unfairplay-modules/.
+    go_folders = [f"{tool}-modules/" for tool in GO_TOOLS if f"{tool}-modules" in folders]
+    go_notices = (" and ".join(go_folders) + (" for the Go modules in each" if len(go_folders) > 1
+                                              else " for the Go modules in it")) if go_folders else ""
 
     lines = [
         "Graft.app: bundled components and their licenses",
@@ -2758,7 +3046,7 @@ def collect_licenses(contents: Path, pins: dict[str, Pin], extra_dir: Path) -> P
         "Code linked into a binary above has its notice here too: python-<library>-LICENSE.txt for each library "
         "python-build-standalone builds into python3.13 (" + ", ".join(
             sorted(f.name.removeprefix("python-").removesuffix("-LICENSE.txt") for f in lic.glob("python-*-LICENSE.txt")))
-        + "); ipatool-modules/ and unfairplay-modules/ for the Go modules in each; rust-crates/<package>/ for the "
+        + f"); {go_notices}; rust-crates/<package>/ for the "
         "Rust crates in a package's compiled module, and rust-crates/ipatool/ for those ipatool's embedded "
         "1Password SDK core shows it holds.",
         "",
@@ -2780,7 +3068,7 @@ TOOLCHAINS = {"go"}
 
 
 def pin_kind(name: str, pins: dict[str, Pin]) -> str:
-    if name in BUILT_FROM_SOURCE:
+    if name in BUILT_FROM_SOURCE or pins[name].from_source:
         return "built-from-source"
     if name in TOOLCHAINS:
         return "toolchain"
@@ -2923,40 +3211,54 @@ def check_no_build_paths(dest: Path) -> None:
         raise BundleError(f"{len(leaks)} staged file(s) name the release machine's paths: {shown}")
 
 
-def stage(dest: Path, work: Path = WORK) -> list[Path]:
-    """Everything Graft.app bundles, staged in `dest` (shaped like Contents),
-    plus dest/macho-list.txt. Returns the Mach-O files to sign, deepest first."""
+def stage_zsign_binary(pins: dict[str, Pin], prefix: Path, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
+    """The zsign to bundle: the release's own binary, or for a pin built
+    from source (x86_64), build_zsign's, linked to the OpenSSL at `prefix`."""
+    pin = pins["zsign"]
+    if pin.from_source:
+        return build_zsign(pin, prefix, work, arch) / "zsign"
+    return _the_binary(extract(fetch(pin), _fresh(work / "zsign-release")), "zsign")
+
+
+def stage(dest: Path, work: Path = WORK, arch: str = DEFAULT_ARCH) -> list[Path]:
+    """Everything Graft.app bundles for `arch`, staged in `dest` (shaped like
+    Contents), plus dest/macho-list.txt. Returns the Mach-O files to sign,
+    deepest first. The x86_64 bundle (Graft-Intel.zip) is the arm64 one
+    built for Intel Macs, without UnfairPlay (its pin is arm64 only): with
+    each pin's x86_64 variant (load_pins), every Mac binary built or thinned
+    to x86_64, cyan's helpers in Darwin/x86_64, and iOS code as it is."""
     if dest.exists() and any(dest.iterdir()):
         raise BundleError(f"{dest} is not empty; stage into a new directory")
+    pins = load_pins(REPO / "bundle" / "pins.toml", arch)
     dest.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
-    pins = load_pins(REPO / "bundle" / "pins.toml")
 
     reports = _fresh(work / "pip-reports")
-    gp = stage_python(pins, dest, reports)
+    gp = stage_python(pins, dest, reports, arch=arch)
     # Before minutes of building: a framework in cyan/extras whose license
     # isn't known stops the stage here (collect_licenses checks again).
     cyan_frameworks(dest)
-    prefix = build_openssl(pins["openssl"], work)
-    zsign = _the_binary(extract(fetch(pins["zsign"]), _fresh(work / "zsign-release")), "zsign")
+    prefix = build_openssl(pins["openssl"], work, arch=arch)
+    zsign = stage_zsign_binary(pins, prefix, work, arch)
     stage_openssl_and_zsign(prefix, zsign, dest)
     licences = vendored_licences(pins, work)
-    stage_ipatool(pins, dest, licences, work)
-    stage_unfairplay(pins, dest, licences, work)
+    stage_ipatool(pins, dest, licences, work, arch=arch)
+    if "unfairplay" in pins:
+        stage_unfairplay(pins, dest, licences, work)
     python_static_licences(pins, gp, licences)
-    rust_crate_licences(dest, lock_hashes(RUNTIME_LOCK), licences / "rust-crates")
+    rust_crate_licences(dest, lock_hashes(runtime_lock(arch)), licences / "rust-crates")
     binary_crate_licences(dest / "Helpers" / "bin" / "ipatool", "ipatool", licences / "rust-crates")
-    helpers = build_cyan_helpers(pins, prefix, work, licences)
-    stage_cyan_helpers(helpers, dest, cyan_original_hashes(fetch(pins["cyan"])))
+    helpers = build_cyan_helpers(pins, prefix, work, licences, arch=arch)
+    stage_cyan_helpers(helpers, dest, cyan_original_hashes(fetch(pins["cyan"]), arch=arch), arch=arch)
     shutil.copy2(prefix / "LICENSE.txt", licences / "openssl-LICENSE.txt")
     shutil.copy2(gp / "lib" / "python3.13" / "LICENSE.txt", licences / "python-LICENSE.txt")
-    build_launchers(dest)
+    build_launchers(dest, arch=arch)
     stage_preferences_stub(dest, work)
     # Every Mach-O is staged by now, so this sees anything that could link it.
     linkers = prune_unlinked_libpython(dest)
     print(f"{LIBPYTHON.name}: " + (f"kept, linked by {', '.join(map(str, linkers))}" if linkers
                                    else "removed (no staged Mach-O links it)"))
-    print(f"thinned to arm64: {len(thin_to_arm64(dest))} universal Mach-O files")
+    print(f"thinned to {arch}: {len(thin_to_arch(dest, arch))} universal Mach-O files")
     for path, rpath in prune_foreign_rpaths(dest):
         print(f"deleted rpath {rpath} from {path.relative_to(dest)}")
     collect_licenses(dest, pins, licences)
@@ -3183,56 +3485,76 @@ def _unfairplay_recipe(pin: Pin) -> tuple[str, list[str], list[list[str]], str]:
             "`unfairplay` (the administrator step checks its copy of UnfairPlay against it) and no entitlements.")
 
 
-def _recipes(ipatool_version: str = "", unfairplay: Pin | None = None,
-             ) -> dict[str, tuple[str, list[str], list[list[str]], str]]:
-    """Per built-from-source pin: where its steps run, what it becomes in the
-    app, the steps (as the build runs them, but -j and its own paths), and
-    what is done to the result."""
-    tools = str(CYAN_TOOLS)
+def _env_text(envs: dict[str, dict[str, str]]) -> str:
+    """Build settings as SOURCES.md gives them: each `KEY=value`, and a key
+    whose value differs by architecture as each architecture's value."""
+    first = next(iter(envs.values()))
+    parts = []
+    for key in first:
+        values = {arch: env[key] for arch, env in envs.items()}
+        if len(set(values.values())) == 1:
+            parts.append(f"`{key}={first[key]}`")
+        else:
+            parts.append(" or ".join(f"`{key}={v}` ({arch})" for arch, v in values.items()))
+    return ", ".join(parts)
+
+
+def _recipes(ipatool_version: str = "", unfairplay: Pin | None = None, arch: str = DEFAULT_ARCH,
+             zsign: Pin | None = None) -> dict[str, tuple[str, list[str], list[list[str]], str]]:
+    """Per built-from-source pin, for the bundle of `arch`: where its steps
+    run, what it becomes in the app, the steps (as the build runs them, but
+    -j and its own paths), and what is done to the result. That last says
+    the same for every architecture, so SOURCES.md gives it once."""
+    tools = str(cyan_tools(arch))
     to_fw = f"@loader_path/{os.path.relpath('Frameworks', tools)}"
     return {
         **({"unfairplay": _unfairplay_recipe(unfairplay)} if unfairplay else {}),
+        **({"zsign": _zsign_recipe(zsign, arch)} if zsign else {}),
         "openssl": ("the archive's top directory",
                     ["Frameworks/libssl.3.dylib", "Frameworks/libcrypto.3.dylib", "Frameworks/ossl-modules/legacy.dylib"],
-                    openssl_steps("$DESTDIR", []),
+                    openssl_steps("$DESTDIR", [], arch),
                     "From `$DESTDIR/opt/graft/openssl/lib`, each library gets `install_name_tool -id @rpath/<name>`, "
                     "and libssl's and legacy.dylib's link to libcrypto becomes `@loader_path/libcrypto.3.dylib` "
-                    "(`@loader_path/../libcrypto.3.dylib`). zsign, a prebuilt release, has its links to OpenSSL "
-                    "changed to `@executable_path/../../Frameworks/<name>`."),
+                    "(`@loader_path/../libcrypto.3.dylib`). zsign (upstream's release binary in the arm64 bundle, "
+                    "its build in the zsign section in the x86_64 one) has its links to OpenSSL changed to "
+                    "`@executable_path/../../Frameworks/<name>`."),
         "libplist": ("the archive's top directory", [f"Frameworks/{LIBPLIST}"],
-                     libplist_steps("$DESTDIR", []),
+                     libplist_steps("$DESTDIR", [], arch),
                      f"`$DESTDIR/opt/graft/libplist/lib/{LIBPLIST}` (the file that link points at) is copied into "
                      f"Frameworks and given `install_name_tool -id @rpath/{LIBPLIST}`. It stays a separate library, "
                      "so you can replace it with your own build: work on a copy of Graft.app. ldid is signed with "
                      "the hardened runtime, whose library validation loads only libraries signed by the release "
                      "team, so after replacing it, re-sign ldid ad hoc, which drops the runtime: "
-                     f"`codesign --force --sign - {tools}/ldid`. The same goes for pylzss's `lzss` module (LGPL-3.0) "
+                     f"`codesign --force --sign - {cyan_tools(DEFAULT_ARCH)}/ldid` (in the Intel bundle, "
+                     f"`{cyan_tools('x86_64')}/ldid`). The same goes for pylzss's `lzss` module (LGPL-3.0) "
                      "and the `python3.13` that loads it. Last, re-seal the whole app ad hoc, "
                      "`codesign --force --sign - Graft.app`, or macOS reports it as damaged. That replaces the "
                      "release team's signature, so Set Up Decryption can no longer check its copy of UnfairPlay "
                      "against the team, and runs it only after you press Run Unchecked Copy as Root…."),
         "ldid": ("the archive's top directory", [f"{tools}/ldid"],
-                 ldid_steps("$LIBPLIST", "$OPENSSL", []),
+                 ldid_steps("$LIBPLIST", "$OPENSSL", [], arch),
                  f"`$LIBPLIST` holds libplist's `include/` and `{LIBPLIST}` from its build above; `$OPENSSL` holds "
                  f"OpenSSL's `include/` and `lib/{LIBCRYPTO}`. `install_name_tool -change` then points ldid's two "
                  f"links at `{to_fw}/{LIBCRYPTO}` and `{to_fw}/{LIBPLIST}`."),
         "cctools": ("`cctools/` in the archive's top directory",
                     [f"{tools}/lipo", f"{tools}/install_name_tool", f"{tools}/otool"],
-                    cctools_steps([]),
+                    cctools_steps([], arch),
                     "`misc/lipo`, `misc/install_name_tool` and `otool/otool` go in as built."),
         "insert_dylib": ("the archive's top directory", [f"{tools}/insert_dylib"],
-                         insert_dylib_steps(), "`insert_dylib/insert_dylib` goes in as built."),
+                         insert_dylib_steps(arch), "`insert_dylib/insert_dylib` goes in as built."),
         "ipatool": ("the archive's top directory, once patched, with the Go toolchain below first on PATH",
                     ["Helpers/bin/ipatool"], ipatool_steps(ipatool_version),
-                    "With these variables set: " + ", ".join(f"`{k}={v}`" for k, v in IPATOOL_ENV.items())
-                    + f". `go mod vendor` downloads each module from {GOPROXY}, checked against ipatool's "
+                    "With these variables set: " + _env_text({a: ipatool_env(a) for a in ARCHS})
+                    + f". Go gives clang `-arch arm64`, or `-arch x86_64 -m64`, itself. `go mod vendor` downloads "
+                    f"each module from {GOPROXY}, checked against ipatool's "
                     "`go.sum` and the checksum database, and `go mod verify` re-hashes the module cache's "
-                    "copies; `pinned/ipatool/vendor.tar.gz` is the `vendor/` it wrote, which the build then reads "
+                    "copies; `pinned/ipatool/vendor.tar.gz` is the `vendor/` it wrote (the same for both "
+                    "architectures: it holds every platform's files), which the build then reads "
                     "offline (leave out both `go mod` steps). `ipatool` goes in as built and is signed with "
                     "two entitlements (`bundle/entitlements/ipatool.plist`): `com.apple.security.cs.allow-jit`, "
                     "for Unicorn's code translator, and `com.apple.security.cs.disable-library-validation`, so "
                     "it can load the Unicorn it downloads, which is ad hoc signed. Unicorn is not in Graft.app: "
-                    "on first use ipatool downloads Unicorn 2.1.4's macOS wheel from PyPI into "
+                    "on first use ipatool downloads Unicorn 2.1.4's macOS wheel for its architecture from PyPI into "
                     "`~/Library/Caches/ipatool`, checked against the SHA-256s its source pins "
                     "(`internal/sap/unicorn/artifact.go`), as upstream ipatool does. The 1Password SDK module "
                     "carries a prebuilt WebAssembly core (`internal/wasm/core.wasm`), built by 1Password from "
@@ -3244,6 +3566,17 @@ def _recipes(ipatool_version: str = "", unfairplay: Pin | None = None,
                     + (", ".join(f"`pinned/ipatool/core-crates/{c}-{v}.crate` ({lic})"
                                  for c, v, lic in core_crate_sources()) or "none") + "."),
     }
+
+
+def _zsign_recipe(pin: Pin, arch: str) -> tuple[str, list[str], list[list[str]], str]:
+    return ("the archive's top directory", ["Helpers/bin/zsign"], zsign_steps("$OPENSSL", [], pin.version, arch),
+            "zsign publishes no macOS x86_64 build, so the Intel bundle's is built here from the same release's "
+            "source, with upstream's own `build/macos/Makefile` given the compiler and the bundled OpenSSL in place "
+            "of pkg-config's; the arm64 bundle takes upstream's release binary (see Not built here). `$OPENSSL` "
+            f"holds OpenSSL's `include/` and `lib/libssl.3.dylib` and `lib/{LIBCRYPTO}`, from its x86_64 build (the "
+            "openssl section). "
+            "`bin/zsign` goes in, its links to OpenSSL changed to `@executable_path/../../Frameworks/<name>` "
+            "as the release binary's are.")
 
 
 def shell_line(step: list[str]) -> str:
@@ -3279,10 +3612,22 @@ def _unbuilt_reason(pin: Pin) -> str:
     return "Not built: its archive is here as the source of what the app holds from it."
 
 
+#: Each architecture's download.
+BUNDLE_ZIPS = {"arm64": "Graft.zip", "x86_64": "Graft-Intel.zip"}
+
+
 def sources_md(top: str, tree: str, pins: dict[str, Pin], archived: list[Pin], sdists: list[Pin],
-               no_sdist: list[dict] = (), repacked: dict[str, tuple[str, list[str]]] | None = None) -> str:
-    """SOURCES.md: for each binary in the app, what it was built from and how."""
-    recipes = _recipes(pins["ipatool"].version if "ipatool" in pins else "", pins.get("unfairplay"))
+               no_sdist: list[dict] = (), repacked: dict[str, tuple[str, list[str]]] | None = None,
+               by_arch: dict[str, dict[str, Pin]] | None = None, overrides: dict[str, str] | None = None) -> str:
+    """SOURCES.md: for each binary in either bundle, what it was built from
+    and how. `pins` are the arm64 bundle's; `by_arch` every architecture's
+    (load_pins_by_arch), which the one source archive serves; `overrides`
+    the packages the Intel lock takes at their own versions (lock_overrides)."""
+    by_arch = by_arch or {DEFAULT_ARCH: pins}
+    recipes = {a: _recipes(ps["ipatool"].version if "ipatool" in ps else "", ps.get("unfairplay"), a,
+                           ps["zsign"] if "zsign" in ps and ps["zsign"].from_source else None)
+               for a, ps in by_arch.items()}
+    both = " and ".join(f"{a} ({BUNDLE_ZIPS[a]})" for a in by_arch)
     lines = [
         f"# {top}",
         "",
@@ -3291,6 +3636,7 @@ def sources_md(top: str, tree: str, pins: dict[str, Pin], archived: list[Pin], s
         f"publishes one (those that don't are listed below). {LICENCE_STATEMENT} Inside the app, "
         "`Contents/Resources/Licenses/components.json` lists every component with the exact file it came from "
         "and that file's SHA-256.",
+        *([f"One archive serves both downloads: {both}."] if len(by_arch) > 1 else []),
         "",
         "## Graft",
         "",
@@ -3300,19 +3646,26 @@ def sources_md(top: str, tree: str, pins: dict[str, Pin], archived: list[Pin], s
         "<release commit>^{tree}` gives that hash.",
         "",
         "- `scripts/graft-release` builds the app: `xcodebuild -scheme Graft -configuration Release "
-        "ARCHS=\"arm64 x86_64\"` (see the script for every setting), then signs and checks it.",
-        "- `scripts/graft_bundle.py stage` stages everything else: the CLI as a wheel built from this source, "
-        "its Python and dependencies, the launchers (`clang` from `bundle/launcher.c`), the tools, and the "
-        "builds below.",
+        "ARCHS=\"arm64 x86_64\"` (see the script for every setting), then signs and checks it."
+        + (" `scripts/graft-release --arch x86_64` builds the Intel one the same way, with the x86_64 stage."
+           if len(by_arch) > 1 else ""),
+        f"- `scripts/graft_bundle.py stage{' [--arch x86_64]' if len(by_arch) > 1 else ''}` stages everything else: "
+        "the CLI as a wheel built from this source, its Python and dependencies, the launchers (`clang` from "
+        "`bundle/launcher.c`), the tools, and the builds below.",
         "",
         "## Built from source",
         "",
-        f"Built for arm64 and macOS {MACOS_MIN} or later with {_toolchain()}. The commands run as shown, plus `-j` for make. "
-        "Each runs with only `/usr/bin:/bin:/usr/sbin:/sbin` on PATH and "
-        f"`MACOSX_DEPLOYMENT_TARGET={MACOS_MIN}`. In the app, every binary is then signed with the hardened runtime.",
+        (f"Built for arm64 and macOS {MACOS_MIN} or later with {_toolchain()}." if len(by_arch) == 1 else
+         f"Built for each of {both}, for macOS {MACOS_MIN} or later, with {_toolchain()}; a pin for one bundle "
+         "only says so. The x86_64 builds are cross-compiles on the Apple silicon Mac the release is built on; "
+         "where their steps differ from arm64's, both are given.")
+        + " The commands run as shown, plus `-j` for make. Each runs with only `/usr/bin:/bin:/usr/sbin:/sbin` on "
+        f"PATH and `MACOSX_DEPLOYMENT_TARGET={MACOS_MIN}`. In the app, every binary is then signed with the hardened "
+        "runtime.",
     ]
     for pin in archived:
-        where, becomes, steps, then = recipes.get(pin.name, ("", [], [], _unbuilt_reason(pin)))
+        arches = [a for a, ps in by_arch.items() if ps.get(pin.name) == pin] or [DEFAULT_ARCH]
+        per = {a: recipes[a].get(pin.name, ("", [], [], _unbuilt_reason(pin))) for a in arches}
         lines += [
             "",
             f"### {pin.name}",
@@ -3320,6 +3673,8 @@ def sources_md(top: str, tree: str, pins: dict[str, Pin], archived: list[Pin], s
             f"- Version: {pin.version}",
             f"- License: {pin.license}",
         ]
+        if len(arches) < len(by_arch):
+            lines.append(f"- Only in the {arches[0]} bundle ({BUNDLE_ZIPS[arches[0]]})")
         if pin.name in (repacked or {}):
             sha, left = repacked[pin.name]
             tools = sorted({n.rsplit("/", 1)[-1] for n in left})
@@ -3330,13 +3685,20 @@ def sources_md(top: str, tree: str, pins: dict[str, Pin], archived: list[Pin], s
                 "mode, and the zip keeps its comment; only the compression differs, so its SHA-256 isn't the pin's",
                 f"- Left out: `{CYAN_LEFT_OUT}`, {len(left)} prebuilt executables ({', '.join(tools)}, for "
                 f"{', '.join(platforms)}) that upstream built with no source for those builds. Graft.app carries "
-                "none of them: it builds cyan's five Darwin arm64 helpers from the ldid, cctools and insert_dylib "
-                "sources here, in their place, and removes the other platforms'.",
+                "none of them: it builds cyan's five Darwin "
+                + ("arm64 helpers" if len(by_arch) == 1 else
+                   "helpers (Darwin/arm64 in Graft.zip, Darwin/x86_64 in Graft-Intel.zip)")
+                + " from the ldid, cctools and insert_dylib sources here, in their place, and removes the other "
+                "platforms'.",
             ]
         else:
             lines.append(f"- Archive: `pinned/{pin.name}/{pin.filename}`, SHA-256 `{pin.sha256}`, from <{pin.url}>")
-        if becomes:
-            lines.append(f"- In the app: {', '.join(f'`Contents/{b}`' for b in becomes)}")
+        becomes = {a: r[1] for a, r in per.items()}
+        if len({tuple(b) for b in becomes.values()}) == 1:
+            if becomes[arches[0]]:
+                lines.append(f"- In the app: {', '.join(f'`Contents/{b}`' for b in becomes[arches[0]])}")
+        else:
+            lines += [f"- In the {a} app: {', '.join(f'`Contents/{b}`' for b in got)}" for a, got in becomes.items()]
         patched = patch_hashes(pin.name)
         if patched:
             lines += [f"- Patched first, in the archive's top directory, with Graft's "
@@ -3344,15 +3706,31 @@ def sources_md(top: str, tree: str, pins: dict[str, Pin], archived: list[Pin], s
                       + ", ".join(f"`bundle/patches/{p}` (SHA-256 `{sha}`)" for p, sha in patched),
                       "", "```sh", *(shell_line([*PATCH_ARGV, f"$GRAFT/bundle/patches/{p}"]) for p, _ in patched),
                       "```", ""]
-        if steps:
-            lines += [f"- In {where}:", "", "```sh", *(shell_line(step) for step in steps), "```", ""]
-        lines.append(then)
+        steps = {a: (r[0], r[2]) for a, r in per.items()}
+        if len({(w, json.dumps(s)) for w, s in steps.values()}) == 1:
+            where, first = steps[arches[0]]
+            if first:
+                lines += [f"- In {where}:", "", "```sh", *(shell_line(step) for step in first), "```", ""]
+        else:
+            for a, (where, got) in steps.items():
+                lines += [f"- For {a} ({BUNDLE_ZIPS[a]}), in {where}:", "", "```sh",
+                          *(shell_line(step) for step in got), "```", ""]
+        thens = list(dict.fromkeys(r[3] for r in per.values()))
+        lines += thens[:1] if len(thens) == 1 else [f"For {a}: {r[3]}" for a, r in per.items()]
+    overridden = sorted((overrides or {}).items())
+    artifacts: dict[str, tuple[Pin, list[str]]] = {}
+    for a, ps in by_arch.items():
+        for n, p in ps.items():
+            if pin_kind(n, ps) == "artifact" and n != "cyan":
+                artifacts.setdefault(f"{n} {p.version} ({p.license})", (p, []))[1].append(a)
+    toolchains = {f"{n} {p.version} ({p.license})": p for ps in by_arch.values() for n, p in ps.items()
+                  if n in TOOLCHAINS}
     lines += [
         "",
         "### Preferences.framework (PlayCover's stub)",
         "",
         f"- In the app: `Contents/{STUB_IN_APP}`, iOS code, so not signed by the release (PlayCover signs it "
-        "on install).",
+        "on install)" + (", and arm64, for the phone, in both bundles." if len(by_arch) > 1 else "."),
         "- In `graft/graft_ipa/stubs/preferences-stub/` (Graft's own source, MIT), with the release Mac's Xcode "
         "and its iOS SDK, then its `Info.plist` copied in:",
         "",
@@ -3364,8 +3742,13 @@ def sources_md(top: str, tree: str, pins: dict[str, Pin], archived: list[Pin], s
         "## Python packages",
         "",
         "The app installs every package as a wheel (each wheel's SHA-256 is in components.json). These are the "
-        "same versions' source distributions from PyPI, each matching a hash in `bundle/requirements.lock`; "
-        "graft's own is `graft/` and cyan's is its pinned archive above.",
+        "same versions' source distributions from PyPI, each matching a hash in `bundle/requirements.lock`, with "
+        "the license each one states itself (its PKG-INFO, else its pyproject.toml)"
+        + ("; the Intel bundle installs `bundle/requirements-x86_64.lock`, the same versions but for those "
+           "`bundle/x86_64-overrides.txt` names, which have no macOS x86_64 wheel at the version locked for arm64 ("
+           + ", ".join(f"{n} {v}" for n, v in overridden) + "), and both versions' are here"
+           if overridden else "")
+        + "; graft's own is `graft/` and cyan's is its pinned archive above.",
         "",
         "| Package | Version | License | Source distribution | SHA-256 |",
         "|---|---|---|---|---|",
@@ -3377,12 +3760,11 @@ def sources_md(top: str, tree: str, pins: dict[str, Pin], archived: list[Pin], s
         "## Not built here",
         "",
         "These are upstream release files, with their URLs in components.json: "
-        + ", ".join(f"{n} {p.version} ({p.license})" for n, p in pins.items()
-                    if pin_kind(n, pins) == "artifact" and n != "cyan")
+        + ", ".join(name + ("" if len(on) == len(by_arch) else f", the {' and '.join(on)} bundle's")
+                    for name, (_, on) in artifacts.items())
         + ". Those under a copyleft license have their source above. cyan's iOS frameworks go in as cyan's "
-        "archive carries them. " + ", ".join(
-            f"{n} {p.version} ({p.license}) is the toolchain a binary above is built with"
-            for n, p in pins.items() if n in TOOLCHAINS) + ".",
+        "archive carries them. " + ", ".join(f"{name} is the toolchain a binary above is built with"
+                                             for name in toolchains) + ".",
         "",
     ]
     return "\n".join(lines)
@@ -3566,7 +3948,10 @@ def built_sources(pins: dict[str, Pin]) -> list[tuple[Path, str]]:
     """Source the stage produces or fetches beside the pins, as (file, its
     path under pinned/): ipatool's and UnfairPlay's vendored Go modules, from
     their cached builds, and each copyleft crate in ipatool's 1Password SDK
-    core (`core_crate_sources`)."""
+    core (`core_crate_sources`). `pins` are the arm64 bundle's: `go mod
+    vendor` writes the same tree for every GOARCH, so the arm64 builds' serve
+    the Intel bundle too, and the archive is the same whichever release
+    writes it."""
     pinned = pinned_crates()
     return [(build_ipatool(pins["ipatool"], pins["go"]) / "vendor.tar.gz", "ipatool/vendor.tar.gz"),
             (build_unfairplay(pins["unfairplay"], pins["go"]) / "vendor.tar.gz", "unfairplay/vendor.tar.gz"),
@@ -3574,28 +3959,122 @@ def built_sources(pins: dict[str, Pin]) -> list[tuple[Path, str]]:
               for c, v, _ in core_crate_sources())]
 
 
-def write_sources(components: Path, out: Path, lock: Path = RUNTIME_LOCK, *, commit: str | None = None,
+def _sdist_top_files(path: Path) -> dict[str, bytes]:
+    """The files at a source distribution's top (`<name>-<version>/<file>`),
+    by name: its PKG-INFO, pyproject.toml and license files among them."""
+    found = {}
+    if path.name.endswith(".zip"):
+        with zipfile.ZipFile(path) as z:
+            for n in z.namelist():
+                if n.count("/") == 1 and not n.endswith("/"):
+                    found[n.split("/", 1)[1]] = z.read(n)
+    else:
+        with tarfile.open(path) as tf:
+            for m in tf.getmembers():
+                if m.isfile() and m.name.count("/") == 1:
+                    found[m.name.split("/", 1)[1]] = tf.extractfile(m).read()
+    return found
+
+
+def _pyproject_licence(text: str) -> str | None:
+    """A license a pyproject.toml states, as _dist_licence reads metadata:
+    `[project] license` (an expression, or a table's text), else the license
+    classifiers of `[project]` or of an old flit sdist's
+    `[tool.flit.metadata]`, else flit's own `license`."""
+    try:
+        data = tomllib.loads(text)
+    except tomllib.TOMLDecodeError:
+        return None
+    project = data.get("project") or {}
+    flit = ((data.get("tool") or {}).get("flit") or {}).get("metadata") or {}
+    lic = project.get("license")
+    if isinstance(lic, dict):
+        lic = lic.get("text")
+    if isinstance(lic, str) and lic.strip() and "\n" not in lic.strip() and len(lic.strip()) <= 80:
+        return lic.strip()
+    classifiers = [c.split("::")[-1].strip() for c in [*(project.get("classifiers") or []), *(flit.get("classifiers") or [])]
+                   if isinstance(c, str) and c.startswith("License ::")]
+    if classifiers:
+        return " / ".join(classifiers)
+    first = lic.strip().splitlines()[0].strip() if isinstance(lic, str) and lic.strip() else ""
+    if first and len(first) <= 80:
+        return first
+    other = flit.get("license")
+    return other.strip() if isinstance(other, str) and other.strip() else None
+
+
+def sdist_licence(path: Path) -> str:
+    """A source distribution's license as it states it itself: its
+    PKG-INFO's (`_dist_licence`), else its pyproject.toml's (an old flit
+    sdist's PKG-INFO states none: ptyprocess 0.7.0's), else "not stated in
+    its metadata", saying so with "; see its license file" when it carries
+    one at its top. Never a wheel's: the arm64 and the x86_64 wheel of one
+    release may state it differently, and the one source archive both
+    releases write must be the same (review 2.2 #3)."""
+    files = _sdist_top_files(path)
+    meta = email.parser.HeaderParser().parsestr(files.get("PKG-INFO", b"").decode(errors="replace"))
+    lic = _dist_licence(meta) or _pyproject_licence(files.get("pyproject.toml", b"").decode(errors="replace"))
+    if lic:
+        return lic
+    return "not stated in its metadata" + ("; see its license file" if any(_LICENSE_FILE.match(n) for n in files)
+                                           else "")
+
+
+def source_archive_pins(by_arch: dict[str, dict[str, Pin]]) -> list[Pin]:
+    """The pins whose archives go into the source archive, each once: every
+    architecture's built from source or under a copyleft license, and cyan,
+    a Python package installed from its pinned archive, which is its source."""
+    archived: list[Pin] = []
+    for name in dict.fromkeys(n for ps in by_arch.values() for n in ps):
+        for pin in dict.fromkeys(ps[name] for ps in by_arch.values() if name in ps):
+            if (name in BUILT_FROM_SOURCE or pin.from_source or is_copyleft(pin.license) or name == "cyan") \
+                    and not pin.source and name not in LICENCE_TEXT_PINS:
+                archived.append(pin)
+    return archived
+
+
+def write_sources(components: Path, out: Path, lock: Path | None = None, *, commit: str | None = None,
                   repo: Path = REPO) -> list[str]:
     """`out` (Graft-<version>-sources.tar.gz): Graft's source at HEAD, the
     archive of every pin built from source or under a copyleft license, the
-    sdist of every copyleft Python package in `components` (components.json),
-    and SOURCES.md. Returns the members' names."""
+    sdist of every Python package in `components` (components.json), and
+    SOURCES.md. Returns the members' names.
+
+    One archive serves both bundles, whichever release writes it: every
+    architecture's pins (load_pins_by_arch), and the source of each package
+    version any architecture's runtime lock installs (`lock`, given, stands
+    for every one's), each with the license the sdist states itself
+    (sdist_licence): never `components`' wheels', which the two bundles'
+    releases may state differently (review 2.2 #3). `components` says only
+    which packages are bundled, and their license whether one with no sdist
+    may go without its source."""
     top = out.name.removesuffix(".tar.gz")
-    pins = load_pins(REPO / "bundle" / "pins.toml")
+    by_arch = load_pins_by_arch(REPO / "bundle" / "pins.toml")
+    pins = by_arch[DEFAULT_ARCH]
     entries = json.loads(components.read_text())
-    # cyan is a Python package installed from its pinned archive: that is its source.
-    archived = [pin for name, pin in pins.items()
-                if (name in BUILT_FROM_SOURCE or is_copyleft(pin.license) or name == "cyan") and not pin.source
-                and name not in LICENCE_TEXT_PINS]
-    locked = lock_hashes(lock)
+    archived = source_archive_pins(by_arch)
+    lockeds = {arch: lock_hashes(lock or runtime_lock(arch)) for arch in ARCHS}
+    locked = lockeds[DEFAULT_ARCH]
+    versions: dict[str, dict[str, set[str]]] = {}
+    for got in lockeds.values():
+        for n, (v, hashes) in got.items():
+            versions.setdefault(n, {}).setdefault(v, set()).update(hashes)
+    overrides = {n: lockeds["x86_64"][n][0] for n, vs in versions.items() if len(vs) > 1}
     project = _norm(tomllib.loads((REPO / "pyproject.toml").read_text())["project"]["name"])
     # Review #58: the source of every bundled package, not only copyleft ones.
     sdists, no_sdist = [], []
     for e in entries:
-        if e["kind"] != "python-package" or _norm(e["name"]) in (project, "cyan"):
+        name = _norm(e["name"])
+        if e["kind"] != "python-package" or name in (project, "cyan"):
+            continue
+        if name in overrides:
+            for version, hashes in sorted(versions[name].items()):
+                pin = sdist_pin(name, version, "", {name: (version, hashes)})
+                sdists.append(dataclasses.replace(pin, license=sdist_licence(fetch(pin))))
             continue
         try:
-            sdists.append(sdist_pin(e["name"], e["version"], e["license"], locked))
+            pin = sdist_pin(e["name"], e["version"], "", locked)
+            sdists.append(dataclasses.replace(pin, license=sdist_licence(fetch(pin))))
         except NoSdist:
             if needs_source(e["license"]):
                 raise
@@ -3611,11 +4090,11 @@ def write_sources(components: Path, out: Path, lock: Path = RUNTIME_LOCK, *, com
                 path = repack
                 repacked[pin.name] = (_sha256(repack), left)
             files.append((path, f"{top}/pinned/{pin.name}/{archived_filename(pin)}"))
-        files += [(path, f"{top}/pinned/{name}") for path, name in built_sources(pins)]
+        files += [(path, f"{top}/pinned/{name}") for path, name in built_sources(pins)]  # the arm64 builds'
         files += [(fetch(pin), f"{top}/sdists/{pin.filename}") for pin in sdists]
         source = Path(tmp) / "graft.tar"
         tree, when = graft_source_tar(source, f"{top}/graft/", repo=repo, commit=commit)
-        md = sources_md(top, tree, pins, archived, sdists, no_sdist, repacked).encode()
+        md = sources_md(top, tree, pins, archived, sdists, no_sdist, repacked, by_arch, overrides).encode()
         names = []
         with part.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=when) as gz, \
                 tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tf:
@@ -3648,7 +4127,13 @@ ALLOW_HOTSPOT_ENV = "GRAFT_ALLOW_HOTSPOT"
 #: anything against them.
 APPROX_MB = {"go": 65, "openssl": 53, "python": 25, "cyan": 9, "ipatool": 6, "cctools": 3, "unfairplay": 1,
              "libplist": 0.5, "python-build-standalone": 0.5, "zsign": 0.2, "ldid": 0.1, "insert_dylib": 0.1,
-             "hacl": 0.1}
+             "hacl": 0.1,
+             # An architecture's variant, by `<pin>.<arch>` (2026-11-24): the x86_64 zsign is its source.
+             "python.x86_64": 25, "zsign.x86_64": 24}
+
+
+def _approx_mb(pin: Pin) -> float | None:
+    return APPROX_MB.get(f"{pin.name}.{pin.arch}") if pin.arch else APPROX_MB.get(pin.name)
 #: Likewise for the rest: each Go tool's modules (the zips `go mod vendor`
 #: fetches, a guess), and an average source distribution and crate (98
 #: source distributions came to 96 MB, 369 crates to 54 MB).
@@ -3678,19 +4163,29 @@ def _cached_sdists(cache: Path) -> set[tuple[str, str]]:
     return found
 
 
-def _go_build_done(tool: str, pins: dict[str, Pin], work: Path) -> bool:
-    key = {"ipatool": ipatool_key, "unfairplay": unfairplay_key}[tool]
+def _go_build_done(tool: str, pins: dict[str, Pin], work: Path, arch: str = DEFAULT_ARCH) -> bool:
     try:
-        return (work / f"{tool}-{key(pins[tool], pins['go'])[:12]}").is_dir()
+        key = ipatool_key(pins[tool], pins["go"], arch) if tool == "ipatool" else unfairplay_key(pins[tool], pins["go"])
+        return (work / f"{tool}-{key[:12]}").is_dir()
     except BundleError:
         return False
 
 
-def uncached_wheels(locks: tuple[Path, ...], cache: Path | None = None) -> list[str]:
+def wheel_is_for(url: str, arch: str) -> bool:
+    """Whether the wheel a URL names can be installed in the bundle of
+    `arch`: pure Python, or a macOS platform tag for that architecture or
+    for both (universal2)."""
+    platforms = url.rsplit("/", 1)[-1].removesuffix(".whl").rsplit("-", 1)[-1].split(".")
+    return any(p == "any" or p.endswith(f"_{arch}") or p.endswith("_universal2")
+               or (arch == "x86_64" and p.endswith("_intel")) for p in platforms)
+
+
+def uncached_wheels(locks: tuple[Path, ...], cache: Path | None = None, arch: str | None = None) -> list[str]:
     """`name version` of each package the `locks` pin with no wheel in pip's
     cache: none the record (`cached_wheels`) lists, with its body still
-    there, has a SHA-256 the lock allows for it."""
-    have = set(cached_wheels(pip_cache(cache)))
+    there, has a SHA-256 the lock allows for it (and, given `arch`, is a
+    wheel for that architecture: wheel_is_for)."""
+    have = {sha for sha, e in cached_wheels(pip_cache(cache)).items() if arch is None or wheel_is_for(e["url"], arch)}
     wanted: dict[tuple[str, str], set[str]] = {}
     for lock in locks:
         for name, (version, hashes) in lock_hashes(lock).items():
@@ -3700,7 +4195,9 @@ def uncached_wheels(locks: tuple[Path, ...], cache: Path | None = None) -> list[
 
 def download_plan(pins: dict[str, Pin], cache: Path | None = None, work: Path | None = None,
                   lock: Path = RUNTIME_LOCK, crates: Path = IPATOOL_CORE_CRATES,
-                  build_lock: Path = BUILD_LOCK) -> list[Download]:
+                  build_lock: Path = BUILD_LOCK, *, arch: str = DEFAULT_ARCH, extra: list[Pin] = (),
+                  source_locks: tuple[Path, ...] | None = None,
+                  source_pins: dict[str, Pin] | None = None) -> list[Download]:
     """What a release would still download, worked out offline from what
     `cache` (CACHE) and `work` (WORK) hold: each pinned file not cached (or
     cached with another hash); each Go tool's modules, unless its build is
@@ -3711,26 +4208,42 @@ def download_plan(pins: dict[str, Pin], cache: Path | None = None, work: Path | 
     runtime locks that pip's cache doesn't hold (`uncached_wheels`). Not
     counted: small lookups (PyPI's JSON and index pages, the Swift packages
     Xcode resolves, UnfairPlay's tag) and the crates named only in a wheel's
-    SBOM, known after staging."""
+    SBOM, known after staging.
+
+    For the bundle of `arch`, whose pins are `pins` and runtime lock `lock`;
+    and for the one source archive both releases write: `extra`, the pins it
+    takes that `pins` lacks (other architectures'), `source_pins`, the arm64
+    pins its vendored Go modules are built from, and `source_locks`, every
+    lock whose packages' source distributions it carries (`lock` alone
+    unless given)."""
     cache, work = cache or CACHE, work or WORK
     plan = []
     for name, pin in pins.items():
         f = cache / pin.filename
         if not (f.is_file() and _sha256(f) == pin.sha256):
-            plan.append(Download(f"{name} {pin.version}", APPROX_MB.get(name)))
+            plan.append(Download(f"{name} {pin.version}", _approx_mb(pin)))
+    for pin in extra:
+        f = cache / pin.filename
+        if not (f.is_file() and _sha256(f) == pin.sha256):
+            plan.append(Download(f"{pin.name} {pin.version} ({pin.arch or DEFAULT_ARCH}'s, for the source archive)",
+                                 _approx_mb(pin)))
     for tool in ("ipatool", "unfairplay"):
-        if tool in pins and "go" in pins and not _go_build_done(tool, pins, work) \
-                and not go_modules_cached(go_modcache(cache), pins[tool]):
+        builds = [(arch, pins)] if tool in pins and "go" in pins else []
+        if source_pins and tool in source_pins and "go" in source_pins:
+            builds.append((DEFAULT_ARCH, source_pins))
+        if builds and not all(_go_build_done(tool, ps, work, a) for a, ps in builds) \
+                and not go_modules_cached(go_modcache(cache), builds[0][1][tool]):
             plan.append(Download(f"{tool}'s Go modules", GO_MODULES_MB.get(tool)))
     have = _cached_sdists(cache)
-    sdists = sorted(f"{n} {v}" for n, (v, _) in lock_hashes(lock).items() if (n, v) not in have)
+    locked = {(n, v) for one in (source_locks or (lock,)) for n, (v, _) in lock_hashes(one).items()}
+    sdists = sorted(f"{n} {v}" for n, v in locked if (n, v) not in have)
     if sdists:
         plan.append(Download(f"{len(sdists)} source distribution(s) for the source archive: "
                              + ", ".join(sdists[:5]) + (", ..." if len(sdists) > 5 else ""), len(sdists) * SDIST_MB))
     missing = sorted(f"{c} {v}" for c, v in pinned_crates(crates) if not (cache / "crates" / f"{c}-{v}.crate").is_file())
     if missing:
         plan.append(Download(f"{len(missing)} Rust crate(s) for their licenses", len(missing) * CRATE_MB))
-    wheels = uncached_wheels((build_lock, lock), cache)
+    wheels = uncached_wheels((build_lock, lock), cache, arch)
     if wheels:
         plan.append(Download(f"{len(wheels)} Python wheel(s) the app bundles: " + ", ".join(wheels[:5])
                              + (", ..." if len(wheels) > 5 else ""), len(wheels) * WHEEL_MB))
@@ -3755,8 +4268,18 @@ def _mb(mb: float | None) -> str:
     return "     ? MB" if mb is None else ("    <1 MB" if mb < 1 else f"{mb:6.0f} MB")
 
 
+def release_plan(arch: str = DEFAULT_ARCH, cache: Path | None = None, work: Path | None = None) -> list[Download]:
+    """What a release of the bundle of `arch` would still download
+    (download_plan): its stage's, and the one source archive's."""
+    by_arch = load_pins_by_arch(REPO / "bundle" / "pins.toml")
+    pins = by_arch[arch]
+    extra = [p for p in source_archive_pins(by_arch) if p not in pins.values()]
+    return download_plan(pins, cache, work, runtime_lock(arch), arch=arch, extra=extra,
+                         source_locks=tuple(runtime_lock(a) for a in ARCHS), source_pins=by_arch[DEFAULT_ARCH])
+
+
 def check_hotspot(pins: dict[str, Pin], *, interactive: bool | None = None,
-                  answer: Callable[[], str] | None = None) -> bool:
+                  answer: Callable[[], str] | None = None, plan: Callable[[], list[Download]] | None = None) -> bool:
     """Whether a release may go on downloading. On a phone's hotspot (the
     default route through HOTSPOT_GATEWAY), with anything a cache would keep
     still to download, it says what and roughly how much, then asks; with
@@ -3768,7 +4291,7 @@ def check_hotspot(pins: dict[str, Pin], *, interactive: bool | None = None,
     if route is None or route[0] != HOTSPOT_GATEWAY:
         return True
     on = f"the default route goes through {HOTSPOT_GATEWAY} on {route[1] or 'an unknown interface'}"
-    plan = download_plan(pins)
+    plan = plan() if plan else download_plan(pins)
     big = [d for d in plan if d.kept]
     if not big:
         every = "; ".join(d.what for d in plan)
@@ -3818,17 +4341,34 @@ def check_interpreter(version: tuple[int, ...] | None = None, machine: str | Non
                           "runs: rebuild .venv with that Python (not under Rosetta)")
 
 
+#: The commands that take `--arch <arch>` straight after their name; without
+#: it they are for DEFAULT_ARCH.
+ARCH_COMMANDS = ("stage", "hotspot-check")
+
+
 def main(argv: list[str]) -> int:
-    usage = ("usage: graft_bundle.py stage <staging-dir> | sources <components.json> "
-             "<Graft-<version>-sources.tar.gz> [--commit SHA --repo CHECKOUT] | check-python | hotspot-check")
+    usage = ("usage: graft_bundle.py stage [--arch arm64|x86_64] <staging-dir> | sources <components.json> "
+             "<Graft-<version>-sources.tar.gz> [--commit SHA --repo CHECKOUT] | check-python | "
+             "hotspot-check [--arch arm64|x86_64] | x86_64-lock")
+    arch = DEFAULT_ARCH
+    if argv[:1] and argv[0] in ARCH_COMMANDS and argv[1:2] == ["--arch"]:
+        if len(argv) < 3 or argv[2] not in ARCHS:
+            print(usage, file=sys.stderr)
+            return 2
+        arch, argv = argv[2], [argv[0], *argv[3:]]
     try:
         if argv == ["check-python"]:
             check_interpreter()
+        elif argv == ["x86_64-lock"]:
+            check_interpreter()
+            X86_64_LOCK.write_text(x86_64_lock_text(RUNTIME_LOCK.read_text(), lock_overrides(), pip_compile_hashes))
+            print(f"wrote {X86_64_LOCK.relative_to(REPO)} ({len(lock_overrides())} override(s))")
         elif argv == ["hotspot-check"]:
-            return 0 if check_hotspot(load_pins(REPO / "bundle" / "pins.toml")) else 1
+            pins = load_pins(REPO / "bundle" / "pins.toml", arch)
+            return 0 if check_hotspot(pins, plan=lambda: release_plan(arch)) else 1
         elif len(argv) == 2 and argv[0] == "stage":
             dest = Path(argv[1]).absolute()
-            found = stage(dest)
+            found = stage(dest, arch=arch)
             print(f"staged {dest}: {len(found)} Mach-O files to sign, listed in macho-list.txt")
         elif len(argv) in (3, 7) and argv[0] == "sources" and argv[2].endswith(".tar.gz") and (
                 len(argv) == 3 or (argv[3], argv[5]) == ("--commit", "--repo")):

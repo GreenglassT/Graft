@@ -8,6 +8,8 @@ app has its own page.
 ## Install
 
 1. Download `Graft.zip` from [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
+   On an Intel Mac, download `Graft-Intel.zip` instead (a test build; see
+   [Requirements](#requirements)).
 2. Unzip it, move `Graft.app` to `/Applications`, and open it.
 
 Graft.app carries everything it needs:
@@ -21,8 +23,22 @@ libimobiledevice's `iproxy` and tools you install yourself (see
 
 ## Requirements
 
-- **A Mac with Apple silicon and macOS 14 or later.** On an Intel Mac,
-  Graft.app opens to a screen that says it needs Apple silicon.
+- **A Mac with macOS 14 or later.** On a Mac with Apple silicon, download
+  `Graft.zip`, which does everything.
+- **On an Intel Mac,** download `Graft-Intel.zip`. It's a test build until it
+  has run on a real Intel Mac. Everything works except what needs Apple
+  silicon:
+  - App Store sign-in, and getting and decrypting App Store apps, older
+    versions and free ones included (search still works, for adding an app
+    by name, and needs no sign-in);
+  - Set Up Decryption;
+  - Build for this Mac, and handing builds to PlayCover.
+
+  Those buttons are there but disabled, with "Needs a Mac with Apple
+  silicon". Use a decrypted IPA you already have, or dump one from a
+  jailbroken device. `Graft.zip` opened on an Intel Mac only says to download
+  `Graft-Intel.zip`; `Graft-Intel.zip` on an Apple silicon Mac runs, with a
+  banner saying to download `Graft.zip` for everything.
 - **An iPhone or iPad** paired with this Mac, connected by USB, or on the
   same network with Wi-Fi sync turned on.
 - **An Apple account,** of one of two kinds. The first run asks which you
@@ -43,10 +59,10 @@ libimobiledevice's `iproxy` and tools you install yourself (see
 | Install or update LiveContainer from Graft | A paid membership and an App Store Connect API key. |
 | Make each app's provisioning profile automatically | A paid membership and an App Store Connect API key. |
 | Search the App Store | Nothing. No Apple ID is involved. |
-| Download from the App Store | An Apple ID signed in in Graft. Any Apple ID works, free or paid; it's separate from the account above. The app must be one that Apple ID owns, or a free one Graft can get for it. |
-| Decrypt App Store downloads | An iPhone or iPad app installed on this Mac from the Mac App Store, with the same Apple ID, and opened once. Any free one will do. |
+| Download from the App Store | A Mac with Apple silicon, and an Apple ID signed in in Graft. Any Apple ID works, free or paid; it's separate from the account above. The app must be one that Apple ID owns, or a free one Graft can get for it. |
+| Decrypt App Store downloads | A Mac with Apple silicon, and an iPhone or iPad app installed on it from the Mac App Store, with the same Apple ID, and opened once. Any free one will do. |
 | Decrypt on a jailbroken device | A jailbroken iPhone or iPad with frida-server 16.x and OpenSSH, plus tools you install yourself (see [Decrypt on a jailbroken device](getting-an-ipa.md#decrypt-on-a-jailbroken-device)). |
-| Run a build on this Mac | [PlayCover](https://github.com/PlayCover/PlayCover/releases), a free app you install yourself. Graft doesn't include it. |
+| Run a build on this Mac | A Mac with Apple silicon, and [PlayCover](https://github.com/PlayCover/PlayCover/releases), a free app you install yourself. Graft doesn't include it. |
 
 ## The five steps
 

@@ -21,6 +21,8 @@ from typing import Any
 
 from graft_ipa import app_update
 
+from . import macho_builder as mb
+
 TAG_PAGE = "https://github.com/GreenglassT/Graft/releases/tag/"
 #: A made-up Developer ID team: the running Graft's, in these tests.
 TEAM = "ABCDE12345"
@@ -29,27 +31,59 @@ TEAM = "ABCDE12345"
 RUNNING_APP = Path("/private/var/empty/Running/Graft.app")
 
 
+#: Each architecture's Mach-O cputype, from <mach/machine.h> (`macho_builder`).
+CPU = {"arm64": mb.CPU_ARM64, "x86_64": mb.CPU_X86_64}
+
+
+def macho_for(archs: tuple[str, ...]) -> bytes:
+    """A real, if empty, Mach-O with code for `archs`: one architecture is a
+    thin file, more a universal one, as `lipo` would make them. No load
+    commands: the updater reads only the headers."""
+    slices = [mb.thin([], cputype=CPU[arch]) for arch in archs]
+    if len(slices) == 1:
+        return slices[0]
+    return mb.fat([(CPU[arch], data) for arch, data in zip(archs, slices)], align=0x1000)
+
+
+#: What the release script puts in each build (`graft_bundle`): a universal
+#: main executable in both, and the embedded Python of that build only.
+UNIVERSAL = ("x86_64", "arm64")
+
+
 def dummy_app(where: Path, version: str, *, bundle_id: str = app_update.BUNDLE_ID,
-              marker: str = "") -> Path:
-    """A tiny unsigned Graft.app in `where`: an Info.plist, an "executable"
-    that is only text, and a framework with the usual `Versions/Current`
-    link. `marker` goes in a file of its own, to tell two copies apart."""
+              marker: str = "", flavor: str | None = app_update.ARM64,
+              executable: tuple[str, ...] = UNIVERSAL, python: tuple[str, ...] | None = None,
+              python_name: str = "python3.13") -> Path:
+    """A tiny unsigned Graft.app in `where`: an Info.plist naming `flavor`
+    (no `GraftBundleArch` at all for None, as before 2.2), a main
+    executable and an embedded Python that are Mach-O headers with code for
+    `executable` and `python` (the flavor's, else arm64's), and a
+    framework with the usual `Versions/Current` link. `python_name` is the
+    interpreter's file name (python3.13 in 2.2). `marker` goes in a file of
+    its own, to tell two copies apart."""
     app = where / app_update.APP_NAME
     contents = app / "Contents"
     (contents / "MacOS").mkdir(parents=True)
-    (contents / "MacOS" / "Graft").write_text("#!/bin/sh\nexit 0\n")
+    (contents / "MacOS" / "Graft").write_bytes(macho_for(executable))
+    plist: dict[str, str] = {
+        "CFBundleIdentifier": bundle_id,
+        "CFBundleShortVersionString": version,
+        "CFBundleExecutable": "Graft",
+        "CFBundlePackageType": "APPL",
+    }
+    if flavor is not None:
+        plist[app_update.FLAVOR_KEY] = flavor
     with (contents / "Info.plist").open("wb") as f:
-        plistlib.dump({
-            "CFBundleIdentifier": bundle_id,
-            "CFBundleShortVersionString": version,
-            "CFBundleExecutable": "Graft",
-            "CFBundlePackageType": "APPL",
-        }, f)
+        plistlib.dump(plist, f)
+    bin_dir = contents.joinpath(*app_update.EMBEDDED_PYTHON[1:])
+    bin_dir.mkdir(parents=True)
+    # A flavor no build has ("universal") gets an arm64 Python, as no key does.
+    (bin_dir / python_name).write_bytes(
+        macho_for(python or ((flavor,) if flavor in CPU else (app_update.ARM64,))))
     versions = contents / "Frameworks" / "Example.framework" / "Versions"
     (versions / "A").mkdir(parents=True)
     (versions / "A" / "Example").write_text("not a binary")
     (versions / "Current").symlink_to("A")
-    (contents / "Resources").mkdir()
     (contents / "Resources" / "marker.txt").write_text(marker)
     return app
 
@@ -61,23 +95,33 @@ def zip_app(app: Path, dest: Path) -> bytes:
     return dest.read_bytes()
 
 
-def release_json(base: str, tag: str, zip_bytes: bytes, **asset_fields: Any) -> dict[str, Any]:
-    """GitHub's latest-release answer, trimmed, for a release whose
-    Graft.zip is `zip_bytes`, served from `base`."""
+def asset_json(base: str, tag: str, zip_bytes: bytes, name: str = "Graft.zip",
+               **asset_fields: Any) -> dict[str, Any]:
+    """One release asset as GitHub's API lists it: `name`, whose bytes are
+    `zip_bytes`, served from `base`."""
     asset = {
-        "name": app_update.ASSET_NAME,
+        "name": name,
         "state": "uploaded",
         "size": len(zip_bytes),
         "digest": "sha256:" + hashlib.sha256(zip_bytes).hexdigest(),
-        "browser_download_url": f"{base}/download/{tag}/{app_update.ASSET_NAME}",
+        "browser_download_url": f"{base}/download/{tag}/{name}",
     }
     asset.update(asset_fields)
+    return asset
+
+
+def release_json(base: str, tag: str, zip_bytes: bytes, *, name: str = "Graft.zip",
+                 extra: list[dict[str, Any]] = (), **asset_fields: Any) -> dict[str, Any]:
+    """GitHub's latest-release answer, trimmed, for a release whose zip
+    `name` (Graft.zip, the Apple silicon build's) is `zip_bytes`, served from
+    `base`; `extra` are more assets beside it (`asset_json`)."""
     return {
         "tag_name": tag, "html_url": TAG_PAGE + tag, "draft": False, "prerelease": False,
         "assets": [
             {"name": f"Graft-{tag.lstrip('v')}-sources.tar.gz", "size": 1,
              "browser_download_url": f"{base}/download/{tag}/sources.tar.gz"},
-            asset,
+            asset_json(base, tag, zip_bytes, name, **asset_fields),
+            *extra,
         ],
     }
 
@@ -154,6 +198,9 @@ class FakeTools:
         self.own_team = TEAM
         self.own_signature_ok = True
         self.own_developer_id = True
+        #: Which build the running Graft is (`own_flavor`, which the
+        #: `tools` fixture answers with this).
+        self.flavor = app_update.ARM64
         self.calls: list[list[str]] = []
         self.own_calls: list[list[str]] = []
         # Kept now: a test may then put this fake in `run_tool`'s place.

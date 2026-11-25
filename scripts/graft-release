@@ -4,24 +4,28 @@
 # hardened runtime and a secure timestamp on every Mach-O, signed inside-out
 # with a Developer ID identity; then zipped and checked.
 #
-# The app's own executable is universal (arm64 and x86_64) so that on an
-# Intel Mac it opens and shows its "needs Apple silicon, use Graft 1.1"
-# screen; an arm64-only one would get macOS's generic "can't be opened".
-# Everything it runs (the Python, the tools, OpenSSL, the launchers) is arm64
-# only. verify-bundle checks both.
+# Two bundles, one per Mac: arm64 (Apple silicon, the default), zipped as
+# Graft.zip, and with `--arch x86_64` the Intel one, Graft-Intel.zip, which
+# has no UnfairPlay (it decrypts by running iOS apps, which only Apple
+# silicon can). The app's own executable is universal (arm64 and x86_64) in
+# both; everything it runs (the Python, the tools, OpenSSL, the launchers)
+# is the bundle's architecture only. Info.plist's GraftBundleArch says which
+# bundle it is, written before anything is signed, and an Intel release
+# refuses a commit whose app doesn't read it. verify-bundle checks the rest.
 #
 #   GRAFT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
-#     scripts/graft-release [output-dir]
+#     scripts/graft-release [--arch arm64|x86_64] [output-dir]
 #
 # GRAFT_SIGN_IDENTITY may also be the identity's SHA-1 (see
 # `security find-identity -v -p codesigning`). The output directory defaults to
-# ./build/release and must not already contain a Graft.app. It ends up with
-# Graft.app, Graft.zip, components.json (every bundled artifact and Python
-# package, with the exact file and SHA-256 it came from) and
-# Graft-<version>-sources.tar.gz, which goes on the release page beside the
-# zip: Graft's source at the commit built, the source of every bundled binary
-# built from source and of every copyleft Python package, and SOURCES.md
-# saying how each was built.
+# ./build/release (./build/release-intel for x86_64) and must not already
+# contain a Graft.app. It ends up with Graft.app, Graft.zip (Graft-Intel.zip),
+# components.json (every bundled artifact and Python package, with the exact
+# file and SHA-256 it came from) and Graft-<version>-sources.tar.gz, which goes
+# on the release page beside the zips: Graft's source at the commit built, the
+# source of every binary either bundle builds from source and of every
+# copyleft Python package, and SOURCES.md saying how each was built. Both
+# releases write the same source archive.
 #
 # It builds a commit, not a working tree: it records HEAD first, refuses a
 # checkout with any change (untracked files included), builds the app and
@@ -36,8 +40,10 @@
 #
 # This does NOT notarize. Submit the resulting zip with `xcrun notarytool`,
 # then `xcrun stapler staple Graft.app`, re-zip the stapled app with
-# `ditto -c -k --keepParent Graft.app Graft.zip` (never `zip -r`, which stores
-# symlinks as files and breaks the seal), and run `verify-bundle --zip` on it.
+# `ditto -c -k --keepParent Graft.app Graft.zip` (Graft-Intel.zip; never
+# `zip -r`, which stores symlinks as files and breaks the seal), and run
+# `verify-bundle --zip` on it (`verify-bundle --arch x86_64 --zip` on the
+# Intel one, which runs its checks under Rosetta).
 #
 # Nothing it publishes may name an app, tweak or bundle id Graft was used
 # with, or its owner: the tracked files, the app and the source archive (every
@@ -69,12 +75,30 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT_DIR="${1:-$REPO_ROOT/build/release}"
+# The bundle's architecture. ARCH_ARGS passes it on to graft_bundle.py and
+# verify-bundle, and is empty for arm64, whose commands are as they always were.
+ARCH=arm64
+ARCH_ARGS=()
+if [[ "${1:-}" == "--arch" ]]; then
+  case "${2:-}" in
+    arm64) ;;
+    x86_64) ARCH=x86_64; ARCH_ARGS=(--arch x86_64) ;;
+    *) echo "error: --arch takes arm64 or x86_64" >&2; exit 2 ;;
+  esac
+  shift 2
+fi
+if [[ "$ARCH" == x86_64 ]]; then
+  ZIP_NAME=Graft-Intel.zip
+  OUT_DIR="${1:-$REPO_ROOT/build/release-intel}"
+else
+  ZIP_NAME=Graft.zip
+  OUT_DIR="${1:-$REPO_ROOT/build/release}"
+fi
 IDENTITY="${GRAFT_SIGN_IDENTITY:?set GRAFT_SIGN_IDENTITY to a Developer ID Application identity}"
 PY="$REPO_ROOT/.venv/bin/python"
 
 # Nothing of an earlier run's may sit beside this one's (review #35).
-for old in "$OUT_DIR/Graft.app" "$OUT_DIR/Graft.zip" "$OUT_DIR/components.json" "$OUT_DIR"/Graft-*-sources.tar.gz; do
+for old in "$OUT_DIR/Graft.app" "$OUT_DIR/$ZIP_NAME" "$OUT_DIR/components.json" "$OUT_DIR"/Graft-*-sources.tar.gz; do
   if [[ -e "$old" ]]; then
     echo "error: $old already exists; move the earlier release away first" >&2
     exit 1
@@ -101,6 +125,22 @@ STAGE="$WORK/stage"
 EXPORT="$WORK/export"
 mkdir "$EXPORT"
 git -C "$REPO_ROOT" archive --format=tar "$HEAD_AT_START" | tar -x -C "$EXPORT"
+# The Intel bundle's own executable is universal, as the arm64 one's is: what
+# tells the app on an Intel Mac which download it is, is its reading of
+# Info.plist's GraftBundleArch (written below). An app whose code doesn't read
+# it would show Intel Macs the old "needs Apple silicon" screen, and nothing
+# else here would notice. So an Intel release needs the key's name, as a
+# string, in the app's own code (Graft/Graft, not its tests, not a comment).
+if [[ "$ARCH" == x86_64 ]]; then
+  READS_ARCH=$(grep -rhF --include='*.swift' '"GraftBundleArch"' "$EXPORT/Graft/Graft" 2>/dev/null \
+    | grep -vE '^[[:space:]]*(//|\*)' || true)
+  if [[ -z "$READS_ARCH" ]]; then
+    echo "error: an Intel release needs an app that reads Info.plist's GraftBundleArch, and no Swift file of" >&2
+    echo "       the app's own (Graft/Graft) names it: on an Intel Mac, this commit's app would still say it" >&2
+    echo "       needs Apple silicon. Build it from a commit with the app's Intel support." >&2
+    exit 1
+  fi
+fi
 echo "→ building commit $HEAD_AT_START, from an export of it"
 echo "→ scanning the tracked files a public export carries for deny-listed names…"
 "$PY" "$EXPORT/scripts/denylist.py" tracked "$REPO_ROOT" "$HEAD_AT_START"
@@ -123,7 +163,7 @@ export GRAFT_BUNDLE_WORK="$REPO_ROOT/build/bundle-work"
 
 # Before anything is downloaded (Xcode's Swift packages come first): on a
 # phone's hotspot, what isn't cached yet is listed, and asked about.
-"$PY" "$EXPORT/scripts/graft_bundle.py" hotspot-check
+"$PY" "$EXPORT/scripts/graft_bundle.py" hotspot-check ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"}
 
 # The committed project is used as-is; regenerating would only churn its GUIDs.
 if [[ ! -d "$EXPORT/Graft/Graft.xcodeproj" ]]; then
@@ -168,7 +208,7 @@ if /usr/libexec/PlistBuddy -c "Print :GraftRepoPath" "$BUILT/Contents/Info.plist
 fi
 
 echo "→ staging the CLI, its Python, the tools and the licenses (outside the app)…"
-"$PY" "$EXPORT/scripts/graft_bundle.py" stage "$STAGE" >"$WORK/stage.log" 2>&1 || {
+"$PY" "$EXPORT/scripts/graft_bundle.py" stage ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} "$STAGE" >"$WORK/stage.log" 2>&1 || {
     tail -40 "$WORK/stage.log" >&2
     echo "error: staging failed (log tail above)" >&2
     exit 1
@@ -182,6 +222,11 @@ ditto "$BUILT" "$APP"
 for dir in Resources Helpers Frameworks; do
   ditto "$STAGE/$dir" "$APP/Contents/$dir"   # merges into the app's own Resources
 done
+# Which bundle this is. Its own executable is universal in both, so the app
+# reads this to know which download it came from (one from Xcode has none, and
+# is taken for arm64). Written before anything is signed, so the seal covers
+# it; Add, so a build that already carries the key stops the release.
+/usr/libexec/PlistBuddy -c "Add :GraftBundleArch string $ARCH" "$APP/Contents/Info.plist"
 
 # What gets signed is the stage's list plus the app's executable. Any other
 # Mach-O in the assembled app (code from the Xcode build, say) would go out
@@ -234,12 +279,15 @@ done <"$STAGE/entitlements.txt"
 # The enrollment's root step checks its copy of UnfairPlay against identifier
 # "unfairplay" (enrollment.UNFAIRPLAY_IDENTIFIER), so it is set here rather
 # than left to codesign's file-name default; verify-bundle checks the result.
-codesign --force --options runtime --timestamp --identifier unfairplay \
-  --sign "$IDENTITY" "$APP/Contents/$UNFAIRPLAY" >>"$WORK/sign.log" 2>&1 || {
-  tail -20 "$WORK/sign.log" >&2
-  echo "error: signing $UNFAIRPLAY failed" >&2
-  exit 1
-}
+# The Intel bundle has none: verify-bundle checks that too.
+if [[ "$ARCH" == arm64 ]]; then
+  codesign --force --options runtime --timestamp --identifier unfairplay \
+    --sign "$IDENTITY" "$APP/Contents/$UNFAIRPLAY" >>"$WORK/sign.log" 2>&1 || {
+    tail -20 "$WORK/sign.log" >&2
+    echo "error: signing $UNFAIRPLAY failed" >&2
+    exit 1
+  }
+fi
 codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 SIGNED=$((SIGNED + 1))
 
@@ -250,13 +298,13 @@ if ! codesign --verify --deep --strict --verbose=2 "$APP"; then
 fi
 codesign -dv --verbose=2 "$APP" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|Runtime Version|flags)=' || true
 
-ZIP="$OUT_DIR/Graft.zip"
+ZIP="$OUT_DIR/$ZIP_NAME"
 rm -f "$ZIP"
 ditto -c -k --keepParent "$APP" "$ZIP"
 cp "$APP/Contents/Resources/Licenses/components.json" "$OUT_DIR/components.json"
 
 echo "→ verify-bundle…"
-if ! "$PY" "$EXPORT/scripts/verify-bundle" "$APP"; then
+if ! "$PY" "$EXPORT/scripts/verify-bundle" ${ARCH_ARGS[@]+"${ARCH_ARGS[@]}"} "$APP"; then
   rm -f "$ZIP"
   echo "error: verify-bundle failed, so the zip was removed; the app is left at $APP to look at" >&2
   exit 1

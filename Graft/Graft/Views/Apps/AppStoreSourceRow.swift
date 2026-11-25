@@ -18,6 +18,12 @@ import SwiftUI
 /// the App Store still serves can be picked. Getting one holds the app at it
 /// (its `preferred_version`): the line then says "Held at 1.2.0 · newest
 /// 1.4.0", never "update available", and Get latest lets go.
+///
+/// **Without Apple silicon** (`MacSupport.unavailableLine`) every get is
+/// disabled, not hidden: a get downloads an encrypted IPA, and only an Apple
+/// silicon Mac, with the download that carries UnfairPlay, decrypts one. The
+/// row says why on a line of its own, and the store's version line still
+/// shows, since adding an app by name works anywhere.
 struct AppStoreSourceRow: View {
     let version: AppStoreVersionRecord?
     let isGetting: Bool
@@ -62,6 +68,8 @@ struct AppStoreSourceRow: View {
 
     /// Get Again's confirmation is up.
     @State private var confirmingGetAgain = false
+    /// Whether this copy can get from the App Store here (`MacSupport`).
+    @Environment(\.macSupport) private var mac
 
     enum PrimaryAction: Equatable { case getLatest, getAgain, claimFree, openInStore }
 
@@ -148,7 +156,33 @@ struct AppStoreSourceRow: View {
         stage?.label ?? "Starting…"
     }
 
+    /// Why a get can't run now: this Mac first (it won't change), then what
+    /// is running.
+    static func blockedReason(unavailable: String?, running: String?) -> String? {
+        unavailable ?? running
+    }
+
     var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            row
+            if let line = mac.unavailableLine {
+                Text(line)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var getBlocked: String? {
+        Self.blockedReason(unavailable: mac.unavailableLine, running: getBlockedReason)
+    }
+
+    private var claimBlocked: String? {
+        Self.blockedReason(unavailable: mac.unavailableLine, running: claimBlockedReason)
+    }
+
+    private var row: some View {
         HStack(spacing: Metrics.controlGap) {
             if !isGetting, version?.heldVersion != nil {
                 // The line beside it says which version; the pin is drawing.
@@ -187,14 +221,14 @@ struct AppStoreSourceRow: View {
             } else {
                 if Self.offersOlderVersions(license: license, isGetting: isGetting, isClaiming: isClaiming) {
                     Button(Self.olderVersionsButton, action: onOlderVersions)
-                        .disabled(isBlocked || getBlockedReason != nil)
-                        .help(getBlockedReason ?? "Pick a version the App Store still has for this Apple ID, and get that one")
+                        .disabled(isBlocked || getBlocked != nil)
+                        .help(getBlocked ?? "Pick a version the App Store still has for this Apple ID, and get that one")
                 }
                 switch Self.primaryAction(license: license, version: version) {
                 case .getLatest:
                     Button("Get latest from App Store", action: onGet)
-                        .disabled(isBlocked || getBlockedReason != nil)
-                        .help(getBlockedReason ?? Self.getLatestHelp(held: version?.heldVersion))
+                        .disabled(isBlocked || getBlocked != nil)
+                        .help(getBlocked ?? Self.getLatestHelp(held: version?.heldVersion))
                 case .getAgain:
                     getAgain
                 case .claimFree:
@@ -205,8 +239,8 @@ struct AppStoreSourceRow: View {
                             .foregroundStyle(Palette.textDim)
                     } else {
                         Button("Get (free)", action: onCheckClaim)
-                            .disabled(isBlocked || claimBlockedReason != nil)
-                            .help(claimBlockedReason ?? "Add it to this Apple ID's purchases, at no cost, then get it")
+                            .disabled(isBlocked || claimBlocked != nil)
+                            .help(claimBlocked ?? "Add it to this Apple ID's purchases, at no cost, then get it")
                     }
                 case .openInStore:
                     Button("Open in App Store", action: onOpenInStore)
@@ -236,8 +270,8 @@ struct AppStoreSourceRow: View {
     private var getAgain: some View {
         let words = Self.getAgainConfirmation(app: appName, version: version?.storeVersion)
         return Button(Self.getAgainButton) { confirmingGetAgain = true }
-            .disabled(isBlocked || getBlockedReason != nil)
-            .help(getBlockedReason ?? "Download, decrypt and stage the App Store's current version again, though it's already staged")
+            .disabled(isBlocked || getBlocked != nil)
+            .help(getBlocked ?? "Download, decrypt and stage the App Store's current version again, though it's already staged")
             .alert(words.title, isPresented: $confirmingGetAgain) {
                 Button("Cancel", role: .cancel) {}
                 Button(Self.getAgainButton) { onGetAgain() }

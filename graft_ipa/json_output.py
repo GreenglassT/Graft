@@ -540,7 +540,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # `--download-update`'s progress, the same keys every time: `step`
         # ("download" or "verify"), `version` (the release's), `received` and
         # `total` (bytes, while downloading; null while verifying) and `check`
-        # (while verifying: archive|bundle|signature|requirement|notarization,
+        # (while verifying: archive|bundle|architecture|signature|requirement|notarization,
         # `app_update.CHECKS`; null while downloading).
         "update-progress",
         # `--download-update`'s answer, exactly once, worked or not (the same

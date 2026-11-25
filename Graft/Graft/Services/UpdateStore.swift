@@ -24,7 +24,8 @@ struct SelfUpdateHost {
 /// The CLI does all of it, as it does every other request: the app makes no
 /// connections of its own. `--check-update` asks GitHub, with a generic
 /// User-Agent and nothing that identifies anyone. `--download-update`
-/// downloads the new Graft.zip and checks it (`app_update` in the CLI).
+/// downloads the new Graft.zip (Graft-Intel.zip for the Intel build) and
+/// checks it (`app_update` in the CLI).
 /// `--install-update` starts the helper that replaces this app once it has
 /// quit.
 ///
@@ -194,8 +195,9 @@ final class UpdateStore: QuitHandover {
     /// The install failed after Graft quit: the next launch is still the
     /// old version.
     static let installDidNotTake = "Graft couldn't replace itself, so it's still the version "
-        + "you had. Download the new Graft.zip from the release page and replace Graft.app "
-        + "in Applications. The update log is in ~/Library/Logs/Graft/update.log."
+        + "you had. Download the new version from the release page (Graft.zip, or "
+        + "Graft-Intel.zip for an Intel Mac) and replace Graft.app in Applications. The update "
+        + "log is in ~/Library/Logs/Graft/update.log."
 
     /// What Check for Updates… says when the CLI's answer named a version
     /// that isn't digits and dots.
@@ -236,20 +238,43 @@ final class UpdateStore: QuitHandover {
 
     /// The CLI's reasons for a download that was refused for what it is,
     /// rather than for this Mac's connection: not tried again on its own.
-    /// `no-team` is this copy's: it has no Developer ID team to trust
-    /// updates from (`app_update.own_team`), and no retry gives it one.
+    /// `architecture` is a download of the other build of Graft, or one
+    /// with no code for this build's processor. `no-team` and `mixed-build`
+    /// are this copy's: it has no Developer ID team to trust updates from
+    /// (`app_update.own_team`), or can't tell which build it is
+    /// (`app_update.own_flavor`), and no retry changes either.
     static let refusedForWhatItIs: Set<String> = [
-        "no-asset", "digest", "archive", "bundle", "signature", "requirement", "notarization",
-        "not-newer", "no-team",
+        "no-asset", "digest", "archive", "bundle", "architecture", "signature", "requirement",
+        "notarization", "not-newer", "no-team", "mixed-build",
     ]
+
+    /// Of `refusedForWhatItIs`, the one where what arrived may not be what
+    /// was published, so another try can work: bytes that didn't match
+    /// GitHub's SHA-256 or ran past its size (`digest`: a corrupt or cut-off
+    /// transfer). Check for Updates… offers Try Again for it. It still isn't
+    /// downloaded again on its own: a release that is broken for everyone
+    /// would cost a whole download each time.
+    ///
+    /// Not `archive`: it comes only after the bytes matched GitHub's SHA-256
+    /// and there was room to unpack them, so another download of the same
+    /// bytes fails the same way (the 2.2 review).
+    static let worthTryingAgain: Set<String> = ["digest"]
 
     /// The CLI's reasons for a failure that trying again can't help with
     /// this launch, so Check for Updates… doesn't offer Try Again: those
     /// `refusedForWhatItIs` names (the same download meets the same
-    /// refusal), and where this copy is, which no retry changes: run from a
-    /// translocated copy, in a folder this account can't change, or not
-    /// Graft.app. Their sentences say what to do instead.
-    static let retryCantHelp: Set<String> = refusedForWhatItIs.union(["translocated", "not-writable", "not-graft"])
+    /// refusal) but `worthTryingAgain`'s, and where this copy is, which no
+    /// retry changes: run from a translocated copy, in a folder this account
+    /// can't change, or not Graft.app. Their sentences say what to do
+    /// instead.
+    ///
+    /// Not a release with no zip of this build yet (`not-for-this-mac`: "no
+    /// update for this Mac yet"): the zip can be added to the release at any
+    /// time, and Try Again then gets it. Nor is it remembered as refused, so
+    /// a later check downloads it on its own.
+    static let retryCantHelp: Set<String> = refusedForWhatItIs.subtracting(worthTryingAgain).union([
+        "translocated", "not-writable", "not-graft",
+    ])
 
     /// Whether trying again can help with a failure for `reason`. True for
     /// none: the CLI didn't say why (it stopped, or couldn't run).
@@ -370,7 +395,9 @@ final class UpdateStore: QuitHandover {
 
     /// Whether the helper's log says it installed `attempt`'s version at or
     /// after the time the attempt was written down. False when it can't
-    /// tell: an attempt with no time (2.0.2's), or no log that's a file.
+    /// tell: an attempt with no time (2.0.2's), or no log that's a file. Only
+    /// a line in the helper's own form, its time with an offset, counts
+    /// (`loggedTime`).
     ///
     /// The helper's line for an install that worked (`app_update.HELPER`,
     /// pinned by tests/test_app_update_helper.py) is its time, to the
@@ -389,38 +416,43 @@ final class UpdateStore: QuitHandover {
     }
 
     /// When a line of the helper's log was written, if what follows its
-    /// time is `said`; nil for any other line.
+    /// time and offset is `said`; nil for any other line.
     ///
-    /// Since 2.1 the time has its offset from UTC ("2026-11-24 09:30:15
-    /// +1400", `date '+%Y-%m-%d %H:%M:%S %z'`), and is read in that offset:
-    /// the helper's zone is the CLI's, which has any TZ the user's shell
-    /// profile sets, and can differ from this app's. 2.0.2's helper wrote
-    /// its times with none ("2026-11-24 09:30:15"), and the log keeps its
-    /// lines: such a time is read in this Mac's zone, as it was. Between
-    /// the time and `said`, only " " or " ±hhmm".
+    /// The time has its offset from UTC ("2026-11-24 09:30:15 +1400",
+    /// `date '+%Y-%m-%d %H:%M:%S %z'`), as the helper has written it since
+    /// 2.1, and is read in that offset: the helper's zone is the CLI's,
+    /// which has any TZ the user's shell profile sets, and can differ from
+    /// this app's. Between the time and `said`, only " ±hhmm".
+    ///
+    /// **A time with no offset is never read.** Only 2.0.2's helper wrote
+    /// those ("2026-11-24 09:30:15"), for an update its own app started,
+    /// whose attempt has no time and is never compared (`installLogged`);
+    /// every attempt with a time is a 2.1 or later app's, whose helper
+    /// writes the offset. Read in this Mac's zone, which needn't be the one
+    /// it was written in, an old 2.0.2 line could land after a later
+    /// attempt and hide its failure: 2.0.2's "installed Graft 2.2", then
+    /// 2.1 put back by hand and its own update to 2.2 failing (the 2.1
+    /// review).
     nonisolated static func loggedTime(of line: String, saying said: String) -> Date? {
         let time = line.prefix(19)
         guard time.count == 19 else { return nil }
         let rest = line.dropFirst(19)
-        // Seconds east of UTC; nil for a time with no offset.
-        var offset: Int?
-        if !rest.hasPrefix(said) {
-            let mark = Array(rest.prefix(6))
-            let digits = mark.dropFirst(2).compactMap { $0.isASCII ? $0.wholeNumberValue : nil }
-            guard mark.count == 6, mark[0] == " ", mark[1] == "+" || mark[1] == "-", digits.count == 4,
-                  rest.dropFirst(6).hasPrefix(said)
-            else { return nil }
-            let hours = digits[0] * 10 + digits[1], minutes = digits[2] * 10 + digits[3]
-            guard hours < 24, minutes < 60 else { return nil }
-            offset = (mark[1] == "+" ? 1 : -1) * (hours * 60 * 60 + minutes * 60)
-        }
+        let mark = Array(rest.prefix(6))
+        let digits = mark.dropFirst(2).compactMap { $0.isASCII ? $0.wholeNumberValue : nil }
+        guard mark.count == 6, mark[0] == " ", mark[1] == "+" || mark[1] == "-", digits.count == 4,
+              rest.dropFirst(6).hasPrefix(said)
+        else { return nil }
+        let hours = digits[0] * 10 + digits[1], minutes = digits[2] * 10 + digits[3]
+        guard hours < 24, minutes < 60 else { return nil }
+        // Seconds east of UTC.
+        let offset = (mark[1] == "+" ? 1 : -1) * (hours * 60 * 60 + minutes * 60)
         let stamp = DateFormatter()
         stamp.locale = Locale(identifier: "en_US_POSIX")
-        // With an offset: read as UTC, then moved back by it.
-        stamp.timeZone = offset == nil ? .current : .gmt
+        // Read as UTC, then moved back by the offset.
+        stamp.timeZone = .gmt
         stamp.dateFormat = "yyyy-MM-dd HH:mm:ss"
         guard let read = stamp.date(from: String(time)) else { return nil }
-        return read - TimeInterval(offset ?? 0)
+        return read - TimeInterval(offset)
     }
 
     /// `data`'s lines, as UTF-8: split at each LF byte, each without the CR
@@ -437,13 +469,21 @@ final class UpdateStore: QuitHandover {
     /// on every update).
     nonisolated static let tailLimit = 1 << 20
 
+    /// `pread(2)`'s shape: read up to `count` bytes at `offset` into
+    /// `buffer`; the count read, 0 at the end, or -1 with `errno` set.
+    typealias PositionalRead = (_ fd: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int, _ offset: off_t) -> Int
+
     /// The last `tailLimit` bytes of `log`, or nil unless it's a regular
     /// file. One open, which follows no symlink (`O_NOFOLLOW`) and doesn't
     /// wait for a FIFO's writer at launch (`O_NONBLOCK`); then the type of
     /// what that open found (`fstat`), and the read, from the same
     /// descriptor. So nothing put at the path between a look and the read
     /// is what's read.
-    private nonisolated static func tail(of log: URL) -> Data? {
+    ///
+    /// A read interrupted by a signal (EINTR) is asked again, and a short
+    /// one carried on from where it stopped. `read` is `pread`, unless a
+    /// test passes its own to interrupt or shorten reads.
+    nonisolated static func tail(of log: URL, read readAt: PositionalRead = { Darwin.pread($0, $1, $2, $3) }) -> Data? {
         let fd = Darwin.open(log.path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -455,7 +495,7 @@ final class UpdateStore: QuitHandover {
         var got = 0
         while got < bytes.count {
             let read = bytes.withUnsafeMutableBytes { buffer in
-                pread(fd, buffer.baseAddress! + got, buffer.count - got, off_t(start + got))
+                readAt(fd, buffer.baseAddress! + got, buffer.count - got, off_t(start + got))
             }
             if read < 0, errno == EINTR { continue }
             guard read >= 0 else { return nil }
@@ -612,8 +652,9 @@ final class UpdateStore: QuitHandover {
                 guard canUpdate else {
                     return CheckAlert(
                         title: "Graft \(version) is available",
-                        message: "\(have) Download the new Graft.zip from its release page, then replace "
-                            + "Graft.app in Applications. Your settings, apps and builds carry over.",
+                        message: "\(have) Download the new version from its release page (Graft.zip, "
+                            + "or Graft-Intel.zip for an Intel Mac), then replace Graft.app in "
+                            + "Applications. Your settings, apps and builds carry over.",
                         action: nil, release: record, cancel: "Later"
                     )
                 }

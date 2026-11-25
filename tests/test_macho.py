@@ -399,3 +399,110 @@ def test_ios_code_is_any_slice_built_for_a_device_platform(tmp_path):
                       ([], False)):
         p.write_bytes(mb.thin(cmds))
         assert macho.is_ios(p) is ios, cmds
+
+
+# ---- architectures: which processors a file has code for (the Intel build's updater) ----
+
+@pytest.mark.parametrize("little", [True, False])
+def test_a_thin_file_is_its_own_headers_architecture(tmp_path, little):
+    p = tmp_path / "x"
+    p.write_bytes(mb.thin([], cputype=mb.CPU_X86_64, cpusubtype=mb.CPU_SUBTYPE_X86_64_ALL, little=little))
+    assert macho.architectures(p) == ["x86_64"]
+    p.write_bytes(mb.thin([], little=little))
+    assert macho.architectures(p) == ["arm64"]
+    p.write_bytes(mb.thin([], cputype=mb.CPU_I386, is64=False, little=little))
+    assert macho.architectures(p) == ["i386"]
+
+
+@pytest.mark.parametrize("is64", [False, True])
+def test_a_universal_file_has_each_slices_architecture_in_file_order(tmp_path, is64):
+    p = tmp_path / "x"
+    p.write_bytes(mb.fat([(mb.CPU_X86_64, mb.thin([], cputype=mb.CPU_X86_64)),
+                          (mb.CPU_ARM64, mb.thin([mb.rpath_cmd("@loader_path")]))], is64=is64))
+    assert macho.architectures(p) == ["x86_64", "arm64"]
+
+
+def test_arm64e_and_capability_bits_are_told_apart_from_plain_arm64(tmp_path):
+    """arm64e is its own architecture, which a plain arm64 process can't load;
+    a subtype's top byte (here LIB64) is capability bits, not a subtype."""
+    p = tmp_path / "x"
+    p.write_bytes(mb.thin([], cpusubtype=mb.CPU_SUBTYPE_ARM64E))
+    assert macho.architectures(p) == ["arm64e"]
+    p.write_bytes(mb.thin([], cpusubtype=mb.CPU_SUBTYPE_ARM64E | mb.CPU_SUBTYPE_LIB64))
+    assert macho.architectures(p) == ["arm64e"]
+    p.write_bytes(mb.thin([], cputype=mb.CPU_X86_64, cpusubtype=mb.CPU_SUBTYPE_X86_64_ALL | mb.CPU_SUBTYPE_LIB64))
+    assert macho.architectures(p) == ["x86_64"]
+    p.write_bytes(mb.fat([(mb.CPU_ARM64, mb.CPU_SUBTYPE_ARM64E, mb.thin([], cpusubtype=mb.CPU_SUBTYPE_ARM64E)),
+                          (mb.CPU_ARM64, mb.thin([]))]))
+    assert macho.architectures(p) == ["arm64e", "arm64"]
+
+
+def test_an_unknown_processor_is_named_by_its_numbers(tmp_path):
+    p = tmp_path / "x"
+    p.write_bytes(mb.thin([], cputype=0x0100_0099, cpusubtype=5))
+    assert macho.architectures(p) == ["cputype 0x1000099 subtype 5"]
+
+
+def test_a_slice_whose_header_disagrees_with_the_fat_table_is_refused(tmp_path):
+    """The table is what the kernel picks a slice by; the header is what the
+    slice is. A file where they differ has no answer to "which processors"."""
+    p = tmp_path / "x"
+    p.write_bytes(mb.fat([(mb.CPU_X86_64, mb.thin([])), (mb.CPU_ARM64, mb.thin([]))]))
+    with pytest.raises(macho.MachOError, match="its fat table says"):
+        macho.architectures(p)
+    p.write_bytes(mb.fat([(mb.CPU_ARM64, mb.thin([], cpusubtype=mb.CPU_SUBTYPE_ARM64E))]))
+    with pytest.raises(macho.MachOError, match="its fat table says"):
+        macho.architectures(p)
+
+
+@pytest.mark.parametrize("data", [
+    pytest.param(b"#!/bin/sh\nexit 0\n", id="a script"),
+    pytest.param(b"", id="empty"),
+    pytest.param(b"\xca\xfe\xba\xbe\x00\x00\x00\x34" + b"\0" * 64, id="a Java class file"),
+    pytest.param(mb.fat([(mb.CPU_ARM64, AR), (mb.CPU_X86_64, AR)]), id="a universal static library"),
+])
+def test_something_that_is_not_a_mach_o_has_no_architectures(tmp_path, data):
+    p = tmp_path / "x"
+    p.write_bytes(data)
+    with pytest.raises(macho.NotMachO):
+        macho.architectures(p)
+
+
+@pytest.mark.parametrize("data", [
+    pytest.param(struct.pack("<I", mb.MH_MAGIC_64) + b"\0\0", id="a truncated header"),
+    pytest.param(b"\xca\xfe\xba\xbe\x00\x00\x00\x02" + b"\0" * 10, id="a truncated fat table"),
+    pytest.param(_fat64_at(4096), id="a slice past the end"),
+])
+def test_a_broken_mach_o_has_no_architectures_either(tmp_path, data):
+    p = tmp_path / "x"
+    p.write_bytes(data)
+    with pytest.raises(macho.MachOError):
+        macho.architectures(p)
+
+
+def test_a_missing_file_is_a_machoerror(tmp_path):
+    with pytest.raises(macho.MachOError, match="couldn't read"):
+        macho.architectures(tmp_path / "nothing")
+
+
+def test_the_interpreter_running_this_test_has_code_for_this_process(tmp_path):
+    """A real file, as the kernel loaded it: whatever this Python is (thin or
+    universal), it has a slice for the architecture it is running as."""
+    import platform
+
+    assert platform.machine() in macho.architectures(Path(sys.executable).resolve())
+
+
+def test_a_fat_slice_whose_header_is_cut_off_has_no_architectures(tmp_path):
+    """A table entry pointing at the file's last bytes: too few for a magic
+    is no answer, nor is a Mach-O magic with its cputype cut off. Never a
+    guess at what the slice was for."""
+    p = tmp_path / "x"
+    whole = mb.fat([(mb.CPU_X86_64, mb.thin([], cputype=mb.CPU_X86_64))], align=0x1000)
+    header = struct.pack(">II", mb.FAT_MAGIC, 1) + struct.pack(">iIIII", mb.CPU_X86_64, 0, 0x1000, 32, 12)
+    p.write_bytes(header + b"\0" * (0x1000 - len(header)) + whole[0x1000:0x1000 + 2])
+    with pytest.raises(macho.MachOError, match="too short"):
+        macho.architectures(p)
+    p.write_bytes(header + b"\0" * (0x1000 - len(header)) + whole[0x1000:0x1000 + 8])
+    with pytest.raises(macho.MachOError, match="truncated"):
+        macho.architectures(p)

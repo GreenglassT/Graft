@@ -8,15 +8,16 @@
  	"errors"
  	"fmt"
  	"io"
-@@ -10,6 +11,7 @@
+@@ -10,6 +11,8 @@
  	"net/http"
  	"strconv"
  	"strings"
 +	"sync"
++	"sync/atomic"
  	"time"
  
  	apphttp "github.com/majd/ipatool/v2/pkg/http"
-@@ -31,18 +33,71 @@
+@@ -31,18 +34,130 @@
  	ReleaseDate    time.Time
  }
  
@@ -38,10 +39,69 @@
 +	rangeCachedBlocks = 4
 +)
 +
-+// rangeRequestTimeout bounds each range request, its body included, so that a
-+// stalled one fails and is tried again rather than hanging the read. A
-+// variable so that tests can shorten it.
-+var rangeRequestTimeout = 30 * time.Second
++// rangeStallTimeout is how long a range request may go without receiving
++// anything before it fails as stalled and is tried again: first its setup and
++// its answer's headers, then each part of its body. A request that keeps
++// receiving takes as long as it needs, so a slow connection still reads a
++// 1 MiB block, while one that has stopped fails rather than hanging the read.
++// (A deadline on the whole request failed a block on any link slower than
++// about 35 KB/s, setup included.) A variable so that tests can shorten it.
++var rangeStallTimeout = 30 * time.Second
++
++// stallWatch cancels a range request's context once the request has received
++// nothing for rangeStallTimeout.
++type stallWatch struct {
++	timer   *time.Timer
++	stalled atomic.Bool
++}
++
++// watchForStall returns a context for one range request, and the watch that
++// cancels it. The caller defers cancel and stop.
++func watchForStall() (context.Context, context.CancelFunc, *stallWatch) {
++	ctx, cancel := context.WithCancel(context.Background())
++	watch := &stallWatch{}
++	watch.timer = time.AfterFunc(rangeStallTimeout, func() {
++		watch.stalled.Store(true)
++		cancel()
++	})
++
++	return ctx, cancel, watch
++}
++
++// received restarts the wait: the request received something.
++func (w *stallWatch) received() {
++	w.timer.Reset(rangeStallTimeout)
++}
++
++func (w *stallWatch) stop() {
++	w.timer.Stop()
++}
++
++// err is the error to report for a request that failed with err: once the
++// watch has canceled the request, a stall, wrapping context.DeadlineExceeded
++// as a deadline's error does; else err as it is.
++func (w *stallWatch) err(err error) error {
++	if w.stalled.Load() {
++		return fmt.Errorf("received nothing for %v: %w", rangeStallTimeout, context.DeadlineExceeded)
++	}
++
++	return err
++}
++
++// stallWatchedReader reads r, telling watch of each read that received something.
++type stallWatchedReader struct {
++	r     io.Reader
++	watch *stallWatch
++}
++
++func (s stallWatchedReader) Read(p []byte) (int, error) {
++	n, err := s.r.Read(p)
++	if n > 0 {
++		s.watch.received()
++	}
++
++	return n, err
++}
 +
  type httpRangeReaderAt struct {
  	client apphttp.Client[interface{}]
@@ -60,7 +120,7 @@
 +}
 +
 +// inTransitError is a range request that failed in transit (an error from the
-+// transport, a timeout, a short body), which trying again can fix.
++// transport, a stall, a short body), which trying again can fix.
 +type inTransitError struct {
 +	err error
 +}
@@ -88,12 +148,13 @@
  	if err != nil {
  		return nil, 0, fmt.Errorf("failed to read remote file size: %w", err)
  	}
-@@ -55,17 +110,21 @@
+@@ -55,17 +170,22 @@
  }
  
  func remoteFileSize(client apphttp.Client[interface{}], url string) (int64, error) {
-+	ctx, cancel := context.WithTimeout(context.Background(), rangeRequestTimeout)
++	ctx, cancel, watch := watchForStall()
 +	defer cancel()
++	defer watch.stop()
 +
  	req, err := client.NewRequest("GET", url, nil)
  	if err != nil {
@@ -107,11 +168,11 @@
  	res, err := client.Do(req)
  	if err != nil {
 -		return 0, fmt.Errorf("request failed: %w", err)
-+		return 0, inTransitError{fmt.Errorf("request failed: %w", err)}
++		return 0, inTransitError{fmt.Errorf("request failed: %w", watch.err(err))}
  	}
  
  	if res != nil && res.Body != nil {
-@@ -120,24 +179,90 @@
+@@ -120,50 +240,117 @@
  		return 0, io.EOF
  	}
  
@@ -130,8 +191,8 @@
 +		}
 +
 +		n += copy(p[n:], block.data[off+int64(n)-block.off:])
- 	}
- 
++	}
++
 +	if n < len(p) {
 +		return n, io.EOF
 +	}
@@ -182,14 +243,15 @@
 +	data, err := r.requestRange(start, end)
 +	if failedInTransit(err) {
 +		data, err = r.requestRange(start, end)
-+	}
-+
+ 	}
+ 
 +	return data, err
 +}
 +
 +func (r *httpRangeReaderAt) requestRange(start, end int64) ([]byte, error) {
-+	ctx, cancel := context.WithTimeout(context.Background(), rangeRequestTimeout)
++	ctx, cancel, watch := watchForStall()
 +	defer cancel()
++	defer watch.stop()
 +
  	req, err := r.client.NewRequest("GET", r.url, nil)
  	if err != nil {
@@ -205,13 +267,15 @@
  	res, err := r.client.Do(req)
  	if err != nil {
 -		return 0, fmt.Errorf("request failed: %w", err)
-+		return nil, inTransitError{fmt.Errorf("request failed: %w", err)}
++		return nil, inTransitError{fmt.Errorf("request failed: %w", watch.err(err))}
  	}
  
  	if res != nil && res.Body != nil {
-@@ -145,25 +270,23 @@
+ 		defer res.Body.Close()
  	}
  
++	watch.received()
++
  	if res.StatusCode != http.StatusPartialContent {
 -		return 0, fmt.Errorf("expected partial content response, got status %d", res.StatusCode)
 +		return nil, fmt.Errorf("expected partial content response, got status %d", res.StatusCode)
@@ -230,10 +294,10 @@
  
 +	data := make([]byte, end-start)
 +
-+	_, err = io.ReadFull(res.Body, data)
++	_, err = io.ReadFull(stallWatchedReader{r: res.Body, watch: watch}, data)
  	if err != nil {
 -		return n, fmt.Errorf("failed to read response body: %w", err)
-+		return nil, inTransitError{fmt.Errorf("failed to read response body: %w", err)}
++		return nil, inTransitError{fmt.Errorf("failed to read response body: %w", watch.err(err))}
  	}
  
 -	if requestEnd >= r.size {
@@ -270,7 +334,7 @@
  
 --- /dev/null
 +++ b/pkg/appstore/appstore_partial_zip_readahead_test.go
-@@ -0,0 +1,489 @@
+@@ -0,0 +1,549 @@
 +package appstore
 +
 +import (
@@ -353,13 +417,13 @@
 +	return data
 +}
 +
-+func withRangeRequestTimeout(t *testing.T, timeout time.Duration) {
++func withRangeStallTimeout(t *testing.T, timeout time.Duration) {
 +	t.Helper()
 +
-+	saved := rangeRequestTimeout
-+	rangeRequestTimeout = timeout
++	saved := rangeStallTimeout
++	rangeStallTimeout = timeout
 +
-+	t.Cleanup(func() { rangeRequestTimeout = saved })
++	t.Cleanup(func() { rangeStallTimeout = saved })
 +}
 +
 +// readaheadTestIPA is an IPA laid out as a big app's is: thousands of files,
@@ -694,7 +758,7 @@
 +}
 +
 +func TestPartialZipReadaheadTimesOutAndRetriesAStalledRequest(t *testing.T) {
-+	withRangeRequestTimeout(t, 300*time.Millisecond)
++	withRangeStallTimeout(t, 300*time.Millisecond)
 +
 +	data := randomBytes(2*rangeBlockSize+rangeTailSize, 6)
 +	stallBody := func(w http.ResponseWriter, r *http.Request) {
@@ -742,12 +806,15 @@
 +			n, err := reader.ReadAt(p, 0)
 +
 +			took := time.Since(began)
-+			if took < rangeRequestTimeout || took > 4*rangeRequestTimeout+2*time.Second {
-+				t.Fatalf("took %v, with a %v timeout", took, rangeRequestTimeout)
++			if took < rangeStallTimeout || took > 4*rangeStallTimeout+2*time.Second {
++				t.Fatalf("took %v, with a %v timeout", took, rangeStallTimeout)
 +			}
 +
 +			if test.fails {
-+				if n != 0 || !errors.Is(err, context.DeadlineExceeded) {
++				// Go's words for a deadline, which Graft reads as a timeout
++				// (graft_ipa/ipatool.py, timed_out).
++				if n != 0 || !errors.Is(err, context.DeadlineExceeded) ||
++					!strings.Contains(err.Error(), "received nothing for 300ms: context deadline exceeded") {
 +					t.Fatalf("ReadAt = %d, %v", n, err)
 +				}
 +			} else if err != nil || !bytes.Equal(p, data[:10]) {
@@ -758,5 +825,62 @@
 +				t.Fatalf("%d requests, want %d", requests, test.requests)
 +			}
 +		})
++	}
++}
++
++// A slow connection is not a stalled one: a block whose body keeps coming, a
++// piece at a time, is read in one request however long it takes in all.
++func TestPartialZipReadaheadWaitsOnABodyThatKeepsComing(t *testing.T) {
++	withRangeStallTimeout(t, 300*time.Millisecond)
++
++	const pieces = 16
++
++	// A third of the stall timeout between pieces: the block takes 1.6 s,
++	// more than five times the timeout, and never stops for as long as it.
++	pause := 100 * time.Millisecond
++	data := randomBytes(2*rangeBlockSize+rangeTailSize, 7)
++	server := newRangeServer(t, data, func(n int64, w http.ResponseWriter, r *http.Request) bool {
++		if n == 1 {
++			return false
++		}
++
++		start, end, _ := testRangeBounds(r.Header.Get("Range"), len(data))
++		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
++		w.Header().Set("Content-Length", strconv.Itoa(end-start+1))
++		w.WriteHeader(http.StatusPartialContent)
++		w.(http.Flusher).Flush()
++
++		body := data[start : end+1]
++		for i := range pieces {
++			time.Sleep(pause)
++
++			_, _ = w.Write(body[len(body)*i/pieces : len(body)*(i+1)/pieces])
++			w.(http.Flusher).Flush()
++		}
++
++		return true
++	})
++
++	reader, _, err := newHTTPRangeReaderAt(newDownloadTestClient(), server.URL)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	began := time.Now()
++	p := make([]byte, 10)
++	n, err := reader.ReadAt(p, 0)
++	took := time.Since(began)
++
++	if err != nil || n != len(p) || !bytes.Equal(p, data[:10]) {
++		t.Fatalf("ReadAt = %d, %v, after %v", n, err, took)
++	}
++
++	if took < pieces*pause {
++		t.Fatalf("took %v: the body came faster than it was sent", took)
++	}
++
++	// The size, then the block once: never failed and tried again.
++	if requests := server.requests.Load(); requests != 2 {
++		t.Fatalf("%d requests, want 2", requests)
 +	}
 +}

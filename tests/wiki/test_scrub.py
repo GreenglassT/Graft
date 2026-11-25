@@ -116,3 +116,33 @@ def test_no_hits_on_clean_text():
 def test_empty_term_is_rejected():
     with pytest.raises(ValueError):
         scan("p", "anything", ("",))
+
+
+def test_public_allow_phrases_are_read_and_blank_only_that_phrase(tmp_path: Path):
+    from wikigen.scrub import load_allowed
+
+    path = write(tmp_path / "d.txt", "Zed+\n#public-allow: Zed+  Chat\n# public-allow:   \n")
+    terms, allowed = load_denylist(path), load_allowed(path)
+    assert terms == ("Zed+",)
+    assert allowed == ("Zed+  Chat",)
+    assert not scan("p", "ask in the zed+ chat", terms, allowed)
+    assert not scan("p", "ask in theZed+ Chat.", terms, allowed)  # a text view that joins words
+    hits = scan("p", "the Zed+ Chat\nand Zed+ alone", terms, allowed)
+    assert [(h.line, h.term) for h in hits] == [(2, "Zed+")]  # positions and lines don't move
+    assert scan("p", "the Zed+ Chat", terms)  # without the allowed phrases, it's a hit
+
+
+@pytest.mark.parametrize("phrase", ["Zed+", " zed+ ", "ZED+.", "zed+ zed+"])
+def test_a_public_allow_phrase_that_is_only_a_listed_term_is_refused_by_its_line(tmp_path: Path, phrase):
+    from wikigen import WikiError
+    from wikigen.scrub import load_allowed
+
+    path = write(tmp_path / "d.txt", f"Zed+\n#public-allow: {phrase}\n")
+    with pytest.raises(WikiError, match=r"line 2") as e:
+        load_allowed(path)
+    assert "Zed" not in str(e.value).split(", line")[1] and "zed" not in str(e.value).split(", line")[1]
+
+
+def test_public_allow_never_hides_a_builtin():
+    hits = scan("p", "/Users/someone/zed+ chat", (), ("/Users/someone",))
+    assert [h.term for h in hits] == [BUILTIN[0][0]]

@@ -109,7 +109,11 @@ def test_a_zip_gatekeeper_accepts_goes_on_to_the_runtime_checks(tmp_path, monkey
     work = tmp_path / "work"
     work.mkdir()
     vb.verify_zip(zipped, vb.Report(), work)
-    assert seen == [("Graft.app", {"gatekeeper_accepted": True})]
+    intel = tmp_path / "work-intel"
+    intel.mkdir()
+    vb.verify_zip(zipped, vb.Report(), intel, "x86_64")
+    assert seen == [("Graft.app", {"gatekeeper_accepted": True, "arch": "arm64"}),
+                    ("Graft.app", {"gatekeeper_accepted": True, "arch": "x86_64"})]
 
 
 def test_a_quarantined_app_is_refused_before_anything_runs(tmp_path, monkeypatch):
@@ -349,6 +353,7 @@ def test_every_framework_in_cyan_extras_must_have_a_licence_file_and_a_component
 # ------------------------------------------------- review #2: no shell in a helper
 
 ZSIGN_AUDITED = "2790ec58a55db5f4282843d0cdbb0b587d19b972331b5285aee2de67f4ab705e"
+ZSIGN_SOURCE_AUDITED = "97bcc2dbbc0dc5f092dc4a33cbe1f9fdbd5c83bdc291da23db45044d4396270e"
 TOOLS = vb.CYAN_TOOLS
 
 
@@ -370,9 +375,14 @@ def test_zsigns_audited_popen_is_allowed_only_for_the_zsign_that_was_audited():
     # The exception is for zsign's popen, not for anything else it might import.
     assert vb.shell_import_problems({"Helpers/bin/zsign": {"_system"}}, {"zsign": {"sha256": ZSIGN_AUDITED}}) == [
         "Helpers/bin/zsign imports _system"]
-    assert vb.SHELL_IMPORT_EXCEPTIONS[("Helpers/bin/zsign", "_popen")][1] == ZSIGN_AUDITED
+    assert ZSIGN_AUDITED in vb.SHELL_IMPORT_EXCEPTIONS[("Helpers/bin/zsign", "_popen")][1]
     pinned = tomllib.loads((REPO / "bundle" / "pins.toml").read_text())
     assert pinned["zsign"]["sha256"] == ZSIGN_AUDITED, "a new zsign pin needs its popen audited again"
+    # The Intel bundle's zsign is v1.1.3's source, built: the same SlotParseRequirements popen.
+    assert pinned["zsign"]["x86_64"]["sha256"] == ZSIGN_SOURCE_AUDITED
+    assert vb.SHELL_IMPORT_EXCEPTIONS[("Helpers/bin/zsign", "_popen")] == ("zsign", (ZSIGN_AUDITED,
+                                                                                    ZSIGN_SOURCE_AUDITED))
+    assert vb.shell_import_problems(imports, {"zsign": {"sha256": ZSIGN_SOURCE_AUDITED}}) == []
 
 
 def test_the_helpers_are_cyans_tools_helpers_and_frameworks_not_the_python_runtime(tmp_path, monkeypatch):
@@ -1471,3 +1481,186 @@ def test_others_files_in_the_app_are_not_scanned_and_graft_s_own_are_whole(tmp_p
         vb.check_no_denylisted_names(app, report)
         assert report.results[-1] == (vb.DENYLIST_CHECK, False), own
         own.unlink()
+
+
+# ---------------------------------------------------------------- the Intel bundle (--arch x86_64)
+
+IOS_FW = "Contents/Resources/GraftPython/lib/python3.13/site-packages/cyan/extras/Orion.framework/Orion"
+
+
+def test_an_intel_bundle_must_be_x86_64_but_its_ios_code_and_universal_executable():
+    good = {MAIN: ["arm64", "x86_64"], "Contents/Helpers/graft": ["x86_64"], IOS_FW: ["arm64"]}
+    assert vb.arch_problems(good, "x86_64", {IOS_FW}) == ([], [])
+    for rel, archs in (("Contents/Helpers/graft", ["arm64"]), ("Contents/Helpers/graft", ["arm64", "x86_64"]),
+                       (IOS_FW, ["x86_64"])):
+        main, others = vb.arch_problems({**good, rel: archs}, "x86_64", {IOS_FW})
+        assert main == [] and len(others) == 1 and others[0].startswith(rel), (rel, archs, others)
+    # The arm64 bundle's check is as it was: iOS code and everything else arm64.
+    assert vb.arch_problems({**good, "Contents/Helpers/graft": ["arm64"]}, "arm64", {IOS_FW}) == ([], [])
+    assert vb.arch_problems({**good, "Contents/Helpers/graft": ["arm64"]}) == ([], [])
+
+
+def test_the_intel_architecture_check_reads_which_files_are_ios_code(tmp_path, monkeypatch):
+    from . import macho_builder as mb
+    app = _fake_app(tmp_path)
+    files = {MAIN: (mb.thin([]), "x86_64 arm64"), "Contents/Helpers/graft": (mb.thin([]), "x86_64"),
+             IOS_FW: (mb.thin([mb.build_version_cmd(mb.PLATFORM_IOS, "14.0")]), "arm64")}
+    for rel, (data, _) in files.items():
+        (app / rel).parent.mkdir(parents=True, exist_ok=True)
+        (app / rel).write_bytes(data)
+    monkeypatch.setattr(vb, "run", lambda argv, **kw: subprocess.CompletedProcess(
+        argv, 0, files[str(Path(argv[2]).relative_to(app))][1] + "\n", ""))
+    report = vb.Report()
+    vb.check_architectures(app, report, "x86_64")
+    assert report.results == [
+        ("the app's executable is universal (arm64 and x86_64), for the Intel screen", True),
+        ("every other Mach-O file is x86_64 only, but iOS code, which is arm64 only, for the phone", True)]
+
+
+@pytest.mark.parametrize("key, python, arch, said", [
+    ("x86_64", ["x86_64"], "x86_64", None),
+    ("arm64", ["arm64"], "arm64", None),
+    ("arm64", ["arm64"], "x86_64", "GraftBundleArch is 'arm64', not 'x86_64' (verify it with --arch arm64)"),
+    (None, ["arm64"], "arm64", "GraftBundleArch is None, not 'arm64'"),
+    ("x86_64", ["arm64"], "x86_64", "the embedded Python is arm64, not x86_64"),
+    ("x86_64", ["arm64", "x86_64"], "x86_64", "the embedded Python is arm64 x86_64, not x86_64"),
+])
+def test_the_bundles_arch_key_and_its_pythons_slice_must_be_the_arch_verified(key, python, arch, said):
+    problems = vb.bundle_arch_problems(key, python, arch)
+    assert (problems == []) if said is None else any(said in p for p in problems), problems
+
+
+def test_the_arch_check_reads_info_plist_and_lipo_on_the_embedded_python(tmp_path, monkeypatch):
+    import plistlib
+    app = _fake_app(tmp_path)
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"GraftBundleArch": "x86_64"}))
+    asked = []
+    monkeypatch.setattr(vb, "run", lambda argv, **kw: asked.append([str(a) for a in argv])
+                        or subprocess.CompletedProcess(argv, 0, "x86_64\n", ""))
+    for arch, ok in (("x86_64", True), ("arm64", False)):
+        report = vb.Report()
+        vb.check_bundle_arch(app, report, arch)
+        assert report.results == [(f"Info.plist's GraftBundleArch is {arch}, the embedded Python's architecture", ok)]
+    assert asked[0] == ["lipo", "-archs", str(app / vb.PYTHON)]
+
+
+def _intel_components(app: Path, drop: str | None = None) -> None:
+    import json
+    gb = vb._stage_module()
+    pins = gb.load_pins(REPO / "bundle" / "pins.toml", "x86_64")
+    entries = [{"name": built, "version": pin.version, "kind": gb.pin_kind(name, pins), "source_url": pin.url,
+                "sha256": pin.sha256, "license": pin.license}
+               for name, pin in pins.items() for built in pin.builds or (name,) if built != drop]
+    lic = app / "Contents" / "Resources" / "Licenses"
+    lic.mkdir(parents=True, exist_ok=True)
+    (lic / "components.json").write_text(json.dumps(entries))
+
+
+def test_intel_components_list_its_own_pins_and_zsign_built_from_source_and_no_unfairplay(tmp_path):
+    app = _fake_app(tmp_path)
+    _intel_components(app)
+    report = vb.Report()
+    vb.check_components(app, report, "x86_64")
+    assert report.results[1] == ("components.json lists cyan's five helpers, libplist, ipatool and zsign as built "
+                                 "from source", True)
+    assert [ok for _, ok in report.results] == [True, True]
+    report = vb.Report()
+    vb.check_components(app, report)
+    assert report.results[0][1] is False, "the arm64 bundle's python, zsign and unfairplay aren't these"
+    for drop in ("python", "zsign"):
+        _intel_components(app, drop=drop)
+        report = vb.Report()
+        vb.check_components(app, report, "x86_64")
+        assert False in [ok for _, ok in report.results], drop
+
+
+def test_any_trace_of_unfairplay_in_an_intel_bundle_fails(tmp_path):
+    import json
+    contents = tmp_path / "Graft.app" / "Contents"
+    lic = contents / "Resources" / "Licenses"
+    lic.mkdir(parents=True)
+    (lic / "components.json").write_text(json.dumps([{"name": "ipatool"}]))
+    (contents / "Helpers" / "bin").mkdir(parents=True)
+    report = vb.Report()
+    vb.check_no_unfairplay(contents.parent, report)
+    assert report.results == [("the Intel bundle has no UnfairPlay (it runs iOS apps, which only Apple silicon can)",
+                               True)]
+    (contents / "Helpers" / "bin" / "unfairplay").write_bytes(b"x")
+    (lic / "unfairplay-LICENSE").write_text("MIT")
+    (lic / "unfairplay-modules").mkdir()
+    (lic / "components.json").write_text(json.dumps([{"name": "unfairplay"}]))
+    assert vb.unfairplay_traces(contents) == ["Helpers/bin/unfairplay", "Resources/Licenses/unfairplay-LICENSE",
+                                              "Resources/Licenses/unfairplay-modules", "components.json: unfairplay"]
+
+
+@pytest.mark.parametrize("arch, ran, skipped", [
+    ("arm64", {"check_unfairplay_requirement", "check_unfairplay_build"}, {"check_no_unfairplay"}),
+    ("x86_64", {"check_no_unfairplay"}, {"check_unfairplay_requirement", "check_unfairplay_build"}),
+])
+def test_each_bundle_gets_its_own_unfairplay_checks_and_the_arch_check_before_anything_runs(
+        tmp_path, monkeypatch, arch, ran, skipped):
+    app = _fake_app(tmp_path)
+    order: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(vb, "run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""))
+    for name in [n for n in dir(vb) if n.startswith("check_")]:
+        monkeypatch.setattr(vb, name, lambda *a, _n=name, **k: order.append((_n, k.get("arch"))) or True)
+    monkeypatch.setattr(vb, "runtime_checks", lambda *a, **k: order.append(("runtime_checks", k.get("arch"))))
+    vb.verify_app(app, vb.Report(), tmp_path / "work", arch=arch)
+    names = [n for n, _ in order]
+    assert ran <= set(names) and not skipped & set(names)
+    assert names.index("check_bundle_arch") < names.index("runtime_checks")
+    given = dict(order)
+    for name in ("check_architectures", "check_bundle_arch", "check_components", "check_go_modules", "check_no_junk",
+                 "check_helper_imports", "runtime_checks"):
+        assert given[name] == arch, name
+
+
+def test_an_intel_bundles_go_check_reads_only_ipatool(tmp_path, monkeypatch, capsys):
+    app, _, read = _go_fixture(tmp_path, monkeypatch)
+    report = vb.Report()
+    vb.check_go_modules(app, report, tmp_path / "work", "x86_64")
+    assert report.results == [("every Go module in ipatool, by its build info, has its notice in Licenses/ and its "
+                               "source in the source archive's vendored modules", True)]
+    assert [Path(p).name for p in read] == ["ipatool"]
+
+
+@pytest.mark.parametrize("arch, other", [("x86_64", "arm64"), ("arm64", "x86_64")])
+def test_a_bundle_shipping_cyans_helpers_for_the_other_mac_is_junk(tmp_path, arch, other):
+    contents = tmp_path / "Graft.app" / "Contents"
+    tools = contents / "Resources/GraftPython/lib/python3.13/site-packages/cyan/tools/Darwin"
+    (tools / arch).mkdir(parents=True)
+    (tools / arch / "ldid").write_bytes(b"x")
+    report = vb.Report()
+    vb.check_no_junk(contents.parent, report, arch)
+    assert report.results[0][1] is True, "its own helpers are what cyan runs"
+    (tools / other).mkdir()
+    (tools / other / "ldid").write_bytes(b"x")
+    report = vb.Report()
+    vb.check_no_junk(contents.parent, report, arch)
+    assert report.results[0][1] is False
+
+
+def test_an_intel_bundles_helpers_are_cyans_x86_64_tools(tmp_path, monkeypatch):
+    contents = tmp_path / "Contents"
+    for rel in (f"{vb.cyan_tools('x86_64')}/otool", f"{TOOLS}/otool", "Helpers/graft"):
+        (contents / rel).parent.mkdir(parents=True, exist_ok=True)
+        (contents / rel).write_bytes(b"x")
+    monkeypatch.setattr(vb, "mach_o_files", lambda root: sorted(p for p in root.rglob("*") if p.is_file()))
+    got = {str(p.relative_to(contents)) for p in vb.helper_files(contents, "x86_64")}
+    assert got == {f"{vb.cyan_tools('x86_64')}/otool", "Helpers/graft"}
+    assert vb.cyan_tools() == vb.CYAN_TOOLS and vb.cyan_tools("x86_64").endswith("/cyan/tools/Darwin/x86_64")
+
+
+@pytest.mark.parametrize("argv, want", [
+    (["Graft.app"], ("app", "arm64")), (["--zip", "Graft.zip"], ("zip", "arm64")),
+    (["--arch", "x86_64", "Graft.app"], ("app", "x86_64")), (["--arch", "x86_64", "--zip", "G.zip"], ("zip", "x86_64")),
+    (["--arch", "ppc", "Graft.app"], None), (["--arch"], None), (["Graft.app", "--arch", "x86_64"], None),
+])
+def test_the_arch_is_given_before_the_app_or_zip(tmp_path, monkeypatch, argv, want):
+    seen = []
+    (tmp_path / argv[-1]).mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(vb, "verify_app", lambda target, report, work, **k: seen.append(("app", k["arch"])))
+    monkeypatch.setattr(vb, "verify_zip", lambda target, report, work, arch: seen.append(("zip", arch)))
+    code = vb.main(argv)
+    assert (seen == [want]) if want else (code == 2 and seen == [])

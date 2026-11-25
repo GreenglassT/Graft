@@ -945,20 +945,45 @@ final class UpdateStoreTests: XCTestCase {
                       "the form tested is the helper's")
     }
 
-    /// 2.0.2's helper wrote its times with no offset, in this Mac's zone
-    /// (the first update to 2.1 is installed by it): such a line is still
-    /// read, as this Mac's time.
-    func test_an_install_logged_without_an_offset_is_read_in_this_mac_s_zone() throws {
+    /// A line whose time has no offset never counts. Only 2.0.2's helper
+    /// wrote those, for an update its own app started, whose attempt has no
+    /// time and is never compared (`test_an_attempt_with_no_time_does_not_
+    /// read_the_log`). Every attempt with a time is a 2.1 or later app's,
+    /// whose helper writes the offset. Read in this Mac's zone, which needn't
+    /// be the one it was written in, a 2.0.2 line could land after a later
+    /// attempt: 2.0.2's "installed Graft 2.2", then 2.1 put back by hand and
+    /// its own update to 2.2 failing, would read as installed (the 2.1
+    /// review). So whenever it was written, it doesn't count; the helper's
+    /// own form, from the attempt's second on, does.
+    func test_an_install_logged_without_an_offset_never_counts_for_an_attempt_with_a_time() throws {
         let attempt = UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: clock.now + 0.7)
-        func counts(at date: Date) throws -> Bool {
-            try writeLog([logged(Self.installedLine(), at: date, offset: false)])
+        func counts(at date: Date, offset: Bool) throws -> Bool {
+            try writeLog([logged(Self.installedLine(), at: date, offset: offset)])
             return UpdateStore.installLogged(attempt, in: updateLog)
         }
 
-        XCTAssertTrue(try counts(at: clock.now + 2))
-        XCTAssertTrue(try counts(at: clock.now), "the attempt's own second")
-        XCTAssertFalse(try counts(at: clock.now - 2))
+        for later in [0, 2, 60 * 60, 14 * 60 * 60] as [TimeInterval] {
+            XCTAssertFalse(try counts(at: clock.now + later, offset: false), "\(later) s after, with no offset")
+            XCTAssertTrue(try counts(at: clock.now + later, offset: true), "\(later) s after, with its offset")
+        }
         XCTAssertFalse(logged("x", at: clock.now, offset: false).contains("+"), "the form tested is 2.0.2's")
+    }
+
+    /// The 2.1 review's case, through a launch: an old "installed" line
+    /// with no offset, from 2.0.2's helper, written later in this Mac's
+    /// digits than the attempt, then this attempt's own helper saying no.
+    /// The launch still on the old version says the install didn't take.
+    func test_an_old_install_line_without_an_offset_does_not_hide_a_failed_install() throws {
+        let defaults = try throwawayDefaults()
+        try attempt(at: clock.now, in: defaults)
+        try writeLog([
+            logged(Self.installedLine(), at: clock.now + 9 * 60 * 60, offset: false),
+            logged("not installed: couldn't move Graft 2.0.1 to \(Self.appPath)", at: clock.now + 2),
+        ])
+
+        let sut = updatingStore(try UpdateCLI(test: self), defaults: defaults)
+
+        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake, retryable: false))
     }
 
     /// A time with anything but a plain ±hhmm after it isn't the helper's,
@@ -1102,6 +1127,131 @@ final class UpdateStoreTests: XCTestCase {
         XCTAssertFalse(UpdateStore.installLogged(attempt, in: updateLog), "starts a MiB and a byte from the end")
     }
 
+    // MARK: Reading the log: interrupted and short reads
+
+    /// A `pread` stand-in over the real one: the reads it was asked for, as
+    /// (offset, count), and its answers, decided per call by `answer`, which
+    /// gets the call's index and may set `errno` and return -1, return 0, or
+    /// pass a byte count to read for real (capped at what was asked).
+    private final class Reads: @unchecked Sendable {
+        var asked: [(offset: off_t, count: Int)] = []
+        let answer: (Int) -> Int?
+
+        init(answer: @escaping (Int) -> Int?) { self.answer = answer }
+
+        func read(_ fd: Int32, _ buffer: UnsafeMutableRawPointer, _ count: Int, _ offset: off_t) -> Int {
+            let call = asked.count
+            asked.append((offset, count))
+            guard let most = answer(call) else { return Darwin.pread(fd, buffer, count, offset) }
+            if most <= 0 { return most }
+            return Darwin.pread(fd, buffer, min(count, most), offset)
+        }
+    }
+
+    /// Each read interrupted once before it's answered (EINTR), then
+    /// answered short, 7 bytes at a time: the tail is still the whole file,
+    /// each read asked for where the last one stopped.
+    func test_an_interrupted_or_short_read_is_carried_on_where_it_stopped() throws {
+        let text = (0..<40).map { "line \($0)" }.joined(separator: "\n") + "\n"
+        try text.write(to: updateLog, atomically: true, encoding: .utf8)
+        let reads = Reads { call in
+            if call % 2 == 0 { errno = EINTR; return -1 }
+            return 7
+        }
+
+        let tail = try XCTUnwrap(UpdateStore.tail(of: updateLog, read: reads.read))
+
+        XCTAssertEqual(String(decoding: tail, as: UTF8.self), text)
+        var expected: off_t = 0
+        for (index, asked) in reads.asked.enumerated() {
+            XCTAssertEqual(asked.offset, expected, "read \(index) asked at the byte the last one stopped")
+            XCTAssertEqual(asked.count, text.utf8.count - Int(expected), "read \(index) asked for the rest")
+            if index % 2 == 1 { expected += off_t(min(7, asked.count)) }
+        }
+        XCTAssertEqual(Int(expected), text.utf8.count)
+    }
+
+    /// Past a MiB, the reads start a MiB from the end, and short ones still
+    /// add up to exactly that MiB.
+    func test_short_reads_of_a_long_log_add_up_to_its_last_mib() throws {
+        let mib = UpdateStore.tailLimit
+        var bytes = Data(count: mib + 1234)
+        for index in bytes.indices { bytes[index] = UInt8(index % 251) }
+        try bytes.write(to: updateLog)
+        let reads = Reads { _ in 100_000 }
+
+        let tail = try XCTUnwrap(UpdateStore.tail(of: updateLog, read: reads.read))
+
+        XCTAssertEqual(tail, bytes.suffix(mib))
+        XCTAssertEqual(reads.asked.first?.offset, 1234)
+        XCTAssertEqual(reads.asked.count, (mib + 99_999) / 100_000)
+    }
+
+    /// A read that fails for anything but an interruption: nothing to read.
+    /// One that finds the end early (the log got shorter since its size
+    /// was read): what was read.
+    func test_a_failed_read_reads_nothing_and_an_early_end_keeps_what_was_read() throws {
+        try "0123456789abcdef\n".write(to: updateLog, atomically: true, encoding: .utf8)
+
+        let failing = Reads { call in
+            if call == 0 { return 5 }
+            errno = EIO
+            return -1
+        }
+        XCTAssertNil(UpdateStore.tail(of: updateLog, read: failing.read))
+
+        let ending = Reads { call in call == 0 ? 5 : 0 }
+        let tail = try XCTUnwrap(UpdateStore.tail(of: updateLog, read: ending.read))
+        XCTAssertEqual(String(decoding: tail, as: UTF8.self), "01234")
+        XCTAssertEqual(ending.asked.count, 2)
+    }
+
+    // MARK: Offsets behind UTC by a half hour
+
+    /// Zones behind UTC on the half hour are read exactly: Marquesas,
+    /// -0930, and Newfoundland, -0330. The minutes are behind UTC as the
+    /// hours are, never added back.
+    func test_a_negative_half_hour_offset_is_read_exactly() throws {
+        let said = " installed Graft 2.0.1 at "
+        let utc = ISO8601DateFormatter()
+        let cases: [(String, String)] = [
+            ("2026-11-24 09:30:15 -0930", "2026-11-24T19:00:15Z"),
+            ("2026-11-24 09:30:15 -0330", "2026-11-24T13:00:15Z"),
+            ("2026-11-24 23:45:00 -0930", "2026-11-25T09:15:00Z"),
+            ("2026-11-24 09:30:15 +0530", "2026-11-24T04:00:15Z"),
+            ("2026-11-24 09:30:15 +1345", "2026-11-23T19:45:15Z"),
+        ]
+        for (stamp, instant) in cases {
+            let line = stamp + said + "/Applications/Graft.app; the old one is in the Trash"
+            XCTAssertEqual(UpdateStore.loggedTime(of: line, saying: said), utc.date(from: instant), stamp)
+        }
+    }
+
+    /// The same, as the helper writes them, in those zones' own rules:
+    /// Marquesas all year, Newfoundland in November (standard time, -0330)
+    /// and in May (daylight time, -0230). An install two seconds after the
+    /// attempt counts, in its own second counts, and two seconds before
+    /// doesn't.
+    func test_installs_logged_in_marquesas_and_newfoundland_are_placed_exactly() throws {
+        let utc = ISO8601DateFormatter()
+        let cases = [
+            ("Pacific/Marquesas", "2026-11-24T12:00:00Z", "-0930"),
+            ("America/St_Johns", "2026-11-24T12:00:00Z", "-0330"),
+            ("America/St_Johns", "2026-05-09T12:00:00Z", "-0230"),
+        ]
+        for (name, instant, mark) in cases {
+            let zone = try XCTUnwrap(TimeZone(identifier: name))
+            let at = try XCTUnwrap(utc.date(from: instant))
+            let attempt = UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: at)
+            let written = logged("x", at: at, in: zone)
+            XCTAssertTrue(written.hasSuffix(" \(mark) x"), "\(name): \(written)")
+            for (shift, counts) in [(2.0, true), (-2.0, false), (0.0, true)] {
+                try writeLog([logged(Self.installedLine(), at: at + shift, in: zone)])
+                XCTAssertEqual(UpdateStore.installLogged(attempt, in: updateLog), counts, "\(name) \(instant) \(shift)")
+            }
+        }
+    }
+
     /// A log whose lines end CRLF (an editor saved it so) is still read a
     /// line at a time: the helper's line after another one counts.
     func test_a_log_with_crlf_lines_is_read_line_by_line() throws {
@@ -1233,7 +1383,9 @@ final class UpdateStoreTests: XCTestCase {
         XCTAssertNil(cannot.answerAlert?.action)
         XCTAssertEqual(cannot.answerAlert?.cancel, "Later")
         XCTAssertNotNil(cannot.answerAlert?.release, "Open Release Page")
-        XCTAssertTrue(cannot.answerAlert?.message.contains("Download the new Graft.zip") == true)
+        XCTAssertTrue(cannot.answerAlert?.message.contains(
+            "Download the new version from its release page (Graft.zip, or Graft-Intel.zip for an Intel Mac)"
+        ) == true)
 
         XCTAssertEqual(UpdatesSection.toggleTitle, "Check for updates automatically")
         XCTAssertEqual(UpdatesSection.installToggleTitle, "Download and install updates automatically")
@@ -1394,13 +1546,17 @@ final class UpdateStoreTests: XCTestCase {
     /// signature that doesn't check out), nor for where this copy is
     /// (translocated, a folder it can't change): the same try meets the
     /// same refusal. After one that went offline, ran out of space or got
-    /// no answer at all, Try Again is offered. Either way the alert says
-    /// why, and links the release page.
+    /// no answer at all, Try Again is offered; and after bytes that didn't
+    /// match GitHub's SHA-256, since the next transfer can be whole. Not
+    /// after a zip that wouldn't unpack: that comes after the bytes matched,
+    /// so the same bytes would fail the same way. And after a release with
+    /// no zip of this build yet, which can be added at any time. Either way
+    /// the alert says why, and links the release page.
     func test_check_for_updates_offers_try_again_only_when_it_can_help() async throws {
         let cases: [(reason: String?, retryable: Bool)] = [
-            ("no-team", false), ("signature", false), ("digest", false), ("translocated", false),
+            ("no-team", false), ("signature", false), ("translocated", false),
             ("not-writable", false), ("not-graft", false), ("offline", true), ("http", true),
-            ("disk", true), ("busy", true), (nil, true),
+            ("disk", true), ("busy", true), ("digest", true), ("archive", false), ("not-for-this-mac", true), (nil, true),
         ]
         for (reason, retryable) in cases {
             let name = reason ?? "no answer"

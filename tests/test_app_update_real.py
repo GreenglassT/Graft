@@ -62,11 +62,11 @@ def test_the_installed_release_passes_every_check() -> None:
     checks: list[str] = []
     assert TEAM is not None
     version = app_update.verify_app(
-        INSTALLED, newer_than="1.0", team=TEAM, run=app_update.run_tool,
-        progress=lambda e: checks.append(e["check"]),
+        INSTALLED, newer_than="1.0", team=TEAM, flavor=app_update.bundle_flavor(INSTALLED),
+        run=app_update.run_tool, progress=lambda e: checks.append(e["check"]),
     )
     assert version == app_update.bundle_info(INSTALLED).version
-    assert checks == ["bundle", "signature", "requirement", "notarization"]
+    assert checks == ["bundle", "architecture", "signature", "requirement", "notarization"]
 
 
 def test_it_is_not_newer_than_itself() -> None:

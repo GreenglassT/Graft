@@ -1,9 +1,12 @@
 """Graft updating itself: `graft --download-update` and `graft --install-update`.
 
 **Download.** When GitHub's latest release (`release_check`) is newer than the
-running Graft.app, `--download-update` downloads that release's Graft.zip into
-Graft's cache (`updates_dir`). The file is nothing until it has passed every
-check below, cheapest first:
+running Graft.app, `--download-update` downloads that release's zip of this
+build of Graft into Graft's cache (`updates_dir`): Graft.zip for the Apple
+silicon build, Graft-Intel.zip for the Intel one (`own_flavor`, `ASSETS`). A
+release without it has no update for this Mac (`NOT_FOR_THIS_MAC`); the
+other build's zip is never fetched in its place. The file is nothing until it
+has passed every check below, cheapest first:
 
 - its size and SHA-256 are the ones GitHub's API lists for the asset (its
   `digest`, "sha256:…");
@@ -13,6 +16,10 @@ check below, cheapest first:
 - ditto unpacks it into a folder of its own, owner-only;
 - its Info.plist names Graft's bundle id, and a CFBundleShortVersionString
   newer than the running app's;
+- it is the same build as the running app (`check_architecture`): its
+  Info.plist says so (`FLAVOR_KEY`), and its main executable and its
+  embedded Python have code for that processor, read off their Mach-O
+  headers (`macho.architectures`), never with `lipo` or `file`;
 - `codesign --verify --deep --strict`: every file is as it was signed;
 - `requirement(team)`: a Developer ID certificate of the team that signed
   the Graft.app this CLI runs from (`own_team`) AND Graft's bundle id, so
@@ -41,7 +48,7 @@ asking Apple.
 **Install.** `--install-update` checks again that the app can be replaced
 where it is, then starts `HELPER`, a /bin/sh script that outlives Graft. It
 waits for Graft to quit, moves the new app beside the old one, checks it there
-once more (signature, requirement, notarization, version), moves the old
+once more (signature, requirement, notarization, version, build), moves the old
 Graft.app to the Trash and the new one into its place, registers it with
 Launch Services, and opens it when asked to. A failure at any step leaves or
 puts back the old app. It writes what it did to `~/Library/Logs/Graft/update.log`.
@@ -79,7 +86,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import release_check
+from . import macho, release_check
 from .child_env import child_env
 from .data_dirs import cache_dir
 from .enrollment import DEVELOPER_ID_CA, DEVELOPER_ID_LEAF
@@ -88,13 +95,32 @@ from .trash import default_trash_dir
 
 BUNDLE_ID = "com.greenglasst.graft"
 APP_NAME = "Graft.app"
-ASSET_NAME = "Graft.zip"
+
+#: Info.plist's word for which download a Graft.app is: "arm64" or "x86_64".
+#: The release script writes it before signing, so it is sealed with the
+#: rest of the plist. It names the bundle's build, not the processor of the
+#: Mac it runs on, nor of the process asking: the app's own executable is
+#: universal in both builds, so a Swift process on Apple silicon runs as
+#: arm64 even inside the Intel build, and only the bundle can say which one
+#: it is.
+FLAVOR_KEY = "GraftBundleArch"
+ARM64 = "arm64"
+X86_64 = "x86_64"
+#: Each build's zip on a release. Graft.zip keeps meaning arm64: the 2.0.2 and
+#: 2.1 updaters ask for it by that name.
+ASSETS = {ARM64: "Graft.zip", X86_64: "Graft-Intel.zip"}
+#: What each build is for, in a sentence.
+MACS = {ARM64: "Macs with Apple silicon", X86_64: "Intel Macs"}
 
 #: A Developer ID team, as codesign names it: ten capitals and digits.
 TEAM_RE = re.compile(r"[A-Z0-9]{10}", re.ASCII)
 #: Where Graft.app keeps the interpreter its CLI runs on, under the bundle:
 #: Contents/Resources/GraftPython/bin/python3.13 (`own_bundle`).
 EMBEDDED_PYTHON = ("Contents", "Resources", "GraftPython", "bin")
+#: The embedded interpreter's name there: python3.<minor>. A download's is
+#: found by this, not by this release's own minor version, so the first
+#: release on a newer Python is still read (`embedded_interpreter`).
+INTERPRETER_RE = re.compile(r"python3\.[0-9]{1,3}", re.ASCII)
 
 
 def requirement(team: str) -> str:
@@ -162,9 +188,14 @@ HTTP = release_check.HTTP
 MALFORMED = release_check.MALFORMED
 NOT_NEWER = "not-newer"
 NO_ASSET = "no-asset"
+#: The latest release has no zip of this build (`ASSETS`): no update for this Mac.
+NOT_FOR_THIS_MAC = "not-for-this-mac"
 DIGEST = "digest"
 ARCHIVE = "archive"
 BUNDLE = "bundle"
+#: The download is another build of Graft, or its code isn't for this build's
+#: processor (`check_architecture`).
+ARCHITECTURE = "architecture"
 SIGNATURE = "signature"
 REQUIREMENT_FAILED = "requirement"
 NOTARIZATION = "notarization"
@@ -174,13 +205,16 @@ NOT_GRAFT = "not-graft"
 NOT_STAGED = "not-staged"
 #: The running Graft has no Developer ID team to trust updates from.
 NO_TEAM = "no-team"
+#: The running Graft's Info.plist and its own Python disagree about which
+#: build it is (`own_flavor`), so it can't tell which zip is its update.
+MIXED_BUILD = "mixed-build"
 DISK = "disk"
 BUSY = "busy"
 HELPER_FAILED = "helper"
 
 #: The verification steps after the download (whose SHA-256 is checked as
 #: it arrives), the `update-progress` event's `check`, in order.
-CHECKS = ("archive", "bundle", "signature", "requirement", "notarization")
+CHECKS = ("archive", "bundle", "architecture", "signature", "requirement", "notarization")
 
 
 class UpdateError(GraftError):
@@ -195,8 +229,10 @@ class UpdateError(GraftError):
 
 @dataclass(frozen=True)
 class Asset:
-    """The release's Graft.zip, as GitHub's API lists it."""
+    """The release's zip of this build (`ASSETS`), as GitHub's API lists it."""
 
+    #: Its file name: Graft.zip or Graft-Intel.zip.
+    name: str
     url: str
     size: int
     #: Lowercase hex, without GitHub's "sha256:".
@@ -267,32 +303,48 @@ def log_path() -> Path:
 _DIGEST_RE = re.compile(r"sha256:([0-9a-f]{64})", re.ASCII)
 
 
-def release_asset(data: dict[str, Any], *, url: str | None = None) -> Asset:
-    """The release's Graft.zip, from GitHub's answer about it: its download
-    URL (under `DOWNLOAD_PREFIX`), size and digest. Raises `UpdateError`
-    when any of them is missing or isn't one."""
+def release_asset(data: dict[str, Any], *, flavor: str, url: str | None = None) -> Asset:
+    """The release's zip of the `flavor` build (`ASSETS`), from GitHub's
+    answer about it: its download URL (under `DOWNLOAD_PREFIX`), size and
+    digest. Raises `UpdateError` when any of them is missing or isn't one.
+
+    Only that build's zip, by its exact name: a release without it is
+    `NOT_FOR_THIS_MAC`, never the other build's zip in its place, which an
+    Intel Mac couldn't run and which would turn an Apple silicon Mac's
+    Intel build into the other one. (An Intel build on Apple silicon is
+    told in the app to download Graft.zip itself; its updater keeps it the
+    build it is.)"""
+    name = ASSETS[flavor]
     assets = data.get("assets")
     if not isinstance(assets, list):
         raise UpdateError(
             "GitHub's answer about the latest release didn't list its files.",
             reason=MALFORMED, url=url,
         )
-    found = [a for a in assets if isinstance(a, dict) and a.get("name") == ASSET_NAME]
+    found = [a for a in assets if isinstance(a, dict) and a.get("name") == name]
+    if not found:
+        raise UpdateError(
+            f"The latest release has no {name}, the download for {MACS[flavor]}, so there's "
+            "no update for this Mac yet.",
+            reason=NOT_FOR_THIS_MAC, url=url,
+        )
     if len(found) != 1:
         raise UpdateError(
-            f"The latest release has no {ASSET_NAME} to download.", reason=NO_ASSET, url=url,
+            f"The latest release lists {name} more than once, so Graft can't tell which to "
+            "download.",
+            reason=NO_ASSET, url=url,
         )
     (asset,) = found
     link, size, digest = asset.get("browser_download_url"), asset.get("size"), asset.get("digest")
-    if not (isinstance(link, str) and link.startswith(DOWNLOAD_PREFIX) and link.endswith("/" + ASSET_NAME)):
+    if not (isinstance(link, str) and link.startswith(DOWNLOAD_PREFIX) and link.endswith("/" + name)):
         raise UpdateError(
-            f"The latest release's {ASSET_NAME} isn't on Graft's release page.",
+            f"The latest release's {name} isn't on Graft's release page.",
             reason=NO_ASSET, url=url,
         )
     if asset.get("state", "uploaded") != "uploaded" or isinstance(size, bool) \
             or not isinstance(size, int) or not 0 < size <= MAX_ZIP_BYTES:
         raise UpdateError(
-            f"GitHub lists the latest release's {ASSET_NAME} without a usable size.",
+            f"GitHub lists the latest release's {name} without a usable size.",
             reason=NO_ASSET, url=url,
         )
     match = _DIGEST_RE.fullmatch(digest) if isinstance(digest, str) else None
@@ -300,11 +352,11 @@ def release_asset(data: dict[str, Any], *, url: str | None = None) -> Asset:
         # No digest, no download: there would be nothing to check the bytes
         # against before unpacking them.
         raise UpdateError(
-            f"GitHub lists no SHA-256 for the latest release's {ASSET_NAME}, so Graft can't "
+            f"GitHub lists no SHA-256 for the latest release's {name}, so Graft can't "
             "check the download.",
             reason=DIGEST, url=url,
         )
-    return Asset(url=link, size=size, sha256=match.group(1))
+    return Asset(name=name, url=link, size=size, sha256=match.group(1))
 
 
 # --- Where it can be installed ------------------------------------------------
@@ -316,18 +368,31 @@ class BundleInfo:
     version: str | None
 
 
-def bundle_info(app: Path) -> BundleInfo:
-    """What `app`'s Info.plist says it is. Nones for a plist that isn't
-    there, isn't readable or is too big to be one."""
+def read_info_plist(app: Path) -> dict[str, Any] | None:
+    """`app`'s Info.plist, or None for one that isn't there, isn't readable,
+    isn't a dictionary or is too big to be one. Every caller refuses a
+    bundle whose plist is None.
+
+    Any exception from plistlib is "not readable": its failures are not a
+    closed set. Besides its own InvalidFileException and ValueError, XML
+    that isn't well formed raises expat's ExpatError, and a `<date>` that
+    isn't one AttributeError (as in `macho`'s entitlements)."""
     plist = app / "Contents" / "Info.plist"
     try:
         if plist.is_symlink() or plist.stat().st_size > 1 << 20:
-            return BundleInfo(None, None)
+            return None
         with plist.open("rb") as f:
             data = plistlib.load(f)
-    except (OSError, ValueError, plistlib.InvalidFileException):
-        return BundleInfo(None, None)
-    if not isinstance(data, dict):
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def bundle_info(app: Path) -> BundleInfo:
+    """What `app`'s Info.plist says it is. Nones for a plist that isn't
+    there, isn't readable or is too big to be one."""
+    data = read_info_plist(app)
+    if data is None:
         return BundleInfo(None, None)
     bundle_id, version = data.get("CFBundleIdentifier"), data.get("CFBundleShortVersionString")
     return BundleInfo(
@@ -424,6 +489,114 @@ def own_team(run: Run, *, app: Path | None = None) -> str:
     return team
 
 
+# --- Which build ---------------------------------------------------------------
+
+
+class MixedBuild(ValueError):
+    """A Graft.app that doesn't say, or doesn't agree with itself, which build
+    it is (`bundle_flavor`). The message says what disagrees, as a clause."""
+
+
+def _architectures(path: Path, what: str) -> list[str]:
+    """`macho.architectures` of the file `what` names, inside a bundle; a
+    `MixedBuild` when there's no such regular file or it isn't a Mach-O.
+    Never through a link: a bundle's own code is its own files."""
+    if path.is_symlink() or not path.is_file():
+        raise MixedBuild(f"it has no {what}")
+    try:
+        return macho.architectures(path)
+    except macho.MachOError as e:
+        raise MixedBuild(f"its {what} isn't a program Graft can read ({e})") from e
+
+
+def embedded_interpreter(app: Path, name: str | None = None) -> Path:
+    """`app`'s embedded Python, under `EMBEDDED_PYTHON`: `name` there when
+    it's known (the running Graft's own, `own_flavor`), else the one entry
+    there named python3.<digits> (`INTERPRETER_RE`), whatever the minor
+    version. Raises `MixedBuild` for none, more than one, or a folder on
+    the way that is a link: a bundle's own code is its own files (the file
+    itself is checked by `_architectures`).
+
+    By pattern, not by this release's python3.13: a download on a newer
+    Python refused as another build would be remembered as refused
+    (`ARCHITECTURE`), and every Graft would stay on this version."""
+    here = app
+    for part in EMBEDDED_PYTHON:
+        here = here / part
+        if here.is_symlink():
+            raise MixedBuild("its embedded Python is reached through a link")
+    if name is not None:
+        return here / name
+    try:
+        found = sorted(entry for entry in here.iterdir() if INTERPRETER_RE.fullmatch(entry.name))
+    except OSError:
+        found = []
+    if not found:
+        raise MixedBuild("it has no embedded Python")
+    if len(found) > 1:
+        raise MixedBuild(f"it has more than one embedded Python ({', '.join(p.name for p in found)})")
+    return found[0]
+
+
+def bundle_flavor(app: Path, *, interpreter: str | None = None) -> str:
+    """Which build of Graft `app` is, ARM64 or X86_64: its Info.plist's
+    `FLAVOR_KEY`, once its embedded Python (`embedded_interpreter`, by
+    `interpreter`'s name when given) has code for that processor. Raises
+    `MixedBuild` otherwise: no readable Info.plist, a key that names
+    neither build, or a Python that is missing, unreadable or built for
+    another processor. A disagreement is never settled by guessing which of
+    the two is right.
+
+    No key means ARM64: every Graft.app made before the key existed was the
+    Apple silicon build (2.0.2 and 2.1 were arm64 only). A Debug or Xcode
+    build has no key either, and no embedded Python, so it is a
+    `MixedBuild`; it never updates itself anyway (`own_bundle`).
+
+    The Python, not `platform.machine()` or the host (`host.apple_silicon`):
+    the question is what this bundle is, and an Intel build on an Apple
+    silicon Mac is still the Intel build, whatever the Mac or Rosetta says."""
+    data = read_info_plist(app)
+    if data is None:
+        raise MixedBuild("it has no Info.plist Graft can read")
+    said = data.get(FLAVOR_KEY, ARM64)
+    if not isinstance(said, str) or said not in ASSETS:
+        raise MixedBuild(f"its Info.plist names no build Graft knows ({FLAVOR_KEY} is {said!r})")
+    has = _architectures(embedded_interpreter(app, interpreter), "embedded Python")
+    if said not in has:
+        raise MixedBuild(
+            f"its Info.plist says it is the build for {MACS[said]} ({said}), and its embedded "
+            f"Python has code only for {', '.join(has)}"
+        )
+    return said
+
+
+def own_flavor(app: Path | None = None) -> str:
+    """Which build the Graft.app this CLI runs from is (`own_bundle`,
+    `bundle_flavor`): the build an update has to be. Its Python is the one
+    running this, by name (`sys.executable`), so its version is known. `app`
+    is a test's stand-in for the bundle, whose Python is found as a
+    download's is. Raises `UpdateError`: `NO_TEAM` outside a bundle,
+    `MIXED_BUILD` when the bundle disagrees with itself, so it can't tell
+    which zip is its update."""
+    interpreter = None
+    if app is None:
+        app = own_bundle()
+        interpreter = Path(sys.executable).name
+    if app is None:
+        raise UpdateError(
+            "Only Graft.app updates itself, and this graft doesn't run from inside it.",
+            reason=NO_TEAM,
+        )
+    try:
+        return bundle_flavor(app, interpreter=interpreter)
+    except MixedBuild as e:
+        raise UpdateError(
+            f"This Graft.app is mixed up: {e}. So it can't tell which download is its update. "
+            "Download Graft again from the release page and replace this copy.",
+            reason=MIXED_BUILD,
+        ) from e
+
+
 # --- Download -----------------------------------------------------------------
 
 
@@ -481,7 +654,7 @@ def _fetch(asset: Asset, dest: Path, *, release_url: str, progress: Progress) ->
                             received += len(chunk)
                             if received > asset.size:
                                 raise UpdateError(
-                                    f"The download is bigger than the {ASSET_NAME} GitHub "
+                                    f"The download is bigger than the {asset.name} GitHub "
                                     "lists, so Graft stopped it and deleted it.",
                                     reason=DIGEST, url=release_url,
                                 )
@@ -512,7 +685,7 @@ def _fetch(asset: Asset, dest: Path, *, release_url: str, progress: Progress) ->
     said(received)
     if digest.hexdigest() != asset.sha256:
         raise UpdateError(
-            f"The download doesn't match the SHA-256 GitHub lists for {ASSET_NAME}, so Graft "
+            f"The download doesn't match the SHA-256 GitHub lists for {asset.name}, so Graft "
             "deleted it.",
             reason=DIGEST, url=release_url,
         )
@@ -545,7 +718,7 @@ def check_listing(zip_path: Path, *, release_url: str | None = None) -> int:
 
     def refuse(why: str) -> UpdateError:
         return UpdateError(
-            f"The downloaded {ASSET_NAME} {why}, so Graft deleted it.",
+            f"The downloaded {zip_path.name} {why}, so Graft deleted it.",
             reason=ARCHIVE, url=release_url,
         )
 
@@ -606,6 +779,40 @@ def check_bundle(app: Path, *, newer_than: str, release_url: str | None = None) 
     return info.version
 
 
+def check_architecture(app: Path, *, flavor: str, release_url: str | None = None) -> None:
+    """`app` is the `flavor` build of Graft, the running one's (`own_flavor`):
+    its Info.plist says so and its embedded Python agrees (`bundle_flavor`),
+    and its main executable (CFBundleExecutable) has code for that processor
+    too. Raises `UpdateError` (`ARCHITECTURE`) otherwise.
+
+    Read off the Mach-O headers in Python (`macho.architectures`). Not
+    `lipo` or `file`: on a Mac without the developer tools `/usr/bin/lipo`
+    is a stub that offers to install them. The plist and the files are
+    untrusted until the signature checks that follow; what this rules out is
+    a genuine Graft of the other build, which passes every one of those."""
+
+    def refuse(why: str) -> UpdateError:
+        return UpdateError(
+            f"The downloaded Graft {why}, so Graft deleted it.", reason=ARCHITECTURE, url=release_url,
+        )
+
+    try:
+        found = bundle_flavor(app)
+    except MixedBuild as e:
+        raise refuse(f"is mixed up: {e}") from e
+    if found != flavor:
+        raise refuse(f"is the build for {MACS[found]}, and this Graft is the build for {MACS[flavor]}")
+    name = (read_info_plist(app) or {}).get("CFBundleExecutable")
+    if not isinstance(name, str) or name in ("", ".", "..") or "/" in name or "\0" in name:
+        raise refuse("doesn't name its main executable")
+    try:
+        has = _architectures(app / "Contents" / "MacOS" / name, "main executable")
+    except MixedBuild as e:
+        raise refuse(f"is broken: {e}") from e
+    if flavor not in has:
+        raise refuse(f"has no code for {MACS[flavor]} in its main executable ({', '.join(has)})")
+
+
 def check_signature(app: Path, run: Run, *, release_url: str | None = None) -> None:
     """Every file in `app` is as it was signed, nested code included."""
     if run([CODESIGN, "--verify", "--deep", "--strict", str(app)]).returncode != 0:
@@ -643,17 +850,19 @@ def check_notarization(app: Path, run: Run, *, release_url: str | None = None) -
         )
 
 
-def verify_app(app: Path, *, newer_than: str, team: str, run: Run, progress: Progress,
-               release_url: str | None = None) -> str:
+def verify_app(app: Path, *, newer_than: str, team: str, flavor: str, run: Run,
+               progress: Progress, release_url: str | None = None) -> str:
     """Every check of an unpacked Graft.app, in order; its version once all
-    pass, signed by `team` (`own_team`). `progress` hears each one as it
-    starts."""
+    pass, signed by `team` (`own_team`) and the `flavor` build
+    (`own_flavor`). `progress` hears each one as it starts."""
 
     def checking(name: str) -> None:
         progress({"step": "verify", "received": None, "total": None, "check": name})
 
     checking("bundle")
     version = check_bundle(app, newer_than=newer_than, release_url=release_url)
+    checking("architecture")
+    check_architecture(app, flavor=flavor, release_url=release_url)
     checking("signature")
     check_signature(app, run, release_url=release_url)
     checking("requirement")
@@ -709,9 +918,9 @@ def _private_dir(path: Path) -> Path:
 
 
 def download_update(current: str, app: Path, *, progress: Progress, run: Run | None = None) -> Staged:
-    """Download the latest release's Graft.zip when it is newer than
-    `current`, unpack it and check it (the module docstring). Raises
-    `UpdateError`, having deleted whatever it downloaded.
+    """Download the latest release's zip of this build (`own_flavor`) when it
+    is newer than `current`, unpack it and check it (the module docstring).
+    Raises `UpdateError`, having deleted whatever it downloaded.
 
     `run` is `run_tool` unless a test passes its stand-in, looked up here
     rather than as a default so the verb, which passes none, gets a test's
@@ -721,6 +930,9 @@ def download_update(current: str, app: Path, *, progress: Progress, run: Run | N
     # Before anything is downloaded: a Graft that can't say whose updates to
     # trust has no use for one.
     team = own_team(run)
+    # Which zip is this Graft's update, asked of the bundle, not of the Mac
+    # (`bundle_flavor`): an Intel build stays the Intel build.
+    flavor = own_flavor()
     try:
         data = release_check.latest_release_json()
         release = release_check.release_from(data)
@@ -731,7 +943,7 @@ def download_update(current: str, app: Path, *, progress: Progress, run: Run | N
             f"Graft {current} is up to date: the latest release is {release.version}.",
             reason=NOT_NEWER, url=release.url,
         )
-    asset = release_asset(data, url=release.url)
+    asset = release_asset(data, flavor=flavor, url=release.url)
 
     def report(fields: dict[str, Any]) -> None:
         # Every `update-progress` names the version it is about.
@@ -755,7 +967,7 @@ def download_update(current: str, app: Path, *, progress: Progress, run: Run | N
         # offered in Spotlight or Open With while it waits here.
         work = Path(tempfile.mkdtemp(prefix="Graft-", suffix=".noindex", dir=root))
         try:
-            zip_path = work / ASSET_NAME
+            zip_path = work / asset.name
             # The digest is checked as the bytes arrive (`_fetch`).
             _fetch(asset, zip_path, release_url=release.url, progress=report)
             report({"step": "verify", "received": None, "total": None, "check": "archive"})
@@ -768,18 +980,18 @@ def download_update(current: str, app: Path, *, progress: Progress, run: Run | N
             into = _private_dir(work / "app")
             if run([DITTO, "-x", "-k", str(zip_path), str(into)]).returncode != 0:
                 raise UpdateError(
-                    f"Couldn't unpack the downloaded {ASSET_NAME}, so Graft deleted it.",
+                    f"Couldn't unpack the downloaded {asset.name}, so Graft deleted it.",
                     reason=ARCHIVE, url=release.url,
                 )
             zip_path.unlink()
             staged = into / APP_NAME
             if staged.is_symlink() or not staged.is_dir():
                 raise UpdateError(
-                    f"The downloaded {ASSET_NAME} has no {APP_NAME} in it, so Graft deleted it.",
+                    f"The downloaded {asset.name} has no {APP_NAME} in it, so Graft deleted it.",
                     reason=ARCHIVE, url=release.url,
                 )
-            version = verify_app(staged, newer_than=current, team=team, run=run, progress=report,
-                                 release_url=release.url)
+            version = verify_app(staged, newer_than=current, team=team, flavor=flavor, run=run,
+                                 progress=report, release_url=release.url)
         except BaseException:
             # A failed check, a stop (SIGTERM, `lc_manage.exit_on_termination`)
             # or anything else: nothing half-checked stays behind.
@@ -815,7 +1027,7 @@ set -u
 # All of them, before anything is touched: one missing partway through would
 # stop the script with the new app half moved.
 : "${GRAFT_UPDATE_PID:?}" "${GRAFT_UPDATE_APP:?}" "${GRAFT_UPDATE_STAGED:?}" \
-  "${GRAFT_UPDATE_VERSION:?}" "${GRAFT_UPDATE_RELAUNCH:?}" "${GRAFT_UPDATE_REQUIREMENT:?}" \
+  "${GRAFT_UPDATE_VERSION:?}" "${GRAFT_UPDATE_ARCH:?}" "${GRAFT_UPDATE_RELAUNCH:?}" "${GRAFT_UPDATE_REQUIREMENT:?}" \
   "${GRAFT_UPDATE_LOG:?}" "${GRAFT_UPDATE_TRASH:?}" "${GRAFT_UPDATE_WAIT_TICKS:?}" \
   "${GRAFT_UPDATE_CODESIGN:?}" "${GRAFT_UPDATE_SPCTL:?}" "${GRAFT_UPDATE_PLISTBUDDY:?}" \
   "${GRAFT_UPDATE_LSREGISTER:?}" "${GRAFT_UPDATE_OPEN:?}" "${GRAFT_UPDATE_MV:?}"
@@ -868,6 +1080,12 @@ if [ -e "$copy" ] || [ -L "$copy" ]; then give_up "$copy is in the way"; fi
   || give_up "Gatekeeper didn't accept it"
 found=$("$GRAFT_UPDATE_PLISTBUDDY" -c 'Print :CFBundleShortVersionString' "$copy/Contents/Info.plist" 2>/dev/null)
 [ "$found" = "$version" ] || give_up "it is version '$found', not $version"
+# The build the CLI checked (FLAVOR_KEY), as the plist the signature above
+# sealed says; one without the key is the Apple silicon build. Another build
+# of the same version passes every check above: this one keeps it out.
+built=$("$GRAFT_UPDATE_PLISTBUDDY" -c 'Print :GraftBundleArch' "$copy/Contents/Info.plist" 2>/dev/null) \
+  || built=arm64
+[ "$built" = "$GRAFT_UPDATE_ARCH" ] || give_up "it is the build for '$built', not $GRAFT_UPDATE_ARCH"
 
 mkdir -p "$GRAFT_UPDATE_TRASH" || give_up "couldn't make the Trash"
 trashed="$GRAFT_UPDATE_TRASH/Graft.app"
@@ -921,12 +1139,15 @@ class HelperTools:
     mv: str = MV
 
 
-def helper_env(*, pid: int, app: Path, staged: Path, version: str, relaunch: bool,
+def helper_env(*, pid: int, app: Path, staged: Path, version: str, flavor: str, relaunch: bool,
                log: Path, trash: Path, team: str, tools: HelperTools = HelperTools(),
                wait_ticks: int = WAIT_TICKS) -> dict[str, str]:
     """The helper's own variables. `spawn_detached` puts them over the
     CLI's environment without its secrets (`child_env`), so these win.
-    `team` is whose signature the copy must carry (`own_team`)."""
+    `team` is whose signature the copy must carry (`own_team`), and
+    `flavor` which build it must be (`own_flavor`)."""
+    if flavor not in ASSETS:
+        raise ValueError(f"not a build of Graft: {flavor!r}")
     return {
         "PATH": SYSTEM_PATH,
         "HOME": str(Path.home()),
@@ -935,6 +1156,7 @@ def helper_env(*, pid: int, app: Path, staged: Path, version: str, relaunch: boo
         "GRAFT_UPDATE_APP": str(app),
         "GRAFT_UPDATE_STAGED": str(staged),
         "GRAFT_UPDATE_VERSION": version,
+        "GRAFT_UPDATE_ARCH": flavor,
         "GRAFT_UPDATE_RELAUNCH": "1" if relaunch else "0",
         "GRAFT_UPDATE_REQUIREMENT": requirement(team),
         "GRAFT_UPDATE_LOG": str(log),
@@ -984,14 +1206,16 @@ def schedule_install(staged: Path, app: Path, *, pid: int, relaunch: bool,
     """Start the helper that installs `staged` over `app` once `pid` (Graft)
     has quit. Raises `UpdateError`, having started nothing, unless `app` can
     be replaced (`check_installable`), the running Graft has a team to trust
-    (`own_team`), `staged` is a download this CLI made (under `updates_dir`)
-    and newer than `app`, and `pid` is running. `spawn` and `run` are
+    (`own_team`), `staged` is a download this CLI made (under `updates_dir`),
+    newer than `app` and the running Graft's build (`check_architecture`),
+    and `pid` is running. `spawn` and `run` are
     `spawn_detached` and `run_tool` unless a test passes its own
     (`download_update`'s `run`)."""
     spawn = spawn or spawn_detached
     run = run or run_tool
     check_installable(app)
     team = own_team(run)
+    flavor = own_flavor()
     root = updates_dir()
     if not staged.is_absolute() or staged.is_symlink() or staged.name != APP_NAME \
             or not staged.is_dir() or root.resolve() not in staged.resolve().parents:
@@ -1010,13 +1234,16 @@ def schedule_install(staged: Path, app: Path, *, pid: int, relaunch: bool,
                 f"The Graft at {app} is already {old.version}, so {new.version} isn't an update.",
                 reason=NOT_NEWER,
             )
+    # Again here, though the download was checked: the cache is this user's
+    # to change, and the helper re-reads only the plist (`HELPER`).
+    check_architecture(staged, flavor=flavor)
     if pid <= 1 or not _alive(pid):
         raise UpdateError(f"No process {pid} is running to wait for.", reason=HELPER_FAILED)
     log = log_path()
     try:
         log.parent.mkdir(parents=True, exist_ok=True)
         spawn(HELPER_ARGV, helper_env(
-            pid=pid, app=app, staged=staged, version=new.version, relaunch=relaunch,
+            pid=pid, app=app, staged=staged, version=new.version, flavor=flavor, relaunch=relaunch,
             log=log, trash=default_trash_dir(), team=team,
         ))
     except OSError as e:

@@ -205,6 +205,50 @@ final class AppStoreVersionsTests: XCTestCase {
                        "the held version is staged: nothing to get")
     }
 
+    /// The row as the sheet draws it, not only `offersGet`: the held
+    /// version, its IPA deleted, offers Get once the list says it is held,
+    /// which is the one way back to it that keeps the hold. Held and
+    /// staged, it offers none, and a row being read shows the spinner.
+    @MainActor
+    func test_the_sheet_offers_get_on_the_held_row_whose_ipa_is_gone() async throws {
+        let (runner, _) = try scriptRunner("""
+        printf '%s\\n' '\(Self.row("800400", index: 0, version: "1.4.0"))'
+        printf '%s\\n' '\(Self.row("800300", index: 1, version: "1.3.0", staged: true))'
+        printf '%s\\n' '\(Self.row("800200", index: 2, version: "1.2.0", staged: false))'
+        printf '%s\\n' '\(Self.end(count: 3, held: "1.2.0"))'
+        """)
+        let store = AppStoreVersionsStore(runner: runner)
+
+        store.load(app: "example")
+        await waitUntil { store.phase != .loading }
+
+        XCTAssertEqual(store.phase, .loaded)
+        XCTAssertEqual(store.heldVersion, "1.2.0", "from the list, not the sheet's opening")
+        let rows = Dictionary(uniqueKeysWithValues: store.releases.map { ($0.externalId, $0) })
+        typealias Sheet = AppStoreVersionsSheet
+        XCTAssertEqual(Sheet.accessory(try XCTUnwrap(rows["800200"]), in: store), .get, "held, not staged")
+        XCTAssertEqual(Sheet.accessory(try XCTUnwrap(rows["800400"]), in: store), .get)
+        XCTAssertEqual(Sheet.accessory(try XCTUnwrap(rows["800300"]), in: store), .get, "staged, not held")
+
+        let (heldStaged, _) = try scriptRunner("""
+        printf '%s\\n' '\(Self.row("800200", index: 0, version: "1.2.0", staged: true))'
+        printf '%s\\n' '\(Self.end(count: 1, held: "1.2.0"))'
+        """)
+        let other = AppStoreVersionsStore(runner: heldStaged)
+        other.load(app: "example")
+        await waitUntil { other.phase != .loading }
+        XCTAssertEqual(Sheet.accessory(try XCTUnwrap(other.releases.first), in: other), .nothing,
+                       "held and staged: nothing to get")
+
+        let reading = Self.record("800100", index: 0, version: nil)
+        let (slow, _) = try scriptRunner("sleep 5")
+        let loading = AppStoreVersionsStore(runner: slow)
+        loading.load(app: "example")
+        XCTAssertEqual(loading.phase, .loading)
+        XCTAssertEqual(Sheet.accessory(reading, in: loading), .reading)
+        loading.reset()
+    }
+
     /// The sentinel has the last word: a hold let go elsewhere since the
     /// sheet opened is gone when the list finishes.
     @MainActor

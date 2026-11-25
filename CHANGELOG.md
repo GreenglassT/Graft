@@ -3,6 +3,48 @@
 What changed in each release of Graft, newest first. Each release's download
 is on [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
 
+## 2.2 (2026-11-25)
+
+### New
+
+- **Intel Macs, as a test build.** `Graft-Intel.zip`, beside `Graft.zip` on
+  the release page, runs on an Intel Mac with macOS 14 or later. It stays a
+  test build until it has run on a real Intel Mac. Everything works except
+  what needs Apple silicon: App Store sign-in, getting and decrypting App
+  Store apps (older versions and free ones included), and Build for this Mac
+  with PlayCover. Those buttons are still there, disabled, with "Needs a Mac
+  with Apple silicon". On an Intel Mac, use a decrypted IPA you already have,
+  or dump one from a jailbroken device. App Store search still works, for
+  adding an app by name, and needs no sign-in.
+- Each download updates itself from its own zip, and checks that the update
+  is the same build before installing it. If a release doesn't have your
+  build's zip yet, Graft says there's no update for this Mac yet.
+- `Graft.zip` opened on an Intel Mac says to download `Graft-Intel.zip`, with
+  a button to the releases page. `Graft-Intel.zip` opened on an Apple silicon
+  Mac runs, with a banner saying to download `Graft.zip` for everything.
+- Help › Join the Graft Discord, the same button in Settings › Version, and a
+  link in Graft › About Graft open the Graft Discord, for questions and help.
+
+### Fixes
+
+- Get an older version… stops when the connection stalls. It used to wait
+  about a minute on the version it was reading, mark that version as
+  unavailable, and go on to the next one, up to a minute each. Now the list
+  stops there and says reading that version timed out. The versions it had
+  read are kept, so Try Again picks up where it stopped. If that version
+  times out again, it's marked as unavailable and the list goes on.
+- Get an older version… copes better with slow connections: a request for a
+  version's details now fails only after 30 seconds with nothing arriving,
+  not after 30 seconds in all.
+- Export IPA… no longer freezes the window when it saves to a drive where
+  it has to copy the file into place, such as some network and FAT drives.
+  The window stays responsive while the file is copied, and Stop ends the
+  copy and leaves nothing in the folder. If a file with the same name
+  appears in the folder while the file is copied, Graft leaves it alone and
+  says so.
+- When an export fails, the error names the file you chose, not the
+  temporary folder Graft built it in.
+
 ## 2.1 (2026-11-24)
 
 ### New

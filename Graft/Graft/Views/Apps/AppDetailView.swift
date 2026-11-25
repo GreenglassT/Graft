@@ -2073,9 +2073,12 @@ struct AppDetailView: View {
             // real build ran for real, installing to the device.
             let arguments = [Flag.json] + options.cliArgs + [app.name]
             let exporting = options.exportPath != nil
-            let result = try await runner.stream(arguments: arguments) { event in
-                handle(event: event, owner: owner, exporting: exporting, placing: placing != nil)
+            let streamed = try await runner.stream(arguments: arguments) { event in
+                handle(event: event, owner: owner, exporting: exporting, placing: placing)
             }
+            // A staged export's stderr names the staging folder, the only
+            // path the CLI knew: said as the user's file instead.
+            let result = placing.map { $0.userFacing(streamed) } ?? streamed
             // Ordered on the cancel, not on the exit status. A Stop pressed
             // after the child has already exited 0 — the continuation waits for
             // both drainers to hit EOF, so the slot is still claimed and Stop
@@ -2099,7 +2102,7 @@ struct AppDetailView: View {
             }
             // Still holding the build slot, so the move is part of the run.
             if let placing {
-                return finishExport(placing, events: result.events, owner: owner)
+                return await finishExport(placing, events: result.events, owner: owner)
             }
             return result.events
         } catch {
@@ -2122,38 +2125,26 @@ struct AppDetailView: View {
     }
 
     /// Move a staged export's file to where the user chose, then say how the
-    /// run ended: the line naming the file and the `build-end` the pane held
-    /// back (`ExportStaging.holdsUntilPlaced`), or a failure saying why the
-    /// file isn't there. Through `handle`, so the store's banner and failure
-    /// card, the header and the transcript all hear it the way they hear the
-    /// CLI.
+    /// run ended (`ExportStaging.finishRun`): the line naming the file and the
+    /// `build-end` the pane held back (`ExportStaging.holdsUntilPlaced`), or a
+    /// failure saying why the file isn't there. Through `handle`, so the
+    /// store's banner and failure card, the header and the transcript all hear
+    /// it the way they hear the CLI. A Stop while the file was being copied
+    /// into place is a stop, like one during the build.
     ///
     /// - Returns: the events, with the placed record last for the pane's
     ///   confirmation (`exportedRecord(in:)`), or nil when it wasn't placed.
     @MainActor
     private func finishExport(
         _ staging: ExportStaging, events: [BuildEvent], owner: String
-    ) -> [BuildEvent]? {
-        let elapsed = events.lazy.reversed().compactMap { event -> Double? in
-            if case let .buildEnd(_, _, _, elapsedSeconds, _) = event { return elapsedSeconds }
+    ) async -> [BuildEvent]? {
+        switch await staging.finishRun(events: events, app: owner, say: { handle(event: $0, owner: owner) }) {
+        case let .placed(all):
+            return all
+        case .failed:
             return nil
-        }.first
-        switch staging.finish(events: events) {
-        case let .success(placed):
-            handle(event: .ipaExported(placed), owner: owner)
-            handle(
-                event: .buildEnd(app: owner, ok: true, error: nil, elapsedSeconds: elapsed),
-                owner: owner
-            )
-            return events + [.ipaExported(placed)]
-        case let .failure(error):
-            handle(
-                event: .buildEnd(
-                    app: owner, ok: false, error: error.localizedDescription,
-                    elapsedSeconds: elapsed
-                ),
-                owner: owner
-            )
+        case .stopped:
+            noteCancelled(result: nil, owner: owner)
             return nil
         }
     }
@@ -2462,16 +2453,23 @@ struct AppDetailView: View {
 
     /// - Parameter exporting: the run is an export, whose first line says so:
     ///   `→ export: example (unsigned)`. Its `build-start` names no delivery.
-    /// - Parameter placing: the export writes into a staging folder, and the
-    ///   pane moves the file into place after it: the CLI's `ipa-exported`
-    ///   and its successful `build-end` wait for that (`finishExport`).
+    /// - Parameter placing: the export writes into this staging folder, and
+    ///   the pane moves the file into place after it: the CLI's
+    ///   `ipa-exported` and its successful `build-end` wait for that
+    ///   (`finishExport`), and the rest name the user's file rather than the
+    ///   staging folder (`ExportStaging.heard`).
     @MainActor
     private func handle(
-        event: BuildEvent, owner: String, exporting: Bool = false, placing: Bool = false
+        event cliEvent: BuildEvent, owner: String, exporting: Bool = false,
+        placing: ExportStaging? = nil
     ) {
+        var event = cliEvent
+        if let placing {
+            guard let heard = placing.heard(cliEvent) else { return }
+            event = heard
+        }
         // Everything outside the build stream is not this panel's business.
         guard let progress = event.progress else { return }
-        if placing, ExportStaging.holdsUntilPlaced(progress) { return }
         // Recorded ahead of the ownership guard, and the only line here that
         // is: these records belong to the store, not to the panel, and it is
         // the build the user navigated away from that needs them most — that

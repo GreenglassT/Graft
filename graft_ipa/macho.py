@@ -9,6 +9,14 @@ Graft asks three things of a Mach-O, and all three are in its load commands:
   line two and once made every tweak look Substrate-linked.
 * `rpaths`: its `LC_RPATH` entries.
 
+And one of its headers alone:
+
+* `architectures`: which processors it has code for, one name per slice, as
+  `lipo -archs` names them. The updater asks it of a downloaded Graft.app
+  (`app_update.check_architecture`), where `lipo` itself can't be run: on a
+  Mac without the developer tools `/usr/bin/lipo` is a stub that offers to
+  install them.
+
 And one of its code signature, which `LC_CODE_SIGNATURE` points at:
 
 * `entitlements`: what it was signed to ask for, its XML entitlements blob,
@@ -79,6 +87,17 @@ DYLIB_COMMANDS = frozenset({
     LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB, LC_LOAD_UPWARD_DYLIB,
 })
 ENCRYPTION_COMMANDS = frozenset({LC_ENCRYPTION_INFO, LC_ENCRYPTION_INFO_64})
+
+# <mach/machine.h>
+CPU_ARCH_ABI64 = 0x01000000
+CPU_TYPE_X86 = 7
+CPU_TYPE_ARM = 12
+CPU_TYPE_X86_64 = CPU_TYPE_X86 | CPU_ARCH_ABI64
+CPU_TYPE_ARM64 = CPU_TYPE_ARM | CPU_ARCH_ABI64
+#: A subtype's top byte is capability bits (LIB64, PTRAUTH_ABI), not part of it.
+CPU_SUBTYPE_MASK = 0xFF000000
+CPU_SUBTYPE_X86_64_H = 8
+CPU_SUBTYPE_ARM64E = 2
 
 #: Far above any real file: universal binaries carry two to four slices.
 MAX_FAT_ARCHS = 16
@@ -161,6 +180,83 @@ def load_commands(path: Path) -> list[list[LoadCommand]]:
             return [thin]
     except OSError as e:
         raise MachOError(f"couldn't read {path.name}: {e}") from e
+
+
+def architectures(path: Path) -> list[str]:
+    """The processor each Mach-O slice of `path` is built for, in file order,
+    named as `lipo -archs` names them: "arm64", "arm64e", "x86_64",
+    "x86_64h", "i386"; any other as its numbers.
+
+    Read off each slice's own Mach-O header, which is what the slice is. In a
+    universal file the fat table's entry for it, which the kernel picks a
+    slice by, must say the same, or this raises `MachOError`: such a file
+    has no one answer. A slice that is no Mach-O at all is left out, as in
+    `load_commands`; a file with none raises `NotMachO`.
+    """
+    try:
+        with path.open("rb") as f:
+            head = f.read(8)
+            if len(head) < 4:
+                raise NotMachO(f"{path.name} is too short to be a Mach-O")
+            magic = struct.unpack(">I", head[:4])[0]
+            if magic in (FAT_CIGAM, FAT_CIGAM_64):
+                raise NotMachO(f"{path.name} has a byte-swapped fat magic, which no fat binary has")
+            if magic not in (FAT_MAGIC, FAT_MAGIC_64):
+                found = _header_cpu(f, 0, path, in_fat=False)
+                assert found is not None
+                return [_arch_name(*found)]
+            size = os.fstat(f.fileno()).st_size
+            names = []
+            for cputype, cpusubtype, offset, _ in _fat_entries(f, head, path, size):
+                found = _header_cpu(f, offset, path, in_fat=True)
+                if found is None:
+                    continue
+                said, was = _arch_name(cputype, cpusubtype), _arch_name(*found)
+                if said != was:
+                    raise MachOError(
+                        f"{path.name}: its fat table says the slice at offset {offset} is "
+                        f"{said}, and its header says {was}"
+                    )
+                names.append(was)
+            if not names:
+                raise NotMachO(f"{path.name} is a universal file with no Mach-O slice in it")
+            return names
+    except OSError as e:
+        raise MachOError(f"couldn't read {path.name}: {e}") from e
+
+
+def _header_cpu(f: BinaryIO, offset: int, path: Path, *, in_fat: bool) -> tuple[int, int] | None:
+    """The (cputype, cpusubtype) of the Mach-O header at `offset`; None for a
+    fat slice that is no Mach-O (`_thin`'s rule), `NotMachO` for a thin
+    file that isn't one."""
+    f.seek(offset)
+    header = f.read(12)
+    if len(header) < 4:
+        raise MachOError(f"{path.name}: no Mach-O header at offset {offset} (too short)")
+    magic = struct.unpack("<I", header[:4])[0]
+    if magic in (MH_MAGIC, MH_MAGIC_64):
+        e = "<"
+    elif magic in (MH_CIGAM, MH_CIGAM_64):
+        e = ">"
+    elif in_fat:
+        return None
+    else:
+        raise NotMachO(f"{path.name}: no Mach-O header at offset {offset}")
+    if len(header) < 12:
+        raise MachOError(f"{path.name}: the Mach-O header at offset {offset} is truncated (too short)")
+    cputype, cpusubtype = struct.unpack_from(e + "iI", header, 4)
+    return cputype, cpusubtype
+
+
+def _arch_name(cputype: int, cpusubtype: int) -> str:
+    subtype = cpusubtype & ~CPU_SUBTYPE_MASK & 0xFFFFFFFF
+    if cputype == CPU_TYPE_ARM64:
+        return "arm64e" if subtype == CPU_SUBTYPE_ARM64E else "arm64"
+    if cputype == CPU_TYPE_X86_64:
+        return "x86_64h" if subtype == CPU_SUBTYPE_X86_64_H else "x86_64"
+    if cputype == CPU_TYPE_X86:
+        return "i386"
+    return f"cputype 0x{cputype & 0xFFFFFFFF:x} subtype {subtype}"
 
 
 def cryptids(path: Path) -> list[int]:
@@ -443,6 +539,11 @@ def _fat_offsets(f: BinaryIO, head: bytes, path: Path, size: int) -> list[int]:
 
 def _fat_slices(f: BinaryIO, head: bytes, path: Path, size: int) -> list[tuple[int, int]]:
     """Each fat table entry's `(offset, size)`, in table order."""
+    return [(offset, length) for _, _, offset, length in _fat_entries(f, head, path, size)]
+
+
+def _fat_entries(f: BinaryIO, head: bytes, path: Path, size: int) -> list[tuple[int, int, int, int]]:
+    """Each fat table entry's `(cputype, cpusubtype, offset, size)`, in table order."""
     if len(head) < 8:
         raise MachOError(f"{path.name}'s fat header is truncated")
     magic, nfat = struct.unpack(">II", head)
@@ -453,9 +554,9 @@ def _fat_slices(f: BinaryIO, head: bytes, path: Path, size: int) -> list[tuple[i
     table = f.read(nfat * entry)
     if len(table) < nfat * entry:
         raise MachOError(f"{path.name}'s architecture table is truncated")
-    fmt = ">iiQQII" if is64 else ">iiIII"
-    slices = [struct.unpack_from(fmt, table, i * entry)[2:4] for i in range(nfat)]
-    for offset, _ in slices:
+    fmt = ">iIQQII" if is64 else ">iIIII"
+    slices = [struct.unpack_from(fmt, table, i * entry)[:4] for i in range(nfat)]
+    for _, _, offset, _ in slices:
         # Before any seek: a fat64 offset of 2^63 or more is no file position
         # at all, and `seek` raised ValueError past every MachOError handler.
         if offset >= size:

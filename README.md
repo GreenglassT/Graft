@@ -33,6 +33,8 @@ helps others find it.
 ## Install
 
 1. Download `Graft.zip` from [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
+   On an Intel Mac, download `Graft-Intel.zip` instead (a test build; see
+   [Requirements](#requirements)).
 2. Unzip it, move `Graft.app` to `/Applications`, and open it.
 
 Graft.app carries everything it needs:
@@ -48,12 +50,22 @@ Coming from Graft 1.x? See [Upgrading from Graft 1.x](docs/upgrading.md).
 
 ## Requirements
 
-- **A Mac with Apple silicon and macOS 14 or later.** On an Intel Mac,
-  Graft.app opens to a screen that says: "Graft 2.0 needs a Mac with Apple
-  silicon. Graft 1.1 may work on an Intel Mac running macOS 15 or later, but
-  it was never tested there." Graft 1.1 needs macOS 15; to install it, see
-  [Going back to 1.1](docs/upgrading.md#going-back-to-11), whose pipx command
-  pins it with `@v1.1`.
+- **A Mac with macOS 14 or later.** On a Mac with Apple silicon, download
+  `Graft.zip`, which does everything.
+- **On an Intel Mac,** download `Graft-Intel.zip`. It's a test build until it
+  has run on a real Intel Mac. Everything works except what needs Apple
+  silicon:
+  - App Store sign-in, and getting and decrypting App Store apps, older
+    versions and free ones included (search still works, for adding an app
+    by name, and needs no sign-in);
+  - Set Up Decryption;
+  - Build for this Mac, and handing builds to PlayCover.
+
+  Those buttons are there but disabled, with "Needs a Mac with Apple
+  silicon". Use a decrypted IPA you already have, or dump one from a
+  jailbroken device. `Graft.zip` opened on an Intel Mac only says to download
+  `Graft-Intel.zip`; `Graft-Intel.zip` on an Apple silicon Mac runs, with a
+  banner saying to download `Graft.zip` for everything.
 - **An iPhone or iPad** paired with this Mac, connected by USB, or on the
   same network with Wi-Fi sync turned on.
 - **An Apple account,** of one of two kinds. The first run asks which you
@@ -74,10 +86,10 @@ Coming from Graft 1.x? See [Upgrading from Graft 1.x](docs/upgrading.md).
 | Install or update LiveContainer from Graft | A paid membership and an App Store Connect API key. |
 | Make each app's provisioning profile automatically | A paid membership and an App Store Connect API key. |
 | Search the App Store | Nothing. No Apple ID is involved. |
-| Download from the App Store | An Apple ID signed in in Graft. Any Apple ID works, free or paid; it's separate from the account above. The app must be one that Apple ID owns, or a free one Graft can get for it. |
-| Decrypt App Store downloads | An iPhone or iPad app installed on this Mac from the Mac App Store, with the same Apple ID, and opened once. Any free one will do. |
+| Download from the App Store | A Mac with Apple silicon, and an Apple ID signed in in Graft. Any Apple ID works, free or paid; it's separate from the account above. The app must be one that Apple ID owns, or a free one Graft can get for it. |
+| Decrypt App Store downloads | A Mac with Apple silicon, and an iPhone or iPad app installed on it from the Mac App Store, with the same Apple ID, and opened once. Any free one will do. |
 | Decrypt on a jailbroken device | A jailbroken iPhone or iPad with frida-server 16.x and OpenSSH, plus tools you install yourself (see [Decrypt on a jailbroken device](#decrypt-on-a-jailbroken-device)). |
-| Run a build on this Mac | [PlayCover](https://github.com/PlayCover/PlayCover/releases), a free app you install yourself. Graft doesn't include it. |
+| Run a build on this Mac | A Mac with Apple silicon, and [PlayCover](https://github.com/PlayCover/PlayCover/releases), a free app you install yourself. Graft doesn't include it. |
 
 ## Getting started
 
@@ -265,6 +277,9 @@ version set in Edit App is a hold too; Get latest sets it back to latest.
 - Only apps your Apple ID has. If it doesn't have the app yet, get it first.
 - Apple doesn't serve every old version. One it won't describe or hand over
   says so, and you can pick another.
+- If the connection stalls, the list stops, and Try Again picks up where it
+  stopped. A version that stalls twice in a row is marked as unavailable, and
+  the list goes on.
 - Some apps refuse to run once they're too old, and ask you to update.
 - A version that's already staged is held without downloading it again.
 - An old version may be one UnfairPlay can't verify (see
@@ -311,7 +326,7 @@ Device UDIDs never leave your Mac.
 | You search, fetch or update tweaks | canister.me, and the repos you add | Tweak listings and downloads |
 | A device's pane opens, Edit App opens for a LiveContainer app, or you install LiveContainer | GitHub | LiveContainer's releases |
 | Once a day while Graft is open, unless Settings › Updates turns it off, and when you choose Help › Check for Updates… | GitHub (`api.github.com`), with nothing that identifies you or your Mac | Whether a newer Graft is out |
-| A newer Graft is out, unless Settings › Updates turns automatic updates off (then when you choose Update) | GitHub's release files (`github.com`), with nothing that identifies you or your Mac | The new `Graft.zip`, about 150 MB, once |
+| A newer Graft is out, unless Settings › Updates turns automatic updates off (then when you choose Update) | GitHub's release files (`github.com`), with nothing that identifies you or your Mac | The new `Graft.zip` (`Graft-Intel.zip` for the Intel build), about 150 MB, once |
 | A paid account with an App Store Connect key makes a profile | Apple's App Store Connect API | Provisioning profiles |
 | You sign in, get an app or an older version of one, list an app's older versions, or get a free one | Apple's App Store, through the bundled ipatool | Your sign-in, the license, the IPA, the versions' numbers and dates |
 | The first App Store action on a Mac (usually the first sign-in) | PyPI (`files.pythonhosted.org`), and Apple's software CDN | ipatool's Unicorn emulator (a few MB) and its App Store components (about 320 MB, skipped if a 1.x ipatool already downloaded them), once |
@@ -337,9 +352,13 @@ Check for Updates…), it asks GitHub whether a newer version is out. If one is,
 it downloads it in the background, then shows **Restart to Update** in a banner
 at the bottom of the main window. If you don't restart, it installs the update
 when you quit Graft.
+- Each download updates from its own zip: `Graft.zip` for Apple silicon,
+  `Graft-Intel.zip` for the Intel build. A release without yours has no
+  update for your Mac yet, and Graft never installs the other one.
 - Before it calls a download ready, Graft checks it: the SHA-256 GitHub lists
-  for it, then that the app inside is Graft, newer than yours, signed with
-  the same developer's Developer ID as yours and notarized by Apple. A download
+  for it, then that the app inside is Graft, newer than yours, the same build
+  as yours, signed with the same developer's Developer ID as yours and
+  notarized by Apple. A download
   that fails any check is deleted, and the banner links to the release page
   instead. A Graft you built yourself, which has no Developer ID, doesn't
   update itself.
@@ -360,7 +379,8 @@ Graft can't update itself when it runs straight from Downloads (macOS runs a
 read-only copy of an app it hasn't moved), or from a folder your account
 can't change. The banner then says so and links to
 [GitHub Releases](https://github.com/GreenglassT/Graft/releases): download the
-new `Graft.zip` there and replace the `Graft.app` in `/Applications`. If an
+new `Graft.zip` (or `Graft-Intel.zip`) there and replace the `Graft.app` in
+`/Applications`. If an
 update can't be installed, Graft keeps the version you have, says so the next
 time it opens, and writes what happened to `~/Library/Logs/Graft/update.log`.
 
@@ -694,7 +714,8 @@ None of this blocks a build.
 ## Running builds on this Mac
 
 On an Apple silicon Mac, an app's pane has **Build for this Mac**, which makes
-the build loadable under PlayCover and hands it to PlayCover. A staged IPA or
+the build loadable under PlayCover and hands it to PlayCover. (On an Intel
+Mac, PlayCover can't run, and the button is disabled.) A staged IPA or
 an archived build can be handed over too. Some tweak libraries import iOS
 private frameworks that macOS doesn't have; for these Mac builds Graft bundles
 a minimal stand-in instead. Phone builds are never changed this way.
@@ -1480,10 +1501,13 @@ there's no daemon.
 - A build from Xcode runs the CLI it finds on your PATH, such as the repo's
   venv.
 
-`scripts/graft-release` builds the distributable app: everything bundled
-(arm64, with a universal app executable that shows Intel Macs a "needs Apple
-silicon" screen), signed with a Developer ID identity and zipped. Then
-`scripts/verify-bundle` checks the sealed app. See
+`scripts/graft-release` builds the distributable app: everything bundled for
+one processor (`Graft.zip` for Apple silicon, `Graft-Intel.zip` for Intel
+Macs, with `--arch x86_64`), with a universal app executable in both, so
+`Graft.zip` opened on an Intel Mac shows a screen that names
+`Graft-Intel.zip`. It's signed with a Developer ID identity and zipped. Then
+`scripts/verify-bundle` (with `--arch x86_64` for the Intel build) checks the
+sealed app. See
 [Graft/README.md](Graft/README.md), and [docs/network.md](docs/network.md) for
 every host Graft and its tools contact, including what a release build
 downloads.

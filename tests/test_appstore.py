@@ -171,6 +171,101 @@ def test_on_an_intel_mac_an_unenrolled_get_says_why(
     assert not [c for c in fakes.calls("ipatool") if c["argv"][0] == "download"]
 
 
+def _intel_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Intel build of Graft.app on an Apple silicon Mac (conftest's): its
+    GraftBundleArch is x86_64, and it carries no UnfairPlay."""
+    from graft_ipa import host
+
+    monkeypatch.setattr(host, "_running_flavor", lambda: "x86_64")
+
+
+def test_the_intel_build_offers_no_decryption_setup_and_says_which_download(
+    cfg: Config, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not UnfairPlay's build-from-source steps, nor an enrollment: the fix
+    is Graft.zip, on this Apple silicon Mac."""
+    _intel_build(monkeypatch)
+    fakes.unfairplay.unlink()
+    (fakes.models / "enrollment.bin").unlink()
+
+    payload = appstore.status(cfg.appstore)
+    commands = payload["setup_commands"]
+
+    assert ("# App Store decryption can't be set up here: this is the Intel build of Graft; "
+            "on an Apple silicon Mac, download Graft.zip.") in commands
+    assert not any("go -C unfairplay build" in c or "git clone" in c for c in commands)
+    assert not any("--appstore-enroll-command" in c or "Set Up Decryption" in c for c in commands)
+    assert payload["unfairplay"]["install"] is None
+    assert all(c.startswith("#") or "--appstore-login" in c for c in commands)
+
+
+def test_the_intel_build_says_why_it_cant_get_from_the_app_store(
+    cfg: Config, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A get stops before ipatool runs (`store_requests_blocker`), and says
+    which download, not that UnfairPlay is missing."""
+    _intel_build(monkeypatch)
+    fakes.unfairplay.unlink()
+
+    with pytest.raises(AppStoreError) as e:
+        _fetch(cfg)
+
+    assert e.value.message == ("App Store sign-in and downloads need a Mac with Apple silicon and "
+                               "Graft.zip: this is the Intel build of Graft; on an Apple silicon Mac, "
+                               "download Graft.zip")
+    assert "UnfairPlay not found" not in e.value.message
+    assert fakes.calls("ipatool") == []
+
+
+def test_the_intel_build_says_why_it_cant_decrypt(
+    cfg: Config, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where only decryption is asked (an encrypted drop), its own refusal."""
+    _intel_build(monkeypatch)
+    fakes.unfairplay.unlink()
+
+    with pytest.raises(AppStoreError) as e:
+        appstore._require_unfairplay(cfg.appstore)
+
+    assert e.value.message == ("decrypting App Store IPAs can't be done here: this is the Intel "
+                               "build of Graft; on an Apple silicon Mac, download Graft.zip")
+    assert e.value.hint == "Use an IPA that is already decrypted, or dump one from a jailbroken device (--decrypt)"
+
+
+def test_the_intel_build_refuses_an_encrypted_drop_saying_why(
+    cfg: Config, fakes: FakeTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping an encrypted IPA, or Add App › Manual with one, reaches the
+    same refusal (`decrypted_if_encrypted`)."""
+    _intel_build(monkeypatch)
+    fakes.unfairplay.unlink()
+    src = make_ipa(tmp_path / "drop" / "Example.ipa", encrypted=True)
+
+    with pytest.raises(AppStoreError) as e, appstore.decrypted_if_encrypted(
+        cfg, "example", src, emitter=None
+    ):
+        pytest.fail("must not yield an encrypted IPA to be staged")
+
+    assert "this is the Intel build of Graft; on an Apple silicon Mac, download Graft.zip" in e.value.message
+    assert fakes.calls("unfairplay") == []
+
+
+def test_the_apple_silicon_build_still_says_unfairplay_is_missing(
+    cfg: Config, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The control: the same missing UnfairPlay in the Apple silicon build is
+    a damaged copy, said as before."""
+    from graft_ipa import host
+
+    monkeypatch.setattr(host, "_running_flavor", lambda: "arm64")
+    fakes.unfairplay.unlink()
+
+    with pytest.raises(AppStoreError) as e:
+        _fetch(cfg)
+
+    assert e.value.message.startswith("UnfairPlay not found at ")
+
+
 def test_2_8_1_is_warned_about(cfg: Config, fakes: FakeTools) -> None:
     fakes.set(ipatool_version="2.8.1")
 

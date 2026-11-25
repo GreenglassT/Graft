@@ -66,6 +66,99 @@ def test_the_pins_file_names_every_artifact_with_a_hash():
     assert {b for pin in pins.values() for b in pin.builds} | {"ldid", "insert_dylib"} >= set(gb.CYAN_HELPERS)
 
 
+# --- Intel Macs: Graft-Intel.zip, the x86_64 bundle --------------------------------------------
+
+#: The arm64 bundle's two per-architecture files, as 2.2 pinned them.
+ARM64_PYTHON = ("https://github.com/astral-sh/python-build-standalone/releases/download/20261026/"
+                "cpython-3.13.18+20261026-aarch64-apple-darwin-install_only.tar.gz",
+                "e5af2fde6a937a0e0c795a0c595c4efb70578d57463a2657c819992b9b9acbac")
+ARM64_ZSIGN = ("https://github.com/zhlynn/zsign/releases/download/v1.1.3/zsign-macos-arm64.tar.gz",
+               "2790ec58a55db5f4282843d0cdbb0b587d19b972331b5285aee2de67f4ab705e")
+
+
+def test_the_arm64_bundle_keeps_every_pin_it_had():
+    """The default is the arm64 bundle, exactly as before: the variants an
+    Intel bundle takes change none of its pins."""
+    pins = gb.load_pins(REPO / "bundle" / "pins.toml")
+    assert gb.load_pins(REPO / "bundle" / "pins.toml", "arm64") == pins
+    assert (pins["python"].url, pins["python"].sha256) == ARM64_PYTHON
+    assert (pins["zsign"].url, pins["zsign"].sha256) == ARM64_ZSIGN
+    assert not [n for n, p in pins.items() if p.arch or p.from_source], "every arm64 pin is its base table"
+    assert gb.pin_kind("zsign", pins) == "artifact" and "unfairplay" in pins
+
+
+def test_an_intel_bundle_takes_the_x86_64_python_zsign_built_from_source_and_no_unfairplay():
+    arm = gb.load_pins(REPO / "bundle" / "pins.toml")
+    intel = gb.load_pins(REPO / "bundle" / "pins.toml", "x86_64")
+    assert set(intel) == set(arm) - {"unfairplay"}, "UnfairPlay runs iOS apps, which only Apple silicon can"
+    python, zsign = intel["python"], intel["zsign"]
+    assert (python.url, python.sha256) == (
+        "https://github.com/astral-sh/python-build-standalone/releases/download/20261026/"
+        "cpython-3.13.18+20261026-x86_64-apple-darwin-install_only.tar.gz",
+        "708be9e7df297f68bdae589ea9e62a621db5abe7708f79e851c41410347452d1")
+    # zsign has no macOS x86_64 release file: the same release's source, the tag's commit.
+    assert (zsign.url, zsign.sha256) == (
+        "https://github.com/zhlynn/zsign/archive/9299685bab7ef99827e06e5dfda93af747386590.tar.gz",
+        "97bcc2dbbc0dc5f092dc4a33cbe1f9fdbd5c83bdc291da23db45044d4396270e")
+    assert zsign.from_source and gb.pin_kind("zsign", intel) == "built-from-source"
+    assert gb.source_commit(zsign) == ("https://github.com/zhlynn/zsign.git", "9299685bab7ef99827e06e5dfda93af747386590")
+    for name in ("python", "zsign"):
+        assert intel[name].arch == "x86_64"
+        assert (intel[name].version, intel[name].license) == (arm[name].version, arm[name].license), name
+    for name in set(intel) - {"python", "zsign"}:
+        assert intel[name] == arm[name], f"{name} is source or the host's toolchain: the same for both"
+
+
+def _pins_file(tmp_path: Path, text: str) -> Path:
+    path = tmp_path / "pins.toml"
+    path.write_text(text)
+    return path
+
+
+_BASE = f'version = "1"\nurl = "https://example.invalid/arm64.tar.gz"\nsha256 = "{"a" * 64}"\nlicense = "MIT"\n'
+_VARIANT = f'url = "https://example.invalid/x86_64.tar.gz"\nsha256 = "{"b" * 64}"\n'
+
+
+def test_a_pin_whose_file_is_a_mac_binary_needs_a_variant_for_intel(tmp_path):
+    pins = _pins_file(tmp_path, f"[python]\n{_BASE}")
+    assert gb.load_pins(pins)["python"].url.endswith("/arm64.tar.gz")
+    with pytest.raises(gb.BundleError, match=r"\[python\] has no \[python.x86_64\]"):
+        gb.load_pins(pins, "x86_64")
+    # Source is the same for both: no variant needed.
+    assert gb.load_pins(_pins_file(tmp_path, f"[openssl]\n{_BASE}"), "x86_64")["openssl"].url.endswith("/arm64.tar.gz")
+
+
+@pytest.mark.parametrize("text, error", [
+    (f"[python]\n{_BASE}[python.ppc]\n{_VARIANT}", r"\[python.ppc\], which names no architecture"),
+    (f"[python]\n{_BASE}[python.arm64]\n{_VARIANT}", r"\[python.arm64\], which names no architecture"),
+    (f'[python]\n{_BASE}[python.x86_64]\n{_VARIANT}license = "GPL-3.0"\n', "may set only"),
+    (f'[python]\n{_BASE}[python.x86_64]\nurl = "https://example.invalid/x"\n', "needs both url and sha256"),
+    (f'[zsign]\n{_BASE}[zsign.x86_64]\n{_VARIANT}build = "magic"\n', 'build = "magic"'),
+    (f'[unfairplay]\n{_BASE}archs = ["x86_64"]\n', "must include arm64"),
+    (f'[unfairplay]\n{_BASE}archs = ["arm64", "ppc"]\n', "ppc"),
+])
+def test_a_variant_or_architecture_list_that_makes_no_sense_is_refused(tmp_path, text, error):
+    with pytest.raises(gb.BundleError, match=error):
+        gb.load_pins(_pins_file(tmp_path, text), "x86_64")
+
+
+def test_an_architecture_no_release_is_built_for_is_refused(tmp_path):
+    with pytest.raises(gb.BundleError, match="riscv64"):
+        gb.load_pins(_pins_file(tmp_path, f"[openssl]\n{_BASE}"), "riscv64")
+
+
+def test_a_pin_for_arm64_only_is_left_out_of_an_intel_bundle(tmp_path):
+    pins = _pins_file(tmp_path, f'[unfairplay]\n{_BASE}archs = ["arm64"]\n[openssl]\n{_BASE}')
+    assert set(gb.load_pins(pins)) == {"unfairplay", "openssl"}
+    assert set(gb.load_pins(pins, "x86_64")) == {"openssl"}
+
+
+def test_every_architectures_pins_are_listed_for_the_shared_source_archive():
+    by_arch = gb.load_pins_by_arch(REPO / "bundle" / "pins.toml")
+    assert list(by_arch) == ["arm64", "x86_64"]
+    assert by_arch["x86_64"]["zsign"].from_source and not by_arch["arm64"]["zsign"].from_source
+
+
 def test_ipatools_licence_expression_covers_what_is_compiled_into_it():
     """RC audit #6: it left out mpb (the Unlicense) and xi2/xz (public
     domain), two Go modules in the binary; and since RC audit #1 the crates
@@ -570,7 +663,7 @@ def test_graft_and_cyan_are_built_only_with_the_hash_locked_backends(tmp_path, m
 
     monkeypatch.setattr(gb, "fetch", lambda pin, cache=None: tmp_path / "cache" / pin.filename)
     monkeypatch.setattr(gb, "extract", fake_extract)
-    monkeypatch.setattr(gb, "prune_python", lambda py: None)
+    monkeypatch.setattr(gb, "prune_python", lambda py, arch="arm64": None)
     monkeypatch.setattr(gb, "check_python", lambda py: "graft 0")
     monkeypatch.setattr(gb.subprocess, "run", fake_run)
     reports = tmp_path / "reports"
@@ -1457,7 +1550,7 @@ class _Built(Exception):
 
 @pytest.mark.parametrize("unknown", [False, True])
 def test_stage_stops_at_an_unknown_framework_before_building_anything(tmp_path, monkeypatch, unknown):
-    def stage_python(pins, contents, reports=None):
+    def stage_python(pins, contents, reports=None, arch="arm64"):
         extras = _extras(contents)
         _audit(monkeypatch, extras)
         if unknown:
@@ -1612,10 +1705,15 @@ def _sources_fixture(tmp_path: Path, monkeypatch, *, sdist_sha=None):
     cache = tmp_path / "cache"
     cache.mkdir()
 
+    licences = {gb._norm(n): lic for n, _, lic in packages}
+
     def fetch(pin, cache_dir=None):
         f = cache / pin.filename
         if pin.name == "cyan":
             return _cyan_archive(f, pin)
+        if pin.url.startswith("https://files.pythonhosted.org/"):
+            # A source distribution states its own license, in its PKG-INFO.
+            return _sdist_with_licence(f, pin.name, pin.version, licences[pin.name])
         f.write_bytes(f"the bytes of {pin.name}".encode())
         return f
 
@@ -1655,18 +1753,21 @@ def test_the_source_archive_covers_every_copyleft_component(tmp_path, monkeypatc
         md = tf.extractfile("Graft-9.9-sources/SOURCES.md").read().decode()
     top = "Graft-9.9-sources"
     assert f"{top}/graft/pyproject.toml" in members
-    for name, pin in pins.items():
-        if name in gb.LICENCE_TEXT_PINS:
-            assert not [m for m in members if f"/pinned/{name}/" in m], f"{name} is license texts, not in the app"
-        elif (name in gb.BUILT_FROM_SOURCE or gb.is_copyleft(pin.license) or name == "cyan") and not pin.source:
-            assert f"{top}/pinned/{name}/{gb.archived_filename(pin)}" in members, name
-            assert pin.sha256 in md and pin.url in md, name
-        elif pin.source:
-            # A copyleft binary: its source pin is what goes in.
-            assert not [m for m in members if f"/pinned/{name}/" in m], f"{name}'s binary, not its source"
-            assert f"{top}/pinned/{pin.source}/{pins[pin.source].filename}" in members, name
-        else:
-            assert not [m for m in members if f"/pinned/{name}/" in m], f"{name} is neither built here nor copyleft"
+    # One archive serves both bundles: each architecture's pins.
+    for arch_pins in gb.load_pins_by_arch(REPO / "bundle" / "pins.toml").values():
+        for name, pin in arch_pins.items():
+            if name in gb.LICENCE_TEXT_PINS:
+                assert not [m for m in members if f"/pinned/{name}/" in m], f"{name} is license texts, not in the app"
+            elif (name in gb.BUILT_FROM_SOURCE or pin.from_source or gb.is_copyleft(pin.license)
+                  or name == "cyan") and not pin.source:
+                assert f"{top}/pinned/{name}/{gb.archived_filename(pin)}" in members, name
+                assert pin.sha256 in md and pin.url in md, name
+            elif pin.source:
+                # A copyleft binary: its source pin is what goes in.
+                assert f"{top}/pinned/{name}/{pin.filename}" not in members, f"{name}'s binary, not its source"
+                assert f"{top}/pinned/{pin.source}/{arch_pins[pin.source].filename}" in members, name
+            else:
+                assert f"{top}/pinned/{name}/{pin.filename}" not in members, f"{name} is neither built here nor copyleft"
     assert f"{top}/pinned/ipatool/vendor.tar.gz" in members
     assert f"{top}/pinned/unfairplay/vendor.tar.gz" in members
     assert f"{top}/pinned/unfairplay/{pins['unfairplay'].filename}" in members, "UnfairPlay's source, not its release"
@@ -2097,7 +2198,7 @@ def test_the_ipatool_patch_applies_to_its_reader_as_the_build_applies_it(tmp_pat
     gb.apply_patches("ipatool", top)
     patched = reader.read_text()
     assert "rangeTailSize = 1 << 20" in patched and "r.mu.Lock()" in patched
-    assert "context.WithTimeout(context.Background(), rangeRequestTimeout)" in patched
+    assert "ctx, cancel, watch := watchForStall()" in patched and "watch.received()" in patched
     assert (top / "pkg" / "appstore" / "appstore_partial_zip_readahead_test.go").is_file()
     with pytest.raises(subprocess.CalledProcessError):
         gb.apply_patches("ipatool", top)      # --forward: never applied twice
@@ -2267,7 +2368,7 @@ def test_ipatool_is_staged_with_every_licence_and_no_unicorn(tmp_path, monkeypat
     for f, body in (("LICENSE", "ipatool MIT"), ("go-LICENSE", "Go BSD"), ("go-PATENTS", "Go patents")):
         (built / f).write_text(body)
     pins = gb.load_pins(REPO / "bundle" / "pins.toml")
-    monkeypatch.setattr(gb, "build_ipatool", lambda pin, go, work=None: built)
+    monkeypatch.setattr(gb, "build_ipatool", lambda pin, go, work=None, arch="arm64": built)
     monkeypatch.setattr(gb, "fetch", lambda pin, cache=None: pytest.fail(f"fetched {pin.name}"))
     contents, licences = tmp_path / "Contents", tmp_path / "licences"
     licences.mkdir()
@@ -2615,13 +2716,14 @@ def test_the_stage_puts_its_unfairplay_build_in_with_the_tool_licences(tmp_path,
     the folder the tools' licenses gather in; nothing else stages it."""
     calls = []
     dest, work = tmp_path / "stage", tmp_path / "work"
-    monkeypatch.setattr(gb, "stage_python", lambda pins, contents, reports=None: contents / "Resources/GraftPython")
-    monkeypatch.setattr(gb, "build_openssl", lambda pin, work=None: tmp_path / "openssl")
+    monkeypatch.setattr(gb, "stage_python", lambda pins, contents, reports=None, arch="arm64":
+                        contents / "Resources/GraftPython")
+    monkeypatch.setattr(gb, "build_openssl", lambda pin, work=None, arch="arm64": tmp_path / "openssl")
     monkeypatch.setattr(gb, "fetch", lambda pin, cache=None: calls.append(("fetch", pin.name)) or tmp_path / "f")
     monkeypatch.setattr(gb, "extract", lambda archive, dest: dest)
     monkeypatch.setattr(gb, "_the_binary", lambda unpacked, tool: unpacked / tool)
     monkeypatch.setattr(gb, "stage_openssl_and_zsign", lambda prefix, zsign, contents: None)
-    monkeypatch.setattr(gb, "stage_ipatool", lambda pins, contents, licences, work=None:
+    monkeypatch.setattr(gb, "stage_ipatool", lambda pins, contents, licences, work=None, arch="arm64":
                         calls.append(("ipatool", licences)))
 
     def stage_unfairplay(pins, contents, licences, work=None):
@@ -2957,9 +3059,10 @@ def test_graft_release_builds_the_commit_it_recorded_from_an_export_of_it():
     assert '"$PY" "$EXPORT/scripts/graft_bundle.py" stage' in s and '"$PY" "$EXPORT/scripts/verify-bundle"' in s
     assert '--commit "$HEAD_AT_START" --repo "$REPO_ROOT"' in s
     assert s.index('"$(git -C "$REPO_ROOT" rev-parse HEAD)" != "$HEAD_AT_START"') > s.index("→ the source archive")
-    for old in ('"$OUT_DIR/Graft.app"', '"$OUT_DIR/Graft.zip"', '"$OUT_DIR/components.json"',
+    for old in ('"$OUT_DIR/Graft.app"', '"$OUT_DIR/$ZIP_NAME"', '"$OUT_DIR/components.json"',
                 '"$OUT_DIR"/Graft-*-sources.tar.gz'):
         assert old in s.split("check-python", 1)[0], old
+    assert "ZIP_NAME=Graft.zip" in s and "ZIP_NAME=Graft-Intel.zip" in s
     assert "ditto -c -k --keepParent Graft.app Graft.zip" in s and "verify-bundle --zip" in s  # review #41
 
 
@@ -3577,7 +3680,7 @@ def test_openssl_builds_in_the_clean_environment_and_its_key_covers_steps_and_to
     assert gb.build_openssl(pin, tmp_path / "work") == first and len(envs) == 1, "cached"
     toolchain[0] = "clang 2; SDK 15.0"
     assert gb.build_openssl(pin, tmp_path / "work") != first, "a new compiler is a new build"
-    monkeypatch.setattr(gb, "openssl_steps", lambda destdir, jobs: [["./Configure", "no-asm"], ["make", "install_sw",
+    monkeypatch.setattr(gb, "openssl_steps", lambda destdir, jobs, arch="arm64": [["./Configure", "no-asm"], ["make", "install_sw",
                                                                                                 f"DESTDIR={destdir}"]])
     assert gb.build_openssl(pin, tmp_path / "work").parent.name not in {first.parent.name}, "new steps, new build"
 
@@ -3585,10 +3688,10 @@ def test_openssl_builds_in_the_clean_environment_and_its_key_covers_steps_and_to
 def test_every_build_key_and_sources_md_name_the_toolchain():
     import inspect
     for fn in (gb.build_libplist, gb.build_ldid, gb.build_cctools, gb.build_insert_dylib, gb.ipatool_key,
-               gb.unfairplay_key, gb.build_preferences_stub, gb.build_openssl):
+               gb.unfairplay_key, gb.build_preferences_stub, gb.build_openssl, gb.build_zsign):
         assert "toolchain_id()" in inspect.getsource(fn), fn.__name__
     for fn, key in ((gb.build_ipatool, "ipatool_key"), (gb.build_unfairplay, "unfairplay_key")):
-        assert f"{key}(pin, go_pin)" in inspect.getsource(fn), fn.__name__
+        assert re.search(rf"{key}\(pin, go_pin(, arch)?\)", inspect.getsource(fn)), fn.__name__
     assert "toolchain_id()" in inspect.getsource(gb._toolchain)
 
 
@@ -4054,7 +4157,7 @@ def test_staging_a_go_tool_whose_copyleft_module_its_licence_doesnt_name_is_refu
     for f in (*gb.UNFAIRPLAY_LICENCES, "go-LICENSE", "go-PATENTS"):
         (built / f).write_text(f)
     monkeypatch.setattr(gb, "build_unfairplay", lambda pin, go, work=None: built)
-    monkeypatch.setattr(gb, "build_ipatool", lambda pin, go, work=None: built)
+    monkeypatch.setattr(gb, "build_ipatool", lambda pin, go, work=None, arch="arm64": built)
     pins = gb.load_pins(REPO / "bundle" / "pins.toml")
     for tool, stage in (("unfairplay", gb.stage_unfairplay), ("ipatool", gb.stage_ipatool)):
         licences = tmp_path / f"{tool}-licences"
@@ -4327,7 +4430,7 @@ def test_the_default_route_is_read_from_route(monkeypatch, out, code, want):
 
 def _on(monkeypatch, gateway: str, plan: list) -> None:
     monkeypatch.setattr(gb, "default_route", lambda: (gateway, "en7"))
-    monkeypatch.setattr(gb, "download_plan", lambda pins: plan)
+    monkeypatch.setattr(gb, "download_plan", lambda pins, *a, **kw: plan)
     monkeypatch.delenv("GRAFT_ALLOW_HOTSPOT", raising=False)
 
 
@@ -4337,7 +4440,7 @@ BIG = [gb.Download("go 1.26.5", 65), gb.Download("ipatool's Go modules", 100), g
 
 def test_off_a_hotspot_nothing_is_planned_or_asked(monkeypatch, capsys):
     _on(monkeypatch, "192.168.1.1", BIG)
-    monkeypatch.setattr(gb, "download_plan", lambda pins: pytest.fail("planned off a hotspot"))
+    monkeypatch.setattr(gb, "download_plan", lambda pins, *a, **kw: pytest.fail("planned off a hotspot"))
     assert gb.check_hotspot({}, interactive=True, answer=lambda: pytest.fail("asked"))
     assert capsys.readouterr().err == ""
 
@@ -4374,7 +4477,765 @@ def test_on_a_hotspot_with_no_one_to_ask_it_stops_unless_allowed(monkeypatch, ca
 
 
 def test_the_hotspot_check_is_a_command_whose_status_says_go_on_or_stop(monkeypatch):
-    monkeypatch.setattr(gb, "check_hotspot", lambda pins: False)
+    monkeypatch.setattr(gb, "check_hotspot", lambda pins, **kw: False)
     assert gb.main(["hotspot-check"]) == 1
-    monkeypatch.setattr(gb, "check_hotspot", lambda pins: True)
+    monkeypatch.setattr(gb, "check_hotspot", lambda pins, **kw: True)
     assert gb.main(["hotspot-check"]) == 0
+
+
+# --- the x86_64 stage: Graft-Intel.zip -------------------------------------------------------------
+
+#: What the stage ran for arm64 at v2.2 (17fe3a8), every command, setting
+#: and path, written out by the stage of that commit (`$TMP` and `$REPO` for
+#: the two paths that were this machine's).
+ARM64_STAGE = json.loads((REPO / "tests" / "fixtures" / "bundle" / "arm64-stage-2.2.json").read_text())
+#: The two v2.2 records' SHA-256s. They are data, so writing them again would
+#: quietly make any change pass: a change to either needs review, as a change
+#: to the arm64 bundle, never a regenerated file.
+STAGE_FIXTURES = {"arm64-stage-2.2.json": "bb921eb702f34c6ab77843bd83c6013e95e9a309cc9e06e8e80a9db3bda46252",
+                  "arm64-stage-calls-2.2.json": "c12615fd153cc91089656dd55cdea2c273cadd4d3e2da5c5dbc9efa2f56c9d13"}
+
+
+def _stage_commands(tmp_path: Path, monkeypatch, arch: str | None) -> dict:
+    """The stage's commands, settings and paths, as ARM64_STAGE records them,
+    for `arch` (None: each function called with no arch at all)."""
+    a = {} if arch is None else {"arch": arch}
+    pins = gb.load_pins(REPO / "bundle" / "pins.toml", arch or "arm64")
+    calls = []
+    monkeypatch.setattr(gb.subprocess, "run", lambda argv, **kw: calls.append([str(x) for x in argv]))
+    contents = tmp_path / (arch or "default") / "Contents"
+    gb.build_launchers(contents, **a)
+    monkeypatch.undo()
+    got = {
+        "TARGET": list(gb.target(**a)),
+        "openssl": gb.openssl_steps("$DESTDIR", ["-j8"], **a),
+        "libplist": gb.libplist_steps("$DESTDIR", ["-j8"], **a),
+        "ldid": gb.ldid_steps("$LIBPLIST", "$OPENSSL", ["-j8"], **a),
+        "cctools": gb.cctools_steps(["-j8"], **a),
+        "insert_dylib": gb.insert_dylib_steps(**a),
+        "ipatool": gb.ipatool_steps("2.8.0"),
+        "IPATOOL_ENV": gb.ipatool_env(**a),
+        "WHEEL_TARGET": list(gb.wheel_target(**a)),
+        "PRUNE": list(gb.prune_patterns(**a)),
+        "CYAN_TOOLS": str(gb.cyan_tools(**a)),
+        "stub": gb.stub_steps(),
+        "launchers": [[x.replace(str(contents.parent), "$TMP").replace(str(REPO), "$REPO") for x in c] for c in calls],
+        "ENTITLED": gb.ENTITLED,
+    }
+    if "unfairplay" in pins:
+        got["unfairplay"] = gb.unfairplay_steps("0.4.0", *gb.source_commit(pins["unfairplay"]))
+        got["UNFAIRPLAY_ENV"] = gb.UNFAIRPLAY_ENV
+    return got
+
+
+def test_the_arm64_stage_runs_exactly_what_2_2_did(tmp_path, monkeypatch):
+    """Every build command, setting and path of the arm64 bundle, with arch
+    left out and with arch="arm64", is v2.2's, as is each module constant."""
+    assert _stage_commands(tmp_path, monkeypatch, None) == ARM64_STAGE
+    assert _stage_commands(tmp_path, monkeypatch, "arm64") == ARM64_STAGE
+    assert (list(gb.TARGET), gb.IPATOOL_ENV, list(gb.WHEEL_TARGET), list(gb.PRUNE), str(gb.CYAN_TOOLS)) == (
+        ARM64_STAGE["TARGET"], ARM64_STAGE["IPATOOL_ENV"], ARM64_STAGE["WHEEL_TARGET"], ARM64_STAGE["PRUNE"],
+        ARM64_STAGE["CYAN_TOOLS"])
+
+
+#: How an arm64 command becomes its x86_64 one: nothing else may differ.
+_TO_INTEL = [('"-arch", "arm64"', '"-arch", "x86_64"'), ("-arch arm64", "-arch x86_64"),
+             ("darwin64-arm64-cc", "darwin64-x86_64-cc"), ("macosx_14_0_arm64", "macosx_14_0_x86_64"),
+             ('"GOARCH": "arm64"', '"GOARCH": "amd64"'), ("Darwin/arm64", "Darwin/@"), ("Darwin/x86_64", "Darwin/arm64"),
+             ("Darwin/@", "Darwin/x86_64")]
+
+
+def _intel(value):
+    text = json.dumps(value)
+    for old, new in _TO_INTEL:
+        text = text.replace(old, new)
+    out = json.loads(text)
+    # The two autotools configures are told they cross-compile (AUTOTOOLS_HOST).
+    for key in ("libplist", "cctools"):
+        if isinstance(out, dict) and key in out:
+            out[key][0].insert(2, "--host=x86_64-apple-darwin")
+    return out
+
+
+def test_the_x86_64_stage_runs_the_arm64_commands_for_x86_64_and_nothing_else(tmp_path, monkeypatch):
+    """Each Mac binary is built for x86_64 (OpenSSL's darwin64-x86_64-cc,
+    clang's -arch x86_64, Go's GOARCH=amd64, x86_64 wheels, cyan's
+    Darwin/x86_64), at the same macOS 14.0, by the same commands; PRUNE
+    drops Darwin/arm64 in place of Darwin/x86_64. PlayCover's stub is iOS
+    code: arm64 in both. No UnfairPlay."""
+    got = _stage_commands(tmp_path, monkeypatch, "x86_64")
+    want = {k: v for k, v in ARM64_STAGE.items() if k not in ("unfairplay", "UNFAIRPLAY_ENV", "stub")}
+    want = {**_intel(want), "stub": ARM64_STAGE["stub"]}
+    assert got == want
+    for key in ("TARGET", "openssl", "libplist", "ldid", "cctools", "insert_dylib", "IPATOOL_ENV", "WHEEL_TARGET",
+                "PRUNE", "CYAN_TOOLS", "launchers"):
+        assert got[key] != ARM64_STAGE[key], f"{key} is built for x86_64"
+        assert "arm64" not in json.dumps(got[key]).replace("Darwin/arm64", ""), key
+    assert got["stub"][0][:6] == ["xcrun", "-sdk", "iphoneos", "clang", "-arch", "arm64"], "iOS code, for the phone"
+    assert "-mmacosx-version-min=14.0" in got["TARGET"]
+
+
+def test_an_architecture_no_release_is_built_for_builds_nothing():
+    for fn in (gb.target, gb.wheel_target, gb.prune_patterns):
+        with pytest.raises(gb.BundleError, match="ppc"):
+            fn("ppc")
+    with pytest.raises(KeyError):
+        gb.openssl_steps("$D", [], "ppc")
+
+
+def test_zsign_builds_from_its_makefile_for_x86_64_on_the_bundled_openssl():
+    """Upstream's build/macos/Makefile as its release runs it (make
+    VERSION=1.1.3), with no pkg-config: the bundled OpenSSL by path, the
+    target on CC and CXX (its zlib, minizip and link use nothing else), and
+    room in the header for the @executable_path names."""
+    assert gb.zsign_steps("$OPENSSL", ["-j8"], "1.1.3", "x86_64") == [[
+        "make", "-j8", "-C", "build/macos", "VERSION=1.1.3",
+        "CC=clang -arch x86_64 -mmacosx-version-min=14.0", "CXX=clang++ -arch x86_64 -mmacosx-version-min=14.0",
+        "CXXFLAGS=-std=c++11 -O3 -MMD -MP -DZSIGN_VERSION=1.1.3", "OPENSSL_INCLUDE=-I$OPENSSL/include",
+        "LIBS=$OPENSSL/lib/libssl.3.dylib $OPENSSL/lib/libcrypto.3.dylib -Wl,-headerpad_max_install_names"]]
+
+
+def _fake_zsign_build(tmp_path: Path, monkeypatch, imports: set[str]) -> tuple[list, Path]:
+    """build_zsign's tools faked: the archive, its unpacking, make (which
+    leaves a bin/zsign), and nm (which reads `imports`)."""
+    seen = []
+    openssl = tmp_path / "openssl-abc" / "prefix"
+    (openssl / "include" / "openssl").mkdir(parents=True)
+    (openssl / "lib").mkdir()
+    for lib in gb.OPENSSL_LIBS:
+        (openssl / "lib" / lib).write_bytes(b"lib")
+
+    def unpack(pin, tmp):
+        src = tmp / "src" / "zsign"
+        (src / "build" / "macos").mkdir(parents=True)
+        (src / "LICENSE").write_text("MIT License\n")
+        return src
+
+    def build_steps(steps, cwd):
+        seen.append(("make", steps, cwd.name))
+        (cwd / "bin").mkdir()
+        (cwd / "bin" / "zsign").write_bytes(mb.thin([]))
+
+    monkeypatch.setattr(gb, "fetch", lambda pin, cache=None: tmp_path / "zsign.tar.gz")
+    monkeypatch.setattr(gb, "check_archive_commit", lambda pin, archive: seen.append(("commit", pin.name)))
+    monkeypatch.setattr(gb, "_unpack", unpack)
+    monkeypatch.setattr(gb, "_build_steps", build_steps)
+    monkeypatch.setattr(gb, "imported_symbols", lambda path: imports)
+    monkeypatch.setattr(gb, "toolchain_id", lambda: "clang 1")
+    return seen, openssl
+
+
+def test_zsign_is_built_from_the_commit_its_pin_names_and_cached_by_its_inputs(tmp_path, monkeypatch):
+    seen, openssl = _fake_zsign_build(tmp_path, monkeypatch, {"_popen", "_execlp", "_fopen"})
+    pin = gb.load_pins(REPO / "bundle" / "pins.toml", "x86_64")["zsign"]
+    built = gb.build_zsign(pin, openssl, tmp_path / "work", "x86_64")
+    assert (built / "zsign").is_file() and (built / "LICENSE").read_text() == "MIT License\n"
+    assert seen[0] == ("commit", "zsign"), "checked to be the pinned commit before anything is built"
+    (_, steps, cwd), = seen[1:]
+    assert steps == gb.zsign_steps(str(steps[0][-2].split("-I", 1)[1].removesuffix("/include")), gb._jobs(),
+                                   "1.1.3", "x86_64")
+    assert " " not in steps[0][-2], "the OpenSSL it builds against is a copy without a space in its path"
+    assert gb.build_zsign(pin, openssl, tmp_path / "work", "x86_64") == built and len(seen) == 2, "cached"
+    assert gb.build_zsign(pin, openssl, tmp_path / "work", "arm64") != built, "another target is another build"
+    other = tmp_path / "openssl-def" / "prefix"
+    shutil.copytree(openssl, other)
+    assert gb.build_zsign(pin, other, tmp_path / "work", "x86_64") != built, "another OpenSSL build is another build"
+
+
+def test_a_zsign_build_that_can_start_a_shell_some_other_way_is_refused(tmp_path, monkeypatch):
+    _, openssl = _fake_zsign_build(tmp_path, monkeypatch, {"_popen", "_system"})
+    pin = gb.load_pins(REPO / "bundle" / "pins.toml", "x86_64")["zsign"]
+    with pytest.raises(gb.BundleError, match="imports _popen, _system"):
+        gb.build_zsign(pin, openssl, tmp_path / "work", "x86_64")
+
+
+class _Thinned(Exception):
+    """Raised by a fake thin_to_arch: the stage got that far."""
+
+
+def test_the_x86_64_stage_builds_zsign_passes_its_arch_everywhere_and_has_no_unfairplay(tmp_path, monkeypatch):
+    calls = []
+    dest, work = tmp_path / "stage", tmp_path / "work"
+    gp = dest / "Resources" / "GraftPython"
+    prefix = tmp_path / "openssl"
+
+    def stage_python(pins, contents, reports=None, arch="arm64"):
+        calls.append(("python", pins["python"].sha256[:8], arch))
+        (gp / "lib" / "python3.13").mkdir(parents=True)
+        (gp / "lib" / "python3.13" / "LICENSE.txt").write_text("PSF")
+        return gp
+
+    def build_openssl(pin, work=None, arch="arm64"):
+        calls.append(("openssl", arch))
+        prefix.mkdir(exist_ok=True)
+        (prefix / "LICENSE.txt").write_text("Apache")
+        return prefix
+
+    def record(name):
+        return lambda *a, **kw: calls.append((name, kw.get("arch")))
+
+    def thin(contents, arch="arm64"):
+        calls.append(("thin", arch))
+        raise _Thinned
+
+    monkeypatch.setattr(gb, "stage_python", stage_python)
+    monkeypatch.setattr(gb, "build_openssl", build_openssl)
+    monkeypatch.setattr(gb, "build_zsign", lambda pin, openssl, work=None, arch="arm64":
+                        calls.append(("zsign", pin.from_source, openssl, arch)) or tmp_path / "zsign-built")
+    monkeypatch.setattr(gb, "fetch", lambda pin, cache=None: calls.append(("fetch", pin.name)) or tmp_path / "f")
+    monkeypatch.setattr(gb, "stage_openssl_and_zsign", lambda p, zsign, contents: calls.append(("repoint", zsign)))
+    monkeypatch.setattr(gb, "stage_unfairplay", lambda *a, **kw: pytest.fail("the Intel bundle has no UnfairPlay"))
+    for name in ("stage_ipatool", "python_static_licences", "rust_crate_licences", "binary_crate_licences",
+                 "stage_cyan_helpers", "build_launchers", "stage_preferences_stub"):
+        monkeypatch.setattr(gb, name, record(name))
+    monkeypatch.setattr(gb, "build_cyan_helpers", lambda *a, arch="arm64", **kw: calls.append(("helpers", arch)) or {})
+    monkeypatch.setattr(gb, "cyan_original_hashes", lambda archive, arch="arm64": calls.append(("originals", arch)) or {})
+    monkeypatch.setattr(gb, "prune_unlinked_libpython", lambda contents: [])
+    monkeypatch.setattr(gb, "thin_to_arch", thin)
+    with pytest.raises(_Thinned):
+        gb.stage(dest, work, arch="x86_64")
+    assert calls == [("python", "708be9e7", "x86_64"), ("openssl", "x86_64"),
+                     ("zsign", True, prefix, "x86_64"), ("repoint", tmp_path / "zsign-built" / "zsign"),
+                     ("stage_ipatool", "x86_64"), ("python_static_licences", None), ("rust_crate_licences", None),
+                     ("binary_crate_licences", None), ("helpers", "x86_64"), ("fetch", "cyan"), ("originals", "x86_64"),
+                     ("stage_cyan_helpers", "x86_64"), ("build_launchers", "x86_64"), ("stage_preferences_stub", None),
+                     ("thin", "x86_64")]
+    assert sorted(p.name for p in (work / "tool-licences").iterdir()) == ["openssl-LICENSE.txt", "python-LICENSE.txt",
+                                                                          "zsign-LICENSE"]
+
+
+def test_the_arm64_stage_still_takes_zsigns_release_binary(tmp_path, monkeypatch):
+    pins = gb.load_pins(REPO / "bundle" / "pins.toml")
+    monkeypatch.setattr(gb, "build_zsign", lambda *a, **kw: pytest.fail("arm64 builds no zsign"))
+    monkeypatch.setattr(gb, "fetch", lambda pin, cache=None: tmp_path / pin.filename)
+    monkeypatch.setattr(gb, "extract", lambda archive, dest: dest)
+    monkeypatch.setattr(gb, "_the_binary", lambda unpacked, tool: unpacked / f"{tool}-release")
+    assert gb.stage_zsign_binary(pins, tmp_path / "openssl", tmp_path / "work") == \
+        tmp_path / "work" / "zsign-release" / "zsign-release"
+
+
+@needs_tools("clang", "lipo")  # compiles with clang; the code under test runs lipo
+def test_universal_mach_o_files_in_an_intel_stage_are_thinned_to_x86_64(tmp_path):
+    c = tmp_path / "Contents"
+    fat = _clang_dylib(c / "Resources/GraftPython/lib/python3.13/site-packages/x/_x.abi3.so", "arm64", "x86_64")
+    thin = _clang_dylib(c / "Frameworks/libthin.dylib", "x86_64")
+    before = thin.read_bytes()
+    assert gb.thin_to_arch(c, "x86_64") == [fat]
+    assert _lipo_archs(fat) == ["x86_64"]
+    assert thin.read_bytes() == before, "an x86_64-only file is left alone"
+    _clang_dylib(c / "Helpers/bin/libarm.dylib", "arm64")
+    with pytest.raises(gb.BundleError, match=r"libarm\.dylib is arm64, with no x86_64 slice"):
+        gb.thin_to_arch(c, "x86_64")
+
+
+def test_ios_code_is_not_thinned_in_an_intel_stage_either(tmp_path, monkeypatch):
+    contents = tmp_path / "Contents"
+    ios = contents / CYAN_EXTRAS / "Orion.framework" / "Orion"
+    ios.parent.mkdir(parents=True)
+    ios.write_bytes(mb.fat([(mb.CPU_ARM64, mb.thin([mb.build_version_cmd(mb.PLATFORM_IOS, "14.0")])),
+                            (mb.CPU_X86_64, mb.thin([mb.build_version_cmd(mb.PLATFORM_IOS, "14.0")]))]))
+    before = ios.read_bytes()
+    monkeypatch.setattr(gb, "_run", lambda *a, **k: pytest.fail(f"thinned {a}"))
+    assert gb.thin_to_arch(contents, "x86_64") == [] and ios.read_bytes() == before
+
+
+def test_an_intel_stage_prunes_cyans_arm64_helpers_and_keeps_its_x86_64_ones(tmp_path):
+    py = tmp_path / "GraftPython"
+    tools = py / "lib/python3.13/site-packages/cyan/tools"
+    for d in ("Darwin/arm64", "Darwin/x86_64", "Darwin/iOS", "Linux/x86_64"):
+        (tools / d).mkdir(parents=True)
+        (tools / d / "ldid").write_bytes(b"x")
+    (py / "bin").mkdir()
+    (py / "bin" / "python3.13").write_bytes(b"py")
+    gb.prune_python(py, "x86_64")
+    assert sorted(str(p.relative_to(tools)) for p in tools.rglob("ldid")) == ["Darwin/x86_64/ldid"]
+
+
+def test_cyans_x86_64_originals_are_read_and_replaced_in_darwin_x86_64(tmp_path, monkeypatch):
+    import zipfile
+    tools = {name: f"cyan's x86_64 {name}".encode() for name in gb.CYAN_HELPERS}
+    archive = tmp_path / "cyan.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        for name, data in tools.items():
+            z.writestr(f"pyzule-rw-0/cyan/tools/Darwin/x86_64/{name}", data)
+            z.writestr(f"pyzule-rw-0/cyan/tools/Darwin/arm64/{name}", b"arm64 " + data)
+    originals = gb.cyan_original_hashes(archive, "x86_64")
+    assert originals == {name: hashlib.sha256(data).hexdigest() for name, data in tools.items()}
+    contents, built, _ = _helpers_stage(tmp_path / "stage")
+    intel = contents / gb.cyan_tools("x86_64")
+    (contents / CYAN_TOOLS).rename(intel)
+    for name, data in tools.items():
+        (intel / name).write_bytes(data)
+    _install_name_tool_fake(monkeypatch)
+    gb.stage_cyan_helpers(built, contents, originals, "x86_64")
+    assert str(gb.cyan_tools("x86_64")).endswith("cyan/tools/Darwin/x86_64")
+    for name in gb.CYAN_HELPERS:
+        assert (intel / name).is_file() and (intel / name).read_bytes() != tools[name], name
+    # Darwin/x86_64 is as deep as Darwin/arm64: ldid reaches Frameworks the same way.
+    assert macho.dylib_names(intel / "ldid")[:2] == [f"{TO_FRAMEWORKS}/libcrypto.3.dylib",
+                                                     f"{TO_FRAMEWORKS}/libplist-2.0.dylib"]
+
+
+def test_a_locked_install_for_x86_64_picks_x86_64_wheels(tmp_path, monkeypatch):
+    calls = []
+    url = "https://files.pythonhosted.org/packages/aa/bb/x-1.0-py3-none-any.whl"
+
+    def fake_run(argv, **kw):
+        argv = [str(a) for a in argv]
+        calls.append(argv)
+        if "--report" in argv:
+            _pip_report(Path(argv[argv.index("--report") + 1]), [("X", "1.0", url, "a" * 64)])
+    monkeypatch.setattr(gb.subprocess, "run", fake_run)
+    gb.install_locked(tmp_path / "python3.13", gb.RUNTIME_LOCK, tmp_path / "plan.json", tmp_path / "s", {}, "x86_64")
+    resolve, download, _ = calls
+    for argv in (resolve, download):
+        assert argv[argv.index("--platform") + 1] == "macosx_14_0_x86_64"
+
+
+def test_the_index_names_only_the_go_module_folders_the_bundle_has(tmp_path):
+    def index(folders: list[str]) -> str:
+        root = tmp_path / "-".join(folders or ["none"])
+        extra = root / "tool-licences"
+        for f in folders:
+            (extra / f / "example.com@v1").mkdir(parents=True)
+            (extra / f / "example.com@v1" / "LICENSE").write_text(MIT_TEXT)
+        (root / "Contents").mkdir()
+        gb.collect_licenses(root / "Contents", gb.load_pins(REPO / "bundle" / "pins.toml"), extra)
+        return (root / "Contents/Resources/Licenses/INDEX.txt").read_text()
+    assert "; ipatool-modules/ and unfairplay-modules/ for the Go modules in each; " in index(
+        ["ipatool-modules", "unfairplay-modules"])
+    intel = index(["ipatool-modules"])
+    assert "; ipatool-modules/ for the Go modules in it; " in intel and "unfairplay-modules" not in intel
+
+
+# --- the Intel bundle's runtime lock ------------------------------------------------------------
+
+_LOCK = """#
+# This file is autogenerated by pip-compile with Python 3.13
+#
+alpha==1.0 \\
+    --hash=sha256:{a}
+    # via graft-ipa (pyproject.toml)
+cryptography==50.0.2 \\
+    --hash=sha256:{b} \\
+    --hash=sha256:{c}
+    # via
+    #   graft-ipa (pyproject.toml)
+    #   paramiko
+zeta==2.0 \\
+    --hash=sha256:{d}
+    # via cryptography
+""".format(a="a" * 64, b="b" * 64, c="c" * 64, d="d" * 64)
+
+
+def test_the_intel_lock_is_the_runtime_lock_but_for_each_override_rehashed_by_pip_compile(tmp_path):
+    asked = []
+
+    def hashes(name: str, version: str) -> list[str]:
+        asked.append((name, version))
+        return ["e" * 64, "f" * 64]
+
+    text = gb.x86_64_lock_text(_LOCK, {"cryptography": "48.0.1"}, hashes)
+    assert asked == [("cryptography", "48.0.1")]
+    head, body = text.split("alpha==1.0", 1)
+    original = _LOCK.split("alpha==1.0")[0]
+    assert head.startswith("#\n# The Intel (x86_64) bundle's runtime lock") and "bundle/x86_64-overrides.txt" in head
+    assert head.endswith(original.removeprefix("#\n")), "pip-compile's own header follows the note"
+    assert "alpha==1.0" + body == "alpha==1.0" + _LOCK.split("alpha==1.0", 1)[1].replace(
+        f"cryptography==50.0.2 \\\n    --hash=sha256:{'b' * 64} \\\n    --hash=sha256:{'c' * 64}\n",
+        f"cryptography==48.0.1 \\\n    --hash=sha256:{'e' * 64} \\\n    --hash=sha256:{'f' * 64}\n")
+    locked = gb.lock_hashes(_write(tmp_path / "x.lock", text))
+    assert locked["cryptography"] == ("48.0.1", {"e" * 64, "f" * 64}) and locked["zeta"] == ("2.0", {"d" * 64})
+
+
+def _write(path: Path, text: str) -> Path:
+    path.write_text(text)
+    return path
+
+
+def test_an_override_the_runtime_lock_does_not_pin_is_refused():
+    with pytest.raises(gb.BundleError, match="nothing"):
+        gb.x86_64_lock_text(_LOCK, {"nothing": "1.0"}, lambda n, v: ["e" * 64])
+    with pytest.raises(gb.BundleError, match="no hashes"):
+        gb.x86_64_lock_text(_LOCK, {"cryptography": "48.0.1"}, lambda n, v: [])
+
+
+def test_the_overrides_file_names_each_package_with_its_version(tmp_path):
+    overrides = _write(tmp_path / "o.txt", "# why\ncryptography==48.0.1  # the last with an x86_64 wheel\n\n")
+    assert gb.lock_overrides(overrides) == {"cryptography": "48.0.1"}
+    with pytest.raises(gb.BundleError, match="name==version"):
+        gb.lock_overrides(_write(tmp_path / "bad.txt", "cryptography>=48\n"))
+
+
+def test_the_committed_intel_lock_is_the_runtime_lock_with_only_the_overrides_changed():
+    """lock-bundle writes both; a runtime lock re-made without the Intel one
+    would leave Intel on old versions, which this catches."""
+    arm, intel = gb.lock_hashes(gb.RUNTIME_LOCK), gb.lock_hashes(gb.X86_64_LOCK)
+    overrides = gb.lock_overrides()
+    assert overrides == {"cryptography": "48.0.1"}, "cryptography 49 and later ship no macOS x86_64 wheel"
+    assert set(arm) == set(intel)
+    for name in arm:
+        if name in overrides:
+            assert intel[name][0] == overrides[name] and len(intel[name][1]) > 1, name
+        else:
+            assert intel[name] == arm[name], name
+    assert gb.runtime_lock() == gb.runtime_lock("arm64") == gb.RUNTIME_LOCK
+    assert gb.runtime_lock("x86_64") == gb.X86_64_LOCK
+    blocks = gb.lock_entries(gb.X86_64_LOCK.read_text())[1]
+    assert [n for n, _ in blocks] == [n for n, _ in gb.lock_entries(gb.RUNTIME_LOCK.read_text())[1]]
+
+
+def test_the_intel_stage_installs_the_intel_lock(tmp_path, monkeypatch):
+    locks = []
+
+    def install_locked(py, lock, plan, scratch, env, arch="arm64"):
+        locks.append((lock.name, arch))
+        if lock != gb.BUILD_LOCK:
+            raise _Thinned
+
+    monkeypatch.setattr(gb, "fetch", lambda pin, cache=None: tmp_path / "python.tar.gz")
+    monkeypatch.setattr(gb, "extract", lambda archive, dest: (dest / "python" / "bin").mkdir(parents=True) or dest)
+    monkeypatch.setattr(gb, "install_locked", install_locked)
+    for arch, want in (("x86_64", "requirements-x86_64.lock"), ("arm64", "requirements.lock")):
+        with pytest.raises(_Thinned):
+            gb.stage_python(gb.load_pins(REPO / "bundle" / "pins.toml", arch), tmp_path / arch, arch=arch)
+    assert locks == [("build-requirements.lock", "x86_64"), ("requirements-x86_64.lock", "x86_64"),
+                     ("build-requirements.lock", "arm64"), ("requirements.lock", "arm64")]
+
+
+# --- one source archive for both bundles ----------------------------------------------------------
+
+def _archive(components: Path, out: Path, lock: Path | None) -> tuple[bytes, str]:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    gb.write_sources(components, out, lock=lock)
+    with tarfile.open(out) as tf:
+        md = tf.extractfile(f"{out.name.removesuffix('.tar.gz')}/SOURCES.md").read().decode()
+    return out.read_bytes(), md
+
+
+def test_sources_md_gives_the_intel_bundles_builds_beside_the_arm64_ones(tmp_path, monkeypatch):
+    pins, components, lock, _ = _sources_fixture(tmp_path, monkeypatch)
+    _, md = _archive(components, tmp_path / "out" / "Graft-9.9-sources.tar.gz", lock)
+    intel = gb.load_pins(REPO / "bundle" / "pins.toml", "x86_64")
+    assert "One archive serves both downloads: arm64 (Graft.zip) and x86_64 (Graft-Intel.zip)." in md
+    for arch in ("arm64", "x86_64"):
+        for step in (gb.openssl_steps("$DESTDIR", [], arch) + gb.libplist_steps("$DESTDIR", [], arch)
+                     + gb.ldid_steps("$LIBPLIST", "$OPENSSL", [], arch) + gb.cctools_steps([], arch)
+                     + gb.insert_dylib_steps(arch)):
+            assert gb.shell_line(step) in md, (arch, step)
+    for name in ("openssl", "libplist", "ldid", "cctools", "insert_dylib"):
+        section = _section(md, name)
+        assert "- For arm64 (Graft.zip), in " in section and "- For x86_64 (Graft-Intel.zip), in " in section, name
+    assert f"`Contents/{gb.cyan_tools('x86_64')}/ldid`" in _section(md, "ldid")
+    # zsign: the Intel bundle's, from source, with its own section; the arm64 release file isn't built here.
+    zsign = _section(md, "zsign")
+    assert "- Only in the x86_64 bundle (Graft-Intel.zip)" in zsign and intel["zsign"].url in zsign
+    assert gb.shell_line(gb.zsign_steps("$OPENSSL", [], "1.1.3", "x86_64")[0]) in zsign
+    assert "zsign 1.1.3 (MIT), the arm64 bundle's" in md.split("## Not built here", 1)[1]
+    assert f"python {pins['python'].version} (PSF-2.0)," in md.split("## Not built here", 1)[1]
+    assert "- Only in the arm64 bundle (Graft.zip)" in _section(md, "unfairplay")
+    ipatool = _section(md, "ipatool")
+    assert "`GOARCH=arm64` (arm64) or `GOARCH=amd64` (x86_64)" in ipatool
+    assert ipatool.count("\n" + gb.shell_line(["go", "mod", "vendor"]) + "\n") == 1, "one set of steps: only GOARCH differs"
+    assert "- For x86_64" not in ipatool and "- In the archive's top directory, once patched" in ipatool
+    assert "Darwin/x86_64 in Graft-Intel.zip" in _section(md, "cyan")
+
+
+def test_either_bundles_components_give_the_same_source_archive(tmp_path, monkeypatch):
+    """The arm64 and the Intel release each write the archive; it must be one
+    archive, whichever wrote it."""
+    pins, components, lock, packages = _sources_fixture(tmp_path, monkeypatch)
+    intel = gb.load_pins(REPO / "bundle" / "pins.toml", "x86_64")
+    entries = [e for e in json.loads(components.read_text()) if e["kind"] == "python-package"]
+    entries += [{"name": n, "version": p.version, "kind": gb.pin_kind(n, intel), "source_url": p.url,
+                 "sha256": p.sha256, "license": p.license} for n, p in intel.items()]
+    other = tmp_path / "intel-components.json"
+    other.write_text(json.dumps(entries))
+    first, _ = _archive(components, tmp_path / "a" / "Graft-9.9-sources.tar.gz", lock)
+    second, _ = _archive(other, tmp_path / "b" / "Graft-9.9-sources.tar.gz", lock)
+    assert first == second
+
+
+def _sdist_with_licence(path: Path, name: str, version: str, licence: str) -> Path:
+    data = f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\nLicense-Expression: {licence}\n".encode()
+    with tarfile.open(path, "w:gz") as tf:
+        info = tarfile.TarInfo(f"{name}-{version}/PKG-INFO")
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+    return path
+
+
+def test_a_package_the_bundles_lock_at_two_versions_ships_both_sources_with_their_own_licences(tmp_path, monkeypatch):
+    pins, components, lock, packages = _sources_fixture(tmp_path, monkeypatch)
+    text = lock.read_text()
+    intel_lock = tmp_path / "requirements-x86_64.lock"
+    intel_lock.write_text(text.replace("mitpkg==5.0", "mitpkg==4.9").replace(
+        hashlib.sha256(b"mitpkg").hexdigest(), hashlib.sha256(b"mitpkg 4.9").hexdigest()))
+    monkeypatch.setattr(gb, "runtime_lock", lambda arch="arm64": lock if arch == "arm64" else intel_lock)
+    real_fetch, real_pypi = gb.fetch, gb._pypi_sdist
+
+    def pypi(name, version):
+        if name == "mitpkg":
+            sha = hashlib.sha256(b"mitpkg" if version == "5.0" else b"mitpkg 4.9").hexdigest()
+            return f"https://files.pythonhosted.org/packages/ab/mitpkg-{version}.tar.gz", sha
+        return real_pypi(name, version)
+
+    def fetch(pin, cache_dir=None):
+        if pin.name == "mitpkg":
+            licence = "MIT" if pin.version == "5.0" else "BSD-3-Clause"
+            return _sdist_with_licence(tmp_path / pin.filename, "mitpkg", pin.version, licence)
+        return real_fetch(pin, cache_dir)
+
+    monkeypatch.setattr(gb, "_pypi_sdist", pypi)
+    monkeypatch.setattr(gb, "fetch", fetch)
+    arm, md = _archive(components, tmp_path / "a" / "Graft-9.9-sources.tar.gz", None)
+    with tarfile.open(tmp_path / "a" / "Graft-9.9-sources.tar.gz") as tf:
+        names = set(tf.getnames())
+    assert {"Graft-9.9-sources/sdists/mitpkg-5.0.tar.gz", "Graft-9.9-sources/sdists/mitpkg-4.9.tar.gz"} <= names
+    assert "| mitpkg | 4.9 | BSD-3-Clause |" in md and "| mitpkg | 5.0 | MIT |" in md
+    assert "(mitpkg 4.9), and both versions' are here" in md
+    # The Intel release's components name mitpkg 4.9: the archive is the same.
+    entries = json.loads(components.read_text())
+    for e in entries:
+        if e["name"] == "mitpkg":
+            e.update(version="4.9", license="something its wheel says")
+    other = tmp_path / "intel-components.json"
+    other.write_text(json.dumps(entries))
+    intel, _ = _archive(other, tmp_path / "b" / "Graft-9.9-sources.tar.gz", None)
+    assert arm == intel
+
+
+def test_an_sdists_licence_is_read_from_its_own_pkg_info(tmp_path):
+    assert gb.sdist_licence(_sdist_with_licence(tmp_path / "x-1.tar.gz", "x", "1", "Apache-2.0 OR BSD-3-Clause")) == \
+        "Apache-2.0 OR BSD-3-Clause"
+    with tarfile.open(tmp_path / "bare.tar.gz", "w:gz"):
+        pass
+    assert gb.sdist_licence(tmp_path / "bare.tar.gz") == "not stated in its metadata"
+
+
+# --- what an Intel release downloads, on a phone's hotspot -------------------------------------------
+
+def test_an_intel_releases_plan_counts_its_own_builds_and_what_the_shared_archive_needs(tmp_path, monkeypatch):
+    """The Intel stage builds ipatool for x86_64; the source archive takes
+    the arm64 builds' vendored modules, UnfairPlay's among them, and both
+    locks' source distributions."""
+    arm, cache, work, lock, crates = _plan_world(tmp_path, monkeypatch)
+    monkeypatch.setattr(gb, "_urlopen", lambda *a, **k: pytest.fail("the plan went to the network"))
+    intel = {n: p for n, p in arm.items() if n != "unfairplay"}
+    (work / f"ipatool-{gb.ipatool_key(intel['ipatool'], intel['go'], 'x86_64')[:12]}").mkdir()
+    intel_lock = tmp_path / "requirements-x86_64.lock"
+    intel_lock.write_text(lock.read_text().replace("bbb==2.0", "bbb==1.9"))
+    plan = gb.download_plan(intel, cache, work, intel_lock, crates, arch="x86_64", extra=[arm["unfairplay"]],
+                            source_locks=(lock, intel_lock), source_pins=arm)
+    whats = [d.what for d in plan]
+    assert "ipatool's Go modules" in whats, "the archive's arm64 ipatool isn't built, nor its modules fetched"
+    assert "unfairplay's Go modules" in whats, "the archive carries UnfairPlay's modules though Intel has none"
+    assert "unfairplay 1.0 (arm64's, for the source archive)" not in whats, "its pin is cached"
+    assert "2 source distribution(s) for the source archive: bbb 1.9, ccc 3.0" in whats
+    # bbb 2.0's sdist, which only the arm64 lock pins, is in the archive too.
+    (cache / "bbb-2.0.zip").unlink()
+    whats = [d.what for d in gb.download_plan(intel, cache, work, intel_lock, crates, arch="x86_64",
+                                              source_locks=(lock, intel_lock), source_pins=arm)]
+    assert "3 source distribution(s) for the source archive: bbb 1.9, bbb 2.0, ccc 3.0" in whats
+    # The x86_64 build alone, cached under its own key, needs no modules.
+    assert "ipatool's Go modules" not in [d.what for d in gb.download_plan(
+        intel, cache, work, intel_lock, crates, arch="x86_64")]
+    (work / f"ipatool-{gb.ipatool_key(arm['ipatool'], arm['go'])[:12]}").mkdir()
+    assert "ipatool's Go modules" not in [d.what for d in gb.download_plan(
+        intel, cache, work, intel_lock, crates, arch="x86_64", source_pins=arm)], "both builds are cached"
+    (cache / f"{'c' * 40}.tar.gz").unlink()
+    assert "unfairplay 1.0 (arm64's, for the source archive)" in [d.what for d in gb.download_plan(
+        intel, cache, work, intel_lock, crates, arch="x86_64", extra=[arm["unfairplay"]], source_pins=arm)]
+
+
+def test_a_cached_wheel_counts_only_for_the_architecture_it_is_for(tmp_path):
+    lock = tmp_path / "requirements.lock"
+    lock.write_text("aaa==1.0 \\\n    --hash=sha256:" + "1" * 64 + " \\\n    --hash=sha256:" + "2" * 64
+                    + "\nbbb==2.0 \\\n    --hash=sha256:" + "3" * 64
+                    + "\nccc==3.0 \\\n    --hash=sha256:" + "4" * 64 + "\n")
+    cache = tmp_path / "cache"
+    pip = gb.pip_cache(cache)
+    urls = {"1" * 64: "https://files.example.invalid/aaa-1.0-cp313-cp313-macosx_11_0_arm64.whl",
+            "3" * 64: "https://files.example.invalid/bbb-2.0-py3-none-any.whl",
+            "4" * 64: "https://files.example.invalid/ccc-3.0-cp39-abi3-macosx_10_9_universal2.whl"}
+    for url in urls.values():
+        _cached_body(pip, url, b"wheel")
+    plan = _pip_report(tmp_path / "plan.json", [(u.rsplit("/", 1)[1].split("-")[0], "1.0", u, sha)
+                                                 for sha, u in urls.items()])
+    gb.record_cached_wheels(plan, pip)
+    assert gb.uncached_wheels((lock,), cache, "arm64") == [] == gb.uncached_wheels((lock,), cache)
+    assert gb.uncached_wheels((lock,), cache, "x86_64") == ["aaa 1.0"], "its cached wheel is arm64's"
+
+
+def test_each_releases_plan_covers_its_stage_and_the_one_source_archive(tmp_path, monkeypatch):
+    monkeypatch.setattr(gb, "_urlopen", lambda *a, **k: pytest.fail("the plan went to the network"))
+    empty = tmp_path / "cache"
+    empty.mkdir()
+    for arch, own, archived in (("arm64", "zsign 1.1.3", "zsign 1.1.3 (x86_64's, for the source archive)"),
+                                ("x86_64", "zsign 1.1.3", "unfairplay 0.4.0 (arm64's, for the source archive)")):
+        plan = gb.release_plan(arch, empty, tmp_path / "work")
+        whats = [d.what for d in plan]
+        assert own in whats and archived in whats, (arch, whats)
+        assert ("unfairplay 0.4.0" in whats) == (arch == "arm64")
+        assert "unfairplay's Go modules" in whats, arch
+        sizes = {d.what: d.mb for d in plan}
+        assert sizes["python 3.13.18+20261026"] == 25
+    intel = {d.what: d.mb for d in gb.release_plan("x86_64", empty, tmp_path / "work")}
+    assert intel["zsign 1.1.3"] == 24, "the Intel zsign is its 24 MB source archive, not the arm64 release"
+
+
+def test_the_hotspot_check_plans_for_the_arch_it_is_given(monkeypatch):
+    asked = []
+    monkeypatch.setattr(gb, "release_plan", lambda arch="arm64": asked.append(arch) or [])
+    monkeypatch.setattr(gb, "default_route", lambda: (gb.HOTSPOT_GATEWAY, "en7"))
+    assert gb.main(["hotspot-check", "--arch", "x86_64"]) == 0
+    assert gb.main(["hotspot-check"]) == 0
+    assert asked == ["x86_64", "arm64"]
+    assert gb.main(["hotspot-check", "--arch", "ppc"]) == 2
+
+
+
+# --- review: the source archive's licenses are the sdists' own --------------------------------------
+
+def test_each_sdists_licence_in_sources_md_is_its_own_not_a_wheels(tmp_path, monkeypatch):
+    """Review #3: the license column came from the release's components.json,
+    its wheels' metadata, which an x86_64 wheel may state otherwise than the
+    arm64 one: two archives under one name. Now each sdist states its own."""
+    pins, components, lock, packages = _sources_fixture(tmp_path, monkeypatch)
+    entries = json.loads(components.read_text())
+    for e in entries:
+        if e["kind"] == "python-package":
+            e["license"] = f"what {e['name']}'s wheel for one Mac says"
+    other = tmp_path / "other-components.json"
+    other.write_text(json.dumps(entries))
+    first, md = _archive(components, tmp_path / "a" / "Graft-9.9-sources.tar.gz", lock)
+    second, _ = _archive(other, tmp_path / "b" / "Graft-9.9-sources.tar.gz", lock)
+    assert first == second, "the same archive, whichever release's components it was given"
+    for name, version, licence in packages:
+        if name != "wheelonly":
+            assert f"| {gb._norm(name)} | {version} | {licence} |" in md, name
+    assert "wheel for one Mac" not in md
+
+
+def _sdist(path: Path, top: str, files: dict[str, str]) -> Path:
+    with tarfile.open(path, "w:gz") as tf:
+        for name, text in files.items():
+            data = text.encode()
+            info = tarfile.TarInfo(f"{top}/{name}")
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return path
+
+
+@pytest.mark.parametrize("files, licence", [
+    ({"PKG-INFO": "Metadata-Version: 2.4\nName: a\nLicense-Expression: MIT\n",
+      "pyproject.toml": '[project]\nlicense = "BSD-3-Clause"\n'}, "MIT"),
+    # ptyprocess 0.7.0: an old flit sdist, whose PKG-INFO states nothing; its pyproject.toml has the classifier.
+    ({"PKG-INFO": "Metadata-Version: 1.1\nName: a\n", "LICENSE": "ISC License text",
+      "pyproject.toml": '[tool.flit.metadata]\nclassifiers = ["License :: OSI Approved :: ISC License (ISCL)"]\n'},
+     "ISC License (ISCL)"),
+    ({"PKG-INFO": "Metadata-Version: 2.1\nName: a\n", "pyproject.toml": '[project]\nlicense = "Apache-2.0"\n'},
+     "Apache-2.0"),
+    ({"PKG-INFO": "Metadata-Version: 2.1\nName: a\n",
+      "pyproject.toml": '[project]\nlicense = {text = "MIT License"}\n'}, "MIT License"),
+    ({"PKG-INFO": "Metadata-Version: 2.1\nName: a\n", "LICENSE.txt": "some text"},
+     "not stated in its metadata; see its license file"),
+    ({"PKG-INFO": "Metadata-Version: 2.1\nName: a\n", "pyproject.toml": "not [valid toml"},
+     "not stated in its metadata"),
+])
+def test_an_sdists_licence_is_its_pkg_info_s_else_its_pyproject_s(tmp_path, files, licence):
+    assert gb.sdist_licence(_sdist(tmp_path / "a-1.tar.gz", "a-1", files)) == licence
+
+
+
+# --- review: more of v2.2's arm64 stage, recorded -------------------------------------------------
+
+#: The stage functions record_stage_calls stands in for, and what each gives back.
+_STAGE_STEPS = ("stage_python", "cyan_frameworks", "build_openssl", "fetch", "extract", "_the_binary",
+                "stage_openssl_and_zsign", "vendored_licences", "stage_ipatool", "stage_unfairplay",
+                "python_static_licences", "lock_hashes", "rust_crate_licences", "binary_crate_licences",
+                "build_cyan_helpers", "cyan_original_hashes", "stage_cyan_helpers", "build_launchers",
+                "stage_preferences_stub", "prune_unlinked_libpython", "thin_to_arm64", "thin_to_arch",
+                "prune_foreign_rpaths", "collect_licenses", "crate_notice_problems", "write_components",
+                "check_no_build_paths", "signed_machos", "write_entitlements_list")
+
+
+def record_stage_calls(module, tmp: Path) -> dict:
+    """What a graft_bundle `module` does for the arm64 bundle beyond its build
+    commands: its build environment, zsign's OpenSSL repoint plan, a locked
+    install's pip commands, and the order of stage()'s steps. Paths are
+    `$TMP`, `$REPO` and `$HOME`, so v2.2's record (written by this, from
+    v2.2's module) can be compared. Every tool is a stand-in: nothing runs."""
+    real_run, real_cache, real_steps = module.subprocess.run, module.CACHE, {n: getattr(module, n, None)
+                                                                             for n in _STAGE_STEPS}
+    repo = str(module.REPO)
+
+    def norm(value):
+        text = json.dumps(value)
+        for path, name in ((str(tmp), "$TMP"), (repo, "$REPO"), (os.environ.get("HOME", "/"), "$HOME"),
+                           (os.environ.get("TMPDIR", "/tmp"), "$TMPDIR")):
+            text = text.replace(path, name)
+        return json.loads(text)
+
+    record = {"_build_env": norm({k: v for k, v in module._build_env().items() if k != "DEVELOPER_DIR"})}
+    zsign = tmp / "zsign"
+    zsign.write_bytes(mb.thin([mb.dylib_cmd(n) for n in (
+        "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib", "/opt/homebrew/opt/openssl@3/lib/libcrypto.3.dylib",
+        "/usr/lib/libz.1.dylib", "/usr/lib/libc++.1.dylib", "/usr/lib/libSystem.B.dylib")]))
+    record["openssl_repoint_plan"] = [list(p) for p in module.openssl_repoint_plan(zsign)]
+    pip = []
+
+    def fake_run(argv, **kw):
+        argv = [str(a) for a in argv]
+        pip.append(argv)
+        if "--report" in argv:
+            url = "https://files.pythonhosted.org/packages/aa/a-1.0-py3-none-any.whl"
+            Path(argv[argv.index("--report") + 1]).write_text(json.dumps({"install": [{
+                "download_info": {"url": url, "archive_info": {"hashes": {"sha256": "a" * 64}}},
+                "metadata": {"name": "a", "version": "1.0"}}]}))
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    order = []
+    try:
+        module.subprocess.run, module.CACHE = fake_run, tmp / "cache"
+        module.install_locked(Path("/py/bin/python3.13"), module.RUNTIME_LOCK, tmp / "plan.json", tmp / "pip", {})
+        record["install_locked"] = norm(pip)
+        gp, prefix = tmp / "GraftPython", tmp / "openssl"
+        for d in (gp / "lib" / "python3.13", prefix):
+            d.mkdir(parents=True)
+        (gp / "lib" / "python3.13" / "LICENSE.txt").write_text("PSF")
+        (prefix / "LICENSE.txt").write_text("Apache")
+        gives = {"stage_python": gp, "build_openssl": prefix, "fetch": tmp / "f", "extract": tmp / "x",
+                 "_the_binary": tmp / "zsign", "vendored_licences": tmp / "licences", "lock_hashes": {},
+                 "build_cyan_helpers": {}, "cyan_original_hashes": {}, "prune_unlinked_libpython": [],
+                 "thin_to_arm64": [], "thin_to_arch": [], "prune_foreign_rpaths": [], "crate_notice_problems": [],
+                 "signed_machos": [], "cyan_frameworks": []}
+        (tmp / "licences").mkdir()
+        for name in _STAGE_STEPS:
+            if hasattr(module, name):
+                setattr(module, name, lambda *a, _n=name, **k: order.append(_n) or gives.get(_n))
+        module.stage(tmp / "stage", tmp / "work")
+        record["stage_order"] = order
+    finally:
+        module.subprocess.run, module.CACHE = real_run, real_cache
+        for name, fn in real_steps.items():
+            if fn is not None:
+                setattr(module, name, fn)
+    return record
+
+
+def test_the_v2_2_records_are_the_ones_reviewed():
+    for name, sha in STAGE_FIXTURES.items():
+        got = hashlib.sha256((REPO / "tests" / "fixtures" / "bundle" / name).read_bytes()).hexdigest()
+        assert got == sha, f"{name} changed: that is a change to what the arm64 stage does, so review it"
+
+
+def test_the_arm64_stage_still_builds_its_env_repoints_zsign_installs_and_stages_in_2_2_s_order(tmp_path):
+    """The build environment, zsign's OpenSSL repoint plan, a locked
+    install's three pip commands and stage()'s steps, in order: v2.2's
+    (tests/fixtures/bundle/arm64-stage-calls-2.2.json, recorded from 17fe3a8
+    by record_stage_calls). Only thin_to_arm64 is now thin_to_arch."""
+    want = json.loads((REPO / "tests" / "fixtures" / "bundle" / "arm64-stage-calls-2.2.json").read_text())
+    got = record_stage_calls(gb, tmp_path)
+    got["stage_order"] = ["thin_to_arm64" if n == "thin_to_arch" else n for n in got["stage_order"]]
+    assert got == want

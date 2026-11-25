@@ -34,7 +34,7 @@ app from source.
 
 ## Requirements
 
-- macOS 14 or later, on Apple silicon. The app's own executable is universal (arm64 and x86_64), so on an Intel Mac it opens to a screen that says "Graft 2.0 needs a Mac with Apple silicon. Graft 1.1 may work on an Intel Mac running macOS 15 or later, but it was never tested there." (Graft 1.1 needs macOS 15; [Going back to 1.1](../docs/upgrading.md#going-back-to-11) installs its CLI with `@v1.1`.) Everything it bundles is arm64 only.
+- macOS 14 or later. The app's own executable is universal (arm64 and x86_64) in both downloads; Info.plist's `GraftBundleArch` says which download a bundle is (`MacSupport`, checked against the embedded Python's Mach-O header; no key means arm64, as in a Debug build). `Graft.zip` bundles arm64 tools, and on an Intel Mac opens only to a screen that names `Graft-Intel.zip`. `Graft-Intel.zip` runs on either Mac, with App Store sign-in (Sign In… and Sign In Again…), App Store gets and Get an older version…, Set Up Decryption, Build for this Mac, Install to Mac and Get PlayCover disabled (no ipatool App Store request runs at all): on an Intel Mac each says "Needs a Mac with Apple silicon", and on an Apple silicon Mac "Needs the Apple silicon download of Graft (Graft.zip)", under a banner pointing to `Graft.zip`.
 - Xcode, and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 
 Xcode is for building the app. Running a release build needs neither Xcode
@@ -66,10 +66,10 @@ A local build is signed ad hoc and contains no CLI, so build Debug: a Debug buil
 
 ### The distributable app
 
-`scripts/graft-release` builds the download: a Release with the CLI, its own Python and the tools inside it, signed with a Developer ID identity. The app's executable is universal, for the Intel message; the Python, the tools and OpenSSL are arm64.
+`scripts/graft-release` builds the download: a Release with the CLI, its own Python and the tools inside it, signed with a Developer ID identity. By default it builds `Graft.zip`, for Apple silicon; `--arch x86_64` builds `Graft-Intel.zip`, for Intel Macs: the same app with its Python, tools and OpenSSL built for x86_64, and no UnfairPlay. The app's own executable is universal in both; everything else is the bundle's one architecture, and Info.plist's `GraftBundleArch` (`arm64` or `x86_64`, written before anything is signed) says which. An Intel release stops before building if the app's own Swift doesn't read that key, since its Intel Macs would otherwise see the old "needs Apple silicon" screen.
 
 ```bash
-GRAFT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" scripts/graft-release [output-dir]
+GRAFT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" scripts/graft-release [--arch arm64|x86_64] [output-dir]
 ```
 
 It runs from the repo's venv (`pip install -e '.[dev]'`). It downloads the pinned artifacts and PyPI wheels, and `codesign --timestamp` needs the network too; see [docs/network.md](../docs/network.md).
@@ -84,11 +84,11 @@ In order, it:
 7. runs `scripts/verify-bundle` on the sealed app. A failure removes the zip;
 8. writes the source archive (`scripts/graft_bundle.py sources`). It needs a checkout with no uncommitted changes, since it is HEAD's source.
 
-The output directory gets `Graft.app`, `Graft.zip`, `components.json` and `Graft-<version>-sources.tar.gz`. The source archive goes on the release page beside the zip: Graft's source, the pinned source of every binary built from source, the PyPI source distribution of every copyleft Python package, and `SOURCES.md` with the build commands.
+The output directory (`build/release`, or `build/release-intel` for x86_64, by default) gets `Graft.app`, `Graft.zip` (or `Graft-Intel.zip`), `components.json` and `Graft-<version>-sources.tar.gz`. The source archive goes on the release page beside the zips: Graft's source, the pinned source of every binary either bundle builds from source, the PyPI source distribution of every copyleft Python package, and `SOURCES.md` with the build commands for both. Both releases write the same source archive.
 
 **Nothing inside the app runs before `codesign --verify --deep --strict` passes.** Running code from an app with an incomplete seal makes macOS show "“Graft” is damaged" and block until someone answers.
 
-`scripts/verify-bundle <Graft.app>` runs the bundled CLI, Python and tools in a sandbox: a temporary HOME, a system-only PATH, no keychain and no device. Use it on its own as well.
+`scripts/verify-bundle <Graft.app>` runs the bundled CLI, Python and tools in a sandbox: a temporary HOME, a system-only PATH, no keychain and no device. Use it on its own as well. For the Intel bundle, give `--arch x86_64` first; its checks run under Rosetta.
 
 `scripts/verify-bundle --zip Graft.zip` checks a zip as a user receives it: it unpacks it, quarantines it as a browser would, and asks Gatekeeper. It runs nothing from a copy Gatekeeper rejects, and it always rejects a zip that isn't notarized.
 

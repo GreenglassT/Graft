@@ -14,10 +14,21 @@ import SwiftUI
 /// enrollment script behind macOS's administrator prompt
 /// (`AppStoreEnrollSheet`). The Terminal block remains only for a missing
 /// tool, which in Graft.app means a damaged bundle.
+///
+/// **Without Apple silicon** (`MacSupport.unavailableLine`): Sign In…, Sign
+/// In Again… and Set Up Decryption… are disabled, each with the line saying
+/// why, whether or not this download has UnfairPlay (the Intel one doesn't).
+/// Every App Store sign-in runs ipatool's emulator, which the Intel build
+/// can't run (`appstore.store_requests_blocker`), and nothing a sign-in is
+/// for (a get, a free claim, older versions) can be decrypted there.
+/// Searching the App Store and adding an app by name need no sign-in: they
+/// use Apple's public lookup. Sign Out still works: it only forgets the
+/// sign-in in the login keychain.
 struct AppStoreSettingsSection: View {
     let store: AppStoreStore
     @State private var showSignIn = false
     @State private var showEnroll = false
+    @Environment(\.macSupport) private var mac
 
     /// What the section shows, read off the store's three load facts.
     enum State: Equatable {
@@ -180,17 +191,42 @@ struct AppStoreSettingsSection: View {
     /// one. The model works only for the Apple ID the Mac App Store installed
     /// its app with, so after a switch of Apple ID every decrypt fails; Set Up
     /// Again… is the way out that needs no Terminal (the review's critic).
-    static func enrollAction(_ status: AppStoreStatusRecord) -> EnrollAction? {
-        guard status.unfairplay.present else { return nil }
+    ///
+    /// Where this Mac can't decrypt (`unavailable`), the button is there
+    /// anyway, disabled, so the line beside it has something to explain:
+    /// with no UnfairPlay in this download it would otherwise just vanish.
+    static func enrollAction(_ status: AppStoreStatusRecord, unavailable: String? = nil) -> EnrollAction? {
+        guard status.unfairplay.present || unavailable != nil else { return nil }
         return status.unfairplay.enrolled ? .setUpAgain : .setUp
     }
 
     static let setUpAgainHelp = "Enroll this Mac again: needed after the Mac App Store, or Graft, changes to another Apple ID."
 
+    /// Whether Sign In… or Sign In Again… can be pressed: when the account's
+    /// buttons can (`accountActionsEnabled`), and only where this Mac and
+    /// this download can make App Store requests (`unavailable`,
+    /// `MacSupport.unavailableLine`, is nil).
+    static func signInEnabled(actionsEnabled: Bool, unavailable: String?) -> Bool {
+        actionsEnabled && unavailable == nil
+    }
+
+    /// Whether Set Up Decryption… or Set Up Again… can be pressed: when the
+    /// account's buttons can (`accountActionsEnabled`), and only where this
+    /// Mac can decrypt (`unavailable`, `MacSupport.unavailableLine`, is nil).
+    static func enrollEnabled(actionsEnabled: Bool, unavailable: String?) -> Bool {
+        actionsEnabled && unavailable == nil
+    }
+
     /// The Terminal block is for a tool that isn't there. Signing in and
     /// enrolling have buttons, so their command lines aren't shown.
-    static func showsTerminalCommands(_ status: AppStoreStatusRecord) -> Bool {
-        !status.setupCommands.isEmpty && (!status.ipatool.present || !status.unfairplay.present)
+    ///
+    /// Not for UnfairPlay where this Mac can't decrypt (`unavailable`): its
+    /// commands there are an Intel Mac's "can't be set up here", or, for the
+    /// Intel download on Apple silicon, a build from source the Apple silicon
+    /// download makes unnecessary. The line under the row says which.
+    static func showsTerminalCommands(_ status: AppStoreStatusRecord, unavailable: String? = nil) -> Bool {
+        !status.setupCommands.isEmpty
+            && (!status.ipatool.present || (!status.unfairplay.present && unavailable == nil))
     }
 
     /// A row's warning: each thing it has to say, one per line, or nil.
@@ -203,7 +239,11 @@ struct AppStoreSettingsSection: View {
         parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n").nilIfEmpty
     }
 
-    static func rows(for status: AppStoreStatusRecord, checking: Bool = false) -> [Row] {
+    /// UnfairPlay's detail where this Mac can't decrypt and this download
+    /// has none: not a path that looks like a damaged app.
+    static let notInThisDownload = "not part of this download"
+
+    static func rows(for status: AppStoreStatusRecord, checking: Bool = false, unavailable: String? = nil) -> [Row] {
         let ipa = status.ipatool
         let up = status.unfairplay
         if checking {
@@ -226,12 +266,13 @@ struct AppStoreSettingsSection: View {
             ),
             Row(
                 name: "UnfairPlay",
-                ok: up.present && up.enrolled,
+                ok: up.present && up.enrolled && unavailable == nil,
                 detail: up.present
                     ? "\(up.version ?? "unknown version") · \(up.enrolled ? "enrolled" : "not enrolled")"
-                    : "not found at \(up.path)",
-                warning: Self.lines([up.modelProblem, up.note]),
-                install: up.install
+                    : unavailable == nil ? "not found at \(up.path)" : notInThisDownload,
+                // Why Set Up Decryption… is grayed out, first.
+                warning: Self.lines([unavailable, up.modelProblem, up.note]),
+                install: unavailable == nil ? up.install : nil
             ),
         ]
     }
@@ -291,7 +332,8 @@ struct AppStoreSettingsSection: View {
                 .cardStyle()
         case let .loaded(status):
             VStack(spacing: Metrics.rowGap) {
-                ForEach(Self.rows(for: status, checking: store.isLoadingStatus), id: \.name) { row in
+                ForEach(Self.rows(for: status, checking: store.isLoadingStatus, unavailable: mac.unavailableLine),
+                        id: \.name) { row in
                     StatusRow(row: row, accessory: accessory(for: row, in: status))
                 }
                 if !showEnroll, let outcome = Self.enrolOutcomeLine(store.account.enrol) {
@@ -318,7 +360,7 @@ struct AppStoreSettingsSection: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                if Self.showsTerminalCommands(status) {
+                if Self.showsTerminalCommands(status, unavailable: mac.unavailableLine) {
                     SetupCommands(commands: status.setupCommands)
                 }
             }
@@ -330,13 +372,14 @@ struct AppStoreSettingsSection: View {
 
     private func accessory(for row: Row, in status: AppStoreStatusRecord) -> AnyView? {
         if row.name == "ipatool" { return AnyView(accountButton(status)) }
-        if row.name == "UnfairPlay", let action = Self.enrollAction(status) {
+        if row.name == "UnfairPlay", let action = Self.enrollAction(status, unavailable: mac.unavailableLine) {
             return AnyView(
                 Button(action == .setUp ? CLIContract.SettingsLabel.setUpDecryption : CLIContract.SettingsLabel.setUpAgain) {
                     showEnroll = true
                 }
-                    .disabled(!actionsEnabled)
-                    .help(store.accountBlockedReason ?? (action == .setUpAgain ? Self.setUpAgainHelp : ""))
+                    .disabled(!Self.enrollEnabled(actionsEnabled: actionsEnabled, unavailable: mac.unavailableLine))
+                    .help(mac.unavailableLine ?? store.accountBlockedReason
+                          ?? (action == .setUpAgain ? Self.setUpAgainHelp : ""))
             )
         }
         return nil
@@ -352,8 +395,9 @@ struct AppStoreSettingsSection: View {
                 switch button {
                 case .signIn, .signInAgain:
                     Button(button.label) { showSignIn = true }
-                        .disabled(!actionsEnabled)
-                        .help(store.accountBlockedReason ?? (button == .signInAgain ? Self.signInAgainHelp : ""))
+                        .disabled(!Self.signInEnabled(actionsEnabled: actionsEnabled, unavailable: mac.unavailableLine))
+                        .help(mac.unavailableLine ?? store.accountBlockedReason
+                              ?? (button == .signInAgain ? Self.signInAgainHelp : ""))
                 case .signOut:
                     Button(store.account.isSigningOut ? "Signing Out…" : button.label) {
                         Task { await store.account.signOut() }

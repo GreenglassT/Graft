@@ -1178,6 +1178,6 @@ struct UpdateNotice: View {
             .buttonStyle(.borderless)
             .font(AppFont.body)
             .foregroundStyle(Palette.accent)
-            .help("Open this release's page on GitHub, where the new Graft.zip is")
+            .help("Open this release's page on GitHub, where the new version is")
     }
 }

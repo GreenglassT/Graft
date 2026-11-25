@@ -1,0 +1,15 @@
+# Packages the Intel (x86_64) bundle installs at another version than
+# bundle/requirements.lock pins, because PyPI has no macOS x86_64 wheel of
+# the locked one. scripts/lock-bundle writes bundle/requirements-x86_64.lock
+# from requirements.lock with each of these in place of its locked version.
+# The arm64 bundle is unaffected.
+
+# cryptography 49.0.0 dropped macOS x86_64 ("We now only publish arm64 wheels
+# for macOS", its changelog): 48.0.1 is the last with a wheel an Intel Mac
+# can load (universal2), built on OpenSSL 4.0.1. Every package that needs
+# cryptography allows it (pymobiledevice3 >=43, graft-ipa >=42, pyiosbackup
+# >=35, paramiko >=3.3, pyjwt >=3.4). What it lacks of 50.0.2's: 50.0.0's
+# fix for a Bleichenbacher oracle in pkcs7_decrypt_* (Graft never decrypts
+# PKCS#7), and wheels on OpenSSL 4.0.2 and 4.0.3. A newer cryptography for
+# Intel means building it from source, with a Rust toolchain.
+cryptography==48.0.1

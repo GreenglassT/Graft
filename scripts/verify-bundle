@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Acceptance checks on a sealed Graft.app: the last step of scripts/graft-release.
 
-    .venv/bin/python scripts/verify-bundle <path/to/Graft.app>
-    .venv/bin/python scripts/verify-bundle --zip <path/to/Graft.zip>
+    .venv/bin/python scripts/verify-bundle [--arch arm64|x86_64] <path/to/Graft.app>
+    .venv/bin/python scripts/verify-bundle [--arch arm64|x86_64] --zip <path/to/Graft.zip>
+
+--arch is the bundle's architecture: arm64 (Graft.zip, the default) or
+x86_64 (Graft-Intel.zip, for Intel Macs, run here under Rosetta). Info.plist's
+GraftBundleArch must name it, and every Mac binary but the app's universal
+executable must be it alone; the Intel bundle must have no UnfairPlay.
 
 The first form runs the app's bundled CLI, Python and tools in a sandbox:
 PATH=/usr/bin:/bin:/usr/sbin:/sbin, a temporary HOME and XDG directories, the
@@ -70,8 +75,21 @@ def private_socket(root: Path) -> Path:
 QUARANTINE = "com.apple.quarantine"
 #: A developer directory that isn't there: the xcrun shims fail at once.
 NO_DEVELOPER_DIR = "/nonexistent-dev"
-#: cyan's helpers, built from source in place of its prebuilt ones, where cyan runs them.
+#: cyan's helpers, built from source in place of its prebuilt ones, where cyan runs them
+#: in the arm64 bundle (cyan_tools: Darwin/<arch>).
 CYAN_TOOLS = "Resources/GraftPython/lib/python3.13/site-packages/cyan/tools/Darwin/arm64"
+#: The architectures a bundle is built for (graft_bundle.ARCHS), the default first.
+ARCHS = ("arm64", "x86_64")
+
+
+def cyan_tools(arch: str = "arm64") -> str:
+    return CYAN_TOOLS.removesuffix("/arm64") + f"/{arch}"
+
+
+def bundle_pins(arch: str = "arm64"):
+    """The pins of the bundle of `arch`, as the stage chose them (graft_bundle.load_pins)."""
+    gb = _stage_module()
+    return gb.load_pins(REPO / "bundle" / "pins.toml", arch)
 CYAN_HELPERS = ("ldid", "insert_dylib", "lipo", "install_name_tool", "otool")
 #: cyan's iOS frameworks, which go in prebuilt, as cyan's archive carries them.
 CYAN_EXTRAS = "Resources/GraftPython/lib/python3.13/site-packages/cyan/extras"
@@ -194,10 +212,6 @@ def json_lines(text: str) -> list[dict]:
             except ValueError:
                 pass
     return out
-
-
-def pins() -> dict[str, dict]:
-    return tomllib.loads((REPO / "bundle" / "pins.toml").read_text())
 
 
 def pyproject_version() -> str:
@@ -358,6 +372,29 @@ def go_version_m(binary: Path, work: Path) -> subprocess.CompletedProcess:
     return run([go / "bin" / "go", "version", "-m", binary], env=env, timeout=60)
 
 
+def unfairplay_traces(contents: Path) -> list[str]:
+    """Anything of UnfairPlay's in an app: its helper, its license files and
+    module notices, and a components.json entry for it."""
+    found = [str(p.relative_to(contents)) for p in (contents / "Helpers" / "bin" / "unfairplay",) if p.exists()]
+    lic = contents / "Resources" / "Licenses"
+    found += sorted(str(p.relative_to(contents)) for p in lic.glob("unfairplay*")) if lic.is_dir() else []
+    try:
+        entries = json.loads((lic / "components.json").read_text())
+    except (OSError, ValueError):
+        entries = []
+    found += [f"components.json: {e.get('name')}" for e in entries if str(e.get("name", "")).lower() == "unfairplay"]
+    return found
+
+
+def check_no_unfairplay(app: Path, report: Report) -> None:
+    """The Intel bundle has no UnfairPlay: it decrypts by running the iOS
+    app, which only Apple silicon can, and the CLI refuses decryption on an
+    Intel Mac."""
+    found = unfairplay_traces(app / "Contents")
+    report.check("the Intel bundle has no UnfairPlay (it runs iOS apps, which only Apple silicon can)", not found,
+                 f"{len(found)} found" if found else "", output="\n".join(found))
+
+
 def check_unfairplay_build(app: Path, report: Report, work: Path) -> None:
     """UnfairPlay runs as root, so it is built from its pinned source (owner,
     2026-11-23). The binary in the app must say so itself: its Go build info
@@ -376,7 +413,7 @@ def check_unfairplay_build(app: Path, report: Report, work: Path) -> None:
                  output="\n".join(problems))
 
 
-def check_go_modules(app: Path, report: Report, work: Path) -> None:
+def check_go_modules(app: Path, report: Report, work: Path, arch: str = "arm64") -> None:
     """Release reviewer: every Go module compiled into a bundled Go program,
     read from the binary's own build info, not from a list, must have its
     license notice in Licenses/<tool>-modules/ and its source in the vendored
@@ -387,7 +424,10 @@ def check_go_modules(app: Path, report: Report, work: Path) -> None:
     archived = {name: path for path, name in gb.built_sources(gb.load_pins(REPO / "bundle" / "pins.toml"))}
     lic = app / "Contents" / "Resources" / "Licenses"
     problems, counted = [], 0
-    for tool in gb.GO_TOOLS:
+    # The source archive's vendored trees are the arm64 builds' (graft_bundle.built_sources):
+    # `go mod vendor` writes the same tree for every GOARCH, and the archive serves both bundles.
+    tools = [tool for tool in gb.GO_TOOLS if tool in bundle_pins(arch)]
+    for tool in tools:
         r = go_version_m(app / "Contents" / "Helpers" / "bin" / tool, work)
         modules = gb.go_deps(r.stdout) if r.returncode == 0 else []
         vendor = archived.get(f"{tool}/vendor.tar.gz")
@@ -398,8 +438,8 @@ def check_go_modules(app: Path, report: Report, work: Path) -> None:
             continue
         counted += len(modules)
         problems += [f"{tool}: {p}" for p in gb.go_module_problems(modules, vendor, lic / f"{tool}-modules")]
-    report.check("every Go module in ipatool and unfairplay, by their build info, has its notice in Licenses/ and its "
-                 "source in the source archive's vendored modules", not problems,
+    report.check(f"every Go module in {' and '.join(tools)}, by {'their' if len(tools) > 1 else 'its'} build info, has "
+                 "its notice in Licenses/ and its source in the source archive's vendored modules", not problems,
                  f"{counted} modules" if not problems else f"{len(problems)} wrong", output="\n".join(problems))
 
 
@@ -477,40 +517,75 @@ def entitlement_problems(entitlements: dict[str, dict | None]) -> list[str]:
     return problems
 
 
-#: The app's own executable, relative to the app. It is universal so that on
-#: an Intel Mac it opens and shows its own "needs Apple silicon, use Graft
-#: 1.1" screen; an arm64-only one gets macOS's "can't be opened" instead.
-#: Everything it runs (Python, the tools, OpenSSL, the launchers) is arm64 only.
+#: The app's own executable, relative to the app. It is universal in both
+#: bundles: in the arm64 one so that on an Intel Mac it opens and shows its
+#: own screen rather than macOS's "can't be opened". Everything it runs (Python,
+#: the tools, OpenSSL, the launchers) is the bundle's one architecture.
 MAIN_EXECUTABLE = "Contents/MacOS/Graft"
 MAIN_ARCHS = ("arm64", "x86_64")
-BUNDLED_ARCHS = ("arm64",)
+#: iOS code (cyan's frameworks, PlayCover's stub) goes into users' IPAs, for
+#: the phone: arm64 in both bundles.
+IOS_ARCHS = ("arm64",)
 
 
-def arch_problems(archs: dict[str, list[str]]) -> tuple[list[str], list[str]]:
+def arch_problems(archs: dict[str, list[str]], arch: str = "arm64",
+                  ios: frozenset[str] | set[str] = frozenset()) -> tuple[list[str], list[str]]:
     """(problems with the main executable, problems with every other Mach-O),
-    from each Mach-O's architectures (`lipo -archs`) by its path in the app."""
+    from each Mach-O's architectures (`lipo -archs`) by its path in the app:
+    each must be `arch` alone, or arm64 alone for iOS code (`ios`)."""
     main, others = [], []
     if MAIN_EXECUTABLE not in archs:
         main.append(f"{MAIN_EXECUTABLE}: not found")
     for rel, got in sorted(archs.items()):
-        want = MAIN_ARCHS if rel == MAIN_EXECUTABLE else BUNDLED_ARCHS
+        want = MAIN_ARCHS if rel == MAIN_EXECUTABLE else IOS_ARCHS if rel in ios else (arch,)
         if sorted(got) != sorted(want):
             (main if rel == MAIN_EXECUTABLE else others).append(
                 f"{rel}: {' '.join(got) or 'no architectures'}, not {' and '.join(want)}")
     return main, others
 
 
-def check_architectures(app: Path, report: Report) -> None:
+def check_architectures(app: Path, report: Report, arch: str = "arm64") -> None:
     files = mach_o_files(app / "Contents")
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         answers = list(pool.map(lambda f: run(["lipo", "-archs", f], timeout=60), files))
     archs = {str(f.relative_to(app)): r.stdout.split() if r.returncode == 0 else []
              for f, r in zip(files, answers, strict=True)}
-    main, others = arch_problems(archs)
+    ios = {str(f.relative_to(app)) for f in files if macho.is_ios(f)}
+    main, others = arch_problems(archs, arch, ios)
     report.check("the app's executable is universal (arm64 and x86_64), for the Intel screen", not main,
                  " ".join(archs.get(MAIN_EXECUTABLE, [])), output="\n".join(main))
-    report.check("every other Mach-O file is arm64 only", not others,
+    report.check(f"every other Mach-O file is {arch} only"
+                 + ("" if arch == "arm64" else ", but iOS code, which is arm64 only, for the phone"), not others,
                  f"{len(others)} not" if others else f"{len(archs) - 1} files", output="\n".join(others[:40]))
+
+
+#: The Info.plist key graft-release writes before it signs: the bundle's
+#: architecture, which the app reads to know which download it is (its own
+#: executable is universal in both). An app without it is an Xcode build.
+BUNDLE_ARCH_KEY = "GraftBundleArch"
+PYTHON = "Contents/Resources/GraftPython/bin/python3.13"
+
+
+def bundle_arch_problems(key: object, python_archs: list[str], arch: str) -> list[str]:
+    problems = []
+    if key != arch:
+        hint = f" (verify it with --arch {key})" if key in ARCHS else ""
+        problems.append(f"Info.plist's {BUNDLE_ARCH_KEY} is {key!r}, not {arch!r}{hint}")
+    if python_archs != [arch]:
+        problems.append(f"the embedded Python is {' '.join(python_archs) or 'unreadable'}, not {arch}")
+    return problems
+
+
+def check_bundle_arch(app: Path, report: Report, arch: str = "arm64") -> None:
+    """The app says which bundle it is, and that is what it holds: its
+    Info.plist's GraftBundleArch, the architecture asked for, and the
+    embedded Python's slice all agree."""
+    import plistlib
+    key = plistlib.loads((app / "Contents" / "Info.plist").read_bytes()).get(BUNDLE_ARCH_KEY)
+    r = run(["lipo", "-archs", app / PYTHON], timeout=60)
+    problems = bundle_arch_problems(key, r.stdout.split() if r.returncode == 0 else [], arch)
+    report.check(f"Info.plist's {BUNDLE_ARCH_KEY} is {arch}, the embedded Python's architecture", not problems,
+                 str(key), output="\n".join(problems))
 
 
 def minos_problems(versions: dict[str, list], limit: tuple[int, int, int]) -> list[str]:
@@ -546,7 +621,13 @@ def check_minimum_macos(app: Path, report: Report) -> None:
                  f"{len(files)} files" if not problems else f"{len(problems)} don't", output="\n".join(problems))
 
 
-def check_components(app: Path, report: Report) -> None:
+#: What components.json must list as built from source besides cyan's
+#: helpers, libplist and ipatool: UnfairPlay in the arm64 bundle, and zsign,
+#: which upstream releases no macOS x86_64 build of, in the Intel one.
+BUILT_BY_ARCH = {"arm64": ("unfairplay",), "x86_64": ("zsign",)}
+
+
+def check_components(app: Path, report: Report, arch: str = "arm64") -> None:
     path = app / "Contents" / "Resources" / "Licenses" / "components.json"
     try:
         entries = json.loads(path.read_text())
@@ -556,16 +637,16 @@ def check_components(app: Path, report: Report) -> None:
     # A pin that builds several binaries (cctools) is listed once per binary,
     # each with the pin's URL and SHA-256.
     listed = {(e.get("source_url"), e.get("sha256")) for e in entries if e.get("kind") != "python-package"}
-    missing = [n for n, p in pins().items() if (p["url"], p["sha256"].lower()) not in listed]
+    missing = [n for n, p in bundle_pins(arch).items() if (p.url, p.sha256) not in listed]
     packages = [e for e in entries if e.get("kind") == "python-package"]
     report.check("Licenses/components.json lists every pinned artifact by its SHA-256", not missing,
                  f"{len(entries)} entries, {len(packages)} Python packages" if not missing
                  else f"missing {missing}")
     built = {e.get("name") for e in entries if e.get("kind") == "built-from-source"}
-    want = [*CYAN_HELPERS, "libplist", "ipatool", "unfairplay"]
+    want = [*CYAN_HELPERS, "libplist", "ipatool", *BUILT_BY_ARCH[arch]]
     absent = [n for n in want if n not in built]
-    report.check("components.json lists cyan's five helpers, libplist, ipatool and unfairplay as built from source",
-                 not absent,
+    report.check(f"components.json lists cyan's five helpers, libplist, ipatool and {' and '.join(BUILT_BY_ARCH[arch])} "
+                 "as built from source", not absent,
                  ", ".join(want) if not absent else f"missing {absent}")
 
 
@@ -693,14 +774,14 @@ def check_rust_crate_notices(app: Path, report: Report) -> None:
                  else f"{len(problems)} files without", output="\n".join(problems))
 
 
-def check_no_junk(app: Path, report: Report) -> None:
+def check_no_junk(app: Path, report: Report, arch: str = "arm64") -> None:
     """RC audit #2, #7: nothing the stage prunes (graft_bundle.PRUNE) is in
     GraftPython, and no Windows binary is anywhere in the app. try12 shipped
     Wintun's four DLLs and about 38 MB of upstream tests, stubs and scripts."""
     gb = _stage_module()
     contents = app / "Contents"
     gp = contents / "Resources" / "GraftPython"
-    found = sorted({str(p.relative_to(contents)) for pattern in gb.PRUNE for p in gp.glob(pattern)}
+    found = sorted({str(p.relative_to(contents)) for pattern in gb.prune_patterns(arch) for p in gp.glob(pattern)}
                    | {str(p.relative_to(contents)) for p in gb.windows_binaries(contents)})
     report.check("no Windows binaries, and nothing the stage prunes, ship in the app", not found,
                  f"{len(found)} found" if found else "", output="\n".join(found[:40]))
@@ -900,21 +981,24 @@ def check_no_coverage_sections(app: Path, report: Report) -> None:
 
 #: What no helper may import: each runs a command line through /bin/sh.
 SHELL_IMPORTS = ("_system", "_popen")
-#: Imports audited and allowed, each tied to the exact artifact audited (its
-#: pin's SHA-256 in bundle/pins.toml), so a new pin has to be audited again.
+#: Imports audited and allowed, each tied to the exact artifacts audited (its
+#: pin's SHA-256s in bundle/pins.toml), so a new pin has to be audited again.
 #:   zsign 1.1.3, `_popen`: SlotParseRequirements runs
 #:   `/usr/bin/csreq -r '/tmp/Requirements_<microseconds>.blob' -t`, a path zsign
 #:   makes itself, and only when it prints a bare Mach-O's signature (`zsign
-#:   <file>` with no signing options), which Graft never runs.
+#:   <file>` with no signing options), which Graft never runs. Audited in the
+#:   arm64 release binary (2790ec58…) and in v1.1.3's source (97bcc2db…, the
+#:   tag's commit 9299685, src/signing.cpp), which the Intel bundle builds.
 SHELL_IMPORT_EXCEPTIONS = {
-    ("Helpers/bin/zsign", "_popen"): ("zsign", "2790ec58a55db5f4282843d0cdbb0b587d19b972331b5285aee2de67f4ab705e"),
+    ("Helpers/bin/zsign", "_popen"): ("zsign", ("2790ec58a55db5f4282843d0cdbb0b587d19b972331b5285aee2de67f4ab705e",
+                                                "97bcc2dbbc0dc5f092dc4a33cbe1f9fdbd5c83bdc291da23db45044d4396270e")),
 }
 
 
-def helper_files(contents: Path) -> list[Path]:
+def helper_files(contents: Path, arch: str = "arm64") -> list[Path]:
     """The Mach-O files that are tools, not the Python runtime: cyan's helpers,
     everything under Helpers/, and everything under Frameworks/."""
-    roots = (contents / CYAN_TOOLS, contents / "Helpers", contents / "Frameworks")
+    roots = (contents / cyan_tools(arch), contents / "Helpers", contents / "Frameworks")
     return [p for root in roots if root.is_dir() for p in mach_o_files(root)]
 
 
@@ -936,21 +1020,21 @@ def shell_import_problems(imports: dict[str, set[str] | None], pinned: dict[str,
             continue
         for symbol in sorted(symbols & set(SHELL_IMPORTS)):
             allowed = SHELL_IMPORT_EXCEPTIONS.get((rel, symbol))
-            if allowed and pinned.get(allowed[0], {}).get("sha256", "").lower() == allowed[1]:
+            if allowed and pinned.get(allowed[0], {}).get("sha256", "").lower() in allowed[1]:
                 continue
             problems.append(f"{rel} imports {symbol}")
     return problems
 
 
-def check_helper_imports(app: Path, report: Report) -> None:
+def check_helper_imports(app: Path, report: Report, arch: str = "arm64") -> None:
     """Review #2: a helper that runs a shell can be made to run anything a
     file name says. cctools-port's install_name_tool did, through system()."""
     contents = app / "Contents"
-    files = helper_files(contents)
+    files = helper_files(contents, arch)
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         imports = dict(zip((str(f.relative_to(contents)) for f in files), pool.map(imported_symbols, files),
                            strict=True))
-    problems = shell_import_problems(imports, pins())
+    problems = shell_import_problems(imports, {n: {"sha256": p.sha256} for n, p in bundle_pins(arch).items()})
     report.check("no helper imports system() or popen() (cyan's tools, Helpers, Frameworks)",
                  files and not problems, f"{len(files)} files" if not problems else f"{len(problems)} do",
                  output="\n".join(problems))
@@ -1169,11 +1253,11 @@ def _entitlements(text: str) -> dict:
     return plistlib.loads(text.encode()) if text else {}
 
 
-def check_cyan_helpers(app: Path, sb: Sandbox, report: Report) -> None:
+def check_cyan_helpers(app: Path, sb: Sandbox, report: Report, arch: str = "arm64") -> None:
     """cyan's helpers, built from source, run from the sealed app: ldid on the
     bundled libcrypto and libplist, otool on the universal executable."""
     contents = app / "Contents"
-    tools = contents / CYAN_TOOLS
+    tools = contents / cyan_tools(arch)
     # Review #50: an executable with entitlements, so that reading nothing
     # can't pass (the bundled zsign has none).
     f = sb.fixtures / "ldid-e"
@@ -1834,12 +1918,13 @@ def check_unfairplay_offline(app: Path, sb: Sandbox, report: Report) -> None:
                  output="\n".join(f"{k}: {v[2][-600:]}" for k, v in answers.items()))
 
 
-def runtime_checks(app: Path, sb: Sandbox, report: Report) -> None:
+def runtime_checks(app: Path, sb: Sandbox, report: Report, arch: str = "arm64") -> None:
+    """An x86_64 bundle's checks run on this Mac under Rosetta."""
     contents = app / "Contents"
     graft = contents / "Helpers" / "graft"
     bindir = contents / "Helpers" / "bin"
     py = contents / "Resources" / "GraftPython" / "bin" / "python3.13"
-    pinned = pins()
+    pinned = bundle_pins(arch)
     want = f"graft {pyproject_version()}"
 
     r = sb.run([graft, "--version"])
@@ -1903,9 +1988,14 @@ def runtime_checks(app: Path, sb: Sandbox, report: Report) -> None:
     status = next((o for o in json_lines(r.stdout) if o.get("type") == "appstore-status"), {})
     for tool in ("ipatool", "unfairplay"):
         row = status.get(tool) or {}
-        report.check(f"--appstore-status: {tool} {pinned[tool]['version']} is the bundled one",
+        if tool not in pinned:
+            report.check(f"--appstore-status: no {tool} in this bundle", row.get("source") != "bundled"
+                         and row.get("present") is not True, f"{row.get('source')} {row.get('present')}",
+                         output=both(r))
+            continue
+        report.check(f"--appstore-status: {tool} {pinned[tool].version} is the bundled one",
                      row.get("source") == "bundled" and row.get("present") is True
-                     and str(row.get("version", "")).lstrip("v") == pinned[tool]["version"],
+                     and str(row.get("version", "")).lstrip("v") == pinned[tool].version,
                      f"{row.get('source')} {row.get('version')}", output=both(r))
 
     r = sb.run([py, "-I", "-B", "-c", IMPORTS])
@@ -1920,17 +2010,18 @@ def runtime_checks(app: Path, sb: Sandbox, report: Report) -> None:
                  r.stdout.splitlines()[0] if r.stdout else "", output=both(r))
     r = sb.run([bindir / "cyan", "--help"])
     report.check("Helpers/bin/cyan --help", r.returncode == 0 and "cyan" in r.stdout, output=both(r))
-    check_cyan_helpers(app, sb, report)
+    check_cyan_helpers(app, sb, report, arch=arch)
     check_cyan_inject(app, sb, report)
     check_cyan_hostile_names(app, sb, report)
     check_offline_builds(app, sb, report)
     check_ca_overrides(app, sb, report)
-    check_unfairplay_offline(app, sb, report)
+    if "unfairplay" in pinned:
+        check_unfairplay_offline(app, sb, report)
     check_playcover(app, sb, report)
     check_jit_harness(app, sb, report)
     r = sb.run([bindir / "zsign", "-v"])
-    report.check(f"zsign -v is {pinned['zsign']['version']}", r.returncode == 0
-                 and pinned["zsign"]["version"] in r.stdout, r.stdout.strip(), output=both(r))
+    report.check(f"zsign -v is {pinned['zsign'].version}", r.returncode == 0
+                 and pinned["zsign"].version in r.stdout, r.stdout.strip(), output=both(r))
 
     link = sb.home / "bin" / "graft"
     link.symlink_to(graft)
@@ -1939,7 +2030,8 @@ def runtime_checks(app: Path, sb: Sandbox, report: Report) -> None:
                  r.returncode == 0 and r.stdout.strip() == want, r.stdout.strip(), output=both(r))
 
 
-def verify_app(app: Path, report: Report, work: Path, *, gatekeeper_accepted: bool = False) -> None:
+def verify_app(app: Path, report: Report, work: Path, *, gatekeeper_accepted: bool = False,
+               arch: str = "arm64") -> None:
     app = app.resolve()
     if not report.check(f"{app.name} is an app bundle", (app / "Contents" / "Info.plist").is_file(), str(app)):
         return
@@ -1956,25 +2048,29 @@ def verify_app(app: Path, report: Report, work: Path, *, gatekeeper_accepted: bo
         print("verify-bundle: a Mach-O in the app can't be read, so no check can vouch for it, and nothing is run")
         return
     check_signatures(app, report)
-    check_unfairplay_requirement(app, report)
-    check_unfairplay_build(app, report, work)
-    check_go_modules(app, report, work)
+    if "unfairplay" in bundle_pins(arch):
+        check_unfairplay_requirement(app, report)
+        check_unfairplay_build(app, report, work)
+    else:
+        check_no_unfairplay(app, report)
+    check_go_modules(app, report, work, arch=arch)
     check_ios_code(app, report)
-    check_architectures(app, report)
+    check_architectures(app, report, arch=arch)
+    check_bundle_arch(app, report, arch=arch)
     check_minimum_macos(app, report)
-    check_components(app, report)
+    check_components(app, report, arch=arch)
     check_package_licences(app, report)
     check_framework_licences(app, report)
     check_licence_files(app, report)
     check_static_and_rust_licences(app, report)
     check_rust_crate_notices(app, report)
-    check_no_junk(app, report)
+    check_no_junk(app, report, arch=arch)
     check_no_build_paths(app, report)
     check_no_denylisted_names(app, report)
     check_no_coverage_sections(app, report)
     check_no_symlinks(app, report)
     check_links(app, report)
-    check_helper_imports(app, report)
+    check_helper_imports(app, report, arch=arch)
     check_no_unicorn_in_the_app(app, report)
 
     sb = Sandbox(work / "sandbox")
@@ -1982,7 +2078,7 @@ def verify_app(app: Path, report: Report, work: Path, *, gatekeeper_accepted: bo
     marker.touch()
     start = marker.stat().st_mtime_ns
     time.sleep(0.05)
-    runtime_checks(app, sb, report)
+    runtime_checks(app, sb, report, arch=arch)
 
     written = []
     for root, dirs, files in os.walk(app):
@@ -1996,7 +2092,7 @@ def verify_app(app: Path, report: Report, work: Path, *, gatekeeper_accepted: bo
     report.check("the signature still verifies afterward", r.returncode == 0, output=both(r))
 
 
-def verify_zip(zip_path: Path, report: Report, work: Path) -> None:
+def verify_zip(zip_path: Path, report: Report, work: Path, arch: str = "arm64") -> None:
     """The zip as a user gets it: a copy quarantined as a browser download,
     unpacked by ditto, which carries the quarantine onto every file as
     Archive Utility does (review #52), then assessed by Gatekeeper, whose
@@ -2042,16 +2138,23 @@ def verify_zip(zip_path: Path, report: Report, work: Path) -> None:
         print("verify-bundle: Gatekeeper didn't accept the quarantined copy as notarized, so nothing in it was "
               "run. The runtime checks need a notarized, stapled zip.")
         return
-    verify_app(app, report, work, gatekeeper_accepted=True)
+    verify_app(app, report, work, gatekeeper_accepted=True, arch=arch)
 
 
 def main(argv: list[str]) -> int:
+    usage = "usage: verify-bundle [--arch arm64|x86_64] <Graft.app> | verify-bundle [--arch arm64|x86_64] --zip <Graft.zip>"
+    arch = "arm64"
+    if argv[:1] == ["--arch"]:
+        if len(argv) < 2 or argv[1] not in ARCHS:
+            print(usage, file=sys.stderr)
+            return 2
+        arch, argv = argv[1], argv[2:]
     if len(argv) == 1 and not argv[0].startswith("-"):
         mode, target = "app", Path(argv[0])
     elif len(argv) == 2 and argv[0] == "--zip":
         mode, target = "zip", Path(argv[1])
     else:
-        print("usage: verify-bundle <Graft.app> | verify-bundle --zip <Graft.zip>", file=sys.stderr)
+        print(usage, file=sys.stderr)
         return 2
     if not target.exists():
         print(f"verify-bundle: {target} does not exist", file=sys.stderr)
@@ -2060,9 +2163,9 @@ def main(argv: list[str]) -> int:
     work = Path(tempfile.mkdtemp(prefix="graft-verify-"))
     try:
         if mode == "zip":
-            verify_zip(target.resolve(), report, work)
+            verify_zip(target.resolve(), report, work, arch)
         else:
-            verify_app(target, report, work)
+            verify_app(target, report, work, arch=arch)
         status = report.summary()
     finally:
         # Only checks' scratch files are in here (sandbox HOME, fixtures, unzipped copy).

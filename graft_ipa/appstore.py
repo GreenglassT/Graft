@@ -262,11 +262,15 @@ def status(tools: AppStoreToolsConfig) -> dict[str, Any]:
             f"# run '{ipa_path} auth info' in Terminal to see why ipatool "
             "couldn't say whether it is signed in"
         )
-    if (not up_present or not enrolled) and host.apple_silicon() is False:
+    # Asked only when something is missing, as in `_require_unfairplay`.
+    blocker = host.apple_silicon_blocker() if (not up_present or not enrolled) else None
+    if blocker is not None:
         # Building UnfairPlay and setting up decryption both lead nowhere on
-        # an Intel Mac, so neither is offered; the reason is.
-        commands.append(f"# App Store decryption can't be set up here: {host.INTEL_MAC}.")
-        commands.append(f"# {_INTEL_REASON}.")
+        # an Intel Mac, or in the Intel build of Graft, so neither is
+        # offered; the reason is.
+        commands.append(f"# App Store decryption can't be set up here: {blocker}.")
+        if blocker == host.INTEL_MAC:
+            commands.append(f"# {_INTEL_REASON}.")
     elif not up_present:
         steps = unfairplay.build_steps(up.path)
         commands.append(
@@ -278,7 +282,7 @@ def status(tools: AppStoreToolsConfig) -> dict[str, Any]:
                 commands.append(f"# {note} (or install Go from https://go.dev/dl/)")
         commands += steps
         up_install = " && ".join(steps)
-    if not enrolled and host.apple_silicon() is not False:
+    if not enrolled and blocker is None:
         if model.problem:
             commands.append(f"# {model.problem}")
         # Never the bundled UnfairPlay under sudo: root runs it only inside the
@@ -608,16 +612,23 @@ _INTEL_REASON = (
 def _require_unfairplay(tools: AppStoreToolsConfig) -> None:
     up = unfairplay.resolve_tool(tools)
     ready = unfairplay.present(up.path) and unfairplay.enrolled(tools.unfairplay_models)
-    if not ready and host.apple_silicon() is False:
-        # Checked only when something is missing, so a working setup never
-        # pays for it — and an Intel Mac is told the real reason rather than
-        # handed an enrollment command that cannot succeed there.
+    # Checked only when something is missing, so a working setup never pays
+    # for it — and an Intel Mac, or the Intel build of Graft, is told the real
+    # reason rather than handed an UnfairPlay build or an enrollment command
+    # that cannot succeed there.
+    blocker = host.apple_silicon_blocker() if not ready else None
+    if blocker == host.INTEL_MAC:
         raise AppStoreError(
             f"decrypting App Store IPAs needs an Apple silicon Mac, and {host.INTEL_MAC}",
             hint=(
                 f"{_INTEL_REASON}. Use an IPA that is already decrypted, or dump "
                 "one from a jailbroken device (--decrypt)"
             ),
+        )
+    if blocker is not None:
+        raise AppStoreError(
+            f"decrypting App Store IPAs can't be done here: {blocker}",
+            hint="Use an IPA that is already decrypted, or dump one from a jailbroken device (--decrypt)",
         )
     if not unfairplay.present(up.path):
         raise AppStoreError(
@@ -789,8 +800,39 @@ def _refuse_still_encrypted(ipa: Path, work: Path, *, source: Path) -> None:
         )
 
 
+#: Why no App Store request is made where decryption can't run, before the
+#: reason (`host.apple_silicon_blocker`).
+STORE_NEEDS = "App Store sign-in and downloads need a Mac with Apple silicon and Graft.zip"
+STORE_NEEDS_HINT = (
+    "Searching the App Store and adding an app by name still work. Use an IPA that is already "
+    "decrypted, or dump one from a jailbroken device (--decrypt)"
+)
+
+
+def store_requests_blocker() -> AppStoreError | None:
+    """The refusal of any ipatool App Store request (sign-in, a get, a free
+    claim, an app's older versions) on an Intel Mac or in the Intel build
+    of Graft.app (`host.apple_silicon_blocker`), or None where they run.
+
+    Each of those runs ipatool's Unicorn emulator, whose code buffer on
+    x86_64 is mapped writable and executable without MAP_JIT, which the
+    bundled ipatool isn't entitled to (allow-jit only), so the request would
+    likely crash it. And nothing one is for can be decrypted there. Searching
+    and adding an app by name use the public iTunes API (`itunes`), and a
+    status read (`auth info`) makes no Store request: neither is refused."""
+    blocker = host.apple_silicon_blocker()
+    if blocker is None:
+        return None
+    return AppStoreError(f"{STORE_NEEDS}: {blocker}", hint=STORE_NEEDS_HINT)
+
+
 def _ipatool_path(tools: AppStoreToolsConfig) -> Path:
-    """The ipatool to run (`ipatool.locate`), refused when it isn't there."""
+    """The ipatool to run for an App Store request (`ipatool.locate`):
+    refused where no Store request may run (`store_requests_blocker`), and
+    when it isn't there. A get, a claim and the older versions all start
+    here, before ipatool is run at all."""
+    if (refusal := store_requests_blocker()) is not None:
+        raise refusal
     path = ipatool.locate(tools.ipatool, explicit="ipatool" in tools.explicit)
     if not ipatool.present(path):
         raise AppStoreError(f"ipatool not found at {path}", hint=ipatool.install_hint(path))
@@ -1223,15 +1265,22 @@ class _VersionCache:
     read as this shape is an empty cache, and a write that fails costs only
     a read again next time.
 
+    It also says, per bundle id, which version the last read stalled on
+    (`stalled`), if the last read stalled: Try Again is a run of its own,
+    and starts at that version (`list_versions`).
+
     Read without following a link, and only from a regular file of at most
     `_VERSIONS_CACHE_MAX` bytes: a FIFO there would wait forever for a
     writer, and a link to /dev/zero would never end. Written whole to a new
     file (0600) that replaces it, so a reader never sees half of one and a
     link there is replaced, never written through."""
 
-    def __init__(self, path: Path, apps: dict[str, dict[str, dict[str, Any]]]) -> None:
+    def __init__(
+        self, path: Path, apps: dict[str, dict[str, dict[str, Any]]], stalled: dict[str, str] | None = None
+    ) -> None:
         self.path = path
         self.apps = apps
+        self.stalled = stalled if stalled is not None else {}
 
     @classmethod
     def load(cls, cache_dir: Path) -> _VersionCache:
@@ -1241,8 +1290,15 @@ class _VersionCache:
             data = json.loads(raw) if raw is not None else None
         except (ValueError, RecursionError):
             data = None
-        apps = data.get("apps") if isinstance(data, dict) and data.get("format") == _VERSIONS_CACHE_FORMAT else None
-        return cls(path, apps if isinstance(apps, dict) else {})
+        if not isinstance(data, dict) or data.get("format") != _VERSIONS_CACHE_FORMAT:
+            data = {}
+        apps, stalled = data.get("apps"), data.get("stalled")
+        return cls(
+            path,
+            apps if isinstance(apps, dict) else {},
+            {bundle: ident for bundle, ident in stalled.items() if isinstance(ident, str)}
+            if isinstance(stalled, dict) else {},
+        )
 
     @staticmethod
     def _read(path: Path) -> bytes | None:
@@ -1284,16 +1340,34 @@ class _VersionCache:
         return found
 
     def remember(self, bundle_id: str, external_id: str, meta: ipatool.VersionMetadata) -> None:
+        """What `external_id` was read to be. The read answered, so it
+        wasn't a stall either."""
         rows = self.apps.get(bundle_id)
         if not isinstance(rows, dict):
             rows = self.apps[bundle_id] = {}
         rows[external_id] = {"version": meta.version, "release_date": meta.release_date}
+        self.stalled.pop(bundle_id, None)
+        self._write()
+
+    def last_read(self, bundle_id: str, *, stalled_on: str | None) -> None:
+        """How `bundle_id`'s last version read ended, when nothing about the
+        version is remembered: it stalled on `stalled_on`, or (None) it
+        answered, with an error of its own."""
+        if self.stalled.get(bundle_id) == stalled_on:
+            return
+        if stalled_on is None:
+            del self.stalled[bundle_id]
+        else:
+            self.stalled[bundle_id] = stalled_on
+        self._write()
+
+    def _write(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".appstore-versions-", dir=self.path.parent)
             try:
                 with os.fdopen(fd, "w") as f:
-                    json.dump({"format": _VERSIONS_CACHE_FORMAT, "apps": self.apps}, f)
+                    json.dump({"format": _VERSIONS_CACHE_FORMAT, "apps": self.apps, "stalled": self.stalled}, f)
                 os.replace(tmp, self.path)
             except BaseException:
                 Path(tmp).unlink(missing_ok=True)
@@ -1338,6 +1412,12 @@ def list_versions(
     that doesn't answer in time stops the listing, which fails: a dropped
     connection would otherwise wait out every version on the page in turn.
 
+    Try Again (the same page, run again) starts at the version that stalled,
+    so one that stalls every time would stop the list there for good. When
+    the last version read for this app stalled on this same one, it's said on
+    its row as one Apple won't describe is, and the rest go on. Any other
+    read in between, of another version, starts the count again.
+
     Checked as a get is first (`_require_signed_in`), and refused the same
     ways: Apple's own apps, ipatool missing or signed out, the login keychain
     locked. Only apps this Apple ID has: anything else is the get's
@@ -1366,13 +1446,18 @@ def list_versions(
                 meta = ipatool.version_metadata(ipa_path, app.bundle_id, external_id)
             except ipatool.VersionUnavailable as e:
                 error = e.message
+                cache.last_read(app.bundle_id, stalled_on=None)
             except ipatool.LicenseRequired as e:
                 raise _needs_licence(app_name, app, emitter, e) from e
             except ipatool.VersionMetadataTimeout as e:
-                raise AppStoreError(
-                    f"the list of {app_name}'s versions stopped: {e.message}",
-                    hint=f"{e.hint}; the versions read so far are remembered",
-                ) from e
+                if cache.stalled.get(app.bundle_id) != external_id:
+                    cache.last_read(app.bundle_id, stalled_on=external_id)
+                    raise AppStoreError(
+                        f"the list of {app_name}'s versions stopped: {e.message}",
+                        hint=f"{e.hint}; the versions read so far are remembered, and if this one "
+                        "stalls again, the list goes on without it",
+                    ) from e
+                error = f"Timed out twice in a row, so the list went on without it: {e.message}"
             else:
                 cache.remember(app.bundle_id, external_id, meta)
         staged = meta is not None and _staged_file(cfg, app, meta.version) is not None

@@ -19,6 +19,8 @@ struct AddAppSheet: View {
     /// (`defaultMode`). A prefilled sheet always opens Manual (`.onAppear`).
     var initialMode: Mode = AddAppSheet.defaultMode
     @Environment(\.dismiss) private var dismiss
+    /// Whether a get could run here at all (`MacSupport`).
+    @Environment(\.macSupport) private var mac
 
     enum Mode: String, CaseIterable, Identifiable {
         case search = "Search"
@@ -391,8 +393,8 @@ struct AddAppSheet: View {
         // once a picked result could be got (`wantsStatus`): never when the
         // sheet opens and never while typing. The sheet stays usable while it
         // runs, and it gives up after `statusTimeout`.
-        .task(id: Self.wantsStatus(mode: mode, picked: picked?.result)) {
-            guard Self.wantsStatus(mode: mode, picked: picked?.result),
+        .task(id: Self.wantsStatus(mode: mode, picked: picked?.result, unavailable: mac.unavailableLine)) {
+            guard Self.wantsStatus(mode: mode, picked: picked?.result, unavailable: mac.unavailableLine),
                   !appStore.hasLoadedStatus, !appStore.isLoadingStatus else { return }
             if await Self.loadStatus(appStore, timeout: Self.statusTimeout) {
                 statusTimedOut = true
@@ -402,8 +404,11 @@ struct AddAppSheet: View {
 
     /// Whether the sheet needs the App Store status now: Search, with a pick
     /// it could offer Get for (`offersGet`).
-    static func wantsStatus(mode: Mode, picked: AppStoreSearchResult?) -> Bool {
-        mode == .search && picked.map(offersGet) == true
+    ///
+    /// Never where no get can run (`unavailable`): the offer is disabled
+    /// whatever status says, so there's nothing to ask the keychain for.
+    static func wantsStatus(mode: Mode, picked: AppStoreSearchResult?, unavailable: String? = nil) -> Bool {
+        unavailable == nil && mode == .search && picked.map(offersGet) == true
     }
 
     /// Long enough for `auth info`, which usually answers in well under a
@@ -552,8 +557,20 @@ struct AddAppSheet: View {
     @ViewBuilder
     private var getOfferRow: some View {
         switch Self.getOffer(
-            status: appStore.status, hasLoaded: appStore.hasLoadedStatus, timedOut: statusTimedOut
+            status: appStore.status, hasLoaded: appStore.hasLoadedStatus, timedOut: statusTimedOut,
+            unavailable: mac.unavailableLine
         ) {
+        case .unavailable:
+            // Disabled, not hidden, with the reason under it.
+            VStack(alignment: .leading, spacing: 4) {
+                Toggle(Self.getToggleLabel, isOn: .constant(false))
+                    .toggleStyle(.checkbox)
+                    .font(AppFont.body)
+                    .disabled(true)
+                Text(mac.unavailableLine ?? "")
+                    .font(AppFont.monoSmall).foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         case .ready:
             Toggle(Self.getToggleLabel, isOn: $getAfterAdd)
                 .toggleStyle(.checkbox)
@@ -581,11 +598,14 @@ struct AddAppSheet: View {
         case notReady
         /// The status didn't answer in time (`statusTimeout`).
         case timedOut
+        /// No get can run here: it needs Apple silicon (`MacSupport`).
+        case unavailable
     }
 
     static func getOffer(
-        status: AppStoreStatusRecord?, hasLoaded: Bool, timedOut: Bool = false
+        status: AppStoreStatusRecord?, hasLoaded: Bool, timedOut: Bool = false, unavailable: String? = nil
     ) -> GetOffer {
+        if unavailable != nil { return .unavailable }
         if let status { return status.canGet ? .ready : .notReady }
         if hasLoaded { return .notReady }
         return timedOut ? .timedOut : .checking
@@ -778,7 +798,8 @@ struct AddAppSheet: View {
                 picked,
                 delivery: Self.delivery(chosen: searchDelivery, account: store.account),
                 getAfterAdd: getAfterAdd,
-                offer: Self.getOffer(status: appStore.status, hasLoaded: appStore.hasLoadedStatus)
+                offer: Self.getOffer(status: appStore.status, hasLoaded: appStore.hasLoadedStatus,
+                                     unavailable: mac.unavailableLine)
             )
         case .url:
             return .url(

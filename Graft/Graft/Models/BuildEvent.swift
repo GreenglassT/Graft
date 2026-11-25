@@ -1462,7 +1462,8 @@ struct UpdateProgressRecord: Codable, Hashable {
     let received: Int?
     let total: Int?
     /// While verifying, the check that is running (archive, bundle,
-    /// signature, requirement, notarization); nil while downloading.
+    /// architecture, signature, requirement, notarization); nil while
+    /// downloading.
     let check: String?
 
     static let download = "download"
