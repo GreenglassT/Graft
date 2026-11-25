@@ -5,7 +5,7 @@ private typealias Flag = CLIContract.Flag
 struct BuildLogView: View {
     let build: BuildRecord
     let runner: CLIRunner
-    let artwork: ArtworkStore
+    @ObservedObject var artwork: ArtworkStore
     let onClose: () -> Void
 
     @State private var logLines: [LogLine] = []

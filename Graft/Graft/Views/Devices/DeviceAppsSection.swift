@@ -57,7 +57,7 @@ struct DeviceAppsSection: View {
     /// that reading `image(for:)` inside each row registers the dependency on
     /// `ArtworkStore.generation` that makes icons appear when a load finishes —
     /// see that method's doc comment for why the `NSCache` alone cannot.
-    let artwork: ArtworkStore
+    @ObservedObject var artwork: ArtworkStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.titleGap) {

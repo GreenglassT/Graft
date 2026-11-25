@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -21,8 +21,7 @@ private typealias Flag = CLIContract.Flag
 /// resets it when it opens and when it closes, which also empties the cache:
 /// an add changes which results say "Added".
 @MainActor
-@Observable
-final class AppStoreSearchStore {
+final class AppStoreSearchStore: ObservableObject {
     /// What the sheet shows under the search field (`AppStoreSearchForm`'s copy).
     ///
     /// `idle` means "nothing to search yet", never "no results". A search
@@ -46,32 +45,36 @@ final class AppStoreSearchStore {
     /// outside the main actor.
     nonisolated static let defaultDebounce: Duration = .milliseconds(500)
 
-    private(set) var state: State = .idle
+    @Published private(set) var state: State = .idle
     /// A search is waiting out the pause or running. The last state stays on
     /// screen meanwhile, so results don't flash away on every keystroke.
-    private(set) var isSearching = false
+    @Published private(set) var isSearching = false
     /// The store searched: the sheet's store picker. It starts at this Mac's
     /// region (`Storefronts.forRegion`), and `reset` puts it back there.
-    private(set) var country: String
+    @Published private(set) var country: String
     /// What the CLI said about how its store was chosen (`note` on the last
     /// sentinel or failure), or nil.
-    private(set) var cliNote: String?
+    @Published private(set) var cliNote: String?
 
     let runner: CLIRunner
     /// The pause in force. Production's is `defaultDebounce`
     /// (`AppStoreSearchStoreTests.test_the_shipped_pause_is_at_least_half_a_second`).
     let debounce: Duration
     private let region: () -> String?
-    @ObservationIgnored private var task: Task<Void, Never>?
+    /// Unpublished: a change to it alone redraws nothing.
+    private var task: Task<Void, Never>?
     /// Bumped by every search started and by `reset`. A run that finishes
     /// under an older one has been replaced or canceled, and writes nothing.
     /// This is the one guard: a killed CLI arrives as an ordinary failure.
-    @ObservationIgnored private var generation = 0
+    /// Unpublished: a change to it alone redraws nothing.
+    private var generation = 0
     /// The term and store running, or last shown; a repeat of it is no search.
-    @ObservationIgnored private var current: Key?
+    /// Unpublished: a change to it alone redraws nothing.
+    private var current: Key?
     /// Every answer this sheet has had, by term and store. Only answers:
     /// a failure is asked again.
-    @ObservationIgnored private var cache: [Key: State] = [:]
+    /// Unpublished: a change to it alone redraws nothing.
+    private var cache: [Key: State] = [:]
 
     private struct Key: Hashable {
         let term: String

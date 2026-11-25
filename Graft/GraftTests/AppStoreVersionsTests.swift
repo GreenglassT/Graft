@@ -412,6 +412,156 @@ final class AppStoreVersionsTests: XCTestCase {
         XCTAssertNotNil(AppDetailView.olderVersionBlockedReason(accountBusy: nil, busy: true))
     }
 
+    // MARK: Builds that share a version
+
+    /// The App Store can serve two builds under one version number, and
+    /// ipatool says only the number and the date. Each is told apart by a
+    /// suffix, counted from the oldest so the numbers go up over time; the
+    /// rows stay newest first.
+    @MainActor
+    func test_two_builds_of_one_version_are_numbered_oldest_first() {
+        let newer = Self.record("100000002", index: 3, version: "2026.42.0")
+        let older = Self.record("100000001", index: 4, version: "2026.42.0")
+        let other = Self.record("100000003", index: 2, version: "2026.43.0")
+        let builds = AppStoreVersionsStore.duplicateBuilds([other, newer, older])
+
+        XCTAssertEqual(builds.count, 2, "\(builds)")
+        XCTAssertNil(builds["100000003"], "a version of its own has nothing added")
+        let first = builds["100000001"]
+        let second = builds["100000002"]
+        XCTAssertEqual(first?.number, 1)
+        XCTAssertEqual(second?.number, 2)
+        XCTAssertEqual(AppStoreVersionsSheet.headline(older, state: .ready, build: first), "2026.42.0 (build 1 of 2)")
+        XCTAssertEqual(AppStoreVersionsSheet.headline(newer, state: .ready, build: second), "2026.42.0 (build 2 of 2)")
+        XCTAssertEqual(first?.help, "The App Store has 2 builds numbered 2026.42.0. This is the older one (build 1).")
+        XCTAssertEqual(second?.help, "The App Store has 2 builds numbered 2026.42.0. This is the newer one (build 2).")
+    }
+
+    @MainActor
+    func test_three_builds_of_one_version_are_numbered_oldest_first() {
+        let rows = [
+            Self.record("100000013", index: 1, version: "2026.42.0"),
+            Self.record("100000012", index: 2, version: "2026.42.0"),
+            Self.record("100000011", index: 3, version: "2026.42.0"),
+        ]
+        let builds = AppStoreVersionsStore.duplicateBuilds(rows)
+        let headlines = rows.map { AppStoreVersionsSheet.headline($0, state: .ready, build: builds[$0.externalId]) }
+        XCTAssertEqual(headlines, ["2026.42.0 (build 3 of 3)", "2026.42.0 (build 2 of 3)", "2026.42.0 (build 1 of 3)"],
+                       "newest first on screen, numbered from the oldest")
+        XCTAssertEqual(builds["100000013"]?.help,
+                       "The App Store has 3 builds numbered 2026.42.0. This is the newest (build 3).")
+        XCTAssertEqual(builds["100000012"]?.help,
+                       "The App Store has 3 builds numbered 2026.42.0. This is build 2, counting from the oldest.")
+        XCTAssertEqual(builds["100000011"]?.help,
+                       "The App Store has 3 builds numbered 2026.42.0. This is the oldest (build 1).")
+    }
+
+    /// Only rows whose version has been read count: one not read yet may
+    /// turn out to be another number altogether.
+    @MainActor
+    func test_a_version_read_once_so_far_has_nothing_added() {
+        let read = Self.record("100000002", index: 0, version: "2026.42.0")
+        let unread = Self.record("100000001", index: 1, version: nil)
+        let gone = Self.record("100000000", index: 2, version: nil, error: "Apple didn't describe this version")
+        XCTAssertEqual(AppStoreVersionsStore.duplicateBuilds([read, unread, gone]), [:])
+        XCTAssertEqual(AppStoreVersionsSheet.headline(read, state: .ready, build: nil), "2026.42.0")
+    }
+
+    /// The same number is the same once trimmed, and only then: 2026.42 is
+    /// not 2026.42.0.
+    @MainActor
+    func test_versions_match_exactly_once_trimmed() {
+        let builds = AppStoreVersionsStore.duplicateBuilds([
+            Self.record("100000004", index: 0, version: "2026.42.0 "),
+            Self.record("100000003", index: 1, version: " 2026.42.0"),
+            Self.record("100000002", index: 2, version: "2026.42"),
+            Self.record("100000001", index: 3, version: "2026.42.0.1"),
+        ])
+        XCTAssertEqual(Set(builds.keys), ["100000004", "100000003"])
+        XCTAssertEqual(builds["100000004"]?.number, 2)
+        XCTAssertEqual(builds["100000003"]?.number, 1)
+        XCTAssertEqual(builds["100000003"]?.version, "2026.42.0")
+    }
+
+    /// A version of its own reads as it always has, row and all.
+    @MainActor
+    func test_versions_of_their_own_are_unchanged() {
+        let rows = [Self.record("100000002", index: 0, version: "1.4.0"),
+                    Self.record("100000001", index: 1, version: "1.3.0")]
+        XCTAssertEqual(AppStoreVersionsStore.duplicateBuilds(rows), [:])
+        XCTAssertEqual(AppStoreVersionsSheet.headline(rows[0], state: .ready, build: nil), "1.4.0")
+        XCTAssertEqual(AppStoreVersionsSheet.headline(rows[1], state: .ready), "1.3.0")
+    }
+
+    /// Show More reads an older build of a version already listed: the
+    /// numbers shift, the one just read becoming build 1.
+    @MainActor
+    func test_show_more_renumbers_the_builds_of_a_version_it_reads_another_of() async throws {
+        let flag = FileManager.default.temporaryDirectory.appending(path: "versions_dupes_\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: flag) }
+        let (runner, _) = try scriptRunner("""
+        printf '%s\\n' '\(Self.row("100000003", index: 0, version: "2026.42.0"))'
+        printf '%s\\n' '\(Self.row("100000002", index: 1, version: "2026.42.0"))'
+        if [ -e '\(flag.path)' ]; then
+          printf '%s\\n' '\(Self.row("100000001", index: 2, version: "2026.42.0"))'
+          printf '%s\\n' '\(Self.end(count: 3, offset: 2, limit: 10))'
+        else
+          printf '%s\\n' '\(Self.row("100000001", index: 2, version: nil))'
+          printf '%s\\n' '\(Self.end(count: 3, limit: 2))'
+          touch '\(flag.path)'
+        fi
+        """)
+        let store = AppStoreVersionsStore(runner: runner)
+        store.load(app: "example")
+        await waitUntil { store.phase == .loaded }
+        XCTAssertEqual(store.duplicateBuilds.mapValues { "\($0.number) of \($0.count)" },
+                       ["100000003": "2 of 2", "100000002": "1 of 2"])
+
+        store.loadMore()
+        await waitUntil { store.phase == .loaded && store.releases.last?.version != nil }
+        XCTAssertEqual(store.duplicateBuilds.mapValues { "\($0.number) of \($0.count)" },
+                       ["100000003": "3 of 3", "100000002": "2 of 3", "100000001": "1 of 3"])
+    }
+
+    /// On screen: a build's row reads with its number, and says which build
+    /// it is as its help, the tooltip VoiceOver reads too. A version of its
+    /// own has no help, as before.
+    @MainActor
+    func test_the_sheet_shows_each_builds_number_and_says_which_it_is() async throws {
+        try AccessibilityTree.requireServed()
+        let (runner, _) = try scriptRunner("""
+        printf '%s\\n' '\(Self.row("100000003", index: 0, version: "2026.42.0"))'
+        printf '%s\\n' '\(Self.row("100000002", index: 1, version: "2026.42.0"))'
+        printf '%s\\n' '\(Self.row("100000001", index: 2, version: "2026.41.0"))'
+        printf '%s\\n' '\(Self.end(count: 3))'
+        """)
+        let store = AppStoreVersionsStore(runner: runner)
+        let sheet = AppStoreVersionsSheet(app: "example", displayName: "Example", store: store,
+                                          getBlockedReason: nil, onGet: { _ in })
+        let box = hosted(sheet, size: NSSize(width: 520, height: 540))
+        addTeardownBlock { takeDown(box) }
+        await waitUntil { store.phase == .loaded }
+        settle(box, seconds: 0.3)
+
+        let nodes = try AccessibilityTree.nodes(in: box.window)
+        let dump = nodes.map { "\($0.role) name=\($0.name) value=\($0.value ?? "") help=\($0.help ?? "")" }
+        func said(_ node: AccessibilityTree.Node) -> String { "\(node.name) \((node.value as? String) ?? "")" }
+        let newer = "The App Store has 2 builds numbered 2026.42.0. This is the newer one (build 2)."
+        let older = "The App Store has 2 builds numbered 2026.42.0. This is the older one (build 1)."
+        let newerRow = nodes.first { said($0).contains("2026.42.0 (build 2 of 2)") }
+        let olderRow = nodes.first { said($0).contains("2026.42.0 (build 1 of 2)") }
+        // The row is one element (its children combined), whose help is the
+        // build's and then Get's.
+        let get = AppStoreVersionsSheet.getHelp(Self.record("100000002", index: 1, version: "2026.42.0"))
+        XCTAssertEqual(newerRow?.help?.contains(newer), true, "\(dump)")
+        XCTAssertEqual(olderRow?.help?.contains(older), true, "\(dump)")
+        XCTAssertEqual(olderRow?.help?.contains(get), true, "Get's help is still there: \(dump)")
+        let ownRow = try XCTUnwrap(nodes.first { said($0).contains("2026.41.0") }, "\(dump)")
+        XCTAssertFalse(said(ownRow).contains("build"), "\(dump)")
+        XCTAssertEqual(ownRow.help, AppStoreVersionsSheet.getHelp(Self.record("100000001", index: 2, version: "2026.41.0")),
+                       "Get's help alone, as before: \(dump)")
+    }
+
     // MARK: Getting a picked version
 
     @MainActor

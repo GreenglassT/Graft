@@ -138,9 +138,9 @@ final class DeviceVitalsPollTests: XCTestCase {
     /// makes the gate itself the thing under test.
     private struct Harness: View {
         let device: DeviceRecord
-        let devices: DevicesStore
-        let info: DeviceInfoStore
-        let config: ConfigStore
+        @ObservedObject var devices: DevicesStore
+        @ObservedObject var info: DeviceInfoStore
+        @ObservedObject var config: ConfigStore
         let interval: UInt64
         let active: ControlActiveState
 

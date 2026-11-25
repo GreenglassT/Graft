@@ -3,7 +3,9 @@ folder on its PYTHONPATH): blocks the network as `tests/network_guard.py`
 blocks it in the suite's own process, and records what it refused in the
 file $GRAFT_TEST_NETWORK_LOG names, which the test's teardown reads. And,
 always, refuses to start `security`, `osascript`, `sudo` and the rest
-(`tests/program_guard.py`), recording that in $GRAFT_TEST_PROGRAM_LOG.
+(`tests/program_guard.py`), recording that in $GRAFT_TEST_PROGRAM_LOG. And,
+with $GRAFT_TEST_APPLE_SILICON set to 1, has a graft read this Mac as Apple
+silicon, as the suite's own process does (`_AppleSilicon`).
 
 It shadows any other sitecustomize, so it runs the next one on sys.path
 after this folder: Homebrew's Python sets sys.executable in its own (see
@@ -31,6 +33,36 @@ if _log:
     _guard = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_guard)
     _guard.install_in_child(_log)
+
+
+class _AppleSilicon:
+    """A graft started by a test runs as if on Apple silicon, as the suite's
+    own process does (conftest's `_an_apple_silicon_mac`, which sets
+    GRAFT_TEST_APPLE_SILICON): `graft_ipa.host._sysctl_arm64` answers 1,
+    whatever Mac runs the suite. Set as the module loads, never by loading
+    it here: most children are no graft at all."""
+
+    @staticmethod
+    def find_spec(name, path=None, target=None):
+        if name != "graft_ipa.host" or path is None:
+            return None
+        import importlib.machinery
+
+        spec = importlib.machinery.PathFinder.find_spec(name, path)
+        if spec is None or spec.loader is None:
+            return spec
+        load = spec.loader.exec_module
+
+        def exec_module(module):
+            load(module)
+            module._sysctl_arm64 = lambda: 1
+
+        spec.loader.exec_module = exec_module
+        return spec
+
+
+if os.environ.get("GRAFT_TEST_APPLE_SILICON") == "1":
+    sys.meta_path.insert(0, _AppleSilicon)
 
 _after = False
 for _entry in sys.path:

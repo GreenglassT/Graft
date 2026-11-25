@@ -1,13 +1,12 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
 @MainActor
-@Observable
-final class TweaksStore: CLIStore {
-    private(set) var tweaks: [TweakRecord] = []
-    var lastError: String?
+final class TweaksStore: ObservableObject, CLIStore {
+    @Published private(set) var tweaks: [TweakRecord] = []
+    @Published var lastError: String?
 
     /// Whether a `loadTweaks()` has *completed* — success or failure, records or
     /// not. Exactly `DevicesStore.hasLoaded`, and for exactly its reason, which
@@ -43,7 +42,7 @@ final class TweaksStore: CLIStore {
     /// exists to pick up a library that changed underneath. This flag is for the
     /// one caller that only wants a first fill: `AppDetailView`, which needs the
     /// names once and re-runs its task on every sidebar click.
-    private(set) var hasLoaded: Bool = false
+    @Published private(set) var hasLoaded: Bool = false
 
     let runner: CLIRunner
     private let cliArgs: [String]
@@ -85,8 +84,8 @@ final class TweaksStore: CLIStore {
     /// identifies a *row*: two files can carry the same package, which this
     /// library does today — `com.example.btweak` at `1.1.8` and
     /// `1.1.8-jailed` — and they are separate rows with separate answers.
-    private(set) var updates: [String: TweakUpdateRecord] = [:]
-    private(set) var isCheckingUpdates = false
+    @Published private(set) var updates: [String: TweakUpdateRecord] = [:]
+    @Published private(set) var isCheckingUpdates = false
     /// nil until a check has finished, so "no updates" and "not asked yet"
     /// render differently. The first is worth saying; the second must not
     /// claim anything.
@@ -96,7 +95,7 @@ final class TweaksStore: CLIStore {
     /// snapshot of the moment the check ended, and updating a tweak clears its
     /// badge without changing it, so the summary went on saying "3 updates"
     /// over a list with none left.
-    private(set) var lastCheck: TweakUpdatesEndRecord?
+    @Published private(set) var lastCheck: TweakUpdatesEndRecord?
 
     /// Ask what is published for everything in the library.
     ///
@@ -139,7 +138,7 @@ final class TweaksStore: CLIStore {
     var outdatedCount: Int { updates.values.filter(\.updateAvailable).count }
 
     /// Which file an update is running for, so only that row shows a spinner.
-    private(set) var updatingFilename: String?
+    @Published private(set) var updatingFilename: String?
 
     /// Download the newest build of `tweak` and re-point the apps using it.
     ///

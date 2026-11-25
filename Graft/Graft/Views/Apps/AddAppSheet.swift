@@ -1,10 +1,10 @@
 import SwiftUI
 
 struct AddAppSheet: View {
-    @Bindable var store: ConfigStore
+    @ObservedObject var store: ConfigStore
     /// `ContentView`'s, the store the app pane stages its drops through: a
     /// manual add's IPA is staged there too (`add`).
-    let appStore: AppStoreStore
+    @ObservedObject var appStore: AppStoreStore
     /// Called with the new app's YAML slug right before the sheet dismisses,
     /// so the caller can select the new row in the sidebar — the pane where
     /// an IPA chosen here finishes staging.
@@ -538,12 +538,12 @@ struct AddAppSheet: View {
             deliveryPicker(selection: $searchDelivery)
             if let picked, Self.offersGet(picked.result) { getOfferRow }
         }
-        .onChange(of: searchTerm) { old, term in
+        .onChangeWithPrevious(of: searchTerm) { old, term in
             // A new term, not a new space: the pick stays (`sameSearch`).
             if !Self.sameSearch(old, term) { picked = nil }
             appStore.search.update(term: term)
         }
-        .onChange(of: picked) { _, pick in
+        .onChange(of: picked) { pick in
             getAfterAdd = pick.map { Self.getsAfterAddingByDefault($0.result) } ?? false
         }
     }

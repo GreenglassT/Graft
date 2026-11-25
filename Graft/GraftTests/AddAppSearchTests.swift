@@ -470,19 +470,25 @@ final class AddAppSearchTests: XCTestCase {
 
 /// What the sheet holds for its Search form, for a test to host the form alone.
 @MainActor
-@Observable
-final class FormBox {
-    var term = ""
-    var picked: AppStoreSearchPick?
+final class FormBox: ObservableObject {
+    @Published var term = ""
+    @Published var picked: AppStoreSearchPick?
 }
 
-/// `AppStoreSearchForm` bound to a `FormBox`, as `AddAppSheet` binds it to its state.
+/// `AppStoreSearchForm` bound to `@State`, as `AddAppSheet` binds it, and
+/// copied to a `FormBox` for the test to read. Not bound to the box itself:
+/// the form writes the pick from its arrow keys' handler, where `@State` may
+/// change but an `ObservableObject` may not publish.
 struct FormHarness: View {
-    let search: AppStoreSearchStore
-    @Bindable var box: FormBox
+    @ObservedObject var search: AppStoreSearchStore
+    @ObservedObject var box: FormBox
+    @State var term = ""
+    @State var picked: AppStoreSearchPick?
 
     var body: some View {
-        AppStoreSearchForm(search: search, term: $box.term, picked: $box.picked)
+        AppStoreSearchForm(search: search, term: $term, picked: $picked)
             .padding(20)
+            .onChange(of: term) { box.term = $0 }
+            .onChange(of: picked) { box.picked = $0 }
     }
 }

@@ -19,24 +19,25 @@ struct DeviceDetailView: View {
     let device: DeviceRecord
     /// The listing this device came from. Held for two things: the Refresh
     /// button re-runs it, and `lastError` is where a failed refresh lands.
-    let store: DevicesStore
+    @ObservedObject var store: DevicesStore
     /// Vitals for every phone, keyed by udid. Shared rather than per-pane, so
     /// switching between two devices doesn't re-run a lockdown query for a
     /// reading taken seconds ago.
-    let deviceInfo: DeviceInfoStore
+    @ObservedObject var deviceInfo: DeviceInfoStore
     /// The configured app list, for "Your apps on this phone".
     ///
     /// Note what this pane reads off it and what it does not: `apps`, and never
     /// `deliveryStates`. That field is `--list`'s unscoped answer — "delivered
     /// anywhere" — which is the right thing for the sidebar and the wrong thing
     /// here. See `DeviceDeliveryStore`.
-    let config: ConfigStore
+    @ObservedObject var config: ConfigStore
     /// Delivery states scoped to one phone, keyed by udid — the store that
     /// makes this pane's app section say something the app list cannot.
-    let delivery: DeviceDeliveryStore
+    @ObservedObject var delivery: DeviceDeliveryStore
     /// Real app icons, resolved centrally by `ContentView` and shared with the
-    /// sidebar and the app pane; this pane only reads from it.
-    let artwork: ArtworkStore
+    /// sidebar and the app pane; this pane hands it to the sections that
+    /// draw them.
+    @PassedThrough var artwork: ArtworkStore
 
     /// Installed apps per phone, and the state of the one dump that can be
     /// running — shared, keyed by udid, and owned by `ContentView` beside its
@@ -66,7 +67,7 @@ struct DeviceDetailView: View {
     /// Shared across panes rather than built here, for the reason `deviceInfo`
     /// is: coming back to a phone you have already listed should not re-run a
     /// ten-second enumeration of it.
-    let deviceApps: DeviceAppsStore
+    @ObservedObject var deviceApps: DeviceAppsStore
 
     /// The IPA cache, keyed by bundle id — owned by `ContentView` beside
     /// `deviceApps` rather than built here.
@@ -93,12 +94,12 @@ struct DeviceDetailView: View {
     /// Read by `InstalledAppsSection` below to decide which row is
     /// `.addable`; see `StagedIPAStore`'s own doc for why it carries no error
     /// channel.
-    let staged: StagedIPAStore
-    let liveContainer: LiveContainerStore
+    @ObservedObject var staged: StagedIPAStore
+    @PassedThrough var liveContainer: LiveContainerStore
     /// Only for "Add as app"'s sheet, which takes it whatever it was opened
     /// from (`AddAppSheet.appStore`). A prefilled sheet has nothing to stage
     /// through it: its IPA is already in the cache.
-    let appStore: AppStoreStore
+    @PassedThrough var appStore: AppStoreStore
     /// Select the app that already claims a row's bundle id, by config key —
     /// forwarded to `InstalledAppsSection`'s `onSelectApp`.
     ///
@@ -575,14 +576,14 @@ struct DeviceDetailView: View {
         // did need is a row that stays a lock and a Dump until the user
         // happens to leave this phone and come back — cheaper to always ask.
         //
-        // `isDumping` is a computed property over a `private var dumping` on
-        // this `@Observable` store, not a stored property `onChange` reads
+        // `isDumping` is a computed property over a `@Published private var
+        // dumping` on this store, not a stored property `onChange` reads
         // directly — confirmed to still fire correctly, both empirically
         // (a headless-window test observed `[true, false]` across a real
         // dump) and by precedent already shipping: `DeviceDecryptSection`'s
         // transcript auto-scroll keys an `.onChange` off
         // `deviceApps.transcript.count`, the identical shape.
-        .onChange(of: deviceApps.isDumping) { _, nowDumping in
+        .onChange(of: deviceApps.isDumping) { nowDumping in
             if !nowDumping { Task { await staged.load() } }
         }
         // Keyed on the udid, not bare: `ContentView` builds this pane without

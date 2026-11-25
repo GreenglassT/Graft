@@ -492,7 +492,8 @@ final class ScreenshotTests: XCTestCase {
     /// unified toolbar, with the toolbar and title bridged from SwiftUI.
     private static func documentWindow<V: View>(_ view: V, size: NSSize) -> NSWindow {
         let controller = NSHostingController(rootView: view)
-        controller.sceneBridgingOptions = .all
+        // macOS 14's; these screenshots are taken on a newer Mac.
+        if #available(macOS 14, *) { controller.sceneBridgingOptions = .all }
         let window = FrontWindow(
             contentRect: NSRect(origin: .zero, size: size),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],

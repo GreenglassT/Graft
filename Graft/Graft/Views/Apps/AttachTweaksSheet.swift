@@ -1,9 +1,9 @@
 import SwiftUI
 
 struct AttachTweaksSheet: View {
-    @Bindable var store: ConfigStore
+    @PassedThrough var store: ConfigStore
     let app: AppRecord
-    @Bindable var tweaksStore: TweaksStore
+    @ObservedObject var tweaksStore: TweaksStore
     @Environment(\.dismiss) private var dismiss
 
     @State private var selected: Set<String> = []

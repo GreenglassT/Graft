@@ -77,7 +77,8 @@ enum BundleFlavor: String, Equatable, Sendable {
 /// - The Intel download, on either Mac: the app runs, without App Store
 ///   gets, decryption setup, Build for this Mac or PlayCover, which are
 ///   disabled with `unavailableLine`. On an Apple silicon Mac a banner says
-///   to download Graft.zip instead (`intelBuildBanner`).
+///   to download Graft.zip instead, or, before macOS 14, that Graft.zip
+///   needs it (`intelBuildBannerLine`).
 /// - The Apple silicon download on an Intel Mac: nothing runs (its Python
 ///   can't), and `AppleSiliconGate` says which download this Mac needs.
 /// - A bundle whose plist and Python disagree: nothing runs either; the gate
@@ -95,6 +96,9 @@ struct MacSupport: Equatable, Sendable {
 
     let appleSiliconMac: Bool
     let build: Build
+    /// This Mac's macOS, by major version: whether Graft.zip opens here
+    /// (`opensAppleSiliconDownload`). `thisMac` reads it; a test passes any.
+    var macOSMajorVersion = 14
 
     enum Verdict: Equatable {
         /// The app runs, with `appleSiliconFeatures` deciding the rest.
@@ -125,11 +129,26 @@ struct MacSupport: Equatable, Sendable {
     /// download Graft.zip for everything.
     var isIntelBuildOnAppleSilicon: Bool { appleSiliconMac && build == .flavor(.x86_64) }
 
+    /// Whether Graft.zip, the Apple silicon download, opens on this Mac's
+    /// macOS. It needs macOS 14; the Intel download opens on macOS 13 too,
+    /// on an Apple silicon Mac through Rosetta.
+    var opensAppleSiliconDownload: Bool { macOSMajorVersion >= 14 }
+
     /// The one line beside an Apple-silicon-only action that is disabled
     /// here, or nil where it isn't.
     var unavailableLine: String? {
         guard !appleSiliconFeatures else { return nil }
-        return appleSiliconMac ? Self.needsAppleSiliconDownload : Self.needsAppleSilicon
+        guard appleSiliconMac else { return Self.needsAppleSilicon }
+        return opensAppleSiliconDownload ? Self.needsAppleSiliconDownload : Self.needsAppleSiliconDownloadAndMacOS14
+    }
+
+    /// The line over the Intel download on an Apple silicon Mac
+    /// (`IntelBuildBanner`), or nil anywhere else. Before macOS 14 it says
+    /// Graft.zip needs macOS 14, rather than send the user to a download
+    /// that won't open.
+    var intelBuildBannerLine: String? {
+        guard isIntelBuildOnAppleSilicon else { return nil }
+        return opensAppleSiliconDownload ? Self.intelBuildBanner : Self.intelBuildBannerBeforeMacOS14
     }
 
     /// First run's line on its Welcome screen, or nil where everything
@@ -141,16 +160,23 @@ struct MacSupport: Equatable, Sendable {
         guard !appleSiliconFeatures else { return nil }
         let instead = "Graft works with a decrypted IPA you already have, or one dumped from "
             + "your own jailbroken iPhone or iPad."
+        let download = opensAppleSiliconDownload
+            ? "the Apple silicon download (Graft.zip)"
+            : "the Apple silicon download (Graft.zip) and macOS 14 or later"
         return appleSiliconMac
             ? "This is the Intel build, so setup skips getting apps from the App Store, which "
-                + "needs the Apple silicon download (Graft.zip). " + instead
+                + "needs \(download). " + instead
             : "Setup skips getting apps from the App Store: decrypting them needs a Mac with "
                 + "Apple silicon. " + instead
     }
 
     static let needsAppleSilicon = "Needs a Mac with Apple silicon"
     static let needsAppleSiliconDownload = "Needs the Apple silicon download of Graft (Graft.zip)"
+    static let needsAppleSiliconDownloadAndMacOS14 =
+        "Needs the Apple silicon download of Graft (Graft.zip) and macOS 14 or later"
     static let intelBuildBanner = "This is the Intel build. On an Apple silicon Mac, download Graft.zip for everything."
+    static let intelBuildBannerBeforeMacOS14 =
+        "This is the Intel build. The Apple silicon download, Graft.zip, does everything, but needs macOS 14 or later."
 
     /// Everything available: the Apple silicon download on an Apple silicon
     /// Mac. What a view sees when nothing set `\.macSupport`, as in most tests.
@@ -164,7 +190,8 @@ struct MacSupport: Equatable, Sendable {
         /// on PATH. (A release build missing it is a damaged app, which its
         /// first CLI launch says: `SetupNeed.damagedApp`.)
         case absent
-        /// There, and not a Mach-O this can read.
+        /// There, and not a Mach-O this can read; or more than one; or
+        /// reached through a link (`embeddedPython(in:)`).
         case unreadable
         /// The processors it has code for (`MachOArchitectures`).
         case architectures([String])
@@ -208,16 +235,51 @@ struct MacSupport: Equatable, Sendable {
         }
     }
 
-    /// Where a Graft.app keeps the interpreter its CLI runs on
-    /// (`app_update.EMBEDDED_PYTHON` in the CLI).
-    static let embeddedPythonPath = "Contents/Resources/GraftPython/bin/python3.13"
+    /// The folders, under a Graft.app, of the one holding the interpreter its
+    /// CLI runs on (`app_update.EMBEDDED_PYTHON` in the CLI).
+    static let embeddedPythonFolders = ["Contents", "Resources", "GraftPython", "bin"]
+
+    /// Whether `name` is the interpreter's, in `embeddedPythonFolders`:
+    /// python3.<one to three ASCII digits>, the whole name, as the CLI's
+    /// `app_update.INTERPRETER_RE` finds it. Not python3.13t, python3.13-config,
+    /// python3 or python3.13.1.
+    static func isInterpreterName(_ name: String) -> Bool {
+        let bytes = Array(name.utf8)
+        let prefix = Array("python3.".utf8)
+        guard bytes.starts(with: prefix), (1...3).contains(bytes.count - prefix.count) else { return false }
+        return bytes.dropFirst(prefix.count).allSatisfy { (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) }
+    }
 
     /// The embedded Python of the bundle at `bundleURL`, read off its header.
+    ///
+    /// Found by its name (`isInterpreterName`), not as this release's
+    /// python3.13, so the first Graft on a newer Python still reads as the
+    /// build it is (`app_update.embedded_interpreter` in the CLI). No folder,
+    /// or no interpreter in it, is `.absent`, as in a Debug build. More than
+    /// one is `.unreadable`, a mixed-up bundle, as the CLI holds. So is a
+    /// folder there that can't be listed, and one reached through a link, a
+    /// folder on the way or the interpreter itself: a bundle's own code is
+    /// its own files.
     static func embeddedPython(in bundleURL: URL) -> EmbeddedPython {
-        let url = bundleURL.appending(path: embeddedPythonPath)
+        let fileManager = FileManager.default
+        func isLink(_ url: URL) -> Bool {
+            (try? fileManager.attributesOfItem(atPath: url.path)[.type] as? FileAttributeType) == .typeSymbolicLink
+        }
+        var folder = bundleURL
+        for part in embeddedPythonFolders {
+            folder = folder.appending(path: part)
+            if isLink(folder) { return .unreadable }
+        }
+        guard fileManager.fileExists(atPath: folder.path) else { return .absent }
+        guard let listed = try? fileManager.contentsOfDirectory(atPath: folder.path) else { return .unreadable }
+        let names = listed.filter(isInterpreterName)
+        guard let name = names.first else { return .absent }
+        guard names.count == 1 else { return .unreadable }
+        let url = folder.appending(path: name)
         var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { return .absent }
-        guard !isDirectory.boolValue, let found = MachOArchitectures.read(url) else { return .unreadable }
+        guard !isLink(url), fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue, let found = MachOArchitectures.read(url)
+        else { return .unreadable }
         return .architectures(found)
     }
 
@@ -228,7 +290,8 @@ struct MacSupport: Equatable, Sendable {
         build: build(
             infoValue: Bundle.main.object(forInfoDictionaryKey: BundleFlavor.infoKey),
             python: embeddedPython(in: Bundle.main.bundleURL)
-        )
+        ),
+        macOSMajorVersion: ProcessInfo.processInfo.operatingSystemVersion.majorVersion
     )
 }
 

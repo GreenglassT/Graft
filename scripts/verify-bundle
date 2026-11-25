@@ -603,21 +603,24 @@ def minos_problems(versions: dict[str, list], limit: tuple[int, int, int]) -> li
     return problems
 
 
-def check_minimum_macos(app: Path, report: Report) -> None:
+def check_minimum_macos(app: Path, report: Report, arch: str = "arm64") -> None:
     """Review #14/#36: everything the app runs must load on the macOS its
-    Info.plist promises, LSMinimumSystemVersion, which must be exactly the
-    stage's MACOS_MIN (14.0). The runtime checks run on the release Mac's
-    newer macOS and can't see it."""
+    bundle is for, the stage's floor for `arch` (macos_min: 14.0 for
+    Graft.zip, 13.0 for Graft-Intel.zip), and its Info.plist's
+    LSMinimumSystemVersion must promise exactly that. Every slice of every
+    macOS Mach-O, the app's universal executable included, by its load
+    commands (LC_BUILD_VERSION, LC_VERSION_MIN_MACOSX), read here, never by
+    running anything: the runtime checks run on the release Mac's newer
+    macOS and can't see it."""
     import plistlib
-    floor = _stage_module().MACOS_MIN
+    floor = _stage_module().macos_min(arch)
     want = plistlib.loads((app / "Contents" / "Info.plist").read_bytes()).get("LSMinimumSystemVersion", "")
-    if want != floor:
-        report.check(f"LSMinimumSystemVersion is {floor}, the macOS the stage builds for", False, repr(want))
-        return
-    limit = tuple([*map(int, want.split(".")), 0, 0][:3])
+    report.check(f"LSMinimumSystemVersion is {floor}, the macOS the stage builds the {arch} bundle for",
+                 want == floor, repr(want))
+    limit = tuple([*map(int, floor.split(".")), 0, 0][:3])
     files = mach_o_files(app / "Contents")
     problems = minos_problems({str(f.relative_to(app)): macho.build_versions(f) for f in files}, limit)
-    report.check(f"every macOS Mach-O loads on macOS {want} (LSMinimumSystemVersion)", not problems,
+    report.check(f"every macOS Mach-O loads on macOS {floor}, the {arch} bundle's", not problems,
                  f"{len(files)} files" if not problems else f"{len(problems)} don't", output="\n".join(problems))
 
 
@@ -2057,7 +2060,7 @@ def verify_app(app: Path, report: Report, work: Path, *, gatekeeper_accepted: bo
     check_ios_code(app, report)
     check_architectures(app, report, arch=arch)
     check_bundle_arch(app, report, arch=arch)
-    check_minimum_macos(app, report)
+    check_minimum_macos(app, report, arch=arch)
     check_components(app, report, arch=arch)
     check_package_licences(app, report)
     check_framework_licences(app, report)

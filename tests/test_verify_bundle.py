@@ -609,18 +609,86 @@ def test_every_macos_slice_must_load_on_the_promised_macos():
         "Contents/Frameworks/silent.dylib: no minimum macOS in its load commands"]
 
 
-def test_the_promised_minimum_must_be_the_stages(tmp_path):
-    """LSMinimumSystemVersion must be exactly the macOS the stage builds for
-    (14.0): a 15.0 left in Info.plist would refuse macOS 14 users the app
-    was built for, and an older one would promise a macOS nothing was built
-    or checked against."""
-    for promised, ok in (("14.0", True), ("15.0", False), ("13.0", False), ("", False)):
-        app = _fake_app(tmp_path / (promised or "none"))
-        import plistlib
-        (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps({"LSMinimumSystemVersion": promised}))
-        report = vb.Report()
-        vb.check_minimum_macos(app, report)
-        assert report.results and all(ok_ for _, ok_ in report.results) is ok, (promised, report.results)
+#: Each bundle's floor: Graft.zip's, and Graft-Intel.zip's (Ventura).
+FLOORS = {"arm64": "14.0", "x86_64": "13.0"}
+
+
+def _app_with(root: Path, promised: str | None, minos: dict[str, list[str]]) -> Path:
+    """A fake app whose Info.plist promises `promised` (no key for None), with
+    one Mach-O per entry of `minos`: its path under Contents, and the minimum
+    macOS of each of its slices (x86_64 first, then arm64), as LC_BUILD_VERSION
+    or, for an entry starting "min:", LC_VERSION_MIN_MACOSX. "ios:" makes an
+    iOS slice, which the floor doesn't cover."""
+    import plistlib
+
+    from . import macho_builder as mb
+    app = _fake_app(root)
+    info = {} if promised is None else {"LSMinimumSystemVersion": promised}
+    (app / "Contents" / "Info.plist").write_bytes(plistlib.dumps(info))
+    for rel, versions in minos.items():
+        slices = []
+        for cpu, v in zip((mb.CPU_X86_64, mb.CPU_ARM64), versions, strict=False):
+            if v.startswith("min:"):
+                cmd = mb.version_min_cmd(mb.LC_VERSION_MIN_MACOSX, v[4:])
+            elif v.startswith("ios:"):
+                cmd = mb.build_version_cmd(mb.PLATFORM_IOS, v[4:])
+            else:
+                cmd = mb.build_version_cmd(mb.PLATFORM_MACOS, v)
+            slices.append((cpu, mb.thin([cmd], cputype=cpu)))
+        path = app / "Contents" / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(slices[0][1] if len(slices) == 1 else mb.fat(slices))
+    return app
+
+
+def _floor_results(app: Path, arch: str) -> list[tuple[str, bool]]:
+    report = vb.Report()
+    vb.check_minimum_macos(app, report, arch=arch)
+    assert report.results
+    return report.results
+
+
+@pytest.mark.parametrize("arch", ["arm64", "x86_64"])
+def test_the_promised_minimum_must_be_the_bundles_own(tmp_path, arch):
+    """LSMinimumSystemVersion must be exactly the macOS the stage builds
+    that bundle for: 14.0 for Graft.zip, 13.0 for Graft-Intel.zip. A 14.0
+    left in the Intel build's Info.plist would refuse the Ventura Macs it
+    is for; an older one would promise a macOS nothing was built or checked
+    against."""
+    for promised in ("14.0", "13.0", "15.0", "12.0", "", None):
+        app = _app_with(tmp_path / arch / str(promised), promised, {})
+        ok = all(passed for _, passed in _floor_results(app, arch))
+        assert ok is (promised == FLOORS[arch]), (arch, promised)
+
+
+@pytest.mark.parametrize(("arch", "minos", "ok"), [
+    ("x86_64", {"Helpers/bin/ipatool": ["13.0"], "MacOS/Graft": ["13.0", "13.0"]}, True),
+    ("x86_64", {"Frameworks/libcrypto.3.dylib": ["12.0"], "Helpers/graft": ["min:10.15"]}, True),
+    ("x86_64", {"Helpers/bin/ipatool": ["14.0"]}, False),
+    ("x86_64", {"Frameworks/libplist-2.0.dylib": ["13.0.1"]}, False),
+    ("x86_64", {"Helpers/bin/zsign": ["min:14.0"]}, False),
+    ("x86_64", {"MacOS/Graft": ["13.0", "14.0"]}, False),
+    ("x86_64", {"Resources/cyan/extras/Orion.framework/Orion": ["ios:15.0"]}, True),
+    ("arm64", {"Helpers/bin/ipatool": ["14.0", "14.0"], "MacOS/Graft": ["14.0", "14.0"]}, True),
+    ("arm64", {"Helpers/bin/unfairplay": ["14.1"]}, False),
+])
+def test_every_mach_o_must_load_on_its_bundle_s_floor(tmp_path, arch, minos, ok):
+    """The Intel bundle's ceiling is 13.0, the arm64 one's 14.0, every slice
+    of every macOS Mach-O, as LC_BUILD_VERSION or LC_VERSION_MIN_MACOSX says,
+    read by the repo's own Mach-O reader: a universal app executable whose
+    arm64 slice needs 14.0 is still too new for the Intel download."""
+    app = _app_with(tmp_path, FLOORS[arch], minos)
+    results = _floor_results(app, arch)
+    assert len(results) == 2, results
+    assert results[0][1] is True, "the promise is right"
+    assert results[1][1] is ok, results
+
+
+def test_the_floor_check_reads_headers_and_runs_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(vb, "run", lambda *a, **k: pytest.fail("ran something"))
+    monkeypatch.setattr(vb.subprocess, "run", lambda *a, **k: pytest.fail("ran something"))
+    app = _app_with(tmp_path, "13.0", {"Helpers/bin/ipatool": ["13.0"]})
+    assert all(ok for _, ok in _floor_results(app, "x86_64"))
 
 
 def test_a_symlink_anywhere_in_the_app_fails(tmp_path):
@@ -1611,7 +1679,7 @@ def test_each_bundle_gets_its_own_unfairplay_checks_and_the_arch_check_before_an
     assert names.index("check_bundle_arch") < names.index("runtime_checks")
     given = dict(order)
     for name in ("check_architectures", "check_bundle_arch", "check_components", "check_go_modules", "check_no_junk",
-                 "check_helper_imports", "runtime_checks"):
+                 "check_helper_imports", "check_minimum_macos", "runtime_checks"):
         assert given[name] == arch, name
 
 

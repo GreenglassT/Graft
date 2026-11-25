@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -48,7 +48,7 @@ private typealias Flag = CLIContract.Flag
 ///
 /// ## What is deliberately *not* keyed
 ///
-/// The dump: `lastDecrypt`, `lastAttempt`, `transcript`, `notes`, `dumping`,
+/// The dump: `lastDecrypt`, `lastAttempt`, `dumpLog`, `dumping`,
 /// `lastError`. There is one dump at a time across the whole app — both entry
 /// points `guard dumping == .idle` — so a dictionary would be a map that can
 /// only ever hold one entry, and the card that narrates a dump is meant to go
@@ -58,12 +58,11 @@ private typealias Flag = CLIContract.Flag
 /// readiness probes are already settled by `readinessGeneration`, so only the
 /// newest one is ever the one on screen.
 @MainActor
-@Observable
-final class DeviceAppsStore {
+final class DeviceAppsStore: ObservableObject {
     /// The installed-apps listing per device. A udid with no entry has never
     /// been listed; see `lastLoad` for how that differs from a phone with no
     /// apps.
-    private(set) var apps: [String: [DeviceAppRecord]] = [:]
+    @Published private(set) var apps: [String: [DeviceAppRecord]] = [:]
     /// Which devices have a listing in flight — the spinner on that phone's
     /// section, and the guard that keeps a second press from starting a
     /// second run.
@@ -72,16 +71,16 @@ final class DeviceAppsStore {
     /// overlap: a listing takes ~9s, and switching panes and pressing "List
     /// apps" on the other phone inside that window is ordinary. One flag would
     /// have dropped the second request silently and spun the wrong section.
-    private(set) var loading: Set<String> = []
+    @Published private(set) var loading: Set<String> = []
     /// nil until a load has finished *for that udid*, so "no apps" and "not
     /// asked yet" render differently — the same rule the update check follows.
-    private(set) var lastLoad: [String: DeviceAppsEndRecord] = [:]
+    @Published private(set) var lastLoad: [String: DeviceAppsEndRecord] = [:]
     /// A failed *listing*, per device — not a failed dump. `lastError` is the
     /// dump's, and keeping the two apart is what stops a dump's error banner
     /// appearing under a section that had nothing to do with the dump.
-    var listErrors: [String: String] = [:]
+    @Published var listErrors: [String: String] = [:]
     /// A failed dump. One value, because there is one dump.
-    var lastError: String?
+    @Published var lastError: String?
 
     let runner: CLIRunner
     /// Held while a dump runs (`runDecrypt`); a test passes its own.
@@ -105,7 +104,7 @@ final class DeviceAppsStore {
         case row(String)   // a specific app's row, keyed by bundle id
         case frontmost     // whatever's on screen; no bundle id until it reports
     }
-    private var dumping: Dumping = .idle
+    @Published private var dumping: Dumping = .idle
 
     /// The bundle id whose row is dumping, or nil — drives that row's spinner.
     var decrypting: String? {
@@ -132,7 +131,7 @@ final class DeviceAppsStore {
 
     /// The last successful dump, kept so the pane can say where it landed and
     /// that the app is now buildable.
-    private(set) var lastDecrypt: DecryptEndRecord?
+    @Published private(set) var lastDecrypt: DecryptEndRecord?
 
     /// Dump a decrypted IPA of `app` off the device and stage it for a build.
     ///
@@ -219,29 +218,17 @@ final class DeviceAppsStore {
         var backend: String?
         var verbose: Bool
     }
-    private(set) var lastAttempt: Attempt?
+    @Published private(set) var lastAttempt: Attempt?
 
     /// The device the last dump aimed at. Read by the pane; kept as a derived
     /// value so callers cannot drift from `lastAttempt`.
     var lastFrontmostDevice: String? { lastAttempt?.device }
     var lastBackend: String? { lastAttempt?.backend }
 
-    /// The backend's own output from the run in progress, newest last.
-    ///
-    /// Streamed rather than collected at the end: a dump takes a minute and the
-    /// only question while it runs is whether it is progressing. bagbak prints
-    /// per-file download progress, so this is the difference between a hung
-    /// dump and a slow one — which is exactly what "hit or miss" felt like.
-    private(set) var transcript: [String] = []
-
-    /// What the CLI decided on the user's behalf during this dump, in order.
-    ///
-    /// Kept apart from the backend's own output because they are read
-    /// differently. The transcript is hundreds of per-file lines, skimmed and
-    /// truncated; these are the two or three sentences that explain why the
-    /// dump changed tack — and a sentence truncated in the middle is worse than
-    /// no sentence, because the reader cannot tell they missed something.
-    private(set) var notes: [String] = []
+    /// The run's narration: the backend's output and the CLI's own notes
+    /// (`DumpLog`). Not this store's own state, so a line arriving redraws
+    /// only the card's transcript, never the views that observe this store.
+    let dumpLog = DumpLog()
 
     /// Whether the last failure is the one a second run can actually fix:
     /// undumpable app extensions that this dump was told to keep.
@@ -306,8 +293,8 @@ final class DeviceAppsStore {
     /// A phone already probed keeps its answer while it is re-probed, which is
     /// the other half of the same property: coming back to a phone shows what
     /// it said last time rather than a blank card.
-    private(set) var readiness: [String: DecryptCheckRecord] = [:]
-    private(set) var isChecking = false
+    @Published private(set) var readiness: [String: DecryptCheckRecord] = [:]
+    @Published private(set) var isChecking = false
 
     /// Ask whether a dump could run right now, without starting one.
     ///
@@ -321,6 +308,7 @@ final class DeviceAppsStore {
     /// error banner would sit a red bar over a pane whose real problem is that
     /// the phone is asleep.
     /// Bumped per request so a slow probe cannot overwrite a newer one.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var readinessGeneration = 0
 
     /// `udid` is required rather than optional, and it is what the answer is
@@ -429,8 +417,10 @@ final class DeviceAppsStore {
         // beside this run's error banner (or the reverse).
         lastError = nil
         lastDecrypt = nil
-        transcript = []
-        notes = []
+        dumpLog.clear()
+        // However the run ends: what is still waiting to be published is
+        // part of what it said.
+        defer { dumpLog.flush() }
         do {
             // `stream`, not `run`: the point of --verbose is seeing the
             // backend narrate *while* it works, and a collected result can only
@@ -448,9 +438,9 @@ final class DeviceAppsStore {
                     if case let .log(source, line) = event,
                        source != CLIContract.startupLogSource {  // C-NOTICE: not the dump's
                         if source == CLIContract.selfLogSource {
-                            self?.notes.append(line)
+                            self?.dumpLog.append(note: line)
                         } else {
-                            self?.transcript.append(line)
+                            self?.dumpLog.append(line: line)
                         }
                     }
                 }
@@ -534,5 +524,84 @@ final class DeviceAppsStore {
             // must not appear on the decrypt card.
             listErrors[udid] = error.localizedDescription
         }
+    }
+}
+
+
+/// A dump's narration, kept apart from `DeviceAppsStore`: the backend's own
+/// output (`lines`) and what the CLI decided on the user's behalf (`notes`).
+///
+/// Its own `ObservableObject` because it changes line by line while a dump
+/// runs, and bagbak prints a line per file. On the store, each line redrew
+/// every view observing the store: the device pane, the installed-apps list
+/// and each row's icon. Only the decrypt card's notes and transcript
+/// observe this (`DumpNotes`, `DumpTranscript`).
+///
+/// Lines are published at most once every `interval`, as each publish
+/// redraws the whole transcript panel; `flush` publishes the rest when the
+/// dump ends. Notes are published as they come: there are two or three.
+@MainActor
+final class DumpLog: ObservableObject {
+    /// The backend's output from the run in progress, newest last.
+    ///
+    /// Streamed rather than collected at the end: a dump takes a minute and the
+    /// only question while it runs is whether it is progressing. bagbak prints
+    /// per-file download progress, so this is the difference between a hung
+    /// dump and a slow one — which is exactly what "hit or miss" felt like.
+    @Published private(set) var lines: [String] = []
+
+    /// What the CLI decided on the user's behalf during this dump, in order.
+    ///
+    /// Kept apart from the backend's own output because they are read
+    /// differently. The transcript is hundreds of per-file lines, skimmed and
+    /// truncated; these are the two or three sentences that explain why the
+    /// dump changed tack — and a sentence truncated in the middle is worse than
+    /// no sentence, because the reader cannot tell they missed something.
+    @Published private(set) var notes: [String] = []
+
+    /// Unpublished: lines that have arrived since the last publish of `lines`.
+    private var waiting: [String] = []
+    /// Unpublished: the publish of `waiting` that is due, if any.
+    private var due: Task<Void, Never>?
+    /// How long a line can wait to be published.
+    let interval: Duration
+
+    init(interval: Duration = .milliseconds(100)) {
+        self.interval = interval
+    }
+
+    /// A line of the backend's: published with any others that arrive
+    /// within `interval` of the first.
+    func append(line: String) {
+        waiting.append(line)
+        guard due == nil else { return }
+        let interval = interval
+        due = Task { [weak self] in
+            try? await Task.sleep(for: interval)
+            guard !Task.isCancelled else { return }
+            self?.flush()
+        }
+    }
+
+    func append(note: String) {
+        notes.append(note)
+    }
+
+    /// Publish the lines still waiting, now.
+    func flush() {
+        due?.cancel()
+        due = nil
+        guard !waiting.isEmpty else { return }
+        lines += waiting
+        waiting = []
+    }
+
+    /// A new dump: nothing of the last one, published or waiting.
+    func clear() {
+        due?.cancel()
+        due = nil
+        waiting = []
+        lines = []
+        notes = []
     }
 }

@@ -16,7 +16,7 @@ struct AppStoreVersionsSheet: View {
     var held: String? = nil
     /// What the sheet calls the app.
     let displayName: String
-    @Bindable var store: AppStoreVersionsStore
+    @ObservedObject var store: AppStoreVersionsStore
     /// Why a get can't start now: a sign-in in Settings, or a get or drop
     /// already running for this app. Get is disabled with it as the help.
     let getBlockedReason: String?
@@ -104,21 +104,27 @@ struct AppStoreVersionsSheet: View {
             .foregroundStyle(Palette.textDim)
             .frame(maxWidth: .infinity)
         } else {
+            let builds = store.duplicateBuilds
             List(store.releases) { release in
-                row(release)
+                row(release, build: builds[release.externalId])
             }
             .listStyle(.inset)
             .scrollContentBackground(.hidden)
         }
     }
 
-    private func row(_ release: AppStoreReleaseRecord) -> some View {
+    /// `build`: which of a version's builds this row is, when the App Store
+    /// lists more than one under its number (`AppStoreVersionsStore.duplicateBuilds`).
+    private func row(
+        _ release: AppStoreReleaseRecord, build: AppStoreVersionsStore.DuplicateBuild?
+    ) -> some View {
         let state = AppStoreVersionsStore.rowState(release, phase: store.phase, readingUpTo: store.readingUpTo)
         return HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(Self.headline(release, state: state))
+                Text(Self.headline(release, state: state, build: build))
                     .font(AppFont.bodyMedium)
                     .foregroundStyle(state == .ready ? Palette.text : Palette.textDim)
+                    .help(ifAny: build?.help)
                 Text(Self.detailLine(release, held: store.heldVersion, state: state))
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.textDim)
@@ -166,9 +172,14 @@ struct AppStoreVersionsSheet: View {
 
     // MARK: What each row says
 
-    /// The version, or what stands in for it before it is read.
-    static func headline(_ release: AppStoreReleaseRecord, state: AppStoreVersionsStore.RowState) -> String {
-        if let version = release.version { return version }
+    /// The version, or what stands in for it before it is read. One of two
+    /// or more builds under one number says which (`build`): "2026.42.0
+    /// (build 1 of 2)".
+    static func headline(
+        _ release: AppStoreReleaseRecord, state: AppStoreVersionsStore.RowState,
+        build: AppStoreVersionsStore.DuplicateBuild? = nil
+    ) -> String {
+        if let version = release.version { return build.map { "\(version) \($0.suffix)" } ?? version }
         switch state {
         case .reading: return "Reading…"
         case .unavailable: return "Version unknown"
@@ -249,5 +260,14 @@ struct AppStoreVersionsSheet: View {
         shown.timeZone = TimeZone(identifier: "UTC")
         shown.dateFormat = "MMM d, yyyy"
         return shown.string(from: date)
+    }
+}
+
+private extension View {
+    /// `help(_:)` when there is something to say, and nothing otherwise:
+    /// a row of a version of its own keeps the help it had.
+    @ViewBuilder
+    func help(ifAny text: String?) -> some View {
+        if let text { help(text) } else { self }
     }
 }

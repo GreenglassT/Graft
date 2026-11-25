@@ -138,6 +138,22 @@ final class NoRealDefaultsTests: XCTestCase {
 
     // MARK: The tests
 
+    /// The test host is the Debug build, whose bundle id is its own
+    /// (project.yml's Debug configuration). Under the release id, AppKit and
+    /// SwiftUI saved the host's window frames and split-view sizes ("NSWindow
+    /// Frame SwiftUI.WindowGroup<…>", "NSSplitView Subview Frames …") into
+    /// the owner's real Graft preferences, keys no Graft code writes, so no
+    /// seam here could keep them out.
+    func test_the_test_host_is_not_under_the_release_bundle_id() {
+        let id = Bundle.main.bundleIdentifier
+        XCTAssertNotNil(id)
+        XCTAssertNotEqual(
+            id, "com.greenglasst.graft",
+            "the test host runs under the release bundle id, so AppKit saves its window frames "
+                + "into the real Graft's preferences: give the Debug configuration its own id"
+        )
+    }
+
     func test_nothing_outside_the_composition_point_defaults_to_a_real_side_effect() throws {
         let root = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent()

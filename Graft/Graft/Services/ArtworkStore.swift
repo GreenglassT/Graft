@@ -1,6 +1,6 @@
 import AppKit
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -27,24 +27,22 @@ private typealias Flag = CLIContract.Flag
 /// the second along with the first. Surfacing it would mean a `notes` or
 /// `lastError` channel, and the tile is still the correct thing on screen.
 @MainActor
-@Observable
-final class ArtworkStore {
+final class ArtworkStore: ObservableObject {
     /// Bumped only when a `load()` actually cached at least one image. The
     /// value itself means nothing; it exists to be read.
     ///
-    /// This is the one piece of state `image(for:)` and every view drawing an
-    /// icon actually observes — see the comment there for why the cache
-    /// itself can't be.
-    private(set) var generation = 0
+    /// This is the one piece of state every view drawing an icon actually
+    /// observes — see the comment on `image(for:)` for why the cache itself
+    /// can't be.
+    @Published private(set) var generation = 0
 
-    /// Where loaded icons live. `NSCache`, not a `@Observable` dictionary:
+    /// Where loaded icons live. `NSCache`, not a `@Published` dictionary:
     /// `NSImage` is a reference type so mutating a dictionary's values
-    /// wouldn't even trigger `@Observable`'s own change tracking reliably,
-    /// and `NSCache` can evict entries under memory pressure at any time —
-    /// which would make a dictionary an outright lie about what's still
-    /// cached one line after `@Observable` reported it. `generation` is the
-    /// thing this type actually promises to keep in sync with reality.
-    @ObservationIgnored
+    /// wouldn't even publish a change reliably, and `NSCache` can evict
+    /// entries under memory pressure at any time — which would make a
+    /// dictionary an outright lie about what's still cached one line after
+    /// it was published. `generation` is the thing this type actually
+    /// promises to keep in sync with reality.
     private let cache = NSCache<NSString, NSImage>()
 
     private let runner: CLIRunner
@@ -57,16 +55,13 @@ final class ArtworkStore {
     /// resolution failed, or the cache evicted it — the caller can't tell
     /// these apart and doesn't need to).
     ///
-    /// `_ = generation` is not dead code. `NSCache` is invisible to
-    /// `@Observable` — mutating it registers no dependency — so without this
-    /// touch, a SwiftUI view calling `image(for:)` before an icon arrives
-    /// would read nil once, register no dependency on anything, and never be
-    /// asked to redraw when `load()` later populates the cache. Reading
-    /// `generation` here is what makes that redraw happen: `load()` bumping
-    /// it is the write half of the same contract.
+    /// `NSCache` publishes nothing, so a SwiftUI view calling this before an
+    /// icon arrives would read nil once and never be asked to redraw when
+    /// `load()` later populates the cache — unless it holds this store as an
+    /// `@ObservedObject`. Every view that calls this does: `load()` bumping
+    /// the `@Published` `generation` is what redraws them.
     func image(for bundleId: String) -> NSImage? {
-        _ = generation
-        return cache.object(forKey: bundleId as NSString)
+        cache.object(forKey: bundleId as NSString)
     }
 
     /// One image per cache file, keyed by path and stamped with what the file

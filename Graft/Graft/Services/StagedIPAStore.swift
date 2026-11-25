@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -60,11 +60,10 @@ private typealias Flag = CLIContract.Flag
 ///
 /// Accepted, not overlooked.
 @MainActor
-@Observable
-final class StagedIPAStore {
+final class StagedIPAStore: ObservableObject {
     /// The preferred staged IPA per bundle id — the file a build would reach
     /// for, as the CLI marked it.
-    private(set) var byBundleId: [String: StagedIPARecord] = [:]
+    @Published private(set) var byBundleId: [String: StagedIPARecord] = [:]
 
     /// Every staged IPA, in the order the CLI emitted them.
     ///
@@ -76,7 +75,7 @@ final class StagedIPAStore {
     /// Two readings of one listing, not two listings: both are published from
     /// the same `load()`, atomically, so a view reading one cannot see a state
     /// the other has not caught up to.
-    private(set) var all: [StagedIPARecord] = []
+    @Published private(set) var all: [StagedIPARecord] = []
 
     /// Whether a listing has ever finished.
     ///
@@ -85,11 +84,12 @@ final class StagedIPAStore {
     /// dictionary's size. Conflating the two is the defect this GUI has now
     /// shipped three times; here it would offer no Add on any row and give no
     /// reason, which reads exactly like the feature being broken.
-    private(set) var hasLoaded = false
+    @Published private(set) var hasLoaded = false
 
     private let runner: CLIRunner
 
     /// Bumped on every `load()` call so a stale one can tell it lost a race.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var loadGeneration = 0
 
     init(runner: CLIRunner) {

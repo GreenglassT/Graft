@@ -374,13 +374,17 @@ def test_the_command_line_tools_alone_are_not_enough(tmp_path, monkeypatch):
 
 def test_a_bundled_install_name_tool_is_run_by_its_path(tmp_path, monkeypatch):
     """Graft.app's is cyan's, built from cctools-port with its fake-sign
-    hook compiled out: never the xcrun shim, never Xcode's (decision 9)."""
+    hook compiled out: never the xcrun shim, never Xcode's (decision 9).
+    In Graft.zip, whose Python says arm64, pinned here: the folder is
+    named for the running Python's processor, so an x86_64 Python (an Intel
+    Mac's, or one under Rosetta) would look in Darwin/x86_64."""
     contents = tmp_path / "Graft.app" / "Contents"
     helpers = contents / "Helpers" / "bin"
     helpers.mkdir(parents=True)
     bundled = _fake_tool((contents / playcover.BUNDLED_INSTALL_NAME_TOOL).parent, "install_name_tool")
     monkeypatch.setattr(playcover.tools, "bundled_tools_dir", lambda: helpers)
     monkeypatch.setattr(playcover, "developer_dir", lambda: None)
+    monkeypatch.setattr(playcover.platform, "machine", lambda: "arm64")
     ran: list[list[str]] = []
     monkeypatch.setattr(playcover.subprocess, "run", lambda argv, **k: ran.append(argv))
 

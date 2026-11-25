@@ -95,13 +95,18 @@ enum SidebarItem: Hashable {
 }
 
 struct ContentView: View {
-    @Bindable var store: ConfigStore
-    @State private var tweaksStore: TweaksStore
+    @ObservedObject var store: ConfigStore
+    // The stores this view reads while drawing are `@StateObject`, which
+    // observes them. Those it only hands to a pane, or uses inside a `Task`,
+    // are plain `@State`: kept for the window's life all the same, without
+    // the window redrawing for each of their changes (a phone's vitals, a
+    // dump's progress). `ObservableStoresTests` proves which is which.
+    @StateObject private var tweaksStore: TweaksStore
     @State private var canisterStore: CanisterStore
-    @State private var repoStore: RepoStore
-    @State private var buildsStore: BuildsStore
-    @State private var devicesStore: DevicesStore
-    @State private var settingsStore: SettingsStore
+    @StateObject private var repoStore: RepoStore
+    @StateObject private var buildsStore: BuildsStore
+    @StateObject private var devicesStore: DevicesStore
+    @StateObject private var settingsStore: SettingsStore
     /// Owned here rather than per-view, because four surfaces draw the same
     /// icons — the sidebar rows, the detail header, and the two builds sheets
     /// — and a store each would mean four `--artwork` runs resolving the same
@@ -148,14 +153,14 @@ struct ContentView: View {
     /// together rather than one singled out below. See `StagedIPAStore`, and
     /// `DeviceDetailView`'s own `staged` doc for the fuller version of this
     /// same reasoning.
-    @State private var stagedIPAStore: StagedIPAStore
+    @StateObject private var stagedIPAStore: StagedIPAStore
     /// App Store status, per-app version checks and running gets. Read by
     /// Settings (is this Mac set up?) and by the app pane (Get latest), so it
     /// lives here: one status load per session rather than one per pane entry.
-    @State private var appStoreStore: AppStoreStore
+    @StateObject private var appStoreStore: AppStoreStore
     /// The first-run screen's account setup, and Settings › Account's. Two, so
     /// a Settings flow's result never holds up the first-run screen.
-    @State private var accountSetupStore: AccountSetupStore
+    @StateObject private var accountSetupStore: AccountSetupStore
     @State private var settingsAccountStore: AccountSetupStore
     @State private var selection: SidebarItem?
     /// The Cache pane's "Add as app", mid-flight.
@@ -210,7 +215,7 @@ struct ContentView: View {
     /// check, and Check for Updates…'s alert. `GraftApp`'s, since the Help
     /// menu reaches it too. Nil only in a test that hosts this window for
     /// something else: no check runs and no banner shows.
-    private let updates: UpdateStore?
+    @ObservedOptionalObject private var updates: UpdateStore?
     /// Handed to each app pane, for Build options' "This Mac" section. See
     /// `PlayCover`.
     private let playCover: PlayCover
@@ -256,24 +261,24 @@ struct ContentView: View {
         openApp: @escaping @MainActor (URL) -> Void = { _ in },
         playCover: PlayCover = .inert
     ) {
-        self._store = Bindable(store)
+        self._store = ObservedObject(wrappedValue: store)
         self._selection = State(initialValue: selection)
-        self.updates = updates
+        self._updates = ObservedOptionalObject(wrappedValue: updates)
         self.playCover = playCover
-        self._tweaksStore = State(initialValue: TweaksStore(runner: store.runner))
+        self._tweaksStore = StateObject(wrappedValue: TweaksStore(runner: store.runner))
         self._canisterStore = State(initialValue: CanisterStore(runner: store.runner))
-        self._repoStore = State(initialValue: RepoStore(runner: store.runner))
-        self._buildsStore = State(initialValue: BuildsStore(runner: store.runner))
-        self._devicesStore = State(initialValue: DevicesStore(runner: store.runner))
-        self._settingsStore = State(initialValue: SettingsStore(runner: store.runner))
+        self._repoStore = StateObject(wrappedValue: RepoStore(runner: store.runner))
+        self._buildsStore = StateObject(wrappedValue: BuildsStore(runner: store.runner))
+        self._devicesStore = StateObject(wrappedValue: DevicesStore(runner: store.runner))
+        self._settingsStore = StateObject(wrappedValue: SettingsStore(runner: store.runner))
         self._artworkStore = State(initialValue: ArtworkStore(runner: store.runner))
         self._deviceInfoStore = State(initialValue: DeviceInfoStore(runner: store.runner))
         self._deviceDeliveryStore = State(initialValue: DeviceDeliveryStore(runner: store.runner))
         self._deviceAppsStore = State(initialValue: DeviceAppsStore(runner: store.runner))
         self._liveContainerStore = State(initialValue: LiveContainerStore(runner: store.runner))
-        self._stagedIPAStore = State(initialValue: StagedIPAStore(runner: store.runner))
-        self._appStoreStore = State(initialValue: AppStoreStore(runner: store.runner, shell: adminShell, openApp: openApp))
-        self._accountSetupStore = State(initialValue: AccountSetupStore(runner: store.runner))
+        self._stagedIPAStore = StateObject(wrappedValue: StagedIPAStore(runner: store.runner))
+        self._appStoreStore = StateObject(wrappedValue: AppStoreStore(runner: store.runner, shell: adminShell, openApp: openApp))
+        self._accountSetupStore = StateObject(wrappedValue: AccountSetupStore(runner: store.runner))
         self._settingsAccountStore = State(initialValue: AccountSetupStore(runner: store.runner))
     }
 
@@ -335,7 +340,7 @@ struct ContentView: View {
         // coalesced (`returnRefresh`): a sheet or an alert taking key is not
         // the window coming back, and a run of them must not be a run of
         // subprocesses.
-        .onChange(of: controlActiveState) { previous, active in
+        .onChangeWithPrevious(of: controlActiveState) { previous, active in
             guard Self.isReturn(from: previous, to: active) else { return }
             if store.setupNeed != nil {
                 Task { await checkSetup(.windowReturn) }
@@ -554,12 +559,12 @@ struct ContentView: View {
         // on disk and in `image(for:)`: renaming an app in config.yaml changes
         // no icon, and repointing one at a different bundle id changes every
         // icon it draws.
-        .onChange(of: store.apps.map(\.bundleId)) { _, _ in
+        .onChange(of: store.apps.map(\.bundleId)) { _ in
             Task { await artworkStore.load() }
         }
         // Fires when a build *ends* (the store clears `buildingApp`), not when
         // one starts — mid-build the IPA is exactly what it was.
-        .onChange(of: store.buildingApp) { previous, current in
+        .onChangeWithPrevious(of: store.buildingApp) { previous, current in
             guard previous != nil, current == nil else { return }
             Task { await artworkStore.load() }
         }
@@ -572,7 +577,7 @@ struct ContentView: View {
         // `app:` takes the *config* name — see `ArtworkStore.load`, where the
         // bundle id is a silent no-op — and `refresh: true` because the input
         // genuinely moved.
-        .onChange(of: appStoreStore.lastCompleted) { _, completed in
+        .onChange(of: appStoreStore.lastCompleted) { completed in
             guard let completed else { return }
             Task { await artworkStore.load(app: completed.app, refresh: true) }
         }
@@ -580,7 +585,7 @@ struct ContentView: View {
         // hold is the app's `preferred_version` in config.yaml, which the
         // pane's subtitle shows and its cached-IPA card resolves by, so the
         // list is read again; the pane re-reads its card on the new pin.
-        .onChange(of: appStoreStore.lastHoldChange) { _, changed in
+        .onChange(of: appStoreStore.lastHoldChange) { changed in
             guard changed != nil else { return }
             Task { try? await store.reload() }
         }
@@ -589,7 +594,7 @@ struct ContentView: View {
         // was open (`graft --init` in Terminal). Re-read the list, which
         // carries the account every pane gates on, and the delivery of every
         // app without a `delivery:` key, which follows the account.
-        .onChange(of: settingsStore.account) { _, reported in
+        .onChange(of: settingsStore.account) { reported in
             guard let reported, reported != store.account else { return }
             Task { try? await store.reload() }
         }

@@ -145,29 +145,29 @@ final class AppDetailLayoutTests: XCTestCase {
     /// defect in the Devices pane.
     private struct Harness: View {
         let app: AppRecord
-        let store: ConfigStore
+        @ObservedObject var store: ConfigStore
         /// Never loaded, so every `image(for:)` answers nil and the header
         /// measures the lettered tile. That is the branch this suite wants:
         /// the tile and real artwork occupy the identical 44pt frame
         /// (`AppIcon` clips both), so an icon cannot be what pushes this pane
         /// past the window, and a fixture that fetched artwork would put a
         /// subprocess in a layout measurement.
-        let artwork: ArtworkStore
-        let devices: DevicesStore
+        @ObservedObject var artwork: ArtworkStore
+        @ObservedObject var devices: DevicesStore
         /// An empty, unloaded store for every case that is not about the
         /// attached-tweak rows, which measures the filename fallback — see
         /// `tweaksStore(printing:loaded:)`.
-        let tweaks: TweaksStore
+        @ObservedObject var tweaks: TweaksStore
         /// Never loaded and never asked for anything: no case in this suite
         /// presses Build for this Mac, and the pane touches this store only
         /// from that action's handoff. It is here because the initializer
         /// requires it — see `AppDetailView.staged`.
-        let staged: StagedIPAStore
+        @ObservedObject var staged: StagedIPAStore
         /// Over the same fake CLI as everything else here, which answers
         /// `--appstore-check` with nothing: the row then reads "Couldn't check…",
         /// the longest thing it can say, and it is `lineLimit(1)` so it cannot
         /// widen the pane.
-        let appStore: AppStoreStore
+        @ObservedObject var appStore: AppStoreStore
         var body: some View {
             NavigationSplitView {
                 List { Text("Bravo"); Text("Delta"); Text("Example+") }

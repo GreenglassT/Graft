@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct ReposView: View {
-    @Bindable var store: RepoStore
+    @ObservedObject var store: RepoStore
     @State private var selectedRepo: RepoRecord.ID?
     @State private var newRepoURL: String = ""
     @State private var filter: String = ""

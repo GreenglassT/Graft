@@ -31,7 +31,7 @@ struct GraftApp: App {
     /// Answers macOS's quit while Graft works (`GraftAppDelegate`).
     @NSApplicationDelegateAdaptor(GraftAppDelegate.self) private var appDelegate
 
-    @State private var rebuild = RebuildCoordinator(
+    @StateObject private var rebuild = RebuildCoordinator(
         runInstaller: RebuildCoordinator.installFromRepo,
         relaunch: RebuildCoordinator.quitAndReopen
     )
@@ -47,7 +47,7 @@ struct GraftApp: App {
     @State private var updates: UpdateStore
     /// Help › Remove Graft's Data…: its sheet, over the main window. Here
     /// because the menu reaches it. The same runner as `store`'s.
-    @State private var removeData: RemoveDataStore
+    @StateObject private var removeData: RemoveDataStore
     /// Set Up Decryption's administrator prompt: in-process NSAppleScript,
     /// and osascript only when that machinery can't run at all.
     private let adminShell: PrivilegedShell = FallbackAdminShell(
@@ -57,8 +57,8 @@ struct GraftApp: App {
     init() {
         // After `shellImportsRemoved`, which as a stored property's initial
         // value runs before this body.
-        // A test host is this app under its real bundle id and the real
-        // HOME, so its own window must run nothing: in a Debug build the
+        // A test host is this app (its Debug build) with the real HOME, so
+        // its own window must run nothing: in a Debug build the
         // lookup finds ~/.local/bin/graft first, the owner's real CLI, and
         // its App Store status asked macOS for ipatool's keychain item
         // (2.0.1). Its runner points nowhere, and its window is a placeholder.
@@ -68,23 +68,33 @@ struct GraftApp: App {
         case .app: runner = CLIRunner.forApp(shell: .shared)
         case .unused: runner = CLIRunner(executable: GraftExecutable.bundled(in: Bundle.main.bundleURL))
         }
-        _store = State(initialValue: ConfigStore(runner: runner, notify: { BuildNotifier.post($0) }))
-        _updates = State(initialValue: UpdateStore(
+        // Each made here, in this order. `store` and `updates` are plain
+        // `@State`, which this App only hands on (to the window, the menu's
+        // `Task` and the delegate): an App observing them would evaluate its
+        // whole body for every change of either. `removeData` is a
+        // `StateObject`, as the sheet reads it here, handed its store rather
+        // than given an autoclosure that would make one on first use.
+        let config = ConfigStore(runner: runner, notify: { BuildNotifier.post($0) })
+        _store = State(initialValue: config)
+        let updateStore = UpdateStore(
             runner: runner, defaults: .standard, now: Date.init,
             appVersion: AboutGraft.version(of: .main), open: { NSWorkspace.shared.open($0) },
             updateLog: URL.libraryDirectory.appending(path: "Logs/Graft/update.log"),
             host: SelfUpdateHost.running()
-        ))
-        _removeData = State(initialValue: RemoveDataStore(
+        )
+        _updates = State(initialValue: updateStore)
+        let removeData = RemoveDataStore(
             runner: runner, hold: .shared,
             // The app's own preferences, which the CLI only lists. Never in a
-            // test host, which is this app under its real bundle id.
+            // test host, which is this app: its Debug build's preferences are a
+            // developer's own Debug runs' too.
             removeAppSettings: {
                 guard !AdminShell.insideTests, let domain = Bundle.main.bundleIdentifier else { return }
                 UserDefaults.standard.removePersistentDomain(forName: domain)
             },
             quit: { NSApp.terminate(nil) }
-        ))
+        )
+        _removeData = StateObject(wrappedValue: removeData)
         // A copy that can't run here gets `AppleSiliconGate`'s one screen and
         // nothing else: not even the login shell is asked. Nor does a test host.
         guard support.runsApp, !AdminShell.insideTests else { return }
@@ -135,9 +145,9 @@ struct GraftApp: App {
                         // whose window is the placeholder above.
                         .task { appDelegate.handOverQuits(to: updates) }
                         // What's New, once after an update. Not in a test
-                        // host, which is this app under its real bundle id:
-                        // it would record the test build's version in the
-                        // real preferences (as `LegacyDefaults` skips it).
+                        // host, which is this app: it would record the test
+                        // build's version in the Debug build's preferences
+                        // (as `LegacyDefaults` skips it).
                         .modifier(OpensWhatsNewAfterUpdate(
                             defaults: AdminShell.insideTests ? nil : .standard,
                             version: AboutGraft.version(of: .main)
@@ -346,7 +356,13 @@ enum QuitAlert {
             alert.addButton(withTitle: QuitQuestion.keepWorking)
             alert.addButton(withTitle: QuitQuestion.quitAnyway).hasDestructiveAction = true
             shown.alert = alert
-            NSApp.activate()
+            // macOS 14's cooperative activation there; macOS 13 has only
+            // the forced kind.
+            if #available(macOS 14, *) {
+                NSApp.activate()
+            } else {
+                NSApp.activate(ignoringOtherApps: true)
+            }
             let response = alert.runModal()
             shown.alert = nil
             if let then = shown.afterTakeDown {

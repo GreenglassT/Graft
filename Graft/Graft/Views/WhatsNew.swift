@@ -302,7 +302,7 @@ struct WhatsNewCommand: View {
 
 /// Opens What's New once after an update (`WhatsNew.opensAfterUpdate`), when
 /// the main window first appears. Nil `defaults` turns it off: `GraftApp`
-/// passes nil in a test host, which is this app under its real bundle id.
+/// passes nil in a test host, which is this app.
 struct OpensWhatsNewAfterUpdate: ViewModifier {
     let defaults: UserDefaults?
     let version: String

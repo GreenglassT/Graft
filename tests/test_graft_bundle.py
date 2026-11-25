@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import gzip
 import hashlib
 import importlib.util
 import io
@@ -1227,7 +1229,7 @@ def test_cctools_is_patched_before_it_is_built_and_its_key_covers_the_patch(tmp_
         (top / "cctools" / "APPLE_LICENSE").write_text("APSL")
         return top
 
-    def build_steps(steps, cwd):
+    def build_steps(steps, cwd, arch="arm64"):
         events.append(("build", cwd.name))
         for tool in pin.builds:
             (cwd / ("otool" if tool == "otool" else "misc") / tool).write_bytes(b"built " + tool.encode())
@@ -2255,8 +2257,10 @@ def test_ipatool_is_patched_then_vendored_then_built_offline_and_its_key_covers_
         return top
 
     def run(argv, cwd=None, env=None, check=False, **kw):
-        events.append(("run", argv[:3], env["PATH"].split(":")[0].endswith("/go/bin"), env["GOMODCACHE"],
-                       {k: env[k] for k in ("GOPATH", "GOCACHE", "HOME")}, Path(cwd)))
+        offline = argv[:3] == gb.GO_OFFLINE
+        command = argv[3:] if offline else argv
+        events.append(("run", command[:3], env["PATH"].split(":")[0].endswith("/go/bin"), env["GOMODCACHE"],
+                       {k: env[k] for k in ("GOPATH", "GOCACHE", "HOME")}, Path(cwd), offline))
         if argv[:3] == ["go", "mod", "vendor"]:
             (Path(cwd) / "vendor" / "example.com" / "m").mkdir(parents=True)
             (Path(cwd) / "vendor" / "example.com" / "m" / "m.go").write_text("package m")
@@ -2289,11 +2293,17 @@ def test_ipatool_is_patched_then_vendored_then_built_offline_and_its_key_covers_
     monkeypatch.setattr(gb, "check_no_shell", lambda path, name: events.append(("no shell", name)))
     monkeypatch.setattr(gb, "compiled_modules", lambda go, binary, env: [("example.com/m", "v1.0.0")])
     monkeypatch.setattr(gb, "module_licences", module_licences)
+    # Its key's compiler, which would otherwise run clang through the stand-in
+    # `run` when no test before this one has cached it.
+    monkeypatch.setattr(gb, "toolchain_id", lambda: "clang 1; SDK 15.0")
     built = gb.build_ipatool(pin, go_pin, tmp_path / "work")
-    assert [e[0] for e in events] == ["patch", "run", "run", "run", "no shell", "licences"]
+    assert [e[0] for e in events] == ["patch", "run", "run", "run", "run", "run", "no shell", "licences"]
     assert events[0] == ("patch", "ipatool")
     assert [e[1] for e in events if e[0] == "run"] == [["go", "mod", "vendor"], ["go", "mod", "verify"],
-                                                      ["go", "build", "-mod=vendor"]]
+                                                      ["go", "build", "-mod=vendor"],
+                                                      ["go", "generate", "-mod=vendor"], ["go", "test", "-mod=vendor"]]
+    assert [e[6] for e in events if e[0] == "run"] == [False, False, False, True, True], \
+        "the mocks and tests download nothing (GO_OFFLINE)"
     assert all(e[2] for e in events if e[0] == "run"), "the pinned Go first on PATH"
     for e in (e for e in events if e[0] == "run"):
         assert e[3] == str(gb.go_modcache()), "the module cache every build shares"
@@ -3092,7 +3102,7 @@ def test_the_playcover_stub_is_built_at_release_and_carried_beside_its_builder(t
 def test_the_stub_build_and_its_key_follow_its_source(tmp_path, monkeypatch):
     ran = []
 
-    def build_steps(steps, cwd):
+    def build_steps(steps, cwd, arch="arm64"):
         ran.append((steps, sorted(p.name for p in cwd.iterdir())))
         (cwd / "Preferences.framework" / "Preferences").write_bytes(b"built")
 
@@ -3663,7 +3673,7 @@ def test_openssl_builds_in_the_clean_environment_and_its_key_covers_steps_and_to
         (tmp / "src" / "openssl-3.5.9" / "LICENSE.txt").write_text("Apache License")
         return tmp / "src" / "openssl-3.5.9"
 
-    def build_steps(steps, cwd):
+    def build_steps(steps, cwd, arch="arm64"):
         envs.append(steps)
         dest = Path(next(s for s in steps[-1] if s.startswith("DESTDIR=")).removeprefix("DESTDIR="))
         lib = dest / gb.OPENSSL_BAKED_PREFIX.lstrip("/") / "lib"
@@ -3835,29 +3845,175 @@ def test_the_docs_say_what_the_licence_statement_says_and_that_ipatool_downloads
     assert "so it never fetches it" not in network
 
 
-# ---- the minimum macOS (owner, 2026-11-22: 14.0, the floor the app's Observation code sets) ----
+# ---- the minimum macOS (owner, 2026-11-22: 14.0, the floor the app's Observation code sets;
+# 2026-11-25: 13.0 for the Intel build, for Intel Macs on Ventura) ----
 
-def test_one_minimum_macos_reaches_every_component_the_stage_builds():
-    """One constant, so no component can be left at an older target: the
-    helpers, OpenSSL, the launchers, ipatool's cgo, the build env and the
-    wheels pip is allowed to pick."""
-    assert gb.MACOS_MIN == "14.0"
-    flag = f"-mmacosx-version-min={gb.MACOS_MIN}"
-    assert flag in gb.TARGET
-    assert gb._build_env()["MACOSX_DEPLOYMENT_TARGET"] == gb.MACOS_MIN
-    assert gb.IPATOOL_ENV["CGO_CFLAGS"] == flag and gb.IPATOOL_ENV["CGO_LDFLAGS"] == flag
+#: Each bundle's floor: Graft.zip's, and Graft-Intel.zip's.
+FLOORS = {"arm64": "14.0", "x86_64": "13.0"}
+
+
+def test_each_bundle_s_minimum_macos_reaches_every_component_the_stage_builds_for_it():
+    """One floor per bundle, so no component can be left at another target:
+    the helpers, OpenSSL, zsign, the launchers, ipatool's cgo and the build
+    env. The wheels are chosen as for 14.0 in both: none the Intel bundle
+    takes needs more than 10.15, and verify-bundle checks that every one
+    loads on its bundle's floor."""
+    assert gb.MACOS_MINS == FLOORS
+    assert gb.MACOS_MIN == gb.macos_min() == gb.macos_min("arm64") == "14.0"
+    for arch, floor in FLOORS.items():
+        flag = f"-mmacosx-version-min={floor}"
+        assert flag in gb.target(arch)
+        assert gb._build_env(arch)["MACOSX_DEPLOYMENT_TARGET"] == floor
+        assert gb.ipatool_env(arch)["CGO_CFLAGS"] == flag == gb.ipatool_env(arch)["CGO_LDFLAGS"]
+        assert flag in gb.openssl_steps("/x", [], arch)[0]
+        for steps in (gb.libplist_steps("$D", [], arch), gb.ldid_steps("$L", "$O", [], arch), gb.cctools_steps([], arch),
+                      gb.insert_dylib_steps(arch), gb.zsign_steps("$O", [], "0.7", arch)):
+            assert flag in json.dumps(steps) and f"-mmacosx-version-min={FLOORS[_other(arch)]}" not in json.dumps(steps)
+    assert gb._build_env() == gb._build_env("arm64"), "the arm64 bundle's, as before"
+    # Wheels too: pip then refuses, up front, a wheel built for a newer macOS
+    # than the bundle's, rather than verify-bundle finding it in the app.
+    assert gb.wheel_target("x86_64")[:2] == ("--platform", "macosx_13_0_x86_64")
     assert gb.WHEEL_TARGET[:2] == ("--platform", "macosx_14_0_arm64")
-    assert flag in gb.openssl_steps("/x", [])[0]
+    with pytest.raises(gb.BundleError, match="ppc"):
+        gb.macos_min("ppc")
     source = (REPO / "scripts" / "graft_bundle.py").read_text()
     assert "15.0" not in re.sub(r'"MinimumOSVersion"[^\n]*', "", source), "a macOS 15 target is left in the stage"
 
 
-def test_the_app_project_targets_the_same_minimum():
+def _other(arch: str) -> str:
+    return next(a for a in gb.ARCHS if a != arch)
+
+
+class _Built(Exception):
+    """Stops a builder at its first build step, once it is recorded."""
+
+
+@pytest.mark.parametrize("arch", ["arm64", "x86_64"])
+def test_every_native_build_runs_in_its_bundle_s_environment(tmp_path, monkeypatch, arch):
+    """MACOSX_DEPLOYMENT_TARGET too, not only the flags: a compile a
+    Makefile or configure runs without CFLAGS takes the environment's."""
+    ran: list = []
+
+    def build_steps(steps, cwd, arch=None):
+        ran.append(arch)
+        raise _Built
+
+    def cached(name, key, work, build):
+        (tmp_path / name).mkdir(exist_ok=True)
+        try:
+            build(tmp_path / name, tmp_path / name / "out")
+        except _Built:
+            pass
+        return tmp_path / name
+
+    def unpack(pin, tmp):
+        (tmp / "src").mkdir(parents=True, exist_ok=True)
+        return tmp / "src"
+
+    with monkeypatch.context() as m:
+        m.setattr(gb, "_build_steps", build_steps)
+        m.setattr(gb, "_cached_build", cached)
+        m.setattr(gb, "_unpack", unpack)
+        m.setattr(gb, "apply_patches", lambda name, src, p=None: None)
+        m.setattr(gb, "check_archive_commit", lambda pin, archive: None)
+        m.setattr(gb, "fetch", lambda pin, cache=None: tmp_path / pin.filename)
+        m.setattr(gb, "toolchain_id", lambda: "clang 1; SDK 15.0")
+        m.setattr(gb.shutil, "copytree", lambda src, dst, **k: Path(dst).mkdir(parents=True, exist_ok=True))
+        m.setattr(gb.shutil, "copy2", lambda *a, **k: None)
+        pins = gb.load_pins(REPO / "bundle" / "pins.toml", arch)
+        zsign = gb.Pin(**{**pins["zsign"].__dict__, "from_source": True})
+        gb.build_openssl(pins["openssl"], tmp_path, arch)
+        gb.build_libplist(pins["libplist"], tmp_path, arch)
+        gb.build_ldid(pins["ldid"], tmp_path / "libplist", tmp_path / "openssl" / "prefix", tmp_path, arch)
+        gb.build_cctools(pins["cctools"], tmp_path, arch)
+        gb.build_insert_dylib(pins["insert_dylib"], tmp_path, arch)
+        gb.build_zsign(zsign, tmp_path / "openssl" / "prefix", tmp_path, arch)
+    assert ran == [arch] * 6
+    # The real _build_steps and launchers, with only subprocess.run stood in.
+    runs: list = []
+    monkeypatch.setattr(gb.subprocess, "run", lambda argv, env=None, **kw: runs.append((argv, env)))
+    gb._build_steps([["make"]], tmp_path, arch)
+    gb.build_launchers(tmp_path / "Contents", arch)
+    assert len(runs) == 1 + len(gb.LAUNCHERS)
+    for argv, env in runs:
+        assert env["MACOSX_DEPLOYMENT_TARGET"] == FLOORS[arch], argv
+    for argv, _ in runs[1:]:
+        assert f"-mmacosx-version-min={FLOORS[arch]}" in argv
+    go = gb.go_env(tmp_path / "go", tmp_path, gb.ipatool_env(arch), tmp_path / "mod", arch)
+    assert go["MACOSX_DEPLOYMENT_TARGET"] == FLOORS[arch] and go["GOARCH"] == gb.GOARCH[arch]
+
+
+def _build_keys(tmp_path: Path, monkeypatch, arch: str) -> dict[str, str]:
+    """Each native build's cache key for `arch`, as its builder computes it
+    (nothing is built)."""
+    keys: dict[str, str] = {}
+
+    def cached(name, key, work, build):
+        keys[name] = key
+        return tmp_path / f"{name}-{key[:12]}"
+
+    with monkeypatch.context() as m:
+        m.setattr(gb, "_cached_build", cached)
+        m.setattr(gb, "toolchain_id", lambda: "clang 1; SDK 15.0")
+        pins = gb.load_pins(REPO / "bundle" / "pins.toml", arch)
+        zsign = gb.Pin(**{**pins["zsign"].__dict__, "from_source": True})
+        openssl = gb.build_openssl(pins["openssl"], tmp_path, arch)
+        plist = gb.build_libplist(pins["libplist"], tmp_path, arch)
+        gb.build_ldid(pins["ldid"], plist, openssl, tmp_path, arch)
+        gb.build_cctools(pins["cctools"], tmp_path, arch)
+        gb.build_insert_dylib(pins["insert_dylib"], tmp_path, arch)
+        gb.build_zsign(zsign, openssl, tmp_path, arch)
+        keys["ipatool"] = gb.ipatool_key(pins["ipatool"], pins["go"], arch)
+    return keys
+
+
+def test_a_build_cached_for_another_minimum_macos_is_never_reused(tmp_path, monkeypatch):
+    """Each key covers its bundle's floor: an x86_64 build cached when the
+    Intel floor was 14.0 is a different key now, for every native build;
+    and the Intel floor is no part of the arm64 builds' keys."""
+    intel, arm = _build_keys(tmp_path, monkeypatch, "x86_64"), _build_keys(tmp_path, monkeypatch, "arm64")
+    assert sorted(intel) == ["cctools", "insert_dylib", "ipatool", "ldid", "libplist", "openssl", "zsign"]
+    monkeypatch.setitem(gb.MACOS_MINS, "x86_64", "14.0")
+    intel_at_14 = _build_keys(tmp_path, monkeypatch, "x86_64")
+    assert [name for name in intel if intel[name] == intel_at_14[name]] == []
+    assert _build_keys(tmp_path, monkeypatch, "arm64") == arm
+
+
+@needs_toolchain  # it compiles a C file for each bundle
+def test_a_real_compile_with_each_bundle_s_flags_needs_only_its_floor(tmp_path):
+    """Through clang and the repo's own Mach-O reader: what target(arch)
+    compiles in _build_env(arch) loads on that bundle's macOS and no older
+    one says otherwise."""
+    (tmp_path / "x.c").write_text("int main(void) { return 0; }\n")
+    for arch, floor in FLOORS.items():
+        out = tmp_path / f"x-{arch}"
+        subprocess.run([gb.CLANG, *gb.target(arch), "-o", str(out), str(tmp_path / "x.c")],
+                       env=gb._build_env(arch), check=True, capture_output=True)
+        assert macho.architectures(out) == [arch]
+        want = (*map(int, floor.split(".")), 0)
+        assert macho.build_versions(out) == [(macho.PLATFORM_MACOS, want)], arch
+
+
+@needs_toolchain  # it compiles bundle/launcher.c
+def test_the_intel_bundle_s_launchers_load_on_macos_13(tmp_path):
+    for arch, floor in FLOORS.items():
+        contents = tmp_path / arch / "Contents"
+        gb.build_launchers(contents, arch)
+        want = (*map(int, floor.split(".")), 0)
+        for rel in gb.LAUNCHERS:
+            assert macho.architectures(contents / rel) == [arch]
+            assert macho.build_versions(contents / rel) == [(macho.PLATFORM_MACOS, want)], (arch, rel)
+
+
+def test_the_app_project_targets_one_of_the_bundles_floors():
+    """The release passes each bundle's own floor to xcodebuild
+    (scripts/graft-release), so the project's is a Debug build's: 14.0, or
+    13.0 once the app's Swift builds for Ventura."""
     project = (REPO / "Graft" / "project.yml").read_text()
-    assert re.search(r'macOS:\s*"' + re.escape(gb.MACOS_MIN) + '"', project)
+    (said,) = re.findall(r'macOS:\s*"([0-9.]+)"', project)
     pbx = (REPO / "Graft" / "Graft.xcodeproj" / "project.pbxproj").read_text()
     targets = set(re.findall(r"MACOSX_DEPLOYMENT_TARGET = ([0-9.]+);", pbx))
-    assert targets == {gb.MACOS_MIN}, targets
+    assert targets == {said} and said in gb.MACOS_MINS.values(), (said, targets)
 
 
 # --- A dropped network doesn't end a release build (2026-11-22: try10 lost
@@ -4494,6 +4650,14 @@ ARM64_STAGE = json.loads((REPO / "tests" / "fixtures" / "bundle" / "arm64-stage-
 #: to the arm64 bundle, never a regenerated file.
 STAGE_FIXTURES = {"arm64-stage-2.2.json": "bb921eb702f34c6ab77843bd83c6013e95e9a309cc9e06e8e80a9db3bda46252",
                   "arm64-stage-calls-2.2.json": "c12615fd153cc91089656dd55cdea2c273cadd4d3e2da5c5dbc9efa2f56c9d13"}
+#: The two steps 2.2.1 runs after ipatool's build: its tests' mocks, then
+#: the tests of the package its patch changes (IPATOOL_MOCKS, IPATOOL_TESTS).
+IPATOOL_TEST_STEPS = [["/usr/bin/env", "GOPROXY=off", "GOFLAGS=-mod=vendor", "go", "generate", "-mod=vendor", "./pkg/..."],
+                      ["/usr/bin/env", "GOPROXY=off", "GOFLAGS=-mod=vendor",
+                       "go", "test", "-mod=vendor", "-count=1", "./pkg/appstore/..."]]
+#: The arm64 stage now: v2.2's record and the one change made to it since,
+#: stated here rather than written into the record.
+ARM64_STAGE_NOW = {**ARM64_STAGE, "ipatool": [*ARM64_STAGE["ipatool"], *IPATOOL_TEST_STEPS]}
 
 
 def _stage_commands(tmp_path: Path, monkeypatch, arch: str | None) -> dict:
@@ -4530,9 +4694,10 @@ def _stage_commands(tmp_path: Path, monkeypatch, arch: str | None) -> dict:
 
 def test_the_arm64_stage_runs_exactly_what_2_2_did(tmp_path, monkeypatch):
     """Every build command, setting and path of the arm64 bundle, with arch
-    left out and with arch="arm64", is v2.2's, as is each module constant."""
-    assert _stage_commands(tmp_path, monkeypatch, None) == ARM64_STAGE
-    assert _stage_commands(tmp_path, monkeypatch, "arm64") == ARM64_STAGE
+    left out and with arch="arm64", is v2.2's, as is each module constant;
+    but for ipatool's tests, run after its build (ARM64_STAGE_NOW)."""
+    assert _stage_commands(tmp_path, monkeypatch, None) == ARM64_STAGE_NOW
+    assert _stage_commands(tmp_path, monkeypatch, "arm64") == ARM64_STAGE_NOW
     assert (list(gb.TARGET), gb.IPATOOL_ENV, list(gb.WHEEL_TARGET), list(gb.PRUNE), str(gb.CYAN_TOOLS)) == (
         ARM64_STAGE["TARGET"], ARM64_STAGE["IPATOOL_ENV"], ARM64_STAGE["WHEEL_TARGET"], ARM64_STAGE["PRUNE"],
         ARM64_STAGE["CYAN_TOOLS"])
@@ -4540,9 +4705,11 @@ def test_the_arm64_stage_runs_exactly_what_2_2_did(tmp_path, monkeypatch):
 
 #: How an arm64 command becomes its x86_64 one: nothing else may differ.
 _TO_INTEL = [('"-arch", "arm64"', '"-arch", "x86_64"'), ("-arch arm64", "-arch x86_64"),
-             ("darwin64-arm64-cc", "darwin64-x86_64-cc"), ("macosx_14_0_arm64", "macosx_14_0_x86_64"),
+             ("darwin64-arm64-cc", "darwin64-x86_64-cc"), ("macosx_14_0_arm64", "macosx_13_0_x86_64"),
              ('"GOARCH": "arm64"', '"GOARCH": "amd64"'), ("Darwin/arm64", "Darwin/@"), ("Darwin/x86_64", "Darwin/arm64"),
-             ("Darwin/@", "Darwin/x86_64")]
+             ("Darwin/@", "Darwin/x86_64"),
+             # The Intel bundle's floor (MACOS_MINS): every compile, link and cgo flag.
+             ("-mmacosx-version-min=14.0", "-mmacosx-version-min=13.0")]
 
 
 def _intel(value):
@@ -4560,11 +4727,11 @@ def _intel(value):
 def test_the_x86_64_stage_runs_the_arm64_commands_for_x86_64_and_nothing_else(tmp_path, monkeypatch):
     """Each Mac binary is built for x86_64 (OpenSSL's darwin64-x86_64-cc,
     clang's -arch x86_64, Go's GOARCH=amd64, x86_64 wheels, cyan's
-    Darwin/x86_64), at the same macOS 14.0, by the same commands; PRUNE
+    Darwin/x86_64), for macOS 13.0, by the same commands; PRUNE
     drops Darwin/arm64 in place of Darwin/x86_64. PlayCover's stub is iOS
     code: arm64 in both. No UnfairPlay."""
     got = _stage_commands(tmp_path, monkeypatch, "x86_64")
-    want = {k: v for k, v in ARM64_STAGE.items() if k not in ("unfairplay", "UNFAIRPLAY_ENV", "stub")}
+    want = {k: v for k, v in ARM64_STAGE_NOW.items() if k not in ("unfairplay", "UNFAIRPLAY_ENV", "stub")}
     want = {**_intel(want), "stub": ARM64_STAGE["stub"]}
     assert got == want
     for key in ("TARGET", "openssl", "libplist", "ldid", "cctools", "insert_dylib", "IPATOOL_ENV", "WHEEL_TARGET",
@@ -4572,7 +4739,8 @@ def test_the_x86_64_stage_runs_the_arm64_commands_for_x86_64_and_nothing_else(tm
         assert got[key] != ARM64_STAGE[key], f"{key} is built for x86_64"
         assert "arm64" not in json.dumps(got[key]).replace("Darwin/arm64", ""), key
     assert got["stub"][0][:6] == ["xcrun", "-sdk", "iphoneos", "clang", "-arch", "arm64"], "iOS code, for the phone"
-    assert "-mmacosx-version-min=14.0" in got["TARGET"]
+    assert "-mmacosx-version-min=13.0" in got["TARGET"]
+    assert "14.0" not in json.dumps(got) and "14_0" not in json.dumps(got), "Ventura's, throughout"
 
 
 def test_an_architecture_no_release_is_built_for_builds_nothing():
@@ -4590,7 +4758,7 @@ def test_zsign_builds_from_its_makefile_for_x86_64_on_the_bundled_openssl():
     room in the header for the @executable_path names."""
     assert gb.zsign_steps("$OPENSSL", ["-j8"], "1.1.3", "x86_64") == [[
         "make", "-j8", "-C", "build/macos", "VERSION=1.1.3",
-        "CC=clang -arch x86_64 -mmacosx-version-min=14.0", "CXX=clang++ -arch x86_64 -mmacosx-version-min=14.0",
+        "CC=clang -arch x86_64 -mmacosx-version-min=13.0", "CXX=clang++ -arch x86_64 -mmacosx-version-min=13.0",
         "CXXFLAGS=-std=c++11 -O3 -MMD -MP -DZSIGN_VERSION=1.1.3", "OPENSSL_INCLUDE=-I$OPENSSL/include",
         "LIBS=$OPENSSL/lib/libssl.3.dylib $OPENSSL/lib/libcrypto.3.dylib -Wl,-headerpad_max_install_names"]]
 
@@ -4611,7 +4779,7 @@ def _fake_zsign_build(tmp_path: Path, monkeypatch, imports: set[str]) -> tuple[l
         (src / "LICENSE").write_text("MIT License\n")
         return src
 
-    def build_steps(steps, cwd):
+    def build_steps(steps, cwd, arch="arm64"):
         seen.append(("make", steps, cwd.name))
         (cwd / "bin").mkdir()
         (cwd / "bin" / "zsign").write_bytes(mb.thin([]))
@@ -4789,7 +4957,7 @@ def test_a_locked_install_for_x86_64_picks_x86_64_wheels(tmp_path, monkeypatch):
     gb.install_locked(tmp_path / "python3.13", gb.RUNTIME_LOCK, tmp_path / "plan.json", tmp_path / "s", {}, "x86_64")
     resolve, download, _ = calls
     for argv in (resolve, download):
-        assert argv[argv.index("--platform") + 1] == "macosx_14_0_x86_64"
+        assert argv[argv.index("--platform") + 1] == "macosx_13_0_x86_64"
 
 
 def test_the_index_names_only_the_go_module_folders_the_bundle_has(tmp_path):
@@ -4956,9 +5124,21 @@ def test_either_bundles_components_give_the_same_source_archive(tmp_path, monkey
     assert first == second
 
 
+@contextlib.contextmanager
+def _fixed_targz(path: Path):
+    """A .tar.gz whose bytes don't depend on the clock. `tarfile.open(path,
+    "w:gz")` stamps the gzip header with the current second, so two archives
+    built from the same fake sdist a second apart differed, and the tests that
+    build the sources archive twice and compare the bytes failed whenever the
+    suite was slow enough to straddle a second."""
+    with path.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz, \
+            tarfile.open(fileobj=gz, mode="w") as tf:
+        yield tf
+
+
 def _sdist_with_licence(path: Path, name: str, version: str, licence: str) -> Path:
     data = f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\nLicense-Expression: {licence}\n".encode()
-    with tarfile.open(path, "w:gz") as tf:
+    with _fixed_targz(path) as tf:
         info = tarfile.TarInfo(f"{name}-{version}/PKG-INFO")
         info.size = len(data)
         tf.addfile(info, io.BytesIO(data))
@@ -5118,7 +5298,7 @@ def test_each_sdists_licence_in_sources_md_is_its_own_not_a_wheels(tmp_path, mon
 
 
 def _sdist(path: Path, top: str, files: dict[str, str]) -> Path:
-    with tarfile.open(path, "w:gz") as tf:
+    with _fixed_targz(path) as tf:
         for name, text in files.items():
             data = text.encode()
             info = tarfile.TarInfo(f"{top}/{name}")
@@ -5239,3 +5419,143 @@ def test_the_arm64_stage_still_builds_its_env_repoints_zsign_installs_and_stages
     got = record_stage_calls(gb, tmp_path)
     got["stage_order"] = ["thin_to_arm64" if n == "thin_to_arch" else n for n in got["stage_order"]]
     assert got == want
+
+
+# --- 2.2.1: ipatool's build runs its patch's Go tests ----------------------------------------------
+
+
+def test_ipatool_s_build_runs_its_patch_s_go_tests_after_the_build_from_vendor():
+    """v2.2's three steps, then the mocks ipatool's tests use and the tests
+    of the package the patch changes: offline (-mod=vendor), never from a
+    test cache (-count=1). After `go build`, so the mocks `go generate`
+    writes into pkg/ are never compiled into ipatool."""
+    steps = gb.ipatool_steps("2.8.0")
+    assert steps == [*ARM64_STAGE["ipatool"], *IPATOOL_TEST_STEPS]
+    assert steps[-2:] == [gb.IPATOOL_MOCKS, gb.IPATOOL_TESTS]
+    assert all("-mod=vendor" in step for step in steps[2:])
+
+
+def test_ipatool_s_mocks_and_tests_can_download_nothing_not_even_a_command_go_generate_runs():
+    """After vendoring, the mocks and the tests run with GOPROXY=off and
+    GOFLAGS=-mod=vendor in their environment, not only -mod=vendor on their
+    own command line: a `//go:generate go run x@v` directive starts a go of
+    its own, which reads the environment and never the outer flag, and would
+    otherwise download x from the module proxy without anyone noticing."""
+    for step in (gb.IPATOOL_MOCKS, gb.IPATOOL_TESTS):
+        assert step[:3] == ["/usr/bin/env", "GOPROXY=off", "GOFLAGS=-mod=vendor"], step
+        assert step[3] == "go"
+    assert gb.IPATOOL_MOCKS[4] == "generate" and gb.IPATOOL_TESTS[4] == "test"
+
+
+def test_every_file_ipatool_s_patch_changes_is_in_the_package_its_tests_run_for():
+    """`./pkg/appstore/...` covers the patch: each file it adds or changes,
+    its two test files among them."""
+    for patch in gb.PATCHES["ipatool"]:
+        text = (gb.PATCHES_DIR / patch).read_text()
+        changed = [line[len("+++ b/"):] for line in text.splitlines() if line.startswith("+++ b/")]
+        assert changed and all(p.startswith("pkg/appstore/") for p in changed), changed
+        assert sorted(p for p in changed if p.endswith("_test.go")) == [
+            "pkg/appstore/appstore_get_version_metadata_test.go",
+            "pkg/appstore/appstore_partial_zip_readahead_test.go"]
+
+
+def _stub_ipatool_build(tmp_path: Path, monkeypatch, runs: list, fail: str | None = None) -> tuple:
+    """build_ipatool with everything but its own steps stubbed out: each
+    command it runs is recorded in `runs` with its env, and the one whose
+    second word is `fail` fails, as `subprocess.run` does: raising only
+    when it was asked to check.
+    Returns the two pins."""
+    pin = gb.Pin(name="ipatool", url="https://example.invalid/i.tar.gz", sha256="a" * 64, license="MIT",
+                 version="2.8.0")
+    go_pin = gb.Pin(name="go", url="https://example.invalid/go.tar.gz", sha256="b" * 64, license="BSD-3-Clause",
+                    version="1.26.5")
+
+    def extract(archive, dest):
+        (dest / "go" / "bin").mkdir(parents=True, exist_ok=True)
+        for f in ("LICENSE", "PATENTS"):
+            (dest / "go" / f).write_text(f"Go's {f}")
+        return dest
+
+    def unpack(pin, tmp):
+        top = tmp / "src" / "ipatool-x"
+        top.mkdir(parents=True)
+        (top / "LICENSE").write_text("ipatool MIT")
+        return top
+
+    def run(argv, cwd=None, env=None, check=False, **kw):
+        runs.append((list(argv), dict(env)))
+        go = argv.index("go")
+        if argv[go + 1] == fail:
+            if check:
+                raise subprocess.CalledProcessError(1, argv)
+            return subprocess.CompletedProcess(argv, 1, "", "")
+        if argv[:3] == ["go", "mod", "vendor"]:
+            (Path(cwd) / "vendor").mkdir()
+            (Path(cwd) / "vendor" / "modules.txt").write_text("")
+        if argv[:2] == ["go", "build"]:
+            (Path(cwd) / "ipatool").write_bytes(b"ipatool binary")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(gb, "fetch", lambda pin, cache=None: tmp_path / pin.filename)
+    monkeypatch.setattr(gb, "extract", extract)
+    monkeypatch.setattr(gb, "_unpack", unpack)
+    monkeypatch.setattr(gb, "apply_patches", lambda name, src, p=None: None)
+    monkeypatch.setattr(gb.subprocess, "run", run)
+    monkeypatch.setattr(gb, "check_no_shell", lambda path, name: None)
+    monkeypatch.setattr(gb, "compiled_modules", lambda go, binary, env: [])
+    monkeypatch.setattr(gb, "module_licences", lambda modcache, modules, dest: dest.mkdir(parents=True))
+    monkeypatch.setattr(gb, "toolchain_id", lambda: "clang 1; SDK 15.0")
+    return pin, go_pin
+
+
+@pytest.mark.parametrize("arch", ["arm64", "x86_64"])
+def test_ipatool_s_tests_run_with_its_build_s_own_settings(tmp_path, monkeypatch, arch):
+    """The pinned Go first on PATH, the hermetic settings, and the bundle's
+    architecture: an x86_64 build's mockgen and tests are amd64 programs,
+    run here under Rosetta, as the x86_64 stage's configure tests and
+    Python are."""
+    runs: list = []
+    pin, go_pin = _stub_ipatool_build(tmp_path, monkeypatch, runs)
+    gb.build_ipatool(pin, go_pin, tmp_path / "work", arch)
+    assert [argv for argv, _ in runs][-2:] == IPATOOL_TEST_STEPS
+    build_env = next(env for argv, env in runs if argv[:2] == ["go", "build"])
+    for argv, env in runs[-2:]:
+        assert env == build_env, argv
+    assert build_env["GOARCH"] == {"arm64": "arm64", "x86_64": "amd64"}[arch] and build_env["CGO_ENABLED"] == "1"
+    assert {k: build_env[k] for k in gb.GO_HERMETIC} == gb.GO_HERMETIC
+    assert build_env["PATH"].split(":")[0].endswith("/go/bin"), "the pinned Go"
+    floor = {"arm64": "14.0", "x86_64": "13.0"}[arch]
+    assert build_env["MACOSX_DEPLOYMENT_TARGET"] == floor
+    assert build_env["CGO_CFLAGS"] == build_env["CGO_LDFLAGS"] == f"-mmacosx-version-min={floor}"
+
+
+@pytest.mark.parametrize("fail", ["generate", "test"])
+def test_a_failing_go_test_stops_ipatool_s_build_and_caches_nothing(tmp_path, monkeypatch, fail):
+    runs: list = []
+    pin, go_pin = _stub_ipatool_build(tmp_path, monkeypatch, runs, fail=fail)
+    with pytest.raises(subprocess.CalledProcessError):
+        gb.build_ipatool(pin, go_pin, tmp_path / "work")
+    last = runs[-1][0]
+    assert last[last.index("go") + 1] == fail
+    assert not list((tmp_path / "work").glob("ipatool-*")), "no build left to be reused"
+    runs.clear()
+    _stub_ipatool_build(tmp_path, monkeypatch, runs)
+    built = gb.build_ipatool(pin, go_pin, tmp_path / "work")
+    assert (built / "ipatool").read_bytes() == b"ipatool binary"
+    assert [argv for argv, _ in runs][-2:] == IPATOOL_TEST_STEPS, "built again, tests and all"
+
+
+def test_an_ipatool_build_cached_before_its_tests_ran_is_never_reused(monkeypatch):
+    """The cache key covers the steps, the tests among them: a build cached
+    by v2.2's steps, which never ran them, has another key, for either
+    bundle, even with this builder's own hash (BUILDER) the same."""
+    monkeypatch.setattr(gb, "toolchain_id", lambda: "clang 1; SDK 15.0")
+    real = gb.ipatool_steps
+    for arch in gb.ARCHS:
+        pins = gb.load_pins(REPO / "bundle" / "pins.toml", arch)
+        now = gb.ipatool_key(pins["ipatool"], pins["go"], arch)
+        with monkeypatch.context() as m:
+            m.setattr(gb, "ipatool_steps", lambda version: real(version)[:-2])
+            untested = gb.ipatool_key(pins["ipatool"], pins["go"], arch)
+        assert now != untested, arch
+        assert now == gb.ipatool_key(pins["ipatool"], pins["go"], arch), "and the same steps, the same key"

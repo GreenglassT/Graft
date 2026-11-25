@@ -2,17 +2,17 @@ import SwiftUI
 
 struct EditAppSheet: View {
     let app: AppRecord
-    @Bindable var store: ConfigStore
+    @ObservedObject var store: ConfigStore
     /// `ContentView`'s, injected through the app pane: the LiveContainer
     /// picker lists what `--lc-status` found on the default device, and the
     /// device pane reads the same store, so a phone already checked there
     /// shows its answer here at once while this sheet re-reads it.
-    let liveContainer: LiveContainerStore
+    @ObservedObject var liveContainer: LiveContainerStore
     /// `ContentView`'s polled store, for which phone is the default.
-    let devices: DevicesStore
+    @ObservedObject var devices: DevicesStore
     /// `ContentView`'s settings, for whether an App Store Connect key is set:
     /// "Create the provisioning profile automatically" needs one to turn on.
-    let settings: SettingsStore
+    @ObservedObject var settings: SettingsStore
     let onClose: () -> Void
 
     /// The whole form, plus the baseline it will be diffed against. One list of
@@ -36,7 +36,7 @@ struct EditAppSheet: View {
         edit: AppOptionsDraft? = nil
     ) {
         self.app = app
-        self._store = Bindable(wrappedValue: store)
+        self._store = ObservedObject(wrappedValue: store)
         self.liveContainer = liveContainer
         self.devices = devices
         self.settings = settings
@@ -413,7 +413,7 @@ struct EditAppSheet: View {
         // LiveContainer picker, and LiveContainer locks "Create the
         // provisioning profile automatically". An edit made to either before
         // the switch must not ride along on the save unseen.
-        .onChange(of: draft.edited.delivery) { _, delivery in
+        .onChange(of: draft.edited.delivery) { delivery in
             draft.revertEditsHiddenByDelivery(
                 lcPinShown: Self.offersLCPin(app: app, delivery: delivery)
             )

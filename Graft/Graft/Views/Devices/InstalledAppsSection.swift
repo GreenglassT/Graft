@@ -69,7 +69,7 @@ struct InstalledAppsSection: View {
     /// reads off it is looked up by `device.udid` — which is what lets one
     /// instance serve every phone, and what removed the `.id(device.udid)`
     /// that used to discard this listing on each switch.
-    let deviceApps: DeviceAppsStore
+    @ObservedObject var deviceApps: DeviceAppsStore
 
     /// The bundle id being dumped right now, handed down by the pane — nil when
     /// nothing is. Drives one row's spinner.

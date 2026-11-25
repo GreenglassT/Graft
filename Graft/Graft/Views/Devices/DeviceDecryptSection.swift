@@ -103,7 +103,7 @@ struct DeviceDecryptSection: View {
     /// and that is a correctness fix rather than tidiness: the store used to
     /// hold one, unkeyed, so for the 2–5s a new phone's probe took this card
     /// drew the *previous* phone's checklist under this phone's name.
-    let deviceApps: DeviceAppsStore
+    @ObservedObject var deviceApps: DeviceAppsStore
 
     /// This phone's readiness answer, or nil before one has landed for it.
     private var readiness: DecryptCheckRecord? { deviceApps.readiness[device.udid] }
@@ -308,8 +308,8 @@ struct DeviceDecryptSection: View {
                 decryptOptions
                 decryptAction
             }
-            dumpNotes
-            dumpTranscript
+            DumpNotesView(log: deviceApps.dumpLog)
+            DumpTranscriptView(log: deviceApps.dumpLog)
 
             if let last = deviceApps.lastDecrypt {
                 Text(decryptSummary(last))
@@ -678,24 +678,30 @@ struct DeviceDecryptSection: View {
         return head + ", minus \(last.stripped.count) app \(noun) no tool could "
             + "decrypt: \(names)"
     }
+}
 
-    /// What the dump decided for the user, while it decides it.
-    ///
-    /// A minute of silence followed by a different tool's output is how
-    /// automatic behavior becomes inexplicable behavior. These wrap rather
-    /// than truncate — there are never more than a couple, and each one is a
-    /// whole sentence whose second half is the part that matters ("…and no tool
-    /// can decrypt them — dropping them and keeping the rest").
-    ///
-    /// The `fixedSize` is the vertical-only one, which is what makes wrapping
-    /// affordable here: it asks for the height its content needs at the width
-    /// it was offered, and never for width. Height is what the pane's
-    /// `ScrollView` absorbs.
+/// What the dump decided for the user, while it decides it.
+///
+/// A minute of silence followed by a different tool's output is how
+/// automatic behavior becomes inexplicable behavior. These wrap rather
+/// than truncate — there are never more than a couple, and each one is a
+/// whole sentence whose second half is the part that matters ("…and no tool
+/// can decrypt them — dropping them and keeping the rest").
+///
+/// The `fixedSize` is the vertical-only one, which is what makes wrapping
+/// affordable here: it asks for the height its content needs at the width
+/// it was offered, and never for width. Height is what the pane's
+/// `ScrollView` absorbs.
+///
+/// Observes the dump's `DumpLog` alone, so a note redraws only this.
+private struct DumpNotesView: View {
+    @ObservedObject var log: DumpLog
+
     @ViewBuilder
-    private var dumpNotes: some View {
-        if !deviceApps.notes.isEmpty {
+    var body: some View {
+        if !log.notes.isEmpty {
             VStack(alignment: .leading, spacing: 4) {
-                ForEach(Array(deviceApps.notes.enumerated()), id: \.offset) { _, note in
+                ForEach(Array(log.notes.enumerated()), id: \.offset) { _, note in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Symbols.note.image(size: 11)
                             .foregroundStyle(Palette.accent)
@@ -710,25 +716,32 @@ struct DeviceDecryptSection: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
+}
 
-    /// The backend's output, while and after a dump.
-    ///
-    /// Kept after the run rather than cleared: when a dump fails, this is the
-    /// evidence — and the failure is exactly when someone wants to read it.
-    /// The next dump clears it.
-    ///
-    /// One line each, truncated in the middle: these are hundreds of per-file
-    /// paths from another tool, and they are the one thing on this card that
-    /// arrives by the hundred. It is also this pane's only nested `ScrollView`,
-    /// with a fixed 140pt height — which is what keeps a long dump's output
-    /// from lengthening the card at all.
+/// The backend's output, while and after a dump.
+///
+/// Kept after the run rather than cleared: when a dump fails, this is the
+/// evidence — and the failure is exactly when someone wants to read it.
+/// The next dump clears it.
+///
+/// One line each, truncated in the middle: these are hundreds of per-file
+/// paths from another tool, and they are the one thing on this card that
+/// arrives by the hundred. It is also this pane's only nested `ScrollView`,
+/// with a fixed 140pt height — which is what keeps a long dump's output
+/// from lengthening the card at all.
+///
+/// Observes the dump's `DumpLog` alone, so the lines, published a batch at
+/// a time, redraw only this.
+private struct DumpTranscriptView: View {
+    @ObservedObject var log: DumpLog
+
     @ViewBuilder
-    private var dumpTranscript: some View {
-        if !deviceApps.transcript.isEmpty {
+    var body: some View {
+        if !log.lines.isEmpty {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 1) {
-                        ForEach(Array(deviceApps.transcript.enumerated()), id: \.offset) { i, line in
+                        ForEach(Array(log.lines.enumerated()), id: \.offset) { i, line in
                             Text(line)
                                 .font(AppFont.monoSmall)
                                 .foregroundStyle(Palette.textDim)
@@ -745,7 +758,7 @@ struct DeviceDecryptSection: View {
                 .background(Palette.surface2)
                 .clipShape(RoundedRectangle(cornerRadius: Metrics.radiusInner))
                 // Follow the tail, which is where a live dump's progress is.
-                .onChange(of: deviceApps.transcript.count) { _, count in
+                .onChange(of: log.lines.count) { count in
                     proxy.scrollTo(count - 1, anchor: .bottom)
                 }
             }

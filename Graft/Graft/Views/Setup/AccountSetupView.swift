@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 /// › Account it is a sheet that starts at the form or at the result, with
 /// Cancel (`onCancel`).
 struct AccountSetupView: View {
-    @Bindable var store: AccountSetupStore
+    @ObservedObject var store: AccountSetupStore
     /// The done screen's button: load the app, or close the Settings sheet.
     let onFinished: () -> Void
     /// Settings' Cancel. Nil on the first-run screen.
@@ -75,8 +75,8 @@ struct AccountSetupView: View {
         }
         // A refusal appears under the form with nothing else changing, so
         // VoiceOver says it (WCAG 4.1.3); the field it cleared is silent.
-        .onChange(of: store.error) { _, error in
-            if let error { AccessibilityNotification.Announcement(error).post() }
+        .onChange(of: store.error) { error in
+            if let error { VoiceOverAnnouncement.thisMac.post(error) }
         }
         .fileImporter(
             isPresented: $showingImporter,
@@ -381,6 +381,33 @@ private struct FreeStepRow: View {
                         .font(AppFont.label)
                 }
             }
+        }
+    }
+}
+
+/// Saying something to VoiceOver: SwiftUI's announcement on macOS 14 and
+/// later, as before macOS 13 was supported, and AppKit's on macOS 13, which
+/// has no `AccessibilityNotification`.
+enum VoiceOverAnnouncement: Equatable {
+    case swiftUI
+    case appKit
+
+    /// The one this Mac's macOS has.
+    static var thisMac: VoiceOverAnnouncement {
+        if #available(macOS 14, *) { return .swiftUI }
+        return .appKit
+    }
+
+    func post(_ text: String) {
+        switch self {
+        case .swiftUI:
+            if #available(macOS 14, *) { AccessibilityNotification.Announcement(text).post() }
+        case .appKit:
+            guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+            NSAccessibility.post(
+                element: window, notification: .announcementRequested,
+                userInfo: [.announcement: text]
+            )
         }
     }
 }

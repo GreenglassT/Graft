@@ -112,7 +112,7 @@ final class AppStoreSourceRowTests: XCTestCase {
     /// want of a license, at price 0. The claim itself is only recorded.
     @MainActor
     private struct Wired: View {
-        let store: AppStoreStore
+        @ObservedObject var store: AppStoreStore
         let claims: Claims
 
         var body: some View {

@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -34,8 +34,7 @@ private typealias Flag = CLIContract.Flag
 /// Settings, for the reason `DevicesStore` is: a view that builds its own
 /// copy buys a second subprocess and a load gate that can latch.
 @MainActor
-@Observable
-final class AppStoreStore {
+final class AppStoreStore: ObservableObject {
     let runner: CLIRunner
     /// Add App's Search (`AppStoreSearchStore`). It lives here so the sheet,
     /// which is rebuilt each time it opens, needs no store of its own. The
@@ -48,30 +47,47 @@ final class AppStoreStore {
     /// Search's reason: the sheet is rebuilt each time it opens. It loads
     /// this when it opens and resets it when it closes.
     let olderVersions: AppStoreVersionsStore
+    /// `account`'s changes, sent on as this store's own. Views read it through
+    /// this store (`appStore.account.signIn`), and so does this store's
+    /// `getBlockedReason`, which the app pane reads: a view observing only
+    /// this store still redraws when the account changes. It changes when
+    /// the user signs in or out, or enrolls.
+    ///
+    /// `search` and `olderVersions` aren't sent on. One changes with every
+    /// keystroke in Add App's search, the other with every older version the
+    /// list reads, and every view observing this store would redraw for
+    /// each. The one view that reads each observes it itself
+    /// (`AppStoreSearchForm`, `AppStoreVersionsSheet`), and
+    /// `ObservableStoresTests` keeps any other from reading them through here.
+    /// Unpublished: set once, in `init`.
+    private var accountChanges: AnyCancellable?
 
     /// The last `--appstore-status` answer, or nil before one arrives or after
     /// one fails. A failed reload clears it: a "signed in" left over from
     /// before the failure would be a claim nothing currently supports.
-    private(set) var status: AppStoreStatusRecord?
+    @Published private(set) var status: AppStoreStatusRecord?
     /// Whether a status load has *finished*, successfully or not.
     ///
     /// Not `status != nil`: that cannot tell "never asked" from "asked and it
     /// failed", and the Settings rows need to say "Checking…" for one and the
     /// error for the other. See memory `empty-collection-is-not-a-load-state`.
     /// A *canceled* load does not set it — see `loadStatus`.
-    private(set) var hasLoadedStatus = false
-    private(set) var isLoadingStatus = false
+    @Published private(set) var hasLoadedStatus = false
+    @Published private(set) var isLoadingStatus = false
     /// Status reads started, and running now; and which one's answer is the
     /// one in `status` (see `loadStatus`).
+    /// Unpublished: bookkeeping, which nothing draws.
     private var statusReadsStarted = 0
+    /// Unpublished: bookkeeping, which nothing draws.
     private var statusReadsRunning = 0
+    /// Unpublished: bookkeeping, which nothing draws.
     private var statusReadRecorded = 0
-    private(set) var statusError: String?
+    @Published private(set) var statusError: String?
 
     /// The App Store's version against the cached one, by config app name.
     /// A check that could not run at all is still an entry, with `error` set,
     /// so a row can say "couldn't check" rather than nothing.
-    private(set) var versions: [String: AppStoreVersionRecord] = [:]
+    @Published private(set) var versions: [String: AppStoreVersionRecord] = [:]
     /// What the pane knew about an app's cache when it asked: the version pin
     /// and the cached version it is showing. An answer is only reused for the
     /// same context — a pin edit, or a staged IPA deleted in the Cache pane,
@@ -84,6 +100,7 @@ final class AppStoreStore {
 
     /// When each *successful* answer in `versions` arrived, and for which
     /// context. See `checkVersion`.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var checkedAt: [String: (context: VersionContext?, at: Date)] = [:]
     /// How long a version answer is reused for an app the user clicks back to.
     static let versionFreshFor: TimeInterval = 10 * 60
@@ -97,11 +114,11 @@ final class AppStoreStore {
 
     /// What is writing each app's source IPA right now. At most one per app:
     /// a drop and a get of the same version would stage the same cache name.
-    private(set) var activity: [String: Activity] = [:]
+    @Published private(set) var activity: [String: Activity] = [:]
     /// Where each app's running get or drop has got to, as the CLI reports it.
-    private(set) var stages: [String: AppStoreStage] = [:]
+    @Published private(set) var stages: [String: AppStoreStage] = [:]
     /// The last get or drop failure per app, until dismissed or retried.
-    private(set) var errors: [String: String] = [:]
+    @Published private(set) var errors: [String: String] = [:]
 
     /// What "Use it anyway…" would re-run, per app: set only when the CLI
     /// refused the last get or drop because UnfairPlay couldn't verify the
@@ -119,10 +136,10 @@ final class AppStoreStore {
         case drop(URL)
     }
 
-    private(set) var unverifiedRetry: [String: Retry] = [:]
+    @Published private(set) var unverifiedRetry: [String: Retry] = [:]
     /// How many gets or drops have staged an IPA for each app. The pane watches
     /// its own app's count to re-read the cached-IPA card.
-    private(set) var completions: [String: Int] = [:]
+    @Published private(set) var completions: [String: Int] = [:]
 
     struct Completion: Equatable {
         let app: String
@@ -131,12 +148,12 @@ final class AppStoreStore {
 
     /// The most recent completion for any app — what `ContentView` watches to
     /// refresh that app's artwork, whichever pane is showing.
-    private(set) var lastCompleted: Completion?
+    @Published private(set) var lastCompleted: Completion?
     /// The most recent get that changed an app's hold (`appstore-hold`): a
     /// get of a chosen version, or a get of the latest that let go. The hold
     /// is the app's `preferred_version`, so `ContentView` reads the app list
     /// again when this changes.
-    private(set) var lastHoldChange: Completion?
+    @Published private(set) var lastHoldChange: Completion?
 
     /// What the last finished get or drop staged, per app — the line the app
     /// pane shows under the Source IPA section until the next action.
@@ -193,8 +210,10 @@ final class AppStoreStore {
         }
     }
 
-    private(set) var staged: [String: Staged] = [:]
+    @Published private(set) var staged: [String: Staged] = [:]
+    /// Unpublished: bookkeeping, which nothing draws.
     private var serial = 0
+    /// Unpublished: bookkeeping, which nothing draws.
     private var tasks: [String: Task<Void, Never>] = [:]
 
     private let now: () -> Date
@@ -224,6 +243,7 @@ final class AppStoreStore {
         account.onChange = { [weak self] in await self?.loadStatus() }
         account.onAccountChange = { [weak self] in self?.forgetLicences() }
         account.blockedBy = { [weak self] in self?.accountBlockedReason }
+        accountChanges = account.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
     // MARK: Account actions against gets (the review's critic)
@@ -308,7 +328,7 @@ final class AppStoreStore {
 
     /// Whether status has been read since Sign In… last opened. Until it
     /// has, the sheet can't say which ipatool gets the password.
-    private(set) var hasCheckedForSignIn = false
+    @Published private(set) var hasCheckedForSignIn = false
 
     /// Sign In…'s first step, as the sheet opens: read status again, so the
     /// "goes to another ipatool" note describes the ipatool `--appstore-login`
@@ -381,6 +401,7 @@ final class AppStoreStore {
 
     /// The last successful statuses' account (`remembered`), kept across a
     /// failed reload so a switch seen after one is still a switch.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var lastAccount: SignedInAccount?
 
     /// The Apple ID changed: a sign-in, a sign-out, or status naming another
@@ -494,7 +515,7 @@ final class AppStoreStore {
         var storeURL: URL? { trackId.flatMap { URL(string: "https://apps.apple.com/app/id\($0)") } }
     }
 
-    private(set) var licenseNeeded: [String: LicenseNeed] = [:]
+    @Published private(set) var licenseNeeded: [String: LicenseNeed] = [:]
 
     func isClaiming(_ app: String) -> Bool { activity[app] == .claiming }
 
@@ -537,13 +558,15 @@ final class AppStoreStore {
     }
 
     /// Apps whose Get (free) is reading status before it asks.
-    private(set) var checkingClaim: Set<String> = []
+    @Published private(set) var checkingClaim: Set<String> = []
     /// Each app's status read for Get (free), by number, until it ends or is
     /// abandoned (`cancelClaim`). A read whose number is gone asks nothing.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var claimChecks: [String: Int] = [:]
+    /// Unpublished: bookkeeping, which nothing draws.
     private var claimCheckSerial = 0
     /// Each app's confirmation, from that read, until it is answered.
-    private(set) var claimConfirmations: [String: ClaimConfirmation] = [:]
+    @Published private(set) var claimConfirmations: [String: ClaimConfirmation] = [:]
 
     static let checkingClaimLine = "Checking which Apple ID is signed in…"
 

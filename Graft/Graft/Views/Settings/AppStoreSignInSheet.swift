@@ -17,7 +17,7 @@ import SwiftUI
 /// in through any other ipatool. After such a refusal ("ipatool-changed"),
 /// the CLI's sentence shows, and status, read again, names the new one.
 struct AppStoreSignInSheet: View {
-    let store: AppStoreStore
+    @ObservedObject var store: AppStoreStore
     private var account: AppStoreAccountStore { store.account }
     /// From the status read since the sheet opened; nil until then.
     private var ipatool: AppStoreStatusRecord.IPATool? { store.signInIpatool }
@@ -202,7 +202,7 @@ struct AppStoreSignInSheet: View {
             code = ""
             if account.isSigningIn { account.cancelSignIn() }
         }
-        .onChange(of: account.signIn) { _, state in
+        .onChange(of: account.signIn) { state in
             if case .signedIn = state { dismiss() }
         }
     }

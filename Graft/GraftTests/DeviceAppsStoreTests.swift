@@ -605,7 +605,7 @@ final class DecryptVerboseTests: XCTestCase {
         """#
         let sut = DeviceAppsStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
         _ = await sut.decryptFrontmost(device: "U", argsOverride: ["-c", script])
-        XCTAssertEqual(sut.transcript, ["pulling app bundle", "downloaded 12 files"])
+        XCTAssertEqual(sut.dumpLog.lines, ["pulling app bundle", "downloaded 12 files"])
     }
 
     func test_a_new_dump_clears_the_previous_transcript() async {
@@ -615,7 +615,7 @@ final class DecryptVerboseTests: XCTestCase {
         let sut = DeviceAppsStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
         _ = await sut.decryptFrontmost(device: "U", argsOverride: ["-c", first])
         _ = await sut.decryptFrontmost(device: "U", argsOverride: ["-c", second])
-        XCTAssertEqual(sut.transcript, ["run two"])
+        XCTAssertEqual(sut.dumpLog.lines, ["run two"])
     }
 
     func test_the_transcript_survives_a_failure() async {
@@ -627,7 +627,7 @@ final class DecryptVerboseTests: XCTestCase {
         let sut = DeviceAppsStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
         _ = await sut.decryptFrontmost(device: "U", argsOverride: ["-c", script])
         XCTAssertNotNil(sut.lastError)
-        XCTAssertEqual(sut.transcript, ["spawned app pid => 16280"])
+        XCTAssertEqual(sut.dumpLog.lines, ["spawned app pid => 16280"])
     }
 }
 
@@ -730,8 +730,8 @@ final class DecryptNoteTests: XCTestCase {
             #"{"type":"log","source":"graft","line":"the main binary came back still encrypted — trying bagbak"}"#,
             #"{"type":"log","source":"bagbak","line":"downloaded 12 files"}"#,
         ]))
-        XCTAssertEqual(sut.notes.count, 1)
-        XCTAssertEqual(sut.transcript, ["downloaded 12 files"])
+        XCTAssertEqual(sut.dumpLog.notes.count, 1)
+        XCTAssertEqual(sut.dumpLog.lines, ["downloaded 12 files"])
     }
 
     func test_a_note_survives_intact() async {
@@ -743,7 +743,7 @@ final class DecryptNoteTests: XCTestCase {
         _ = await sut.decryptFrontmost(device: nil, argsOverride: script([
             #"{"type":"log","source":"graft","line":"\#(sentence)"}"#,
         ]))
-        XCTAssertEqual(sut.notes.first, sentence)
+        XCTAssertEqual(sut.dumpLog.notes.first, sentence)
     }
 
     func test_a_new_dump_starts_with_a_clean_slate() async {
@@ -751,9 +751,9 @@ final class DecryptNoteTests: XCTestCase {
         _ = await sut.decryptFrontmost(device: nil, argsOverride: script([
             #"{"type":"log","source":"graft","line":"trying bagbak"}"#,
         ]))
-        XCTAssertFalse(sut.notes.isEmpty)
+        XCTAssertFalse(sut.dumpLog.notes.isEmpty)
         _ = await sut.decryptFrontmost(device: nil, argsOverride: ["-c", ":"])
-        XCTAssertTrue(sut.notes.isEmpty, "a previous run's reasoning must not explain this one")
+        XCTAssertTrue(sut.dumpLog.notes.isEmpty, "a previous run's reasoning must not explain this one")
     }
 }
 

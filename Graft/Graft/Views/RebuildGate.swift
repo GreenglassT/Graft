@@ -1,5 +1,5 @@
 import AppKit
-import Observation
+import Combine
 import SwiftUI
 
 /// Rebuilds the installed app when its source has changed, before the app is
@@ -13,8 +13,7 @@ import SwiftUI
 /// launch, notice, rebuild, relaunch, and the window below exists to say so
 /// rather than leave the app looking hung for the half minute that takes.
 @MainActor
-@Observable
-final class RebuildCoordinator {
+final class RebuildCoordinator: ObservableObject {
     enum Phase: Equatable {
         /// Nothing to do — run the app.
         case ready
@@ -24,10 +23,10 @@ final class RebuildCoordinator {
         case failed(log: String)
     }
 
-    private(set) var phase: Phase = .ready
+    @Published private(set) var phase: Phase = .ready
 
     /// Where a failed rebuild's output is kept after the window is dismissed.
-    private(set) var logPath: String?
+    @Published private(set) var logPath: String?
 
     /// Set the first time `startIfStale` runs, so it runs once per *process*.
     ///
@@ -36,14 +35,17 @@ final class RebuildCoordinator {
     /// reopening it from the Dock re-ran the check — and a rebuild that decides
     /// to quit the app is not something to do in the middle of a session the
     /// user is already working in.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var hasChecked = false
 
     /// Injected so a test can drive the whole state machine without building
     /// anything. Returns nil on success, or the installer's output on failure.
+    /// Unpublished: a callback, which no view reads.
     var runInstaller: () async -> String?
     /// Injected for the same reason — terminating the app mid-test is not a
     /// thing a test can come back from. Returns false when it could not
     /// arrange the relaunch, in which case it must *not* have quit.
+    /// Unpublished: a callback, which no view reads.
     var relaunch: () -> Bool
 
     /// No defaults: the real installer and relaunch (`installFromRepo`,
@@ -268,7 +270,7 @@ final class RebuildCoordinator {
 
 /// What the window shows while the app is replacing itself.
 struct RebuildGate: View {
-    let coordinator: RebuildCoordinator
+    @ObservedObject var coordinator: RebuildCoordinator
 
     var body: some View {
         VStack(spacing: 16) {

@@ -14,7 +14,7 @@ import UniformTypeIdentifiers
 /// Apple ID, like the signing fields: there is no provisioning profile to make
 /// without a paid membership. Removing a stored key is not (`offersRemove`).
 struct AppStoreConnectSection: View {
-    @Bindable var store: SettingsStore
+    @ObservedObject var store: SettingsStore
     /// `ConfigStore.account`; nil disables nothing (`AccountMode`).
     let account: AccountMode?
 

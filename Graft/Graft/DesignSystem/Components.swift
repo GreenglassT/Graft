@@ -79,14 +79,12 @@ extension View {
     /// `consequence` is a closure rather than a `String`, and that is not
     /// stylistic. `ConfigStore.cancelConsequence` derives from `buildStage`,
     /// which is rewritten on every stage start and end — a dozen-plus times per
-    /// build. Passed by value it was read during `body`, so `@Observable`
-    /// registered `buildStage` as a dependency of whatever view attached this
-    /// modifier. On `SidebarView` that is the app's permanently-mounted
-    /// navigation column: every stage transition re-evaluated the whole List,
-    /// every row and every row's context menu, in every section, to compute a
-    /// sentence that is discarded unless the confirmation is actually up.
-    /// Read inside the message builder, the dependency lasts as long as the
-    /// alert does.
+    /// build. Passed by value it would be worked out in every `body` of
+    /// whatever view attached this modifier — on `SidebarView`, the app's
+    /// permanently-mounted navigation column, at every stage transition — for
+    /// a sentence that is discarded unless the confirmation is actually up.
+    /// Read inside the message builder, it is worked out only while the alert
+    /// is up.
     func stopBuildConfirmation<T>(
         presenting item: Binding<T?>,
         name: @escaping (T) -> String,
@@ -424,14 +422,30 @@ struct SearchField: View {
                 .textFieldStyle(.plain)
                 .font(AppFont.body)
                 .onSubmit(onSubmit)
-                .onKeyPress(keys: [.upArrow, .downArrow]) { press in
-                    guard let onMove else { return .ignored }
-                    return onMove(press.key == .downArrow ? 1 : -1) ? .handled : .ignored
-                }
+                .modifier(ArrowKeysMove(onMove: onMove))
         }
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background(Palette.surface)
         .clipShape(RoundedRectangle(cornerRadius: Metrics.radius))
+    }
+}
+
+/// `SearchField`'s up and down arrows, through `onMove`. `onKeyPress` is
+/// macOS 14's, and macOS 13 has nothing like it for a text field: there the
+/// arrows keep their usual job in the field, and a result is picked by
+/// clicking it, or Return for the first.
+private struct ArrowKeysMove: ViewModifier {
+    let onMove: ((Int) -> Bool)?
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14, *) {
+            content.onKeyPress(keys: [.upArrow, .downArrow]) { press in
+                guard let onMove else { return .ignored }
+                return onMove(press.key == .downArrow ? 1 : -1) ? .handled : .ignored
+            }
+        } else {
+            content
+        }
     }
 }
 

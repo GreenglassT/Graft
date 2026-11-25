@@ -50,11 +50,12 @@ Coming from Graft 1.x? See [Upgrading from Graft 1.x](docs/upgrading.md).
 
 ## Requirements
 
-- **A Mac with macOS 14 or later.** On a Mac with Apple silicon, download
-  `Graft.zip`, which does everything.
-- **On an Intel Mac,** download `Graft-Intel.zip`. It's a test build until it
-  has run on a real Intel Mac. Everything works except what needs Apple
-  silicon:
+- **A Mac with macOS 14 or later,** or macOS 13 or later for the Intel
+  download. On a Mac with Apple silicon, download `Graft.zip`, which does
+  everything.
+- **On an Intel Mac,** download `Graft-Intel.zip`, which also runs on
+  macOS 13. It's a test build until it has run on a real Intel Mac.
+  Everything works except what needs Apple silicon:
   - App Store sign-in, and getting and decrypting App Store apps, older
     versions and free ones included (search still works, for adding an app
     by name, and needs no sign-in);
@@ -277,6 +278,10 @@ version set in Edit App is a hold too; Get latest sets it back to latest.
 - Only apps your Apple ID has. If it doesn't have the app yet, get it first.
 - Apple doesn't serve every old version. One it won't describe or hand over
   says so, and you can pick another.
+- The App Store sometimes has more than one build with the same version
+  number. Graft numbers them from the oldest, so "1.2.0 (build 1 of 2)" is
+  the older and "1.2.0 (build 2 of 2)" the newer, and hovering over one says
+  which it is. Show More renumbers them when it finds an older one.
 - If the connection stalls, the list stops, and Try Again picks up where it
   stopped. A version that stalls twice in a row is marked as unavailable, and
   the list goes on.
@@ -1505,9 +1510,11 @@ there's no daemon.
 one processor (`Graft.zip` for Apple silicon, `Graft-Intel.zip` for Intel
 Macs, with `--arch x86_64`), with a universal app executable in both, so
 `Graft.zip` opened on an Intel Mac shows a screen that names
-`Graft-Intel.zip`. It's signed with a Developer ID identity and zipped. Then
-`scripts/verify-bundle` (with `--arch x86_64` for the Intel build) checks the
-sealed app. See
+`Graft-Intel.zip`. Each is built for its own oldest macOS, 14.0 for
+`Graft.zip` and 13.0 for `Graft-Intel.zip`. It's signed with a Developer ID
+identity and zipped. Then `scripts/verify-bundle` (with `--arch x86_64` for the
+Intel build) checks the sealed app, including that no program in it needs a
+newer macOS than that. See
 [Graft/README.md](Graft/README.md), and [docs/network.md](docs/network.md) for
 every host Graft and its tools contact, including what a release build
 downloads.

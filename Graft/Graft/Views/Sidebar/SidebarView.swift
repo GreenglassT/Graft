@@ -21,12 +21,12 @@ import SwiftUI
 /// Settings. A phone is a place now, not a screen listing places, so it belongs
 /// where the other places are and above the things that get delivered to it.
 struct SidebarView: View {
-    @Bindable var store: ConfigStore
+    @ObservedObject var store: ConfigStore
     @Binding var selection: SidebarItem?
     /// The store, because the lookup is per-app and needs each row's bundle
     /// id. The rows themselves are handed only the resolved image — see the
     /// call below for why that distinction is deliberate.
-    let artwork: ArtworkStore
+    @ObservedObject var artwork: ArtworkStore
     /// The connected phones, and the ones that could not be described.
     ///
     /// The store rather than the two arrays, because both are `private(set)` on
@@ -34,9 +34,9 @@ struct SidebarView: View {
     /// that rewrites `devices` has to repaint this column or the rows are a
     /// snapshot of launch. Nothing here loads or refreshes it; `ContentView`
     /// owns that, so a sidebar rendered in a test spawns no subprocesses.
-    let devices: DevicesStore
+    @ObservedObject var devices: DevicesStore
     /// Handed to Add App, which stages a chosen IPA through it.
-    let appStore: AppStoreStore
+    @PassedThrough var appStore: AppStoreStore
 
     @State private var showingAddSheet = false
     @State private var pendingRemove: AppRecord?

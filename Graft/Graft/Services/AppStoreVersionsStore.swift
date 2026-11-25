@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -17,8 +17,7 @@ private typealias Flag = CLIContract.Flag
 /// Search is. The sheet loads it when it opens and resets it when it closes,
 /// which also kills a run still reading.
 @MainActor
-@Observable
-final class AppStoreVersionsStore {
+final class AppStoreVersionsStore: ObservableObject {
     /// What the list is doing. `loading` keeps the rows already on screen:
     /// a page being read adds to them.
     enum Phase: Equatable {
@@ -34,25 +33,27 @@ final class AppStoreVersionsStore {
     let runner: CLIRunner
 
     /// The config app being listed, or nil while idle.
-    private(set) var app: String?
+    @Published private(set) var app: String?
     /// Every version the CLI has listed, newest first, by `index`.
-    private(set) var releases: [AppStoreReleaseRecord] = []
-    private(set) var phase: Phase = .idle
+    @Published private(set) var releases: [AppStoreReleaseRecord] = []
+    @Published private(set) var phase: Phase = .idle
     /// The version the app is held at: what the sheet opened with
     /// (`load(app:held:)`), until a sentinel says. A list that fails partway
     /// sends none, and keeps the one it opened with.
-    private(set) var heldVersion: String?
+    @Published private(set) var heldVersion: String?
     /// Where the page being read, or last read, ends: rows before it whose
     /// version is still unknown are being read (or Apple wouldn't say).
-    private(set) var readingUpTo = 0
+    @Published private(set) var readingUpTo = 0
     /// Where Show More starts, when there is anything left to read.
-    private(set) var nextOffset: Int?
+    @Published private(set) var nextOffset: Int?
 
     /// Bumped by every run started and by `reset`. A run that finishes under
     /// an older one was replaced or canceled, and writes nothing; its rows
     /// arriving late are dropped the same way.
-    @ObservationIgnored private var generation = 0
-    @ObservationIgnored private var task: Task<Void, Never>?
+    /// Unpublished: a change to it alone redraws nothing.
+    private var generation = 0
+    /// Unpublished: a change to it alone redraws nothing.
+    private var task: Task<Void, Never>?
 
     /// The CLI's page. Only for `readingUpTo` while the first run reads, before
     /// a sentinel says what the page was: the CLI decides, and this app never
@@ -179,6 +180,66 @@ final class AppStoreVersionsStore {
     /// there is nothing left to read.
     nonisolated static func nextOffset(_ releases: [AppStoreReleaseRecord], after end: Int) -> Int? {
         releases.contains { $0.index >= end && $0.version == nil && $0.error == nil } ? end : nil
+    }
+
+    // MARK: Builds that share a version
+
+    /// One of two or more rows read with the same version number. The App
+    /// Store can serve more than one build under one version, and ipatool
+    /// gives only the number and the date, so the sheet tells them apart by
+    /// a count. It goes from the oldest, as build numbers do, though the rows
+    /// stay newest first. Only rows read so far count: Show More reading an
+    /// older build of the same number renumbers the rest.
+    struct DuplicateBuild: Equatable {
+        /// The version number, trimmed.
+        let version: String
+        /// 1 is the oldest read so far.
+        let number: Int
+        /// How many rows read so far have this number.
+        let count: Int
+
+        /// What follows the row's version: "(build 1 of 2)".
+        var suffix: String { "(build \(number) of \(count))" }
+
+        /// Which build this is, plainly: the row's help.
+        var help: String {
+            let which: String
+            if count == 2 {
+                which = number == 2 ? "This is the newer one (build 2)." : "This is the older one (build 1)."
+            } else if number == count {
+                which = "This is the newest (build \(number))."
+            } else if number == 1 {
+                which = "This is the oldest (build 1)."
+            } else {
+                which = "This is build \(number), counting from the oldest."
+            }
+            return "The App Store has \(count) builds numbered \(version). \(which)"
+        }
+    }
+
+    /// The listed rows that share their version with another, by
+    /// `externalId` (`duplicateBuilds(_:)`).
+    var duplicateBuilds: [String: DuplicateBuild] { Self.duplicateBuilds(releases) }
+
+    /// Every row whose version, trimmed, is exactly another read row's, by
+    /// `externalId`, numbered from the oldest (the highest `index`). A row
+    /// not read yet counts for nothing: its number may be another one
+    /// altogether. A version listed once has no entry.
+    nonisolated static func duplicateBuilds(_ releases: [AppStoreReleaseRecord]) -> [String: DuplicateBuild] {
+        var byVersion: [String: [AppStoreReleaseRecord]] = [:]
+        for row in releases {
+            guard let version = row.version?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !version.isEmpty
+            else { continue }
+            byVersion[version, default: []].append(row)
+        }
+        var builds: [String: DuplicateBuild] = [:]
+        for (version, rows) in byVersion where rows.count > 1 {
+            for (at, row) in rows.sorted(by: { $0.index > $1.index }).enumerated() {
+                builds[row.externalId] = DuplicateBuild(version: version, number: at + 1, count: rows.count)
+            }
+        }
+        return builds
     }
 
     /// How a row reads its state, for the sheet.

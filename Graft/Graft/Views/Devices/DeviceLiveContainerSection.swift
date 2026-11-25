@@ -31,7 +31,7 @@ import SwiftUI
 /// (`blocks(for:account:)`).
 struct DeviceLiveContainerSection: View {
     let device: DeviceRecord
-    let store: LiveContainerStore
+    @ObservedObject var store: LiveContainerStore
     /// `ConfigStore.account`. Nil (not known yet) disables nothing.
     let account: AccountMode?
 

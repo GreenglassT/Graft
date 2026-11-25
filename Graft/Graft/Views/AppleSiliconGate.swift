@@ -33,8 +33,8 @@ struct AppleSiliconGate<Content: View>: View {
             content()
                 .environment(\.macSupport, support)
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    if support.isIntelBuildOnAppleSilicon {
-                        IntelBuildBanner(openURL: openURL)
+                    if let line = support.intelBuildBannerLine {
+                        IntelBuildBanner(line: line, openURL: openURL)
                     }
                 }
         case .wrongDownload:
@@ -83,6 +83,8 @@ struct WrongDownloadView: View {
 /// everything that needs Apple silicon is disabled here though the Mac has
 /// it, and Graft.zip is the fix.
 struct IntelBuildBanner: View {
+    /// `MacSupport.intelBuildBannerLine`.
+    let line: String
     let openURL: (URL) -> Void
 
     var body: some View {
@@ -90,7 +92,7 @@ struct IntelBuildBanner: View {
             Symbols.attention.image(size: 11)
                 .foregroundStyle(Palette.warn)
                 .accessibilityHidden(true)
-            Text(MacSupport.intelBuildBanner)
+            Text(line)
                 .font(AppFont.body)
                 .foregroundStyle(Palette.text)
                 .fixedSize(horizontal: false, vertical: true)

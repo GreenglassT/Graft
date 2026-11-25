@@ -11,7 +11,11 @@
 # both; everything it runs (the Python, the tools, OpenSSL, the launchers)
 # is the bundle's architecture only. Info.plist's GraftBundleArch says which
 # bundle it is, written before anything is signed, and an Intel release
-# refuses a commit whose app doesn't read it. verify-bundle checks the rest.
+# refuses a commit whose app doesn't read it. Each bundle has its own oldest
+# macOS, MACOS_MIN below (graft_bundle.MACOS_MINS): 14.0 for Graft.zip, 13.0
+# for Graft-Intel.zip, so Intel Macs on Ventura can run it. The app is built
+# for it, so Info.plist's LSMinimumSystemVersion says it, as everything the
+# stage builds does. verify-bundle checks the rest.
 #
 #   GRAFT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
 #     scripts/graft-release [--arch arm64|x86_64] [output-dir]
@@ -87,12 +91,15 @@ if [[ "${1:-}" == "--arch" ]]; then
   esac
   shift 2
 fi
+# The bundle's oldest macOS, as graft_bundle.MACOS_MINS has it.
 if [[ "$ARCH" == x86_64 ]]; then
   ZIP_NAME=Graft-Intel.zip
   OUT_DIR="${1:-$REPO_ROOT/build/release-intel}"
+  MACOS_MIN=13.0
 else
   ZIP_NAME=Graft.zip
   OUT_DIR="${1:-$REPO_ROOT/build/release}"
+  MACOS_MIN=14.0
 fi
 IDENTITY="${GRAFT_SIGN_IDENTITY:?set GRAFT_SIGN_IDENTITY to a Developer ID Application identity}"
 PY="$REPO_ROOT/.venv/bin/python"
@@ -130,13 +137,13 @@ git -C "$REPO_ROOT" archive --format=tar "$HEAD_AT_START" | tar -x -C "$EXPORT"
 # Info.plist's GraftBundleArch (written below). An app whose code doesn't read
 # it would show Intel Macs the old "needs Apple silicon" screen, and nothing
 # else here would notice. So an Intel release needs the key's name, as a
-# string, in the app's own code (Graft/Graft, not its tests, not a comment).
+# string, in the app's own code (Graft/Graft, not its tests), where it is
+# compiled: not in a comment, nor in an `#if false` block (swift_literal.py).
 if [[ "$ARCH" == x86_64 ]]; then
-  READS_ARCH=$(grep -rhF --include='*.swift' '"GraftBundleArch"' "$EXPORT/Graft/Graft" 2>/dev/null \
-    | grep -vE '^[[:space:]]*(//|\*)' || true)
-  if [[ -z "$READS_ARCH" ]]; then
+  if ! "$PY" "$EXPORT/scripts/swift_literal.py" "$EXPORT/Graft/Graft" GraftBundleArch; then
     echo "error: an Intel release needs an app that reads Info.plist's GraftBundleArch, and no Swift file of" >&2
-    echo "       the app's own (Graft/Graft) names it: on an Intel Mac, this commit's app would still say it" >&2
+    echo "       the app's own (Graft/Graft) names it in code that's compiled (outside comments and #if false):" >&2
+    echo "       on an Intel Mac, this commit's app would still say it" >&2
     echo "       needs Apple silicon. Build it from a commit with the app's Intel support." >&2
     exit 1
   fi
@@ -182,6 +189,9 @@ echo "→ building Release (arm64 and x86_64)…"
 #   stays, so crash logs still name functions.
 # - Swift packages at the versions the committed Package.resolved pins, never
 #   resolved again over the network (review 2.0, bundle #11).
+# - The bundle's own oldest macOS (MACOS_MIN), whatever the project's is: both
+#   slices of the app's executable are built for it, and Info.plist's
+#   LSMinimumSystemVersion, $(MACOSX_DEPLOYMENT_TARGET), says it.
 xcodebuild \
   -project "$EXPORT/Graft/Graft.xcodeproj" \
   -scheme Graft \
@@ -189,7 +199,7 @@ xcodebuild \
   -destination 'generic/platform=macOS' \
   -derivedDataPath "$DERIVED" \
   -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
-  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
+  ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO MACOSX_DEPLOYMENT_TARGET="$MACOS_MIN" \
   ENABLE_CODE_COVERAGE=NO CLANG_COVERAGE_MAPPING=NO \
   DEPLOYMENT_POSTPROCESSING=YES STRIP_INSTALLED_PRODUCT=YES STRIP_STYLE=debugging \
   CODE_SIGN_IDENTITY=- \
@@ -204,6 +214,14 @@ BUILT="$DERIVED/Build/Products/Release/Graft.app"
 
 if /usr/libexec/PlistBuddy -c "Print :GraftRepoPath" "$BUILT/Contents/Info.plist" >/dev/null 2>&1; then
   echo "error: release build carries GraftRepoPath; refusing to ship it" >&2
+  exit 1
+fi
+# Before minutes of staging: the Info.plist promises the macOS the bundle is
+# built for, which verify-bundle checks again with every Mach-O.
+PROMISED=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$BUILT/Contents/Info.plist" 2>/dev/null || true)
+if [[ "$PROMISED" != "$MACOS_MIN" ]]; then
+  echo "error: the app's Info.plist says LSMinimumSystemVersion ${PROMISED:-(none)}, not $MACOS_MIN, the macOS" >&2
+  echo "       the $ARCH bundle is built for; it should be \$(MACOSX_DEPLOYMENT_TARGET)" >&2
   exit 1
 fi
 

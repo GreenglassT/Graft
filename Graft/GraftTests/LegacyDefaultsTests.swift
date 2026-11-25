@@ -73,9 +73,9 @@ final class LegacyDefaultsTests: XCTestCase {
     }
 
     func test_keys_the_new_domain_already_has_are_not_overwritten() {
-        // Not hypothetical: running the test suite launches the app as its
-        // test host under the new bundle id, and AppKit saves window frames
-        // into the new domain before any user ever opens it. A copy gated on
+        // Not hypothetical: until 2.2.1 the test suite ran the app as its
+        // test host under the new bundle id, and AppKit saved window frames
+        // into the new domain before any user ever opened it. A copy gated on
         // "the new domain is empty" would never run on such a machine.
         store.setPersistentDomain(["NSWindow Frame main": "1 2 3 4", "shared": "new"], forName: current)
         seedLegacy(["lastDeliveryMode": "livecontainer", "shared": "old"])
@@ -108,8 +108,8 @@ final class LegacyDefaultsTests: XCTestCase {
     }
 
     func test_the_launch_hook_stays_out_of_the_test_host() {
-        // The test host *is* the app, under the real bundle id. Migrating
-        // there would copy the developer's real TweakBuild preferences.
+        // The test host *is* the app (its Debug build). Migrating there
+        // would copy the developer's real TweakBuild preferences.
         seedLegacy(["k": "v"])
         XCTAssertFalse(LegacyDefaults.migrateOnLaunch(
             environment: ["XCTestConfigurationFilePath": "/tmp/x.xctestconfiguration"],

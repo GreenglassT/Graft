@@ -436,12 +436,75 @@ def test_a_download_on_another_python_is_still_its_build(
     assert marker(download(installed)[0]) == "Graft-Intel.zip"
 
 
+#: Names beside an interpreter that start like one and aren't: a free-threaded
+#: build's, and python-config's. `INTERPRETER_RE` must match the whole name.
+LOOKALIKES = ("python3.13t", "python3.13-config")
+
+
+def _lookalike(bin_dir: Path, name: str, archs: tuple[str, ...]) -> None:
+    """`name` in `bin_dir`, as a Mach-O for `archs` (the free-threaded build)
+    or a script (python-config): each one the bundle could be read by, if
+    its name were taken for the interpreter's."""
+    if name.endswith("t"):
+        (bin_dir / name).write_bytes(macho_for(archs))
+    else:
+        (bin_dir / name).write_text("#!/bin/sh\n")
+
+
+def test_lookalikes_beside_the_python_are_not_a_second_python(tmp_path: Path) -> None:
+    """Still the one Python, not "more than one": the Intel build with an
+    arm64 python3.13t beside its own python3.13 is the Intel build."""
+    app = dummy_app(tmp_path, "2.2", flavor=X86_64)
+    bin_dir = app.joinpath(*app_update.EMBEDDED_PYTHON)
+    for name in LOOKALIKES:
+        _lookalike(bin_dir, name, (ARM64,))
+    assert app_update.embedded_interpreter(app) == bin_dir / "python3.13"
+    assert app_update.bundle_flavor(app) == X86_64
+
+
+@pytest.mark.parametrize("names", [LOOKALIKES, LOOKALIKES[:1], LOOKALIKES[1:]],
+                         ids=["both", "python3.13t", "python3.13-config"])
+def test_a_bin_folder_of_lookalikes_only_has_no_python(tmp_path: Path, names: tuple[str, ...]) -> None:
+    """Even a python3.13t with code for the bundle's own processor: it isn't
+    the interpreter, and there is none."""
+    app = dummy_app(tmp_path, "2.2", flavor=ARM64)
+    bin_dir = app.joinpath(*app_update.EMBEDDED_PYTHON)
+    (bin_dir / "python3.13").unlink()
+    for name in names:
+        _lookalike(bin_dir, name, (ARM64,))
+    with pytest.raises(app_update.MixedBuild, match="it has no embedded Python"):
+        app_update.embedded_interpreter(app)
+    with pytest.raises(app_update.MixedBuild, match="it has no embedded Python"):
+        app_update.bundle_flavor(app)
+
+
+def test_a_folder_named_as_the_python_is_no_build_not_a_crash(tmp_path: Path) -> None:
+    """Refused as a `MixedBuild`, never an IsADirectoryError, and never read
+    through: not even with a real Python for the bundle's processor inside
+    it. The running bundle's, asked for by name, says the same."""
+    app = dummy_app(tmp_path, "2.2", flavor=ARM64)
+    python = app.joinpath(*app_update.EMBEDDED_PYTHON, "python3.13")
+    python.unlink()
+    python.mkdir()
+    (python / "python3.13").write_bytes(macho_for((ARM64,)))
+    assert app_update.embedded_interpreter(app) == python, "found by its name, as any entry is"
+    with pytest.raises(app_update.MixedBuild, match="it has no embedded Python"):
+        app_update.bundle_flavor(app)
+    with pytest.raises(app_update.MixedBuild, match="it has no embedded Python"):
+        app_update.bundle_flavor(app, interpreter="python3.13")
+    with pytest.raises(app_update.UpdateError) as caught:
+        app_update.own_flavor(app)
+    assert caught.value.reason == app_update.MIXED_BUILD
+
+
 @pytest.mark.parametrize(("layout", "said"), [
     ("two Pythons", "more than one embedded Python (python3.13, python3.14)"),
     ("a linked Python", "has no embedded Python"),
     ("a linked bin folder", "reached through a link"),
     ("no Python", "has no embedded Python"),
     ("a Python by another name", "has no embedded Python"),
+    ("a Python that is a folder", "has no embedded Python"),
+    ("only lookalikes", "has no embedded Python"),
 ])
 def test_a_download_whose_python_cant_be_told_is_refused(
     server: FixtureServer, tools: FakeTools, tmp_path: Path, installed: Path, layout: str, said: str
@@ -461,6 +524,13 @@ def test_a_download_whose_python_cant_be_told_is_refused(
         bin_dir.symlink_to("elsewhere")
     elif layout == "no Python":
         python.unlink()
+    elif layout == "a Python that is a folder":
+        python.unlink()
+        python.mkdir()
+        (python / "python3.13").write_bytes(macho_for((ARM64,)))
+    elif layout == "only lookalikes":
+        python.rename(bin_dir / "python3.13t")
+        _lookalike(bin_dir, "python3.13-config", (ARM64,))
     else:
         python.rename(bin_dir / "python3")
     data = zip_app(app, src / "Graft.zip")

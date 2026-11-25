@@ -1,12 +1,11 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
 @MainActor
-@Observable
-final class ConfigStore: CLIStore {
-    private(set) var apps: [AppRecord] = []
+final class ConfigStore: ObservableObject, CLIStore {
+    @Published private(set) var apps: [AppRecord] = []
 
     /// Which account config.yaml is for, as the last `--list` reported it, or
     /// nil before one has landed and against a CLI too old to say.
@@ -19,13 +18,13 @@ final class ConfigStore: CLIStore {
     /// From `--list`'s `account` event, which it emits even with no apps;
     /// failing that, the `account` an older CLI put on each `app`. A load that
     /// throws leaves it as it was, like `apps`.
-    private(set) var account: AccountMode?
+    @Published private(set) var account: AccountMode?
 
     /// Whether each app's last delivery still matches what a build would
     /// produce, keyed by the app's config name. Absent means the CLI said
     /// nothing about it — an older CLI, or a state it declined to compute —
     /// and absent renders as no badge, same as `.current`.
-    private(set) var deliveryStates: [String: DeliveryStateRecord] = [:]
+    @Published private(set) var deliveryStates: [String: DeliveryStateRecord] = [:]
 
     /// Apps whose last verified build was made from an IPA that was never
     /// decrypted, keyed by config name. Absent means the last build that
@@ -42,7 +41,7 @@ final class ConfigStore: CLIStore {
     /// Session-scoped, deliberately: the CLI records nothing about this in the
     /// build log, so there is nothing to read back at launch. The next build
     /// of that app decides it again.
-    private(set) var encryptedBinaries: [String: EncryptedBinariesRecord] = [:]
+    @Published private(set) var encryptedBinaries: [String: EncryptedBinariesRecord] = [:]
 
     /// Apps whose current build has already reported encrypted binaries.
     ///
@@ -50,6 +49,7 @@ final class ConfigStore: CLIStore {
     /// `encrypted-binaries` comes first, then the decryption stage's `end`.
     /// Without this, the stage-end that *is* the verdict would immediately
     /// clear the finding the same build had just made.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var encryptedReportedThisBuild: Set<String> = []
 
     /// How the last build of each app ended badly, keyed by config name — or
@@ -68,9 +68,9 @@ final class ConfigStore: CLIStore {
     /// failures that need this most are the ones that never got a log row —
     /// the app gone from config.yaml, a phone unplugged before `build-start`,
     /// a state directory that wouldn't open.
-    private(set) var buildFailures: [String: String] = [:]
+    @Published private(set) var buildFailures: [String: String] = [:]
 
-    var lastError: String?
+    @Published var lastError: String?
 
     /// Name of the app whose build subprocess is currently in flight, or nil.
     ///
@@ -80,7 +80,7 @@ final class ConfigStore: CLIStore {
     /// down while the CLI keeps signing and pushing the IPA — a completed
     /// install minutes later with no progress, no notice, and nothing to
     /// cancel. The store is the one object both views already hold.
-    private(set) var buildingApp: String?
+    @Published private(set) var buildingApp: String?
 
     /// The stage the running build last announced starting, or nil between
     /// builds.
@@ -91,7 +91,7 @@ final class ConfigStore: CLIStore {
     /// store rather than derived from `AppDetailView`'s `buildState` because
     /// the sidebar offers the same cancel, and the sidebar has never had the
     /// build's state.
-    private(set) var buildStage: String?
+    @Published private(set) var buildStage: String?
 
     /// When each app's most recent build started this session, keyed by
     /// config name.
@@ -102,7 +102,7 @@ final class ConfigStore: CLIStore {
     /// there is one build slot and one way into it. Clearing that line from
     /// the button instead is how "Build for this Mac" came to leave it
     /// standing — Build & Install remembered, the second button did not.
-    private(set) var buildStartedAt: [String: ContinuousClock.Instant] = [:]
+    @Published private(set) var buildStartedAt: [String: ContinuousClock.Instant] = [:]
 
     /// The Task running the build, so it can be stopped from somewhere other
     /// than the pane that started it.
@@ -112,9 +112,9 @@ final class ConfigStore: CLIStore {
     /// terminates the adopted process — SIGTERM, then SIGKILL `cliStopGrace`
     /// later for the stretches cyan and zsign spend in native loops.
     ///
-    /// Untracked by `@Observable` on purpose: nothing renders the Task itself,
-    /// and `buildingApp` already publishes the state the UI reads.
-    @ObservationIgnored private var buildTask: Task<Void, Never>?
+    /// Unpublished on purpose: nothing renders the Task itself, and
+    /// `buildingApp` already publishes the state the UI reads.
+    private var buildTask: Task<Void, Never>?
 
     /// The app whose build the user asked to stop, until the next build claims
     /// the slot.
@@ -124,7 +124,7 @@ final class ConfigStore: CLIStore {
     /// non-zero with whatever it had written to stderr, and the pane's normal
     /// reading of that is "the build failed" — a red Retry and a failure card
     /// for something the user deliberately did a second ago.
-    private(set) var cancellingApp: String?
+    @Published private(set) var cancellingApp: String?
 
     /// What the running build has done to the phone so far — the single value
     /// both the confirmation and the post-mortem read. See `DeviceExposure`.
@@ -133,11 +133,12 @@ final class ConfigStore: CLIStore {
     /// consumers read differently: the confirmation warned about the window
     /// between `lc-push end` and `build-end`, while the post-mortem read
     /// `buildStage` — nil in exactly that window — and wrote no advice at all.
-    private(set) var deviceExposure: DeviceExposure = .notYet
+    @Published private(set) var deviceExposure: DeviceExposure = .notYet
 
     /// When each app's last Stop happened, so the pane can tell "this build was
     /// stopped" from "an older build failed and is still worth showing".
-    @ObservationIgnored private var stoppedAt: [String: Date] = [:]
+    /// Unpublished: a change to it alone redraws nothing.
+    private var stoppedAt: [String: Date] = [:]
 
     /// When this app's last Stop happened, or nil.
     ///
@@ -167,16 +168,17 @@ final class ConfigStore: CLIStore {
     /// change, so a view-local flag told the user a check had finished merely
     /// because they clicked another app and back — re-enabling the button and
     /// letting a second `--reconcile` race the first on `log.sqlite`.
-    private(set) var checkingApp: String?
+    @Published private(set) var checkingApp: String?
 
     /// What the phone is waiting on while the check runs — the CLI's
     /// `device` line, "Unlock the phone and tap Trust…". Shown live under
     /// Checking…, gone when the check ends, and never part of its result.
-    private(set) var deviceCheckStatus: String?
+    @Published private(set) var deviceCheckStatus: String?
 
     /// What the running build will actually do to the phone, captured from the
     /// build options at launch. See `EffectiveDelivery`.
-    @ObservationIgnored private(set) var effectiveDelivery: EffectiveDelivery = .unknown
+    /// Unpublished: a change to it alone redraws nothing.
+    private(set) var effectiveDelivery: EffectiveDelivery = .unknown
 
     /// Builds that have already posted a completion banner, so one build can
     /// never produce two.
@@ -186,6 +188,7 @@ final class ConfigStore: CLIStore {
     /// it had already reported success). Both paths record an outcome, and
     /// without this the user gets "example built ✓" and then "example build
     /// failed" for the same run.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var notifiedThisBuild: Set<String> = []
 
     /// How a finished build reaches the user's notification center.
@@ -200,7 +203,8 @@ final class ConfigStore: CLIStore {
     ///
     /// No default: `BuildNotifier.post` is named only in `GraftApp`, and a
     /// test passes its own (`NoRealDefaultsTests`).
-    @ObservationIgnored var postNote: @MainActor (BuildNotifier.Note?) -> Void
+    /// Unpublished: a change to it alone redraws nothing.
+    var postNote: @MainActor (BuildNotifier.Note?) -> Void
 
     let runner: CLIRunner
     private let cliArgs: [String]
@@ -670,14 +674,14 @@ final class ConfigStore: CLIStore {
 
     /// What the user still has to do in Terminal before anything here works,
     /// or nil once the app list has loaded. Set only by `checkSetup`.
-    private(set) var setupNeed: SetupNeed?
+    @Published private(set) var setupNeed: SetupNeed?
 
     /// Whether `checkSetup` is running — the setup screen's Check again shows
     /// it, and refuses a second press while it does.
-    private(set) var isCheckingSetup = false
+    @Published private(set) var isCheckingSetup = false
     /// The last Check again found the login shell asked too recently to ask
     /// again, and used its last answer (`ShellEnvironment.askedTooRecentlyNote`).
-    private(set) var shellAskedTooRecently = false
+    @Published private(set) var shellAskedTooRecently = false
 
     /// The app's first load, and the setup screen's Check again.
     ///
@@ -740,7 +744,7 @@ final class ConfigStore: CLIStore {
     /// The user chose to go on without the tools step 3 lists. For the
     /// session: they have seen the list, and the window's notice keeps
     /// pointing at Settings until the tools are there.
-    private(set) var toolsStepSkipped = false
+    @Published private(set) var toolsStepSkipped = false
 
     /// Leave the tools step for the app. Only from that step — every other
     /// step is one the app cannot work without.

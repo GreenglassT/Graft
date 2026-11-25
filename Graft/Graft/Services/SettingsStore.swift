@@ -1,16 +1,15 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
 @MainActor
-@Observable
-final class SettingsStore {
-    private(set) var checks: [PreflightCheck] = []
+final class SettingsStore: ObservableObject {
+    @Published private(set) var checks: [PreflightCheck] = []
     /// The editable settings as the CLI currently has them, or nil before the
     /// first read. The pane seeds its fields from this and diffs against it,
     /// so it can send only what the user actually changed.
-    private(set) var settings: SettingsRecord?
+    @Published private(set) var settings: SettingsRecord?
 
     /// Where the CLI says this config keeps everything, for Settings → Paths.
     ///
@@ -19,13 +18,13 @@ final class SettingsStore {
     /// paths, and the section would blank on every save. Nothing a save writes
     /// moves a directory, so the last report stays true. Nil until the first
     /// read, and after it against a CLI too old to report them.
-    private(set) var paths: SettingsPaths?
+    @Published private(set) var paths: SettingsPaths?
 
     /// Whether `paths` are the defaults rather than this config's own: the
     /// read that reported them could not parse config.yaml (C-SETTINGS), so
     /// a `cache_dir` or `tweaks_dir` it sets was never seen. Kept with `paths`,
     /// which outlives a save for the reason given there.
-    private(set) var pathsAreDefaults = false
+    @Published private(set) var pathsAreDefaults = false
 
     /// Why the last `--settings` could not read config.yaml, or nil when it
     /// could — or when the CLI is too old to say (C-SETTINGS).
@@ -43,8 +42,8 @@ final class SettingsStore {
     /// path was discarded the moment the user clicked Devices to check a UDID
     /// — silently, with no prompt. The store is owned by ContentView and
     /// outlives the switch.
-    var draft = SettingsDraft()
-    private(set) var isSaving = false
+    @Published var draft = SettingsDraft()
+    @Published private(set) var isSaving = false
 
     /// Whether anything is running that a second `--check` would race.
     ///
@@ -56,11 +55,11 @@ final class SettingsStore {
     /// Store Connect key's Save and test and Remove end with a scan too, for
     /// the same reason `save()` does, so they hold it as well.
     var isBusy: Bool { isRunning || isSaving || isSavingPortal }
-    private(set) var isRunning: Bool = false
+    @Published private(set) var isRunning: Bool = false
     /// The last Re-run found the login shell asked too recently to ask again,
     /// and scanned with its last answer (`ShellEnvironment.askedTooRecentlyNote`).
-    private(set) var shellAskedTooRecently = false
-    var lastError: String?
+    @Published private(set) var shellAskedTooRecently = false
+    @Published var lastError: String?
 
     /// The pill's two counts. An `info` row is in neither: a free Apple ID's
     /// account row is `ok` on the wire, and counting it would call "you have
@@ -81,7 +80,7 @@ final class SettingsStore {
     /// `checks.isEmpty` cannot say: it is equally "not run yet" and "the run
     /// failed", and `ContentView` must not run a second launch-time scan for
     /// the first case only.
-    private(set) var hasChecked = false
+    @Published private(set) var hasChecked = false
 
     /// The account `--check` last reported on its `preflight-end`, or nil
     /// before a scan has finished (and from a CLI that predates free mode).
@@ -100,7 +99,7 @@ final class SettingsStore {
     /// The first reading — and the one that notices an account change made
     /// in Terminal (`graft --init`) — is the app list itself, which
     /// `ContentView` re-reads every time the window comes back to the front.
-    private(set) var account: AccountMode?
+    @Published private(set) var account: AccountMode?
 
     let runner: CLIRunner
 
@@ -329,8 +328,8 @@ final class SettingsStore {
         case failed(String)
     }
 
-    private(set) var portalResult: PortalResult?
-    private(set) var isSavingPortal = false
+    @Published private(set) var portalResult: PortalResult?
+    @Published private(set) var isSavingPortal = false
 
     /// The section's three fields, held here for `draft`'s reason: the pane
     /// is torn down on every section change, and a half-typed Issuer ID
@@ -351,7 +350,7 @@ final class SettingsStore {
         }
     }
 
-    var portalForm = PortalForm()
+    @Published var portalForm = PortalForm()
 
     /// Whether Save and test has something to send: all three fields.
     nonisolated static func portalFormReady(keyId: String, issuerId: String, keyFile: String) -> Bool {

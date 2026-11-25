@@ -75,8 +75,8 @@ enum AccessibilityTree {
 
     /// **Call first in every test that reads the tree, before hosting
     /// anything.** Throws `XCTSkip` when macOS is not serving this process's
-    /// tree (see `nodes(in:)` for when it does), asked once per run with a
-    /// throwaway window and remembered.
+    /// tree (see `nodes(in:)` for when it does), asked with a throwaway
+    /// window (`served`).
     ///
     /// A skip is reported as one only when it leaves the test method itself.
     /// Thrown from inside an `XCTAssert…` or `XCTUnwrap` argument, XCTest
@@ -85,12 +85,66 @@ enum AccessibilityTree {
     /// window's work, and paid for it. Asking here, up front, avoids both:
     /// the test skips in its first line, having built nothing.
     static func requireServed() throws {
-        if isServed == nil { isServed = probe() }
-        guard isServed == true else { throw notServed }
+        try requireServed(&served, probe: probe, wait: pumpRunLoop)
     }
 
-    /// The answer `requireServed` remembers: nil until asked.
-    private static var isServed: Bool?
+    /// `requireServed()`, with what it remembers, how it asks and how it
+    /// waits between asks passed in: `AccessibilityProbeTests` runs it with
+    /// stand-ins, needing no tree.
+    static func requireServed(
+        _ memory: inout ServedMemory, probe: () -> Bool, wait: (TimeInterval) -> Void
+    ) throws {
+        guard memory.ask(probe: probe, wait: wait) else { throw notServed }
+    }
+
+    /// Whether macOS serves this process's tree, remembered only once it is.
+    ///
+    /// "Not served" is never remembered. In the 2.2 full-suite runs, one
+    /// miss at the first on-screen test, remembered, skipped all 109 of
+    /// them, though the tree was served a moment later. So a miss is asked
+    /// again `tries` times in all, `pause` apart, and asked again at the
+    /// next test. A Mac that never serves the tree costs about a second per
+    /// on-screen test, which is the price of not losing a whole run to one
+    /// miss.
+    struct ServedMemory {
+        let tries: Int
+        let pause: TimeInterval
+        private var served = false
+
+        init(tries: Int, pause: TimeInterval) {
+            self.tries = tries
+            self.pause = pause
+        }
+
+        /// What `requireServed()` uses: three asks, half a second apart.
+        static let standard = ServedMemory(tries: 3, pause: 0.5)
+
+        /// The tree may have gone (`nodes(in:)` found its window missing):
+        /// ask again next time.
+        mutating func forget() { served = false }
+
+        /// Whether the tree is served: remembered, or `probe` asked up to
+        /// `tries` times with `wait(pause)` between asks.
+        mutating func ask(probe: () -> Bool, wait: (TimeInterval) -> Void) -> Bool {
+            if served { return true }
+            for attempt in 0..<tries {
+                if attempt > 0 { wait(pause) }
+                if probe() {
+                    served = true
+                    return true
+                }
+            }
+            return false
+        }
+    }
+
+    private static var served = ServedMemory.standard
+
+    /// Let the main run loop turn for `seconds`, between asks: the tree is
+    /// answered on the main thread.
+    private static func pumpRunLoop(_ seconds: TimeInterval) {
+        RunLoop.main.run(until: Date().addingTimeInterval(seconds))
+    }
 
     private static var notServed: XCTSkip {
         XCTSkip(
@@ -103,8 +157,8 @@ enum AccessibilityTree {
     /// `TEST_RUNNER_GRAFT_TESTS_PRETEND_NO_AX=1` on the `xcodebuild test`
     /// line — makes every window read as missing from the tree, which is what
     /// macOS not serving it looks like. So the skip path can be run on a Mac
-    /// whose tree *is* served: every test that reads it should skip, quickly,
-    /// and none should fail.
+    /// whose tree *is* served: every test that reads it should skip, after
+    /// `ServedMemory`'s brief asks, and none should fail.
     private static let pretendNotServed =
         ProcessInfo.processInfo.environment["GRAFT_TESTS_PRETEND_NO_AX"] != nil
 
@@ -163,15 +217,17 @@ enum AccessibilityTree {
     ///
     /// Tests call `requireServed()` before hosting anything, and that is what
     /// a skip normally comes from. This one is for the server going away
-    /// mid-run, which has been seen. When the window is missing it asks again
-    /// with a fresh window, so a tree that has gone is remembered and the
-    /// rest of the run skips at `requireServed()`; and when the tree is still
-    /// served, the skip says it is this window that is missing — one not in
-    /// front, which the tree is not served for (`SetupTests.frontWindow`).
+    /// mid-run, which has been seen. When the window is missing it forgets
+    /// that the tree was served and asks again with a fresh window
+    /// (`requireServed()`), so a tree that has gone skips this test, and
+    /// each later one asks again rather than skipping on a remembered miss;
+    /// and when the tree is still served, the skip says it is this window
+    /// that is missing — one not in front, which the tree is not served for
+    /// (`SetupTests.frontWindow`).
     static func nodes(in window: NSWindow) throws -> [Node] {
         guard let target = try Self.element(of: window) else {
-            isServed = probe()
-            guard isServed == true else { throw notServed }
+            served.forget()
+            try requireServed()
             throw XCTSkip(
                 "macOS is serving this process's accessibility tree, but not for this "
                     + "window — it is not in front"

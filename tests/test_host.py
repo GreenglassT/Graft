@@ -13,6 +13,7 @@ replace the reader underneath it.
 from __future__ import annotations
 
 import errno
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -84,6 +85,40 @@ def test_the_unpinned_arm64_reader_is_right_about_this_mac(
     assert REAL_SYSCTL_ARM64() == expected
     monkeypatch.setattr(host, "_sysctl_arm64", REAL_SYSCTL_ARM64)
     assert host.apple_silicon() is (expected == 1)
+
+
+# --- a graft the suite starts: as if on Apple silicon too (tests/child_site) ----
+
+#: What a child prints: whether graft_ipa was loaded before it asked for it
+#: (it never is), the name of the reader `apple_silicon` asks (the
+#: stand-in's "<lambda>" when pinned), and its answer.
+_ASK = ("import sys; early = 'graft_ipa.host' in sys.modules; from graft_ipa import host; "
+        "print(early, host._sysctl_arm64.__name__, host.apple_silicon())")
+
+
+def _child(env: dict[str, str] | None) -> list[str]:
+    return subprocess.run([sys.executable, "-c", _ASK], env=env, capture_output=True, text=True,
+                          check=True, timeout=60).stdout.split()
+
+
+def test_a_graft_the_suite_starts_runs_as_if_on_apple_silicon_too() -> None:
+    """Pinned, not read, so it holds on any Mac: a sign-in or a get run as
+    `python -m graft_ipa` was refused on an Intel Mac, and the tests that
+    run them failed there."""
+    assert _child(None) == ["False", "<lambda>", "True"]
+
+
+def test_so_does_one_started_with_an_environment_of_its_own() -> None:
+    """As tests/test_login_secrets_b2.py starts its sign-ins: the variable is
+    passed on to an environment that doesn't name it."""
+    assert "GRAFT_TEST_APPLE_SILICON" in os.environ
+    env = {"PATH": "/usr/bin:/bin", "HOME": os.environ["HOME"]}
+    assert _child(env) == ["False", "<lambda>", "True"]
+
+
+def test_a_test_can_start_a_graft_that_reads_this_mac() -> None:
+    env = {**os.environ, "GRAFT_TEST_APPLE_SILICON": "0"}
+    assert _child(env)[:2] == ["False", "_sysctl_arm64"]
 
 
 # --- this Mac's region (`mac_region`) -----------------------------------------

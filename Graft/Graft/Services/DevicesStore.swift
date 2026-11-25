@@ -1,12 +1,11 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
 @MainActor
-@Observable
-final class DevicesStore {
-    private(set) var devices: [DeviceRecord] = []
+final class DevicesStore: ObservableObject {
+    @Published private(set) var devices: [DeviceRecord] = []
 
     /// Devices usbmux enumerated that the CLI then failed to describe.
     ///
@@ -22,9 +21,9 @@ final class DevicesStore {
     /// went through a single `pick` closure keeping only `.device` — dropped
     /// it. The CLI also warns on stderr, which no caller of a zero-exit
     /// `--devices` ever sees: `checkExit` throws only on a non-zero exit.
-    private(set) var deviceErrors: [DeviceErrorRecord] = []
+    @Published private(set) var deviceErrors: [DeviceErrorRecord] = []
 
-    private(set) var isLoading: Bool = false
+    @Published private(set) var isLoading: Bool = false
 
     /// Whether a `load()` has *completed* — success or failure, devices or not.
     /// Callers that only want to fetch once must key off the attempt, not the
@@ -42,7 +41,7 @@ final class DevicesStore {
     /// as the difference between "Looking for devices…" and "No devices
     /// connected" — so a scan that never finished flipped the sidebar to a
     /// definitive answer it had not earned. See `load()`'s `defer`.
-    private(set) var hasLoaded: Bool = false
+    @Published private(set) var hasLoaded: Bool = false
 
     /// What to say while the answer above is still false.
     ///
@@ -61,7 +60,7 @@ final class DevicesStore {
     /// sentences rather than one that drifted.
     static let scanningLine = "Looking for devices…"
 
-    var lastError: String?
+    @Published var lastError: String?
 
     /// What the last full listing found on the bus. Compared, never displayed.
     ///
@@ -80,11 +79,11 @@ final class DevicesStore {
     /// whose state has not changed. So its udid is remembered with no transport
     /// to compare, and a transport change is only ever noticed for a phone the
     /// listing could actually read.
-    @ObservationIgnored
+    /// Unpublished: a change to it alone redraws nothing.
     private var knownTransports: [String: DeviceRecord.ConnectionType] = [:]
     /// The udids the last listing saw but could not describe. Membership only —
     /// there is no transport on a `DeviceErrorRecord` to remember.
-    @ObservationIgnored
+    /// Unpublished: a change to it alone redraws nothing.
     private var knownUnreadable: Set<String> = []
 
     let runner: CLIRunner
@@ -128,13 +127,21 @@ final class DevicesStore {
     ///
     /// `clearingDeviceErrorsOnFailure` is what separates a scan the user asked
     /// for from one a timer started — see the `catch` below, which is the only
-    /// thing that reads it.
+    /// thing that reads it. `showingProgress` does too: a timer's scan leaves
+    /// `isLoading` alone, so the Refresh and retry buttons spin for a scan
+    /// someone started.
+    ///
+    /// Each published value is written only when it differs from what is
+    /// there (`setIfChanged`). `@Published` sends a change for every
+    /// assignment, equal or not, and every view observing this store (the
+    /// window, the sidebar, the app pane) redraws for it.
     @discardableResult
     func load(
-        argsOverride: [String]? = nil, clearingDeviceErrorsOnFailure: Bool = true
+        argsOverride: [String]? = nil, clearingDeviceErrorsOnFailure: Bool = true,
+        showingProgress: Bool = true
     ) async throws -> [DeviceRecord] {
         let args = argsOverride ?? [Flag.json, Flag.devices]
-        isLoading = true
+        if showingProgress { setIfChanged(\.isLoading, true) }
         // The attempt is finished the moment we stop awaiting the CLI, whether
         // it exited 0, exited non-zero, or never launched — so both flags are
         // settled on every exit path.
@@ -151,8 +158,8 @@ final class DevicesStore {
         // describes this call, and this call is over either way. Leaving it true
         // would spin every Refresh button on the pane forever.
         defer {
-            isLoading = false
-            if !Task.isCancelled { hasLoaded = true }
+            if showingProgress { setIfChanged(\.isLoading, false) }
+            if !Task.isCancelled { setIfChanged(\.hasLoaded, true) }
         }
         // `runEvents` rather than `runCollecting`: one scan answers with two
         // kinds of record and a single `pick` closure can only keep one of
@@ -195,18 +202,18 @@ final class DevicesStore {
             // AppDetailView because an unrelated `--devices` run failed. The
             // banner `lastError` raises is what says the list may be stale.
             if clearingDeviceErrorsOnFailure, !Task.isCancelled {
-                deviceErrors = []
+                setIfChanged(\.deviceErrors, [])
             }
             throw error
         }
-        devices = events.compactMap { event in
+        setIfChanged(\.devices, events.compactMap { event in
             if case let .device(record) = event { return record }
             return nil
-        }
-        deviceErrors = events.compactMap { event in
+        })
+        setIfChanged(\.deviceErrors, events.compactMap { event in
             if case let .deviceError(record) = event { return record }
             return nil
-        }
+        })
         // Keeps a poll that immediately follows this load from mistaking "the
         // set hasn't changed since I last checked" for "the set has changed",
         // which is what happens if only an escalated poll ever wrote this.
@@ -296,7 +303,13 @@ final class DevicesStore {
     func pollAndEscalateIfChanged(argsOverride: [String]? = nil) async {
         guard let seen = try? await loadBrief(argsOverride: argsOverride) else { return }
         guard hasMoved(seen) else { return }
-        _ = try? await load(argsOverride: argsOverride, clearingDeviceErrorsOnFailure: false)
+        _ = try? await load(argsOverride: argsOverride, clearingDeviceErrorsOnFailure: false, showingProgress: false)
+    }
+
+    /// Write `value` only when it differs: an equal one would publish a
+    /// change all the same (`load`).
+    private func setIfChanged<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<DevicesStore, Value>, _ value: Value) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
     }
 
     /// Whether the bus looks different from what the last full listing found.

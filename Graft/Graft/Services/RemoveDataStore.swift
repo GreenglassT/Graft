@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -17,8 +17,7 @@ private typealias Flag = CLIContract.Flag
 /// - It removes its own preferences (`removeAppSettings`), which the CLI only
 ///   lists: they are this process's, and it would write them again anyway.
 @MainActor
-@Observable
-final class RemoveDataStore {
+final class RemoveDataStore: ObservableObject {
     enum Phase: Equatable {
         case loading
         case listed
@@ -61,17 +60,18 @@ final class RemoveDataStore {
     /// Quits Graft. `GraftApp` passes `NSApp.terminate`.
     private let quit: @MainActor () -> Void
 
-    var isPresented = false
-    private(set) var phase: Phase = .loading
+    @Published var isPresented = false
+    @Published private(set) var phase: Phase = .loading
     /// Every item the CLI listed, in its order.
-    private(set) var items: [DataItemRecord] = []
+    @Published private(set) var items: [DataItemRecord] = []
     /// `data-items-end`'s `keychain`: whether the keychain items were checked.
-    private(set) var keychainStatus: String?
+    @Published private(set) var keychainStatus: String?
     /// The ids checked.
-    var chosen: Set<String> = []
+    @Published var chosen: Set<String> = []
     /// What Graft is doing, as of the last `refreshWork`
     /// (`TerminationHold.reasons`). Anything here stops a removal.
-    private(set) var working: [String] = []
+    @Published private(set) var working: [String] = []
+    /// Unpublished: bookkeeping, which nothing draws.
     private var appSettingsRemoved = false
 
     init(

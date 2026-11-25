@@ -1,13 +1,12 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
 @MainActor
-@Observable
-final class BuildsStore {
-    private(set) var builds: [BuildRecord] = []
-    var lastError: String?
+final class BuildsStore: ObservableObject {
+    @Published private(set) var builds: [BuildRecord] = []
+    @Published var lastError: String?
 
     let runner: CLIRunner
 
@@ -44,8 +43,8 @@ final class BuildsStore {
         case failed(String)
     }
 
-    private(set) var pruneResult: PruneResult?
-    private(set) var isPruning = false
+    @Published private(set) var pruneResult: PruneResult?
+    @Published private(set) var isPruning = false
 
     func dismissPruneResult() { pruneResult = nil }
 

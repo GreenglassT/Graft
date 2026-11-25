@@ -81,6 +81,7 @@
 		50A71E2AD6FA8E98DC6ADF76 /* AppleSilicon.swift in Sources */ = {isa = PBXBuildFile; fileRef = 415624CD9ED8A29759E7C036 /* AppleSilicon.swift */; };
 		51DDC7FB4606B4A09BBA1DA3 /* AppStoreSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2774E0158DDDE4743C4FADAE /* AppStoreSettingsTests.swift */; };
 		520CC0C065E4902B55369595 /* GraftApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E6BA115F456EAD93F39687F /* GraftApp.swift */; };
+		52E5C31F4046B43D0E748BB4 /* ObservableStoresTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AAEDA81B754618E471E350D /* ObservableStoresTests.swift */; };
 		53D1D23D643EF815B0B1DDCC /* DeviceDecryptSectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 061CE2182497C1A950EB92FB /* DeviceDecryptSectionTests.swift */; };
 		553182D6E69FBAD51B9247AE /* AddAppSearchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 236BC0EFD3809669C9355452 /* AddAppSearchTests.swift */; };
 		56AAD88D894CA2C99A268261 /* Palette.swift in Sources */ = {isa = PBXBuildFile; fileRef = EA7A30BFB48A42A0CAC29B65 /* Palette.swift */; };
@@ -97,11 +98,13 @@
 		767819460B0CF813DCEB824D /* AccountEventTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1ED309088FE5B14F31248980 /* AccountEventTests.swift */; };
 		78D3AFE744D2F897F084B0B4 /* ChildInputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91AB85E6AFA5087849244E26 /* ChildInputTests.swift */; };
 		79519739E6F2D571C21864A9 /* DeviceSilhouetteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CD25491DB6246348D7AB8A0 /* DeviceSilhouetteTests.swift */; };
+		7A83DF57CB3F3939A5EB22EA /* ObservedOptionalObject.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45F65AD23775191BA961E9AA /* ObservedOptionalObject.swift */; };
 		7AA467E4131FCAEA04619126 /* CachePaneView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 077AFE5691571F2E6C3AE3CB /* CachePaneView.swift */; };
 		7AF8A6B43248C5949B0FC5F8 /* AppDetailMacBuildTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1F1BD6E75E057628FFC094CD /* AppDetailMacBuildTests.swift */; };
 		7DDC25E8B7F780B1C9FFB8B9 /* Marks.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F861A218E4D6869697A8344 /* Marks.swift */; };
 		7F4F2363AA12F616C3681D46 /* CanisterStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8FD770CECE7FC4EBA01B19E5 /* CanisterStoreTests.swift */; };
 		7FFB1C6A27438BE10B1DD6AF /* AppleSiliconGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B1E0F9B572BDC123D045155 /* AppleSiliconGateTests.swift */; };
+		805E8683965F7BA8B4930584 /* OnChangeWithPrevious.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12EF5952A88AFA154CDA8B6F /* OnChangeWithPrevious.swift */; };
 		821E69D0AFCB660B36C88D10 /* SetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 71290EBCCB7F85D509985FA9 /* SetupView.swift */; };
 		82C89521D5C92C23165B0EDD /* PlayCover.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32920461DB0F42308B6B7270 /* PlayCover.swift */; };
 		83120BA40B8712DF4773602E /* LiveContainerRecords.swift in Sources */ = {isa = PBXBuildFile; fileRef = A842AE972C475BF31E2A2AA5 /* LiveContainerRecords.swift */; };
@@ -193,6 +196,7 @@
 		F992B527055581EA9A9F6479 /* AdminShellTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBD2BA7DA6E018C059C25E57 /* AdminShellTests.swift */; };
 		FA114AB509E5B3661FAACCF9 /* AppOptionsDraftTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8C61648DA8AB090C5718CB2 /* AppOptionsDraftTests.swift */; };
 		FA320AF7B3ED9CAAFEE6EE3E /* DeviceAppsStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5041C23968CBBEB1114EDCC8 /* DeviceAppsStoreTests.swift */; };
+		FAB6503276E4EA43D8D1DACA /* PassedThrough.swift in Sources */ = {isa = PBXBuildFile; fileRef = D0C315A2DB10AE8630D4F9BA /* PassedThrough.swift */; };
 		FAF732204F8F0F0A731CA06D /* DateHelpersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8AEDC8959B4777A13CE70371 /* DateHelpersTests.swift */; };
 		FBEF626B9B0D86BB49D121C1 /* CommandLineToolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BC8983977FE5628191B83285 /* CommandLineToolTests.swift */; };
 		FF1840452242ADCE9274FCF0 /* AttachTweaksSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 469BF483253C24A31BCB1CB7 /* AttachTweaksSheet.swift */; };
@@ -225,6 +229,7 @@
 		0E6104E30AAEE3C615BCC4C8 /* BuildsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildsStore.swift; sourceTree = "<group>"; };
 		0F861A218E4D6869697A8344 /* Marks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Marks.swift; sourceTree = "<group>"; };
 		11C7D550C2EA3FD6EC5CA1C0 /* Symbols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Symbols.swift; sourceTree = "<group>"; };
+		12EF5952A88AFA154CDA8B6F /* OnChangeWithPrevious.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnChangeWithPrevious.swift; sourceTree = "<group>"; };
 		1329F38DF601CEC2E6944512 /* WindowLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowLayoutTests.swift; sourceTree = "<group>"; };
 		15B4ADC9A0DC19FD49041B44 /* Typography.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Typography.swift; sourceTree = "<group>"; };
 		15C9DE4AD0DFDF6D1A3C763D /* SSHPasswordSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHPasswordSheet.swift; sourceTree = "<group>"; };
@@ -265,6 +270,7 @@
 		40ED98D30D2316CBAE242EAD /* ReinstallSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReinstallSheet.swift; sourceTree = "<group>"; };
 		415624CD9ED8A29759E7C036 /* AppleSilicon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppleSilicon.swift; sourceTree = "<group>"; };
 		4305FDCE7C917D494D28C93D /* SecretField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecretField.swift; sourceTree = "<group>"; };
+		45F65AD23775191BA961E9AA /* ObservedOptionalObject.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObservedOptionalObject.swift; sourceTree = "<group>"; };
 		465AF463271CA55351FBA299 /* BuildLogPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildLogPanel.swift; sourceTree = "<group>"; };
 		469BF483253C24A31BCB1CB7 /* AttachTweaksSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttachTweaksSheet.swift; sourceTree = "<group>"; };
 		472B216E40DF71FF9FE28FEB /* AppStoreAccountStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStoreAccountStore.swift; sourceTree = "<group>"; };
@@ -298,6 +304,7 @@
 		6997CE8F51D17D763C6A0E27 /* DeviceHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceHeader.swift; sourceTree = "<group>"; };
 		69EA510DF62E2639B8A9759F /* StorefrontsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StorefrontsTests.swift; sourceTree = "<group>"; };
 		6A5AF21EA846C1EB3224245F /* DeviceInfoStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceInfoStore.swift; sourceTree = "<group>"; };
+		6AAEDA81B754618E471E350D /* ObservableStoresTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObservableStoresTests.swift; sourceTree = "<group>"; };
 		6CAEE9145E7A546896BF02EB /* ArtworkStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArtworkStoreTests.swift; sourceTree = "<group>"; };
 		6D48340BF7A0AF44BCAA443B /* AdminShell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdminShell.swift; sourceTree = "<group>"; };
 		6DA4B593F252BD7A680B8970 /* AppStoreSourceRow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStoreSourceRow.swift; sourceTree = "<group>"; };
@@ -370,6 +377,7 @@
 		C5ECFEF27BF57664C7DCB7BB /* ChildInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChildInput.swift; sourceTree = "<group>"; };
 		C80595F0D4B26AF850A6F07A /* CHANGELOG.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = CHANGELOG.md; path = ../../CHANGELOG.md; sourceTree = "<group>"; };
 		CF09509EF404F37506F04CC8 /* DecryptUnavailableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DecryptUnavailableTests.swift; sourceTree = "<group>"; };
+		D0C315A2DB10AE8630D4F9BA /* PassedThrough.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PassedThrough.swift; sourceTree = "<group>"; };
 		D59DDBC6B3A9457D989A748E /* AddAppDeliveryDefaultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddAppDeliveryDefaultTests.swift; sourceTree = "<group>"; };
 		DBFCD708D41D5E2C7D04A05D /* DeviceAppsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceAppsSection.swift; sourceTree = "<group>"; };
 		DCB276C0621868A83C5B0081 /* AppStoreConnectSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStoreConnectSection.swift; sourceTree = "<group>"; };
@@ -445,6 +453,9 @@
 			children = (
 				F46994D1204BBEBBF4201968 /* AppleSiliconGate.swift */,
 				B4F5628C133669DEB8FA222F /* ContentView.swift */,
+				45F65AD23775191BA961E9AA /* ObservedOptionalObject.swift */,
+				12EF5952A88AFA154CDA8B6F /* OnChangeWithPrevious.swift */,
+				D0C315A2DB10AE8630D4F9BA /* PassedThrough.swift */,
 				02A25C89581A6C6C7EFDC5CC /* RebuildGate.swift */,
 				4E3D7D14A6F976806817B7AD /* RemoveDataSheet.swift */,
 				383D36964C2805EF5ABB2B65 /* WhatsNew.swift */,
@@ -621,6 +632,7 @@
 				2277D627CCA3840344DCF9CA /* LoginShellTests.swift */,
 				79B435F90C810E8F039847D6 /* MarksTests.swift */,
 				9CF1F4F804FABE143BFFA81C /* NoRealDefaultsTests.swift */,
+				6AAEDA81B754618E471E350D /* ObservableStoresTests.swift */,
 				02E3AEB0732341826F671101 /* PlayCoverNoticeTests.swift */,
 				F945B2DE3B81C394832CB556 /* RemoveDataStoreTests.swift */,
 				476204432B62F3F6FECC4496 /* RepoStoreTests.swift */,
@@ -920,7 +932,10 @@
 				354435E355D6EFEE8440EC83 /* LoginShell.swift in Sources */,
 				8F2CAEB6FBCBA7AC95CC4FA5 /* MacBuildSection.swift in Sources */,
 				7DDC25E8B7F780B1C9FFB8B9 /* Marks.swift in Sources */,
+				7A83DF57CB3F3939A5EB22EA /* ObservedOptionalObject.swift in Sources */,
+				805E8683965F7BA8B4930584 /* OnChangeWithPrevious.swift in Sources */,
 				56AAD88D894CA2C99A268261 /* Palette.swift in Sources */,
+				FAB6503276E4EA43D8D1DACA /* PassedThrough.swift in Sources */,
 				82C89521D5C92C23165B0EDD /* PlayCover.swift in Sources */,
 				0724DB05D5447B3A3CBD4336 /* RebuildGate.swift in Sources */,
 				2FD802196D4A9C7DC1A5EB86 /* ReinstallSheet.swift in Sources */,
@@ -1017,6 +1032,7 @@
 				0361AC93F4D4043B118B45E8 /* LoginShellTests.swift in Sources */,
 				0B7100D4CD816E80F8FC9798 /* MarksTests.swift in Sources */,
 				2EF16720EC682E6D5398E303 /* NoRealDefaultsTests.swift in Sources */,
+				52E5C31F4046B43D0E748BB4 /* ObservableStoresTests.swift in Sources */,
 				ABF57C16D7A5A877F34F59E8 /* PlayCoverNoticeTests.swift in Sources */,
 				BA92205C360BFC1961D40F28 /* RemoveDataStoreTests.swift in Sources */,
 				191FDCE28ED7FAAB91DEA20F /* RepoStoreTests.swift in Sources */,
@@ -1107,7 +1123,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1146,7 +1162,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.greenglasst.graft;
+				PRODUCT_BUNDLE_IDENTIFIER = com.greenglasst.graft.debug;
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -1239,7 +1255,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;

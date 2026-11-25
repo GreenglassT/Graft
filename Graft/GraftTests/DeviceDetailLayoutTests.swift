@@ -509,15 +509,15 @@ final class DeviceDetailLayoutTests: XCTestCase {
     /// The pane in the container it ships in: a split view's detail column.
     private struct Harness: View {
         let device: DeviceRecord
-        let devices: DevicesStore
-        let info: DeviceInfoStore
-        let config: ConfigStore
-        let delivery: DeviceDeliveryStore
+        @ObservedObject var devices: DevicesStore
+        @ObservedObject var info: DeviceInfoStore
+        @ObservedObject var config: ConfigStore
+        @ObservedObject var delivery: DeviceDeliveryStore
         /// The store both device sections read, populated by the caller.
         /// Required rather than optional: the pane is handed one now, and an
         /// empty store measures the never-asked state, which several cases
         /// below deliberately want.
-        var deviceApps: DeviceAppsStore
+        @ObservedObject var deviceApps: DeviceAppsStore
         /// The IPA cache. No case in this file can make a load here succeed —
         /// `staged.load()` with no override runs the real
         /// `/bin/sh --json --staged-ipas` (`config.runner`'s executable, not
@@ -525,7 +525,7 @@ final class DeviceDetailLayoutTests: XCTestCase {
         /// false — so every row this section measures keeps rendering its
         /// pre-feature shape. This file measures layout, not the join, which
         /// `InstalledAppsSectionTests` owns.
-        var staged: StagedIPAStore
+        @ObservedObject var staged: StagedIPAStore
 
         var body: some View {
             NavigationSplitView {
@@ -1210,8 +1210,8 @@ final class DeviceDetailLayoutTests: XCTestCase {
             + "line's 4-line limit was chosen against — with fewer, this measures a "
             + "shorter line than the one that motivated the limit"
         )
-        XCTAssertEqual(apps.notes.count, 2, "premise: both wrapping notes are on screen")
-        XCTAssertEqual(apps.transcript.count, 3, "premise: the transcript panel has content")
+        XCTAssertEqual(apps.dumpLog.notes.count, 2, "premise: both wrapping notes are on screen")
+        XCTAssertEqual(apps.dumpLog.lines.count, 3, "premise: the transcript panel has content")
         XCTAssertNil(apps.lastError, "premise: this is the success case, not both at once")
         assertFits(
             device: device, devices: devices, info: info, config: config,
@@ -1233,8 +1233,8 @@ final class DeviceDetailLayoutTests: XCTestCase {
             + "screen — without it this measures a banner and nothing else"
         )
         XCTAssertNil(apps.lastDecrypt, "premise: exactly one of the two is ever set")
-        XCTAssertEqual(apps.notes.count, 1, "premise: the note survived the failure")
-        XCTAssertEqual(apps.transcript.count, 2, "premise: so did the transcript")
+        XCTAssertEqual(apps.dumpLog.notes.count, 1, "premise: the note survived the failure")
+        XCTAssertEqual(apps.dumpLog.lines.count, 2, "premise: so did the transcript")
         assertFits(
             device: device, devices: devices, info: info, config: config,
             delivery: delivery, deviceApps: apps, "after a dump that failed"

@@ -33,7 +33,7 @@ struct CachePaneView: View {
     /// The cache listing. `ContentView` owns the one instance, shared with the
     /// device pane's join — the cache is not per-phone, so there is nothing to
     /// key a second copy on and nothing to gain from one.
-    let staged: StagedIPAStore
+    @ObservedObject var staged: StagedIPAStore
 
     /// Hand this file to PlayCover, and answer with the CLI's complaint when
     /// it could not be handed over — nil when it was.

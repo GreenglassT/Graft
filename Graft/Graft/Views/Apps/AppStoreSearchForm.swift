@@ -18,7 +18,7 @@ struct AppStoreSearchPick: Equatable {
 /// with the arrow keys from the field. Every sentence it shows is a static
 /// here, so tests read the same words the sheet shows.
 struct AppStoreSearchForm: View {
-    let search: AppStoreSearchStore
+    @ObservedObject var search: AppStoreSearchStore
     @Binding var term: String
     @Binding var picked: AppStoreSearchPick?
     var onSubmit: () -> Void = {}

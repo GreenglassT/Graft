@@ -1,17 +1,16 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
 @MainActor
-@Observable
-final class CanisterStore {
-    private(set) var results: [CanisterPackage] = []
-    private(set) var hasSearched: Bool = false
-    private(set) var isSearching: Bool = false
-    private(set) var isFetching: Bool = false
-    private(set) var fetchResult: String?
-    var lastError: String?
+final class CanisterStore: ObservableObject {
+    @Published private(set) var results: [CanisterPackage] = []
+    @Published private(set) var hasSearched: Bool = false
+    @Published private(set) var isSearching: Bool = false
+    @Published private(set) var isFetching: Bool = false
+    @Published private(set) var fetchResult: String?
+    @Published var lastError: String?
 
     let runner: CLIRunner
 

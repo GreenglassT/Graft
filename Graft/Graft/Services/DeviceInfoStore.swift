@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -134,13 +134,12 @@ private typealias Flag = CLIContract.Flag
 /// originally claimed to buy. It is written down here as the reason to expect
 /// that, not as an observation of it.
 @MainActor
-@Observable
-final class DeviceInfoStore {
+final class DeviceInfoStore: ObservableObject {
     /// Vitals per device, keyed by udid. A udid with no entry means `load`
     /// has never completed for it, not that the phone was checked and found
     /// to have nothing — see the type doc for why an unreachable result
     /// updates an existing entry rather than removing or replacing it.
-    private(set) var info: [String: DeviceInfoRecord] = [:]
+    @Published private(set) var info: [String: DeviceInfoRecord] = [:]
 
     private let runner: CLIRunner
 

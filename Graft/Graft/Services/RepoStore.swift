@@ -1,19 +1,18 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
 @MainActor
-@Observable
-final class RepoStore: CLIStore {
-    private(set) var repos: [RepoRecord] = []
-    private(set) var packages: [RepoPackage] = []
-    private(set) var packagesRepoURL: String?
-    private(set) var isLoading: Bool = false
-    private(set) var isRefreshing: Bool = false
-    private(set) var isAdding: Bool = false
-    var fetchResult: String?
-    var lastError: String?
+final class RepoStore: ObservableObject, CLIStore {
+    @Published private(set) var repos: [RepoRecord] = []
+    @Published private(set) var packages: [RepoPackage] = []
+    @Published private(set) var packagesRepoURL: String?
+    @Published private(set) var isLoading: Bool = false
+    @Published private(set) var isRefreshing: Bool = false
+    @Published private(set) var isAdding: Bool = false
+    @Published var fetchResult: String?
+    @Published var lastError: String?
 
     let runner: CLIRunner
     private let cliArgs: [String]

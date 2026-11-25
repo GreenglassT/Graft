@@ -1,7 +1,7 @@
 name: Graft
 options:
   deploymentTarget:
-    macOS: "14.0"
+    macOS: "13.0"
   developmentLanguage: en
   bundleIdPrefix: com.greenglasst
 settings:
@@ -35,8 +35,8 @@ targets:
       path: Graft/Info.plist
       properties:
         CFBundleDisplayName: Graft
-        CFBundleShortVersionString: "2.2"
-        CFBundleVersion: "8"
+        CFBundleShortVersionString: "2.2.1"
+        CFBundleVersion: "9"
         CFBundleIdentifier: $(PRODUCT_BUNDLE_IDENTIFIER)
         LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
         NSPrincipalClass: NSApplication
@@ -44,10 +44,19 @@ targets:
         NSSupportsSuddenTermination: true
     settings:
       base:
+        # Release, which scripts/graft-release builds, is the id every Graft
+        # has shipped with (`app_update.BUNDLE_ID` in the CLI).
         PRODUCT_BUNDLE_IDENTIFIER: com.greenglasst.graft
         INFOPLIST_FILE: Graft/Info.plist
         ENABLE_APP_SANDBOX: NO
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      configs:
+        # Debug, Xcode's Run and the test suite's host, has its own, so its
+        # preferences aren't the real Graft's: under the release id AppKit and
+        # SwiftUI saved the test host's window frames and split-view sizes
+        # there. tests/test_xcode_bundle_ids.py and NoRealDefaultsTests check.
+        Debug:
+          PRODUCT_BUNDLE_IDENTIFIER: com.greenglasst.graft.debug
   GraftTests:
     type: bundle.unit-test
     platform: macOS

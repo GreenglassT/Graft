@@ -263,6 +263,49 @@ final class DevicesStoreTests: XCTestCase {
         )
     }
 
+    /// Every view observing this store (the window, the sidebar, an open app
+    /// pane) redraws for each change it publishes, and `@Published` publishes
+    /// every assignment, equal or not. So a background scan that finds what
+    /// the last one found publishes nothing: here the brief poll sees the
+    /// phone on Wi-Fi, which escalates, and the full listing still says USB.
+    @MainActor
+    func test_a_poll_that_finds_the_same_devices_publishes_nothing() async throws {
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let store = DevicesStore(runner: runner)
+        let listing = #"\#(Self.fullDeviceLine(udid: "SAME-UDID", connection: "USB"))\n{"type":"devices-end","count":1,"failed":0}\n"#
+        _ = try await store.load(argsOverride: ["-c", "printf '\(listing)'"])
+        XCTAssertEqual(store.devices.map(\.udid), ["SAME-UDID"], "premise: the seed load landed")
+        let changes = ObservableStoresTests.Changes(of: store)
+
+        await store.pollAndEscalateIfChanged(argsOverride: [
+            "-c", #"printf '{"type":"device-brief","udid":"SAME-UDID","connection_type":"USB"}\n'"#,
+        ])
+        XCTAssertEqual(changes.count, 0, "a poll that didn't escalate published")
+
+        let escalating = #"{"type":"device-brief","udid":"SAME-UDID","connection_type":"Network"}\n"# + listing
+        await store.pollAndEscalateIfChanged(argsOverride: ["-c", "printf '\(escalating)'"])
+        XCTAssertEqual(store.devices.first?.connectionType, .usb, "premise: the escalated listing found the same phone")
+        XCTAssertEqual(changes.count, 0, "a scan that found nothing new redrew every view observing the store")
+    }
+
+    /// And a scan that finds a change publishes it, once: the phone's new
+    /// transport. A timer's scan doesn't spin the Refresh buttons
+    /// (`isLoading`): someone's own Refresh does.
+    @MainActor
+    func test_a_poll_that_finds_a_change_publishes_it() async throws {
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let store = DevicesStore(runner: runner)
+        let seed = #"\#(Self.fullDeviceLine(udid: "SAME-UDID", connection: "USB"))\n{"type":"devices-end","count":1,"failed":0}\n"#
+        _ = try await store.load(argsOverride: ["-c", "printf '\(seed)'"])
+        let changes = ObservableStoresTests.Changes(of: store)
+
+        let moved = #"{"type":"device-brief","udid":"SAME-UDID","connection_type":"Network"}\n\#(Self.fullDeviceLine(udid: "SAME-UDID", connection: "Network"))\n{"type":"devices-end","count":1,"failed":0}\n"#
+        await store.pollAndEscalateIfChanged(argsOverride: ["-c", "printf '\(moved)'"])
+        XCTAssertEqual(store.devices.first?.connectionType, .network, "the change didn't show")
+        XCTAssertEqual(changes.count, 1, "one change, published once, with no spinner for a timer's scan")
+        XCTAssertFalse(store.isLoading)
+    }
+
     /// The caveat that keeps the comparison honest: a phone the listing could
     /// not describe has no transport to compare, so it is checked for presence
     /// alone and must not escalate every tick.

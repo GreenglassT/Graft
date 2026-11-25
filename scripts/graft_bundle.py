@@ -326,7 +326,8 @@ def openssl_steps(destdir: str, jobs: list[str], arch: str = DEFAULT_ARCH) -> li
     """Run in openssl-3.5.9/, with the release machine's environment."""
     return [
         ["./Configure", OPENSSL_TARGETS[arch], "shared", "no-tests", "no-docs",
-         f"--prefix={OPENSSL_BAKED_PREFIX}", f"--openssldir={OPENSSL_BAKED_PREFIX}/ssl", f"-mmacosx-version-min={MACOS_MIN}"],
+         f"--prefix={OPENSSL_BAKED_PREFIX}", f"--openssldir={OPENSSL_BAKED_PREFIX}/ssl",
+         f"-mmacosx-version-min={macos_min(arch)}"],
         ["make", *jobs],
         ["make", "install_sw", f"DESTDIR={destdir}"],
     ]
@@ -345,7 +346,7 @@ def build_openssl(pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path
     """
     def build(tmp: Path, out: Path) -> None:
         src = _unpack(pin, tmp)
-        _build_steps(openssl_steps(str(tmp / "dest"), _jobs(), arch), src)
+        _build_steps(openssl_steps(str(tmp / "dest"), _jobs(), arch), src, arch)
         built = tmp / "dest" / OPENSSL_BAKED_PREFIX.lstrip("/")
         shutil.copytree(built, out / "prefix", symlinks=True)
         shutil.copy2(src / "LICENSE.txt", out / "prefix" / "LICENSE.txt")
@@ -408,20 +409,32 @@ LIBCRYPTO = "libcrypto.3.dylib"
 LIBPLIST_BAKED_PREFIX = "/opt/graft/libplist"
 CCTOOLS_BAKED_PREFIX = "/opt/graft/cctools"
 
-#: The oldest macOS Graft.app supports. 14.0 is the floor the app's Swift sets
-#: (Observation and onChange(of:initial:)); everything the stage builds targets
-#: it too, and verify-bundle checks Info.plist promises exactly this.
-MACOS_MIN = "14.0"
+#: The oldest macOS each bundle supports: Graft.zip, for Apple silicon,
+#: 14.0; Graft-Intel.zip 13.0, for Intel Macs that stay on Ventura (owner,
+#: 2026-11-25). Everything the stage builds for a bundle targets its floor
+#: (macos_min), graft-release builds the app for it, and verify-bundle checks
+#: that Info.plist promises exactly it and every Mach-O loads on it.
+MACOS_MINS = {"arm64": "14.0", "x86_64": "13.0"}
+
+
+def macos_min(arch: str = DEFAULT_ARCH) -> str:
+    """The oldest macOS the bundle of `arch` supports (MACOS_MINS)."""
+    if arch not in ARCHS:
+        raise BundleError(f"no release is built for {arch!r}: {', '.join(ARCHS)}")
+    return MACOS_MINS[arch]
+
+
+#: The arm64 bundle's (macos_min). Each bundle's wheels are chosen for its
+#: own floor (wheel_target), and verify-bundle checks each loads on it.
+MACOS_MIN = macos_min()
 
 
 def target(arch: str = DEFAULT_ARCH) -> tuple[str, ...]:
     """What every helper built from source targets, as the rest of the
-    bundle does: the bundle's architecture, and MACOS_MIN. An x86_64 build
-    is a cross-compile on an Apple silicon Mac; a configure script's test
-    programs then run under Rosetta."""
-    if arch not in ARCHS:
-        raise BundleError(f"no release is built for {arch!r}: {', '.join(ARCHS)}")
-    return ("-arch", arch, f"-mmacosx-version-min={MACOS_MIN}")
+    bundle does: the bundle's architecture, and its floor (macos_min). An
+    x86_64 build is a cross-compile on an Apple silicon Mac; a configure
+    script's test programs then run under Rosetta."""
+    return ("-arch", arch, f"-mmacosx-version-min={macos_min(arch)}")
 
 
 #: The arm64 bundle's (target).
@@ -454,12 +467,14 @@ def toolchain_id() -> str:
     return f"{first('clang', '--version')}, macOS SDK {first('xcrun', '--show-sdk-version')}"
 
 
-def _build_env() -> dict[str, str]:
-    """What a from-source build runs with: the system's tools and nothing
-    else, so nothing from Homebrew or this Mac's PATH is compiled or linked
-    in, and no CFLAGS, LDFLAGS or PKG_CONFIG_PATH of the release machine's."""
+def _build_env(arch: str = DEFAULT_ARCH) -> dict[str, str]:
+    """What a from-source build for the bundle of `arch` runs with: the
+    system's tools and nothing else, so nothing from Homebrew or this Mac's
+    PATH is compiled or linked in, and no CFLAGS, LDFLAGS or PKG_CONFIG_PATH
+    of the release machine's; and that bundle's floor (macos_min) as the
+    deployment target, for any compile a Makefile runs without the flags."""
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": os.environ.get("HOME", "/"),
-           "TMPDIR": os.environ.get("TMPDIR", "/tmp"), "LANG": "C", "MACOSX_DEPLOYMENT_TARGET": MACOS_MIN}
+           "TMPDIR": os.environ.get("TMPDIR", "/tmp"), "LANG": "C", "MACOSX_DEPLOYMENT_TARGET": macos_min(arch)}
     if os.environ.get("DEVELOPER_DIR"):
         env["DEVELOPER_DIR"] = os.environ["DEVELOPER_DIR"]
     return env
@@ -641,16 +656,16 @@ def _unpack(pin: Pin, tmp: Path) -> Path:
     return tops[0]
 
 
-def _build_steps(steps: list[list[str]], cwd: Path) -> None:
+def _build_steps(steps: list[list[str]], cwd: Path, arch: str = DEFAULT_ARCH) -> None:
     for step in steps:
-        subprocess.run(step, cwd=cwd, env=_build_env(), check=True)
+        subprocess.run(step, cwd=cwd, env=_build_env(arch), check=True)
 
 
 def build_libplist(pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
     """libplist, shared: out/libplist-2.0.dylib, out/include, its COPYING files."""
     def build(tmp: Path, out: Path) -> None:
         src = _unpack(pin, tmp)
-        _build_steps(libplist_steps(str(tmp / "dest"), _jobs(), arch), src)
+        _build_steps(libplist_steps(str(tmp / "dest"), _jobs(), arch), src, arch)
         installed = tmp / "dest" / LIBPLIST_BAKED_PREFIX.lstrip("/")
         shutil.copy2((installed / "lib" / LIBPLIST).resolve(), out / LIBPLIST)
         shutil.copytree(installed / "include", out / "include")
@@ -672,7 +687,7 @@ def build_ldid(pin: Pin, libplist: Path, openssl: Path, work: Path = WORK, arch:
         shutil.copytree(openssl / "include", ossl / "include")
         (ossl / "lib").mkdir()
         shutil.copy2(openssl / "lib" / LIBCRYPTO, ossl / "lib" / LIBCRYPTO)
-        _build_steps(ldid_steps(str(plist), str(ossl), _jobs(), arch), src)
+        _build_steps(ldid_steps(str(plist), str(ossl), _jobs(), arch), src, arch)
         shutil.copy2(src / "ldid", out / "ldid")
         for f in HELPER_LICENCES["ldid"]:
             shutil.copy2(src / f, out / f)
@@ -705,7 +720,7 @@ def build_cctools(pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path
         top = _unpack(pin, tmp)
         apply_patches("cctools", top)
         src = top / "cctools"
-        _build_steps(cctools_steps(_jobs(), arch), src)
+        _build_steps(cctools_steps(_jobs(), arch), src, arch)
         for tool in pin.builds:
             shutil.copy2(src / ("otool" if tool == "otool" else "misc") / tool, out / tool)
             check_no_shell(out / tool, tool)
@@ -718,7 +733,7 @@ def build_cctools(pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path
 def build_insert_dylib(pin: Pin, work: Path = WORK, arch: str = DEFAULT_ARCH) -> Path:
     def build(tmp: Path, out: Path) -> None:
         src = _unpack(pin, tmp)
-        _build_steps(insert_dylib_steps(arch), src)
+        _build_steps(insert_dylib_steps(arch), src, arch)
         shutil.copy2(src / "insert_dylib" / "insert_dylib", out / "insert_dylib")
         for f in HELPER_LICENCES["insert_dylib"]:
             shutil.copy2(src / f, out / f)
@@ -748,7 +763,7 @@ def build_zsign(pin: Pin, openssl: Path, work: Path = WORK, arch: str = DEFAULT_
         (ossl / "lib").mkdir()
         for lib in OPENSSL_LIBS:
             shutil.copy2(openssl / "lib" / lib, ossl / "lib" / lib)
-        _build_steps(zsign_steps(str(ossl), _jobs(), pin.version, arch), src)
+        _build_steps(zsign_steps(str(ossl), _jobs(), pin.version, arch), src, arch)
         shutil.copy2(src / "bin" / "zsign", out / "zsign")
         found = sorted(imported_symbols(out / "zsign") & set(SHELL_IMPORTS))
         if set(found) - set(ZSIGN_SHELL_IMPORTS):
@@ -793,13 +808,35 @@ def ipatool_steps(version: str) -> list[list[str]]:
     first copies the modules into vendor/ (from the module cache, downloading
     what it lacks, each checked against go.sum); the second re-hashes what
     the cache holds of them (GO_VERIFY); the third builds offline from
-    vendor/ alone, with no build path recorded."""
+    vendor/ alone, with no build path recorded. The last two run the tests
+    of the package the patch changes (IPATOOL_MOCKS, IPATOOL_TESTS), after
+    the build, so the mocks they write are never compiled into ipatool."""
     return [
         ["go", "mod", "vendor"],
         GO_VERIFY,
         ["go", "build", "-mod=vendor", "-trimpath", "-buildvcs=false",
          f"-ldflags=-X github.com/majd/ipatool/v2/cmd.version={version}", "-o", "ipatool", "."],
+        IPATOOL_MOCKS,
+        IPATOOL_TESTS,
     ]
+
+
+#: What the steps after the build run under: no module proxy at all, and
+#: vendor/ for every go command, in the environment rather than only on the
+#: command line, since a `//go:generate go run x@v` directive starts a go of
+#: its own that reads the environment and never the outer -mod flag, and
+#: would otherwise download x without anyone noticing.
+GO_OFFLINE = ["/usr/bin/env", "GOPROXY=off", "GOFLAGS=-mod=vendor"]
+#: ipatool's tests use mocks its source doesn't carry: `go generate` writes
+#: them, with the mockgen ipatool vendors (its tools.go), as upstream's CI
+#: does. Offline (GO_OFFLINE), from vendor/.
+IPATOOL_MOCKS = [*GO_OFFLINE, "go", "generate", "-mod=vendor", "./pkg/..."]
+#: The tests of the package bundle/patches/ipatool-range-readahead.patch
+#: changes, its own among them: offline from vendor/, never from a test
+#: cache, for the bundle's architecture, as the build is (an x86_64 build's
+#: run under Rosetta, as the x86_64 stage's configure tests and Python do). A
+#: failure stops the build, so nothing is cached.
+IPATOOL_TESTS = [*GO_OFFLINE, "go", "test", "-mod=vendor", "-count=1", "./pkg/appstore/..."]
 
 
 #: After `go mod vendor`. The module cache is shared between builds and
@@ -824,12 +861,12 @@ GOARCH = {"arm64": "arm64", "x86_64": "amd64"}
 
 def ipatool_env(arch: str = DEFAULT_ARCH) -> dict[str, str]:
     """ipatool's build settings, as upstream's release workflow has them (cgo
-    on) but for the oldest macOS Graft supports, and for `arch`: Go gives
+    on) but for the oldest macOS the bundle supports (macos_min), and for `arch`: Go gives
     clang `-arch arm64`, or `-arch x86_64 -m64` (`go env GOGCCFLAGS`), so the
     x86_64 build is a cross-compile with the same settings but GOARCH."""
     return {
-        "CGO_ENABLED": "1", "CC": "clang", "CGO_CFLAGS": f"-mmacosx-version-min={MACOS_MIN}",
-        "CGO_LDFLAGS": f"-mmacosx-version-min={MACOS_MIN}", "GOOS": "darwin", "GOARCH": GOARCH[arch], **GO_HERMETIC,
+        "CGO_ENABLED": "1", "CC": "clang", "CGO_CFLAGS": f"-mmacosx-version-min={macos_min(arch)}",
+        "CGO_LDFLAGS": f"-mmacosx-version-min={macos_min(arch)}", "GOOS": "darwin", "GOARCH": GOARCH[arch], **GO_HERMETIC,
     }
 
 
@@ -846,13 +883,14 @@ def go_modcache(cache: Path | None = None) -> Path:
     return (cache or CACHE) / "go-modcache"
 
 
-def go_env(go: Path, tmp: Path, settings: dict[str, str], modcache: Path | None = None) -> dict[str, str]:
-    """_build_env(), plus `go`'s bin first on PATH, a build's `settings`
+def go_env(go: Path, tmp: Path, settings: dict[str, str], modcache: Path | None = None,
+           arch: str = DEFAULT_ARCH) -> dict[str, str]:
+    """_build_env(arch), plus `go`'s bin first on PATH, a build's `settings`
     (IPATOOL_ENV, UNFAIRPLAY_ENV), the module cache `modcache` (go_modcache()
     unless given), and Go's other state, GOPATH (where the checksum
     database's latest tree head is kept), the build cache and HOME, in
     `tmp`: never the release machine's own."""
-    env = {**_build_env(), **settings}
+    env = {**_build_env(arch), **settings}
     env["PATH"] = f"{go / 'bin'}:{env['PATH']}"
     for var, d in (("GOPATH", "gopath"), ("GOCACHE", "gocache"), ("HOME", "home")):
         (tmp / d).mkdir(exist_ok=True)
@@ -1238,7 +1276,7 @@ def build_ipatool(pin: Pin, go_pin: Pin, work: Path = WORK, arch: str = DEFAULT_
         src = _unpack(pin, tmp)
         apply_patches("ipatool", src)
         modcache = go_modcache()
-        env = go_env(go, tmp, ipatool_env(arch), modcache)
+        env = go_env(go, tmp, ipatool_env(arch), modcache, arch)
         for step in ipatool_steps(pin.version):
             subprocess.run(step, cwd=src, env=env, check=True)
         record_go_modules(modcache, pin, src / "vendor" / "modules.txt")
@@ -1916,12 +1954,14 @@ def _pip_env() -> dict[str, str]:
 def wheel_target(arch: str = DEFAULT_ARCH) -> tuple[str, ...]:
     """The one platform the bundled wheels are chosen for, whatever macOS and
     processor the release Mac has: pip would otherwise rank wheels by the
-    running macOS and could bundle one built for a newer macOS than
-    MACOS_MIN (review #36). For x86_64, pip takes x86_64 and universal2
-    wheels, which thin_to_arch then cuts to x86_64."""
+    running macOS and could bundle one built for a newer macOS than the
+    bundle's (macos_min: 14.0 for arm64, 13.0 for x86_64; review #36), which
+    verify-bundle would then only find in the finished app. For x86_64, pip
+    takes x86_64 and universal2 wheels, which thin_to_arch then cuts to
+    x86_64."""
     if arch not in ARCHS:
         raise BundleError(f"no release is built for {arch!r}: {', '.join(ARCHS)}")
-    return ("--platform", f"macosx_{MACOS_MIN.replace('.', '_')}_{arch}", "--python-version", "3.13",
+    return ("--platform", f"macosx_{macos_min(arch).replace('.', '_')}_{arch}", "--python-version", "3.13",
             "--implementation", "cp", "--abi", "cp313")
 
 
@@ -2015,11 +2055,11 @@ def _report_files(report: Path) -> dict[str, tuple[str, str]]:
 
 
 def check_same_files(plan: Path, installed: Path, arch: str = DEFAULT_ARCH) -> None:
-    """Every file pip installed is the one the plan chose for wheel_target(arch) (macOS MACOS_MIN)."""
+    """Every file pip installed is the one the plan chose for wheel_target(arch) (macOS macos_min(arch))."""
     want, got = _report_files(plan), _report_files(installed)
     wrong = [f"{n} {v} ({sha[:12]})" for n, (v, sha) in sorted(got.items()) if want.get(n) != (v, sha)]
     if wrong:
-        raise BundleError(f"pip installed files the plan for macOS {MACOS_MIN} ({wheel_target(arch)[1]}) didn't "
+        raise BundleError(f"pip installed files the plan for macOS {macos_min(arch)} ({wheel_target(arch)[1]}) didn't "
                           "choose: " + ", ".join(wrong))
 
 
@@ -2182,7 +2222,7 @@ def build_launchers(contents: Path, arch: str = DEFAULT_ARCH) -> None:
             CLANG, "-O2", *target(arch), "-Wall", "-Werror",
             f'-DMODULE="{module}"', f'-DPY_REL="{py_rel}"',
             str(REPO / "bundle" / "launcher.c"), "-o", str(out),
-        ], env=_build_env(), check=True)
+        ], env=_build_env(arch), check=True)
 
 
 #: License texts that what's bundled doesn't carry, as `<owner>-LICENSE`:
@@ -3550,7 +3590,10 @@ def _recipes(ipatool_version: str = "", unfairplay: Pin | None = None, arch: str
                     "`go.sum` and the checksum database, and `go mod verify` re-hashes the module cache's "
                     "copies; `pinned/ipatool/vendor.tar.gz` is the `vendor/` it wrote (the same for both "
                     "architectures: it holds every platform's files), which the build then reads "
-                    "offline (leave out both `go mod` steps). `ipatool` goes in as built and is signed with "
+                    "offline (leave out both `go mod` steps). After the build, `go generate` writes the mocks "
+                    "ipatool's tests use, with the mockgen ipatool vendors, and `go test` runs the tests of "
+                    "`pkg/appstore`, the package the patch changes, the patch's own among them, also from "
+                    "`vendor/`; a failure stops the build. `ipatool` goes in as built and is signed with "
                     "two entitlements (`bundle/entitlements/ipatool.plist`): `com.apple.security.cs.allow-jit`, "
                     "for Unicorn's code translator, and `com.apple.security.cs.disable-library-validation`, so "
                     "it can load the Unicorn it downloads, which is ad hoc signed. Unicorn is not in Graft.app: "
@@ -3656,12 +3699,15 @@ def sources_md(top: str, tree: str, pins: dict[str, Pin], archived: list[Pin], s
         "## Built from source",
         "",
         (f"Built for arm64 and macOS {MACOS_MIN} or later with {_toolchain()}." if len(by_arch) == 1 else
-         f"Built for each of {both}, for macOS {MACOS_MIN} or later, with {_toolchain()}; a pin for one bundle "
+         f"Built for each of {both}, for macOS "
+         + " and ".join(f"{macos_min(a)} or later ({a})" for a in by_arch)
+         + f", with {_toolchain()}; a pin for one bundle "
          "only says so. The x86_64 builds are cross-compiles on the Apple silicon Mac the release is built on; "
          "where their steps differ from arm64's, both are given.")
         + " The commands run as shown, plus `-j` for make. Each runs with only `/usr/bin:/bin:/usr/sbin:/sbin` on "
-        f"PATH and `MACOSX_DEPLOYMENT_TARGET={MACOS_MIN}`. In the app, every binary is then signed with the hardened "
-        "runtime.",
+        "PATH and `MACOSX_DEPLOYMENT_TARGET` set to its bundle's macOS ("
+        + ", ".join(f"`{macos_min(a)}` for {a}" for a in by_arch)
+        + "). In the app, every binary is then signed with the hardened runtime.",
     ]
     for pin in archived:
         arches = [a for a, ps in by_arch.items() if ps.get(pin.name) == pin] or [DEFAULT_ARCH]

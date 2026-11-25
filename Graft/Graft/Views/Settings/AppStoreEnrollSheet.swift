@@ -18,8 +18,8 @@ import SwiftUI
 /// Mac App Store. Afterward it reads the result off status, which accepts a
 /// model only if it is the user's and readable.
 struct AppStoreEnrollSheet: View {
-    let account: AppStoreAccountStore
-    let store: AppStoreStore
+    @ObservedObject var account: AppStoreAccountStore
+    @ObservedObject var store: AppStoreStore
 
     @State private var chosen: String?
     @State private var showScript = false

@@ -219,3 +219,74 @@ final class AccessibilityTests: XCTestCase {
         XCTAssertEqual(unnamed, [])
     }
 }
+
+/// `AccessibilityTree.requireServed()`'s memory of whether macOS serves
+/// this process's tree, with a stand-in probe: no window, no tree needed.
+///
+/// A "not served" is never remembered. In the 2.2 runs one miss at the
+/// first on-screen test skipped every one after it (109), though the tree
+/// was served a moment later. So a miss is asked again a few times, briefly,
+/// and asked again at the next test; only "served" is remembered.
+///
+/// Every call that should not skip is inside `XCTAssertNoThrow`: a skip
+/// leaving the test method is reported as a skip, and would hide a
+/// regression here behind a green run.
+@MainActor
+final class AccessibilityProbeTests: XCTestCase {
+    private typealias Memory = AccessibilityTree.ServedMemory
+
+    func test_a_tree_not_served_at_first_then_served_is_found() {
+        var memory = Memory(tries: 3, pause: 0.5)
+        var answers = [false, true]
+        var waits: [TimeInterval] = []
+        XCTAssertNoThrow(try AccessibilityTree.requireServed(&memory, probe: { answers.removeFirst() },
+                                                             wait: { waits.append($0) }))
+        XCTAssertEqual(answers, [], "asked twice")
+        XCTAssertEqual(waits, [0.5], "with a pause between, none before the first ask")
+    }
+
+    func test_a_tree_never_served_skips_after_the_bounded_tries_and_is_asked_again_next_time() {
+        var memory = Memory(tries: 3, pause: 0.5)
+        var asked = 0
+        var waits: [TimeInterval] = []
+        for run in 1...2 {
+            XCTAssertThrowsError(
+                try AccessibilityTree.requireServed(&memory, probe: { asked += 1; return false },
+                                                    wait: { waits.append($0) })
+            ) { error in
+                XCTAssertTrue(error is XCTSkip, "a skip, not a failure: \(error)")
+            }
+            XCTAssertEqual(asked, 3 * run, "three tries, every time: a miss is not remembered")
+            XCTAssertEqual(waits.count, 2 * run, "no pause after the last try")
+        }
+    }
+
+    func test_a_served_tree_is_remembered() {
+        var memory = Memory(tries: 3, pause: 0.5)
+        var asked = 0
+        XCTAssertNoThrow(try AccessibilityTree.requireServed(&memory, probe: { asked += 1; return true }, wait: { _ in }))
+        XCTAssertNoThrow(try AccessibilityTree.requireServed(&memory, probe: { asked += 1; return false }, wait: { _ in }))
+        XCTAssertEqual(asked, 1, "asked once, then remembered")
+    }
+
+    /// `nodes(in:)` finding its window missing forgets a "served": the tree
+    /// can go away mid-run, and the next ask probes again.
+    func test_forgetting_a_served_tree_asks_again() {
+        var memory = Memory(tries: 2, pause: 0.5)
+        var asked = 0
+        XCTAssertNoThrow(try AccessibilityTree.requireServed(&memory, probe: { asked += 1; return true }, wait: { _ in }))
+        memory.forget()
+        XCTAssertThrowsError(
+            try AccessibilityTree.requireServed(&memory, probe: { asked += 1; return false }, wait: { _ in })
+        )
+        XCTAssertEqual(asked, 3)
+    }
+
+    /// Bounded: a run on a Mac that never serves the tree spends about a
+    /// second per on-screen test on it, not more.
+    func test_the_real_memory_asks_a_few_times_briefly() {
+        let memory = AccessibilityTree.ServedMemory.standard
+        XCTAssertEqual(memory.tries, 3)
+        XCTAssertEqual(memory.pause, 0.5)
+    }
+}

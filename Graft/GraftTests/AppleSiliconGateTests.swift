@@ -248,6 +248,99 @@ final class AppleSiliconGateTests: XCTestCase {
         XCTAssertEqual(MacSupport.embeddedPython(in: app), .architectures(["x86_64"]))
     }
 
+    /// A temporary Graft.app with a `bin` folder where the CLI keeps its
+    /// Python, and that folder.
+    private func appWithBin() throws -> (app: URL, bin: URL) {
+        let app = FileManager.default.temporaryDirectory.appendingPathComponent("graft-app-\(UUID().uuidString)/Graft.app")
+        addTeardownBlock { try? FileManager.default.removeItem(at: app.deletingLastPathComponent()) }
+        let bin = app.appending(path: "Contents/Resources/GraftPython/bin")
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        return (app, bin)
+    }
+
+    /// The interpreter is found by name, python3.<1 to 3 digits>, as the
+    /// CLI's updater finds it (`app_update.INTERPRETER_RE`), not as this
+    /// release's python3.13: the first Graft on a newer Python is still read.
+    func test_a_bundles_embedded_python_is_found_by_its_name_whatever_the_minor_version() throws {
+        for name in ["python3.14", "python3.9", "python3.100"] {
+            let (app, bin) = try appWithBin()
+            try thin(Self.arm64).write(to: bin.appending(path: name))
+            XCTAssertEqual(MacSupport.embeddedPython(in: app), .architectures(["arm64"]), name)
+        }
+    }
+
+    /// Names that only look like it are not the interpreter: a free-threaded
+    /// build, a config script, the unversioned name, a patch version, a
+    /// minor of four digits. With only those, there is no Python, as in a
+    /// Debug build, even when each is a Mach-O.
+    func test_a_name_that_only_looks_like_the_interpreter_is_not_it() throws {
+        let lookalikes = ["python3.13t", "python3.13-config", "python3", "python3.13.1", "python3.1000",
+                          "python3.", "python3.13 ", ".python3.13", "python3.1\u{0663}"]
+        let (app, bin) = try appWithBin()
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .absent, "an empty bin folder")
+        for name in lookalikes {
+            try thin(Self.arm64).write(to: bin.appending(path: name))
+        }
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .absent)
+        try thin(Self.x86_64).write(to: bin.appending(path: "python3.13"))
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .architectures(["x86_64"]),
+                       "the one real name among them is the one read")
+    }
+
+    /// A `bin` folder there that can't be listed is a mixed-up bundle, as the
+    /// CLI holds (`MixedBuild`), not a Debug build with no Python.
+    func test_an_interpreter_folder_that_cannot_be_listed_is_unreadable() throws {
+        let (app, bin) = try appWithBin()
+        try thin(Self.arm64).write(to: bin.appending(path: "python3.13"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: bin.path)
+        addTeardownBlock { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bin.path) }
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .unreadable)
+    }
+
+    /// Two interpreters is a mixed-up bundle, whichever is right: the CLI
+    /// refuses it too.
+    func test_more_than_one_interpreter_is_unreadable() throws {
+        let (app, bin) = try appWithBin()
+        try thin(Self.arm64).write(to: bin.appending(path: "python3.13"))
+        try thin(Self.arm64).write(to: bin.appending(path: "python3.14"))
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .unreadable)
+    }
+
+    func test_an_interpreter_that_is_a_folder_or_no_mach_o_is_unreadable() throws {
+        let (app, bin) = try appWithBin()
+        try FileManager.default.createDirectory(at: bin.appending(path: "python3.13"), withIntermediateDirectories: false)
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .unreadable, "a folder")
+
+        let (other, otherBin) = try appWithBin()
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: otherBin.appending(path: "python3.14"))
+        XCTAssertEqual(MacSupport.embeddedPython(in: other), .unreadable, "a script")
+    }
+
+    /// A bundle's own code is its own files, as the CLI holds
+    /// (`app_update.embedded_interpreter`): a folder on the way that is a
+    /// link, or an interpreter that is one, is a mixed-up bundle even when
+    /// what it points to reads.
+    func test_an_interpreter_reached_through_a_link_is_unreadable() throws {
+        let fm = FileManager.default
+        for linked in ["Contents", "Contents/Resources", "Contents/Resources/GraftPython",
+                       "Contents/Resources/GraftPython/bin"] {
+            let (app, bin) = try appWithBin()
+            try thin(Self.arm64).write(to: bin.appending(path: "python3.13"))
+            XCTAssertEqual(MacSupport.embeddedPython(in: app), .architectures(["arm64"]), linked)
+            let real = app.appending(path: linked)
+            let moved = app.deletingLastPathComponent().appending(path: "moved-\(UUID().uuidString)")
+            try fm.moveItem(at: real, to: moved)
+            try fm.createSymbolicLink(at: real, withDestinationURL: moved)
+            XCTAssertEqual(MacSupport.embeddedPython(in: app), .unreadable, linked)
+        }
+
+        let (app, bin) = try appWithBin()
+        let elsewhere = app.deletingLastPathComponent().appending(path: "python")
+        try thin(Self.arm64).write(to: elsewhere)
+        try fm.createSymbolicLink(at: bin.appending(path: "python3.13"), withDestinationURL: elsewhere)
+        XCTAssertEqual(MacSupport.embeddedPython(in: app), .unreadable, "the interpreter itself a link")
+    }
+
     // MARK: - The gate
 
     func test_the_wrong_download_says_which_one_this_mac_needs() {
@@ -351,8 +444,8 @@ final class AppleSiliconGateTests: XCTestCase {
         XCTAssertEqual(opened.viaEnvironment, [], "not through SwiftUI's openURL")
     }
 
-    /// The test host is Graft.app itself, under its real bundle id and the
-    /// real HOME. Its own window must run nothing: in a Debug build the CLI
+    /// The test host is Graft.app itself (its Debug build), with the real
+    /// HOME. Its own window must run nothing: in a Debug build the CLI
     /// lookup finds ~/.local/bin/graft first, the owner's real CLI, and its
     /// App Store status had macOS ask for ipatool's keychain item during a
     /// test run (2.0.1). So the window is a placeholder, and its runner
@@ -425,6 +518,24 @@ final class AppleSiliconGateTests: XCTestCase {
             let shown = try AccessibilityTree.texts(in: pane.window)
             XCTAssertTrue(shown.contains("line: \(support.unavailableLine ?? "none")"), "\(shown)")
         }
+    }
+
+    /// On macOS 13 the banner says Graft.zip needs macOS 14, rather than
+    /// send the user to it (`MacSupport.intelBuildBannerLine`).
+    func test_before_macos_14_the_banner_says_graft_zip_needs_it() throws {
+        try AccessibilityTree.requireServed()
+        var ventura = Self.intelOnAppleSilicon
+        ventura.macOSMajorVersion = 13
+        let pane = hosted(
+            AppleSiliconGate(support: ventura, openURL: { _ in }) { Text("the app") },
+            size: NSSize(width: Metrics.windowMinWidth, height: Metrics.windowMinHeight)
+        )
+        addTeardownBlock { takeDown(pane) }
+        settle(pane)
+        let shown = try AccessibilityTree.texts(in: pane.window)
+        XCTAssertTrue(shown.contains("the app"), "\(shown)")
+        XCTAssertTrue(shown.contains(MacSupport.intelBuildBannerBeforeMacOS14), "\(shown)")
+        XCTAssertFalse(shown.contains(MacSupport.intelBuildBanner), "\(shown)")
     }
 
     /// The banner's button opens the releases page through the gate's

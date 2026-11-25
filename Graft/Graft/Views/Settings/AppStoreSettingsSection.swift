@@ -25,7 +25,7 @@ import SwiftUI
 /// use Apple's public lookup. Sign Out still works: it only forgets the
 /// sign-in in the login keychain.
 struct AppStoreSettingsSection: View {
-    let store: AppStoreStore
+    @ObservedObject var store: AppStoreStore
     @State private var showSignIn = false
     @State private var showEnroll = false
     @Environment(\.macSupport) private var mac

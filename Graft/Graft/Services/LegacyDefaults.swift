@@ -63,9 +63,9 @@ enum LegacyDefaults {
 
     /// The call `GraftApp` makes at launch.
     ///
-    /// Skipped in the test host: that process is this app, under the real
-    /// bundle id, and migrating there would copy the developer's own
-    /// pre-rename preferences in the middle of a test run.
+    /// Skipped in the test host: that process is this app (its Debug build),
+    /// and migrating there would copy the developer's own pre-rename
+    /// preferences in the middle of a test run.
     @discardableResult
     static func migrateOnLaunch(
         environment: [String: String] = ProcessInfo.processInfo.environment,

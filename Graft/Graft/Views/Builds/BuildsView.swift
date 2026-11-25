@@ -1,19 +1,19 @@
 import SwiftUI
 
 struct BuildsView: View {
-    @Bindable var store: BuildsStore
+    @ObservedObject var store: BuildsStore
     /// Passed straight through to ReinstallSheet: a re-install pushes to the
     /// phone, so it moves the delivery badges the Apps section renders off
     /// this store. Read here only for `reinstallRefusal`.
-    let config: ConfigStore
+    @ObservedObject var config: ConfigStore
     /// Also passed straight through, and to both sheets rather than one: the
     /// build-log and re-install headers each draw the app's icon. Nothing in
     /// this view's own table does.
-    let artwork: ArtworkStore
+    @PassedThrough var artwork: ArtworkStore
     /// Only for `Install to Mac…`, which is `--install-to-mac` — the same verb
     /// the Cache pane presses, so the two surfaces cannot drift on what
     /// "install here" means or on the PlayCover settings it fixes up.
-    let staged: StagedIPAStore
+    @PassedThrough var staged: StagedIPAStore
     @State private var selected: BuildRecord.ID?
     @State private var handoffComplaint: String?
     @State private var reinstallTarget: BuildRecord?

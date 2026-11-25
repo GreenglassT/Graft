@@ -41,9 +41,11 @@ there's no daemon.
 one processor (`Graft.zip` for Apple silicon, `Graft-Intel.zip` for Intel
 Macs, with `--arch x86_64`), with a universal app executable in both, so
 `Graft.zip` opened on an Intel Mac shows a screen that names
-`Graft-Intel.zip`. It's signed with a Developer ID identity and zipped. Then
-`scripts/verify-bundle` (with `--arch x86_64` for the Intel build) checks the
-sealed app. See
+`Graft-Intel.zip`. Each is built for its own oldest macOS, 14.0 for
+`Graft.zip` and 13.0 for `Graft-Intel.zip`. It's signed with a Developer ID
+identity and zipped. Then `scripts/verify-bundle` (with `--arch x86_64` for the
+Intel build) checks the sealed app, including that no program in it needs a
+newer macOS than that. See
 [Graft/README.md](../../Graft/README.md), and [docs/network.md](../network.md) for
 every host Graft and its tools contact, including what a release build
 downloads.

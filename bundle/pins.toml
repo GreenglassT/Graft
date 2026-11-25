@@ -90,8 +90,8 @@ sha256 = "18ae976100c518c4b80ed485d13a4b515ca7bf5d47cc818df47efd12d5929b05"
 license = "Unlicense"
 
 # ---- Built from source: cyan's helpers, in place of the prebuilt copies its
-# archive carries. Each is compiled for the bundle's architecture, macOS 14.0
-# (MACOS_MIN), outside any .app.
+# archive carries. Each is compiled for the bundle's architecture and macOS:
+# 14.0 for arm64, 13.0 for x86_64 (MACOS_MINS), outside any .app.
 #
 # The three `archive/<commit>.tar.gz` URLs are tarballs GitHub generates on
 # request, not files anyone uploaded. If GitHub ever changes how it makes

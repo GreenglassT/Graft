@@ -6,11 +6,11 @@ private typealias Flag = CLIContract.Flag
 struct AppDetailView: View {
     let app: AppRecord
     let runner: CLIRunner
-    @Bindable var store: ConfigStore
+    @ObservedObject var store: ConfigStore
     /// Owned by `ContentView` and shared with the sidebar, so the icon in this
     /// header is the same file the row that opened it drew — not a second
     /// resolve of the same app.
-    let artwork: ArtworkStore
+    @ObservedObject var artwork: ArtworkStore
     /// `ContentView`'s polled store, injected rather than built here.
     ///
     /// This view used to own one: `@State private var devicesStore =
@@ -25,7 +25,7 @@ struct AppDetailView: View {
     /// the window is key — so injecting it is strictly better, and it also
     /// means this pane and the sidebar can never disagree about what is
     /// connected.
-    let devices: DevicesStore
+    @ObservedObject var devices: DevicesStore
     /// `ContentView`'s tweak library, injected for the same reasons `devices`
     /// is — and it arrived the same way, by first being built here.
     ///
@@ -49,7 +49,7 @@ struct AppDetailView: View {
     /// is a list of attached *filenames* out of config.yaml and this is the
     /// library those filenames are joined against, and the two are one line
     /// apart in `attachedTweaks`.
-    let tweaksStore: TweaksStore
+    @ObservedObject var tweaksStore: TweaksStore
     /// The store that owns `--install-to-mac`, injected for the same reason
     /// `devices` and `tweaksStore` are: `ContentView` already holds one, and
     /// the Cache pane's Install button is the other caller of the same verb.
@@ -59,20 +59,20 @@ struct AppDetailView: View {
     /// app on this machine. Building the verb's argv here instead would have
     /// been a second place that assembles it, which is the thing
     /// `StagedIPAStore.installArgs` exists to be the only one of.
-    let staged: StagedIPAStore
+    @ObservedObject var staged: StagedIPAStore
     /// `ContentView`'s App Store store, shared with Settings: the Source IPA
     /// section's version line and **Get latest from App Store** read it. A
     /// get's progress is kept per app on the store, not in this view's
     /// `@State`, because a get takes minutes and this view is reused across
     /// app switches.
-    let appStore: AppStoreStore
+    @ObservedObject var appStore: AppStoreStore
     /// `ContentView`'s LiveContainer store, for the Edit sheet's LiveContainer
     /// picker (C-LCPIN): it lists the default device's instances from the same
     /// `--lc-status` answers the device pane shows.
-    let liveContainer: LiveContainerStore
+    @PassedThrough var liveContainer: LiveContainerStore
     /// `ContentView`'s settings, for the Edit sheet's auto-provisioning
     /// toggle, which needs to know whether an App Store Connect key is set.
-    let settings: SettingsStore
+    @ObservedObject var settings: SettingsStore
     /// What the build-target bar's Change control does: in the app, select the
     /// Settings section.
     ///
@@ -145,7 +145,7 @@ struct AppDetailView: View {
     ) {
         self.app = app
         self.runner = runner
-        self._store = Bindable(wrappedValue: store)
+        self._store = ObservedObject(wrappedValue: store)
         self.artwork = artwork
         self.devices = devices
         self.tweaksStore = tweaksStore
@@ -233,7 +233,7 @@ struct AppDetailView: View {
         // any status read still running for one: otherwise that dialog
         // opened by itself on coming back, maybe hours later, naming an
         // Apple ID read back then (the try14 delta audit's D14-APP-1).
-        .onChange(of: app.id) { left, _ in
+        .onChangeWithPrevious(of: app.id) { left, _ in
             appStore.cancelClaim(app: left)
         }
         // Keyed on the version pin as well as the app, because the Source IPA
@@ -255,7 +255,7 @@ struct AppDetailView: View {
         // A drop or get for this app staged a new file: the card is now stale.
         // Artwork is `ContentView`'s, which watches every app's completions so
         // an icon refreshes even when its pane is not the one open.
-        .onChange(of: appStore.completions[app.name]) { _, _ in
+        .onChange(of: appStore.completions[app.name]) { _ in
             Task { await refreshCachedIPA() }
         }
         // The tweak library, which is where the attached rows get a name and a

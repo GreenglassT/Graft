@@ -34,7 +34,7 @@ app from source.
 
 ## Requirements
 
-- macOS 14 or later. The app's own executable is universal (arm64 and x86_64) in both downloads; Info.plist's `GraftBundleArch` says which download a bundle is (`MacSupport`, checked against the embedded Python's Mach-O header; no key means arm64, as in a Debug build). `Graft.zip` bundles arm64 tools, and on an Intel Mac opens only to a screen that names `Graft-Intel.zip`. `Graft-Intel.zip` runs on either Mac, with App Store sign-in (Sign In… and Sign In Again…), App Store gets and Get an older version…, Set Up Decryption, Build for this Mac, Install to Mac and Get PlayCover disabled (no ipatool App Store request runs at all): on an Intel Mac each says "Needs a Mac with Apple silicon", and on an Apple silicon Mac "Needs the Apple silicon download of Graft (Graft.zip)", under a banner pointing to `Graft.zip`.
+- macOS 13 or later. That is `project.yml`'s deployment target, which `LSMinimumSystemVersion` follows; a release sets it for each download, macOS 14 for `Graft.zip` and 13 for `Graft-Intel.zip`. The app's own executable is universal (arm64 and x86_64) in both downloads; Info.plist's `GraftBundleArch` says which download a bundle is (`MacSupport`, checked against the embedded Python's Mach-O header; no key means arm64, as in a Debug build). `Graft.zip` bundles arm64 tools, and on an Intel Mac opens only to a screen that names `Graft-Intel.zip`. `Graft-Intel.zip` runs on either Mac, with App Store sign-in (Sign In… and Sign In Again…), App Store gets and Get an older version…, Set Up Decryption, Build for this Mac, Install to Mac and Get PlayCover disabled (no ipatool App Store request runs at all): on an Intel Mac each says "Needs a Mac with Apple silicon", and on an Apple silicon Mac "Needs the Apple silicon download of Graft (Graft.zip)", under a banner pointing to `Graft.zip`. On macOS 13, where `Graft.zip` doesn't open, both say it needs macOS 14 or later (`MacSupport.macOSMajorVersion`).
 - Xcode, and [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
 
 Xcode is for building the app. Running a release build needs neither Xcode
@@ -62,11 +62,11 @@ xcodebuild -project Graft/Graft.xcodeproj -scheme Graft -configuration Debug \
   -destination 'platform=macOS' build
 ```
 
-A local build is signed ad hoc and contains no CLI, so build Debug: a Debug build runs the CLI it finds. Release builds come from `scripts/graft-release` (below). A plain Xcode Release build has no bundled CLI, and since a Release build only ever runs the one inside it, it opens on a screen saying it has none. If macOS refuses to open the copy you built, remove the quarantine attribute with `xattr -cr Graft.app`.
+A local build is signed ad hoc and contains no CLI, so build Debug: a Debug build runs the CLI it finds. A Debug build's bundle id is `com.greenglasst.graft.debug`, so its preferences, the test suite's included, are its own and never the installed Graft's (`com.greenglasst.graft`, the Release id). Release builds come from `scripts/graft-release` (below). A plain Xcode Release build has no bundled CLI, and since a Release build only ever runs the one inside it, it opens on a screen saying it has none. If macOS refuses to open the copy you built, remove the quarantine attribute with `xattr -cr Graft.app`.
 
 ### The distributable app
 
-`scripts/graft-release` builds the download: a Release with the CLI, its own Python and the tools inside it, signed with a Developer ID identity. By default it builds `Graft.zip`, for Apple silicon; `--arch x86_64` builds `Graft-Intel.zip`, for Intel Macs: the same app with its Python, tools and OpenSSL built for x86_64, and no UnfairPlay. The app's own executable is universal in both; everything else is the bundle's one architecture, and Info.plist's `GraftBundleArch` (`arm64` or `x86_64`, written before anything is signed) says which. An Intel release stops before building if the app's own Swift doesn't read that key, since its Intel Macs would otherwise see the old "needs Apple silicon" screen.
+`scripts/graft-release` builds the download: a Release with the CLI, its own Python and the tools inside it, signed with a Developer ID identity. By default it builds `Graft.zip`, for Apple silicon; `--arch x86_64` builds `Graft-Intel.zip`, for Intel Macs: the same app with its Python, tools and OpenSSL built for x86_64, and no UnfairPlay. The app's own executable is universal in both; everything else is the bundle's one architecture, and Info.plist's `GraftBundleArch` (`arm64` or `x86_64`, written before anything is signed) says which. Each bundle is built for its own oldest macOS (`MACOSX_DEPLOYMENT_TARGET` 14.0 for `Graft.zip`, 13.0 for `Graft-Intel.zip`), which sets Info.plist's `LSMinimumSystemVersion`; `verify-bundle` checks it and every Mach-O's minimum against that. The release also runs the Go tests of Graft's ipatool patch, and stops if one fails. An Intel release stops before building if the app's own Swift doesn't read `GraftBundleArch` (in code that's compiled, not in a comment or an `#if false` block), since its Intel Macs would otherwise see the old "needs Apple silicon" screen.
 
 ```bash
 GRAFT_SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" scripts/graft-release [--arch arm64|x86_64] [output-dir]
@@ -109,7 +109,10 @@ TEST_RUNNER_PATH="$PWD/../.venv/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
 A few tests (`AccessibilityTests` and the ones that read text off a hosted
 window) go through the macOS Accessibility API. macOS serves an app's tree
 only after an assistive client such as VoiceOver or Accessibility Inspector
-has talked to it, so without one those tests skip; check the skip count. To
+has talked to it, so without one those tests skip; check the skip count. A
+test that finds the tree not served asks again, three times half a second
+apart, and so does the next one: only "served" is remembered, so a moment
+when the tree isn't served skips only the tests that met it. To
 see that skip path on a Mac that does serve the tree, add
 `TEST_RUNNER_GRAFT_TESTS_PRETEND_NO_AX=1` to the command.
 

@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -17,19 +17,21 @@ private typealias Flag = CLIContract.Flag
 /// Owned by `AppStoreStore`, which reads `--appstore-status` again through
 /// `onChange` after each sign-in, sign-out and enrollment.
 @MainActor
-@Observable
-final class AppStoreAccountStore {
+final class AppStoreAccountStore: ObservableObject {
     let runner: CLIRunner
     /// Read status again. `AppStoreStore` sets it.
+    /// Unpublished: a callback, which no view reads.
     var onChange: @MainActor () async -> Void = {}
     /// The Apple ID may be another one now: a sign-in or a sign-out worked.
     /// `AppStoreStore` sets it, to drop what it knew about the last one's
     /// licenses (review part 4, #8).
+    /// Unpublished: a callback, which no view reads.
     var onAccountChange: @MainActor () -> Void = {}
     /// Why Sign In, Sign Out and Set Up Decryption must wait, or nil.
     /// `AppStoreStore` sets it: not while a get or Get (free) runs, since
     /// ipatool reads the sign-in under them and a sign-in or sign-out changes
     /// it, and enrollment replaces the model a decrypt reads.
+    /// Unpublished: a callback, which no view reads.
     var blockedBy: @MainActor () -> String? = { nil }
 
     /// A sign-in, sign-out or enrollment is running: gets wait for it.
@@ -46,11 +48,12 @@ final class AppStoreAccountStore {
         case failed(String, hint: String? = nil)
     }
 
-    private(set) var signIn: SignIn = .idle
-    private(set) var isSigningOut = false
-    private(set) var signOutError: String?
+    @Published private(set) var signIn: SignIn = .idle
+    @Published private(set) var isSigningOut = false
+    @Published private(set) var signOutError: String?
+    /// Unpublished: bookkeeping, which nothing draws.
     private var input: ChildInput?
-    private var signInTask: Task<Void, Never>?
+    @Published private var signInTask: Task<Void, Never>?
 
     static let startingLine = "Signing in…"
     /// After the password. The first sign-in on a Mac also fetches ipatool's
@@ -235,15 +238,15 @@ final class AppStoreAccountStore {
     // MARK: Enrollment
 
     let shell: PrivilegedShell
-    private(set) var candidates: [EnrollCandidateRecord] = []
+    @Published private(set) var candidates: [EnrollCandidateRecord] = []
     /// Whether a candidate load has *finished*: an empty list is an answer
     /// ("install one first") only once it has (memory: an empty collection is
     /// not a load state).
-    private(set) var hasLoadedCandidates = false
-    private(set) var candidatesError: String?
+    @Published private(set) var hasLoadedCandidates = false
+    @Published private(set) var candidatesError: String?
     /// Which way the last administrator run went (decision 6's record):
     /// in-process NSAppleScript, or the osascript fallback.
-    private(set) var lastAdminVia: AdminRun.Via?
+    @Published private(set) var lastAdminVia: AdminRun.Via?
 
     enum Enrol: Equatable {
         case idle
@@ -274,20 +277,20 @@ final class AppStoreAccountStore {
         case failed(String)
     }
 
-    private(set) var enrol: Enrol = .idle
+    @Published private(set) var enrol: Enrol = .idle
     /// The user took the explicit step for an unchecked UnfairPlay: the sheet
     /// showed the CLI's warning (`.unchecked`) and they pressed "Run Unchecked
     /// Copy as Root…". Set only by `prepareEnrol(…, allowUncheckedHelper:
     /// true)` from that state; any other prepare, and `resetEnrol`, clear it.
     /// `confirmEnrol` won't run a `verified: false` script without it.
-    private(set) var uncheckedConsent = false
+    @Published private(set) var uncheckedConsent = false
     /// The command whose root run is going now: its cancel file and its time
     /// limit. nil outside `.running`.
-    private(set) var runningCommand: EnrollCommandRecord?
+    @Published private(set) var runningCommand: EnrollCommandRecord?
     /// Cancel was pressed during the root run, and the cancel file exists.
-    private(set) var isStoppingEnrol = false
+    @Published private(set) var isStoppingEnrol = false
     /// Why a Cancel during the root run couldn't ask it to stop.
-    private(set) var stopError: String?
+    @Published private(set) var stopError: String?
     /// Opens an app in macOS: the sheet's "Open <App>" (`openEnrolApp`).
     let openApp: @MainActor (URL) -> Void
 

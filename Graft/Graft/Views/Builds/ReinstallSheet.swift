@@ -9,8 +9,8 @@ struct ReinstallSheet: View {
     /// `--reinstall-build` pushes to the phone and records a delivery exactly
     /// like a build does, and nothing else in the Builds section holds the
     /// store that carries those badges.
-    let config: ConfigStore
-    let artwork: ArtworkStore
+    @ObservedObject var config: ConfigStore
+    @ObservedObject var artwork: ArtworkStore
     /// Held while `--reinstall-build` runs (`reinstall`); a test passes its own.
     var hold: TerminationHold = .shared
     let onClose: () -> Void

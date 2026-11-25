@@ -54,7 +54,7 @@ struct BuildLogPanel: View {
             .background(Palette.surface2)
             .overlay(RoundedRectangle(cornerRadius: Metrics.radius).strokeBorder(Palette.line.opacity(0.4), lineWidth: 0.5))
             .clipShape(RoundedRectangle(cornerRadius: Metrics.radius))
-            .onChange(of: lines.count) { _, _ in
+            .onChange(of: lines.count) { _ in
                 // No animation — tail-follow during fast log bursts (50-200 lines/sec
                 // from zsign/cyan) would otherwise queue overlapping 100ms tweens and
                 // pin the main thread.

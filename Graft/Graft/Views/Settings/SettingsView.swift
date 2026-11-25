@@ -1,22 +1,22 @@
 import SwiftUI
 
 struct SettingsView: View {
-    @Bindable var store: SettingsStore
+    @ObservedObject var store: SettingsStore
     @State private var showPasswordSheet = false
     /// ContentView's, not a second one. A private instance was torn down with
     /// the pane on every section change, so `hasLoaded` reset and `--devices`
     /// was re-spawned on each entry — on top of the `--settings` and `--check`
     /// runs that entry already triggers — and the picker could never be
     /// refreshed from the Devices tab while Settings was open.
-    let devicesStore: DevicesStore
+    @ObservedObject var devicesStore: DevicesStore
     /// ContentView's, shared with the app pane's "Get latest from App Store".
-    let appStore: AppStoreStore
+    @PassedThrough var appStore: AppStoreStore
     /// `ConfigStore.account`, the one answer every pane gates on. Nil until
     /// the app list has loaded, and nil disables nothing (`AccountMode`).
     let account: AccountMode?
     /// Settings › Account's flows. Nil hides the account buttons, which only
     /// tests of other sections do.
-    var accountSetup: AccountSetupStore? = nil
+    @ObservedOptionalObject var accountSetup: AccountSetupStore? = nil
     /// What to re-read once a run that may have changed the account has
     /// finished (`ContentView.afterAccountChange`). Handed to the store
     /// (`onAccountRunFinished`), which outlives this pane, so a run that ends
@@ -27,7 +27,7 @@ struct SettingsView: View {
     var isBuilding: Bool = false
     /// The update switches. Nil hides Updates, which only tests of other
     /// sections do.
-    var updates: UpdateStore? = nil
+    @ObservedOptionalObject var updates: UpdateStore? = nil
     @State private var showAccountSheet = false
     @State private var confirmingSwitchToFree = false
 
@@ -74,7 +74,7 @@ struct SettingsView: View {
         // Reseed when the store re-reads — `reseedDraftIfIdle` is a no-op
         // while the user has edits pending, so a background refresh cannot
         // discard what they were halfway through typing.
-        .onChange(of: store.settings) { _, _ in store.reseedDraftIfIdle() }
+        .onChange(of: store.settings) { _ in store.reseedDraftIfIdle() }
         .task {
             accountSetup?.onAccountRunFinished = onAccountChanged
             store.reseedDraftIfIdle()
@@ -866,7 +866,7 @@ private struct PathRow: View {
 /// Settings › Updates: the daily check's switch, the automatic update's,
 /// and what each does.
 struct UpdatesSection: View {
-    @Bindable var updates: UpdateStore
+    @ObservedObject var updates: UpdateStore
 
     static let toggleTitle = "Check for updates automatically"
     static let installToggleTitle = "Download and install updates automatically"

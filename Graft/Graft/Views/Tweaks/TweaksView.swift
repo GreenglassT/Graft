@@ -1,11 +1,11 @@
 import SwiftUI
 
 struct TweaksView: View {
-    @Bindable var store: TweaksStore
+    @ObservedObject var store: TweaksStore
     /// Detaching lives on `ConfigStore` because it writes config.yaml and the
     /// apps list has to reflect it. Passed in for the one action this pane
     /// offers that isn't about the file — same shape as `BuildsView(store:config:)`.
-    let config: ConfigStore
+    @ObservedObject var config: ConfigStore
     /// Where this config keeps its tweaks, as the CLI resolved it
     /// (`--settings`' `paths.tweaks_dir`), or nil before that has been read.
     /// Named by the empty state, which used to say `~/.config/graft/tweaks/`

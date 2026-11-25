@@ -31,7 +31,7 @@ struct SetupView: View {
     var onContinueWithoutTools: () -> Void = {}
 
     /// The account setup the config step runs. Nil only in tests of the other steps.
-    var accountSetup: AccountSetupStore? = nil
+    @ObservedOptionalObject var accountSetup: AccountSetupStore? = nil
     /// The account setup's last screen was read: load the app. ContentView's
     /// runs the first load, then lets the setup go (`AccountSetupStore.finish`).
     var onAccountSetupFinished: () -> Void = {}

@@ -168,9 +168,9 @@ final class SidebarDeviceLayoutTests: XCTestCase {
     /// to `onAccentMuted` on the fill, and a harness that could never select
     /// one would measure only half the row's states.
     private struct Harness: View {
-        let config: ConfigStore
-        let devices: DevicesStore
-        let artwork: ArtworkStore
+        @ObservedObject var config: ConfigStore
+        @ObservedObject var devices: DevicesStore
+        @ObservedObject var artwork: ArtworkStore
         var initialSelection: SidebarItem?
 
         var body: some View {
@@ -182,9 +182,9 @@ final class SidebarDeviceLayoutTests: XCTestCase {
     }
 
     private struct StatefulHarness: View {
-        let config: ConfigStore
-        let devices: DevicesStore
-        let artwork: ArtworkStore
+        @ObservedObject var config: ConfigStore
+        @ObservedObject var devices: DevicesStore
+        @ObservedObject var artwork: ArtworkStore
         @State var selection: SidebarItem?
 
         var body: some View {
@@ -599,15 +599,15 @@ final class SidebarDeviceSelectionTests: XCTestCase {
 
     /// Somewhere the test can read the binding from. `@State` inside the
     /// harness would be private to it, and `.constant()` cannot record a write.
-    @Observable final class Box {
-        var selection: SidebarItem?
+    final class Box: ObservableObject {
+        @Published var selection: SidebarItem?
         init(_ selection: SidebarItem?) { self.selection = selection }
     }
 
     private struct Harness: View {
-        let config: ConfigStore
-        let devices: DevicesStore
-        @Bindable var box: Box
+        @ObservedObject var config: ConfigStore
+        @ObservedObject var devices: DevicesStore
+        @ObservedObject var box: Box
 
         var body: some View {
             NavigationSplitView {
@@ -717,15 +717,15 @@ final class SidebarSectionRowTests: XCTestCase {
     /// `SidebarDeviceSelectionTests.Box` is, and for the same reason: a
     /// `@State` inside the harness is private to it and `.constant()` cannot
     /// be driven.
-    @Observable final class Box {
-        var selection: SidebarItem?
+    final class Box: ObservableObject {
+        @Published var selection: SidebarItem?
         init(_ selection: SidebarItem?) { self.selection = selection }
     }
 
     private struct Harness: View {
-        let config: ConfigStore
-        let devices: DevicesStore
-        @Bindable var box: Box
+        @ObservedObject var config: ConfigStore
+        @ObservedObject var devices: DevicesStore
+        @ObservedObject var box: Box
 
         var body: some View {
             NavigationSplitView {

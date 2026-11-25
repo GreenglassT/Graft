@@ -5,7 +5,7 @@ import SwiftUI
 /// checked can't be undone, and is refused while Graft is working
 /// (`RemoveDataStore`).
 struct RemoveDataSheet: View {
-    @Bindable var store: RemoveDataStore
+    @ObservedObject var store: RemoveDataStore
     @State private var confirming = false
 
     static let title = "Remove Graft's Data"

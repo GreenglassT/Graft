@@ -836,7 +836,7 @@ final class AccountChangeOnReturnTests: XCTestCase {
     /// `controlActiveState` injected, as `DeviceVitalsPollTests` does: a test
     /// window is not reliably frontmost, and the transition is the subject.
     private struct Harness: View {
-        let store: ConfigStore
+        @ObservedObject var store: ConfigStore
         let active: ControlActiveState
         var body: some View {
             ContentView(store: store, adminShell: NoAdminShell()).environment(\.controlActiveState, active)

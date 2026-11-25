@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct CanisterView: View {
-    @Bindable var store: CanisterStore
+    @ObservedObject var store: CanisterStore
     @State private var query: String = ""
     @State private var selected: CanisterPackage.ID?
     @State private var searchTask: Task<Void, Never>?

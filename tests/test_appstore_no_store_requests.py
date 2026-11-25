@@ -74,6 +74,13 @@ def _intel_build(monkeypatch: pytest.MonkeyPatch) -> str:
     return host.INTEL_BUILD
 
 
+def _apple_silicon_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Graft.zip on an Apple silicon Mac, both pinned as the refusals pin
+    theirs: never the reading of the Mac that runs the suite."""
+    monkeypatch.setattr(host, "_sysctl_arm64", lambda: 1)  # Apple silicon
+    monkeypatch.setattr(host, "_running_flavor", lambda: "arm64")
+
+
 WHERE = [pytest.param(_intel_mac, id="an Intel Mac"), pytest.param(_intel_build, id="the Intel build")]
 
 
@@ -139,7 +146,8 @@ def test_on_apple_silicon_with_the_apple_silicon_build_ipatool_is_asked(
     cfg: Config, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The control: the same get, where it can run, does run ipatool."""
-    monkeypatch.setattr(host, "_running_flavor", lambda: "arm64")
+    _apple_silicon_build(monkeypatch)
+    assert host.apple_silicon_blocker() is None
     with appstore.fetched(cfg, "example", emitter=None) as ipa:
         assert ipa.exists()
     assert fakes.calls("ipatool")

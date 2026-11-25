@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -82,8 +82,7 @@ struct SelfUpdateHost {
 /// page it named. A saved answer or attempt whose version isn't plain is
 /// dropped at launch.
 @MainActor
-@Observable
-final class UpdateStore: QuitHandover {
+final class UpdateStore: ObservableObject, QuitHandover {
     /// How long a successful check lasts.
     static let interval: TimeInterval = 24 * 60 * 60
     /// How often the window asks `checkIfDue` while the app is open.
@@ -297,14 +296,14 @@ final class UpdateStore: QuitHandover {
     /// Settings › Updates' first switch: whether the daily check runs. On
     /// unless turned off. Off also takes the offer off the banner; Check for
     /// Updates… still works.
-    var dailyCheck: Bool {
+    @Published var dailyCheck: Bool {
         didSet { defaults.set(dailyCheck, forKey: Key.dailyCheck) }
     }
 
     /// Settings › Updates' second switch: download a newer Graft on its own,
     /// and install it when Graft quits. On unless turned off. Off, the banner
     /// offers Update instead.
-    var autoInstall: Bool {
+    @Published var autoInstall: Bool {
         didSet {
             defaults.set(autoInstall, forKey: Key.autoInstall)
             if autoInstall { startDownloadIfWanted() }
@@ -312,42 +311,50 @@ final class UpdateStore: QuitHandover {
     }
 
     /// The last successful answer about this version, nil before there is one.
-    private(set) var lastAnswer: UpdateCheckRecord?
-    private(set) var isChecking = false
+    @Published private(set) var lastAnswer: UpdateCheckRecord?
+    @Published private(set) var isChecking = false
     /// What Check for Updates… found, until its alert is dismissed
     /// (`dismissAnswer`).
-    private(set) var answer: Answer?
+    @Published private(set) var answer: Answer?
     /// What its alert shows: `alert(for: answer)`, as things stood once the
     /// check was done and any download it starts had started. Fixed while
     /// it's open, so no button changes under the pointer (the banner
     /// follows the phase): its words stay true as the phase moves on, and
     /// its button (`perform`) is the banner's.
-    private(set) var answerAlert: CheckAlert?
-    private(set) var phase: Phase = .idle
+    @Published private(set) var answerAlert: CheckAlert?
+    @Published private(set) var phase: Phase = .idle
     /// From the quit taking the install until the helper is started (or
     /// couldn't be).
-    private(set) var installPending = false
+    @Published private(set) var installPending = false
 
     /// Check for Updates… was chosen while a daily check was running: that
     /// check's result is its answer.
-    @ObservationIgnored private var answerWhenDone = false
+    /// Unpublished: a change to it alone redraws nothing.
+    private var answerWhenDone = false
     /// The newest download's number (`ready` must carry it to install).
-    @ObservationIgnored private(set) var generation = 0
+    /// Unpublished: a change to it alone redraws nothing.
+    private(set) var generation = 0
     /// The checked download, and the download it came from.
-    @ObservationIgnored private var ready: (generation: Int, version: String, appPath: String)?
+    /// Unpublished: a change to it alone redraws nothing.
+    private var ready: (generation: Int, version: String, appPath: String)?
     /// The download now running was asked for (Update): restart into it
     /// when it's ready, and install it on any quit.
-    @ObservationIgnored private var userAsked = false
+    /// Unpublished: a change to it alone redraws nothing.
+    private var userAsked = false
     /// Restart to Update asked for this quit: open Graft again afterward.
-    @ObservationIgnored private var relaunchRequested = false
+    /// Unpublished: a change to it alone redraws nothing.
+    private var relaunchRequested = false
     /// Versions downloaded on their own this launch: once each.
-    @ObservationIgnored private var triedOnItsOwn: Set<String> = []
-    @ObservationIgnored private var downloadTask: Task<Void, Never>?
+    /// Unpublished: a change to it alone redraws nothing.
+    private var triedOnItsOwn: Set<String> = []
+    /// Unpublished: a change to it alone redraws nothing.
+    private var downloadTask: Task<Void, Never>?
     /// How long a quit waits for `--install-update` to start the helper.
     /// It takes a second or two; one that never answers must not keep Graft
     /// from quitting. The attempt is written down first, so the next launch
     /// still says whether it took. A test shortens it.
-    @ObservationIgnored var handoverTimeout: Duration = .seconds(15)
+    /// Unpublished: a change to it alone redraws nothing.
+    var handoverTimeout: Duration = .seconds(15)
 
     /// Every dependency is a parameter: `GraftApp` passes the real
     /// preferences, clock, browser, update log and host, a test its own

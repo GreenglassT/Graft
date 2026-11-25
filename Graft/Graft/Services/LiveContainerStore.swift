@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -17,17 +17,17 @@ private typealias Flag = CLIContract.Flag
 /// otherwise look like one never asked — the defect three stores here have
 /// shipped (`empty-collection-is-not-a-load-state`).
 @MainActor
-@Observable
-final class LiveContainerStore {
-    private(set) var status: [String: LCStatusRecord] = [:]
+final class LiveContainerStore: ObservableObject {
+    @Published private(set) var status: [String: LCStatusRecord] = [:]
     /// Devices a load has *finished* for, whatever it found — but not one a
     /// canceled or superseded load was for: that load found nothing out.
-    private(set) var hasLoaded: Set<String> = []
-    private(set) var loading: Set<String> = []
-    var loadErrors: [String: String] = [:]
+    @Published private(set) var hasLoaded: Set<String> = []
+    @Published private(set) var loading: Set<String> = []
+    @Published var loadErrors: [String: String] = [:]
     /// The newest load per device. A load publishes only if it is still the
     /// newest when it returns, so A→B→A quickly runs the second A load rather
     /// than dropping it behind the first one's in-flight guard.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var loadGeneration: [String: Int] = [:]
 
     enum Action: Equatable {
@@ -64,7 +64,8 @@ final class LiveContainerStore {
     /// One run at a time across devices: they share the signing keychain and
     /// the user's attention. A device that is not the one running says so
     /// (`busyElsewhere`) rather than greying out without a reason.
-    private(set) var run: Run?
+    @Published private(set) var run: Run?
+    /// Unpublished: bookkeeping, which nothing draws.
     private var actionTask: Task<Void, Never>?
 
     /// The current or last run, if it was for `udid`.
@@ -185,6 +186,7 @@ final class LiveContainerStore {
     /// in one main-actor turn would otherwise both see `isRunning` false, the
     /// second task would replace `actionTask` (and return at once, finding the
     /// first running), and Stop would cancel that one instead of the CLI.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var actionInFlight = false
 
     private func launch(_ work: @escaping @MainActor (LiveContainerStore) async -> Void) {

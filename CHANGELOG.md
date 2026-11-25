@@ -3,6 +3,37 @@
 What changed in each release of Graft, newest first. Each release's download
 is on [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
 
+## 2.2.1 (2026-11-25)
+
+### New
+
+- **macOS 13 on Intel Macs.** `Graft-Intel.zip` now runs on macOS 13
+  Ventura, as well as macOS 14 and later. It's still a test build.
+  `Graft.zip`, for Apple silicon, still needs macOS 14. A Mac with Apple
+  silicon on macOS 13 can run `Graft-Intel.zip` too, and its banner says
+  `Graft.zip` needs macOS 14 or later. On macOS 13, the up and down arrow keys
+  don't move through Add App's search results: click a result, or press
+  Return to pick the first.
+
+### Fixes
+
+- Get an older version… tells apart builds the App Store has under the same
+  version number. They used to look like the same row twice. Now they read
+  "1.2.0 (build 1 of 2)" and "1.2.0 (build 2 of 2)", numbered from the
+  oldest, and hovering over one says which it is. Show More renumbers them
+  when it finds an older one.
+- Graft finds its own Python by name, whatever its version, as its updater
+  already does. A later release built on a newer Python would otherwise skip
+  the check that the app and its Python come from the same download, Apple
+  silicon or Intel.
+- For people building Graft: a release build runs the tests of Graft's
+  ipatool patch and stops if one fails; each download is built for its own
+  oldest macOS and checked against it; and an Intel release no longer passes
+  its check when the app names `GraftBundleArch` only in a comment or an
+  `#if false` block. The test suites also no longer depend on the Mac they
+  run on, and a test build of the app keeps its settings apart from the
+  Graft you use.
+
 ## 2.2 (2026-11-25)
 
 ### New

@@ -80,18 +80,31 @@ def _no_real_temp_folder(
     monkeypatch.setattr(remove_data, "TEMP_ROOT", tmp_path_factory.mktemp("tmpdir"))
 
 
+#: Set for every child of the suite (`children_offline`): its graft runs as
+#: if on Apple silicon too (tests/child_site).
+APPLE_SILICON_ENV = "GRAFT_TEST_APPLE_SILICON"
+
+
 @pytest.fixture(autouse=True)
 def _an_apple_silicon_mac(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test runs as if on Apple silicon, whatever Mac runs the suite.
 
     PlayCover and UnfairPlay word their failures differently on an Intel Mac
-    (`graft_ipa.host`). Without this, the same test would assert one message
-    on the developer's Mac and get the other on an Intel one. Tests of the
-    Intel path replace the reader themselves.
+    (`graft_ipa.host`), and no App Store sign-in or get runs there at all.
+    Without this, the same test would assert one message on the developer's
+    Mac and get the other on an Intel one. Tests of the Intel path replace
+    the reader themselves.
+
+    And every graft a test starts, `python -m graft_ipa` included: there
+    `tests/child_site` pins the same reader when APPLE_SILICON_ENV is 1,
+    which `children_offline` passes to each child unless the test's own
+    environment for it says otherwise. Without that, a sign-in run as a
+    child was refused on an Intel Mac.
     """
     from graft_ipa import host
 
     monkeypatch.setattr(host, "_sysctl_arm64", lambda: 1)
+    monkeypatch.setenv(APPLE_SILICON_ENV, "1")
 
 
 @pytest.fixture(autouse=True)
@@ -292,8 +305,9 @@ def children_offline(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
     Every `subprocess.Popen` (so `run`, `check_output` and asyncio's
     subprocesses too) is given `tests/child_site` at the end of PYTHONPATH,
     whose sitecustomize blocks the network as `no_network` does, and
-    GRAFT_TEST_NETWORK_LOG, the file it records refusals in. The environment
-    a test passes is kept otherwise as it is. Yields the log's path; a
+    GRAFT_TEST_NETWORK_LOG, the file it records refusals in; and
+    APPLE_SILICON_ENV, unless that environment sets it (`_an_apple_silicon_mac`).
+    The environment a test passes is kept otherwise as it is. Yields the log's path; a
     test of the guard itself, which makes attempts on purpose, empties it.
     """
     import inspect
@@ -321,6 +335,8 @@ def children_offline(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
                 env[network_guard.CHILD_LOG_ENV] = str(log)
             if program_guard.CHILD_LOG_ENV in os.environ:
                 env[program_guard.CHILD_LOG_ENV] = os.environ[program_guard.CHILD_LOG_ENV]
+            if APPLE_SILICON_ENV in os.environ:
+                env.setdefault(APPLE_SILICON_ENV, os.environ[APPLE_SILICON_ENV])
             bound.arguments["env"] = env
         real_init(*bound.args, **bound.kwargs)
 

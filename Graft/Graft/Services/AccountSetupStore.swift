@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -19,8 +19,7 @@ private typealias Flag = CLIContract.Flag
 /// other way out clears it: a confirm, whatever it came to; a review that
 /// failed; Back, Cancel and Finish.
 @MainActor
-@Observable
-final class AccountSetupStore {
+final class AccountSetupStore: ObservableObject {
     enum Step: Equatable {
         case welcome
         case question
@@ -43,30 +42,33 @@ final class AccountSetupStore {
     }
 
     let runner: CLIRunner
-    private(set) var step: Step = .welcome
-    var form = PaidForm()
-    private(set) var isRunning = false
+    @Published private(set) var step: Step = .welcome
+    @Published var form = PaidForm()
+    @Published private(set) var isRunning = false
     /// A run that writes: a setup, a replace, a switch to a free Apple ID.
     /// It can't be stopped halfway (the CLI undoes a failure itself, and a
     /// Stop mid-write is what it has to undo), so while it runs Back and
     /// Cancel are not offered. A review (`--dry-run`) writes nothing and can
     /// be canceled.
-    private(set) var isWriting = false
+    @Published private(set) var isWriting = false
     /// What to re-read once a run that writes has finished, whatever it came
     /// to: Settings › Account sets it (`ContentView.afterAccountChange`), so
     /// the account every pane gates on is never left stale, even when the
     /// Settings pane was left while the run went on.
+    /// Unpublished: a callback, which no view reads.
     var onAccountRunFinished: (() async -> Void)?
     /// The review in flight, which Cancel and Back stop.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var reviewTask: Task<Void, Never>?
     /// Bumped by every reset: a run that comes back after one is dropped.
+    /// Unpublished: bookkeeping, which nothing draws.
     private var generation = 0
     /// Settings › Account's Replace certificate and profile: the paid flow,
     /// sent with `--replace`, for a config that is already paid.
-    private(set) var replacing = false
+    @Published private(set) var replacing = false
     /// The last run's `init-step` sentences, in order.
-    private(set) var progress: [InitStepRecord] = []
-    var error: String?
+    @Published private(set) var progress: [InitStepRecord] = []
+    @Published var error: String?
 
     /// Holds sudden and automatic termination off while `--init` runs
     /// (whole-diff review, app-3).

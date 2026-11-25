@@ -118,6 +118,10 @@ version set in Edit App is a hold too; Get latest sets it back to latest.
 - Only apps your Apple ID has. If it doesn't have the app yet, get it first.
 - Apple doesn't serve every old version. One it won't describe or hand over
   says so, and you can pick another.
+- The App Store sometimes has more than one build with the same version
+  number. Graft numbers them from the oldest, so "1.2.0 (build 1 of 2)" is the
+  older and "1.2.0 (build 2 of 2)" the newer, and hovering over one says which
+  it is. Show More renumbers them when it finds an older one.
 - If the connection stalls, the list stops, and Try Again picks up where it
   stopped. A version that stalls twice in a row is marked as unavailable, and
   the list goes on.

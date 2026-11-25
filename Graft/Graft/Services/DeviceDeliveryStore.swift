@@ -1,5 +1,5 @@
 import Foundation
-import Observation
+import Combine
 
 private typealias Flag = CLIContract.Flag
 
@@ -36,8 +36,7 @@ private typealias Flag = CLIContract.Flag
 /// falling back to the unscoped state when the scoped one says `never`: that
 /// restores the lie in the one place built to expose it.
 @MainActor
-@Observable
-final class DeviceDeliveryStore {
+final class DeviceDeliveryStore: ObservableObject {
 
     /// What this store knows about one phone.
     ///
@@ -65,7 +64,7 @@ final class DeviceDeliveryStore {
 
     /// One readout per phone. A udid with no entry has never been loaded; read
     /// it through `readout(for:)`, which says so as `.pending`.
-    private(set) var readouts: [String: Readout] = [:]
+    @Published private(set) var readouts: [String: Readout] = [:]
 
     private let runner: CLIRunner
 

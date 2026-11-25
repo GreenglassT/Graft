@@ -57,6 +57,45 @@ final class IntelGatingTests: XCTestCase {
                        "This is the Intel build. On an Apple silicon Mac, download Graft.zip for everything.")
     }
 
+    /// Graft.zip needs macOS 14. On macOS 13, an Apple silicon Mac runs the
+    /// Intel download through Rosetta, and the banner and lines say Graft.zip
+    /// needs macOS 14 rather than send the user to a download that won't open.
+    func test_before_macos_14_the_intel_build_says_graft_zip_needs_it() throws {
+        var ventura = Self.intelDownloadOnAppleSilicon
+        ventura.macOSMajorVersion = 13
+        XCTAssertFalse(ventura.opensAppleSiliconDownload)
+        XCTAssertEqual(ventura.intelBuildBannerLine,
+                       "This is the Intel build. The Apple silicon download, Graft.zip, does everything, "
+                           + "but needs macOS 14 or later.")
+        XCTAssertEqual(ventura.unavailableLine,
+                       "Needs the Apple silicon download of Graft (Graft.zip) and macOS 14 or later")
+        let firstRun = try XCTUnwrap(ventura.firstRunLine)
+        XCTAssertTrue(firstRun.contains("needs the Apple silicon download (Graft.zip) and macOS 14 or later."), firstRun)
+
+        // From macOS 14, as before.
+        for version in [14, 15, 27] {
+            var sonoma = Self.intelDownloadOnAppleSilicon
+            sonoma.macOSMajorVersion = version
+            XCTAssertTrue(sonoma.opensAppleSiliconDownload)
+            XCTAssertEqual(sonoma.intelBuildBannerLine, MacSupport.intelBuildBanner)
+            XCTAssertEqual(sonoma.unavailableLine, MacSupport.needsAppleSiliconDownload)
+            XCTAssertEqual(sonoma.firstRunLine, Self.intelDownloadOnAppleSilicon.firstRunLine)
+        }
+
+        // An Intel Mac has nothing to download instead, on any macOS.
+        var intel = Self.intelMac
+        intel.macOSMajorVersion = 13
+        XCTAssertNil(intel.intelBuildBannerLine)
+        XCTAssertEqual(intel.unavailableLine, MacSupport.needsAppleSilicon)
+        XCTAssertEqual(intel.firstRunLine, Self.intelMac.firstRunLine)
+        XCTAssertNil(Self.appleSilicon.intelBuildBannerLine)
+    }
+
+    func test_this_mac_is_read_with_its_own_macos() {
+        XCTAssertEqual(MacSupport.thisMac.macOSMajorVersion,
+                       ProcessInfo.processInfo.operatingSystemVersion.majorVersion)
+    }
+
     // MARK: - App Store gets
 
     private func row(store: String?, cached: String?, license: AppStoreStore.LicenseNeed? = nil,
