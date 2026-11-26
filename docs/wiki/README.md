@@ -12,7 +12,7 @@ tweaks, and sends it to your iPhone or iPad. It works with a free Apple ID.
 - [App Store Downloads](app-store.md): once you've signed in and set up decryption, Graft downloads and decrypts the apps your Apple ID owns or can get for free.
 - [Tweaks](tweaks.md): tweaks from Canister or an APT repository go into your library, and you attach them to an app from there.
 - [Building & Delivery](building-and-delivery.md): building an app with its tweaks and pushing it into LiveContainer, or with a paid account installing it as a normal app.
-- [Updating Your Apps](building-and-delivery.md#updating-your-apps): Graft checks your apps and their tweaks for updates once a day, and brings an app up to date with Update & Install: the newer App Store version, newer tweaks, one build, installed on each device it's on.
+- [Updating Your Apps](building-and-delivery.md#updating-your-apps): Graft checks your apps and their tweaks for updates once a day, and brings an app up to date: the newer App Store version, newer tweaks, one build, installed on each device it's on.
 - [LiveContainer](livecontainer.md): the LiveContainer already on your device, or one Graft installs and updates with a paid account.
 
 ## Terminal

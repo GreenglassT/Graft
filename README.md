@@ -19,7 +19,7 @@ delivers the result to your iPhone or iPad over USB or Wi-Fi.
 - Finds tweaks on canister.me and in APT repositories, and checks them for
   updates.
 - Checks your apps and their tweaks for updates once a day, and brings an app
-  up to date with Update & Install: the newer App Store version, newer tweaks, one
+  up to date: the newer App Store version, newer tweaks, one
   build, installed on each device it's on.
 - Keeps a build history and archived builds for rollback, and tells you when
   a device is behind your config.
