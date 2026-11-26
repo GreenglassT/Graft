@@ -213,6 +213,9 @@ def test_a_livecontainer_app_on_a_free_account_is_not_refused(
     LiveContainer app gets as far as pre-flight."""
     cfg = load_config(free_cfg_path)
     reached = []
+    # A device to go to: the target is resolved before the pre-flight.
+    monkeypatch.setattr(cli_mod, "resolve_target",
+                        lambda cfg, app, explicit_udid=None: cli_mod.Target("UDID1", None, "usb"))
     monkeypatch.setattr(
         cli_mod, "run_all_checks",
         lambda *a, **k: reached.append(k["delivery"]) or _nothing_else(),

@@ -5,10 +5,12 @@ other files in folders of its own.
 
 Settings holds what most people change: the default device, how many archives
 to keep, the signing files on a paid account, the App Store Connect key, the
-App Store sign-in, and the paths Graft uses. Each app's Edit sheet holds its
-options. Everything is stored in `~/.config/graft/config.yaml`
-(`$XDG_CONFIG_HOME/graft` if set), which you can also edit by hand. A
-configured app looks like this:
+App Store sign-in, and the paths Graft uses. **Change** on an app's bar picks
+another device for the next Build & Install only (see
+[Which device a build goes to](building-and-delivery.md#which-device-a-build-goes-to)).
+Each app's Edit sheet holds its options. Everything is stored in
+`~/.config/graft/config.yaml` (`$XDG_CONFIG_HOME/graft` if set), which you can
+also edit by hand. A configured app looks like this:
 
 ```yaml
 signing:                                # paid only; leave it out for a free Apple ID

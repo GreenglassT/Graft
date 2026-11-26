@@ -55,7 +55,8 @@ def test_preflight_failure_emits_build_end_before_raising(tmp_path: Path, capsys
 
     cfg = _cfg(tmp_path)
     failing = [CheckResult(name="cyan", ok=False, hint="install cyan")]
-    with patch.object(cli_mod, "run_all_checks", return_value=failing):
+    with patch.object(cli_mod, "run_all_checks", return_value=failing), \
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("UDID1", None, "usb")):
         log = BuildLog(tmp_path / "log.sqlite")
         with pytest.raises(PreflightError):
             cli_mod._build_one(
@@ -76,6 +77,7 @@ def test_unexpected_exception_emits_build_end_before_raising(tmp_path: Path, cap
 
     cfg = _cfg(tmp_path)
     with patch.object(cli_mod, "run_all_checks", return_value=[]), \
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("UDID1", None, "usb")), \
          patch.object(cli_mod, "acquire_ipa", side_effect=RuntimeError("boom")):
         log = BuildLog(tmp_path / "log.sqlite")
         with pytest.raises(RuntimeError):

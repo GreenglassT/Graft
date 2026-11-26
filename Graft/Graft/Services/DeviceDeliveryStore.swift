@@ -89,6 +89,17 @@ final class DeviceDeliveryStore: ObservableObject {
         [Flag.json, Flag.deliveryState, Flag.device, udid]
     }
 
+    /// Read again every device's delivery states this store holds: after an
+    /// update, which may have installed on any of them, a device page that
+    /// is open would otherwise show its rows from before it (review 23-2,
+    /// item 7). Read on this Mac, so a device that isn't connected is read
+    /// too. One at a time, in UDID order.
+    func reload() async {
+        for udid in readouts.keys.sorted() {
+            await load(udid: udid)
+        }
+    }
+
     /// Read one phone's delivery states.
     ///
     /// A failure is recorded rather than swallowed — unlike `DeviceInfoStore`

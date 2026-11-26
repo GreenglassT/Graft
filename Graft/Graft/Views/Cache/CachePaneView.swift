@@ -35,15 +35,14 @@ struct CachePaneView: View {
     /// key a second copy on and nothing to gain from one.
     @ObservedObject var staged: StagedIPAStore
 
-    /// Hand this file to PlayCover, and answer with the CLI's complaint when
-    /// it could not be handed over — nil when it was.
+    /// Hand this file to PlayCover, and answer with what that did
+    /// (`MacInstall`): the CLI's complaint when it couldn't be handed over,
+    /// else the install or the wait running out, and what Graft did to the
+    /// app's PlayCover settings (spec 5d items 2 and 5).
     ///
     /// **A value comes back because a silent failure here is a dead button.**
-    /// Nothing is reported on success and nothing should be: `open` returns on
-    /// event delivery, so there is no finished install to narrate and PlayCover
-    /// shows its own progress (design spec §2). But PlayCover can be absent,
-    /// and then this is the only channel that can say so — `StagedIPAStore`
-    /// has no `lastError` by design.
+    /// PlayCover can be absent, and then this is the only channel that can say
+    /// so — `StagedIPAStore` has no `lastError` by design.
     ///
     /// Required, not defaulted — and the same goes for the two below.
     /// `InstalledAppsSection` defaults its callbacks on purpose, so a caller
@@ -68,7 +67,7 @@ struct CachePaneView: View {
     /// live during a row dump that the store had already refused. A required
     /// parameter makes forgetting one a build failure at the call site, which
     /// is why the hazard here has stayed hypothetical too.
-    let onInstallToMac: @MainActor (StagedIPARecord) async -> String?
+    let onInstallToMac: @MainActor (StagedIPARecord) async -> MacInstall
     /// Open the prefilled add sheet for this file.
     ///
     /// The one action here with nothing to answer: opening a sheet cannot
@@ -110,7 +109,7 @@ struct CachePaneView: View {
     ///   exactly that, and this is what caught it.
     init(
         staged: StagedIPAStore,
-        onInstallToMac: @escaping @MainActor (StagedIPARecord) async -> String?,
+        onInstallToMac: @escaping @MainActor (StagedIPARecord) async -> MacInstall,
         onAddAsApp: @escaping (StagedIPARecord) -> Void,
         onDelete: @escaping @MainActor (StagedIPARecord, Bool) async -> StagedIPAStore.DeleteAnswer,
         blocked: Blocked? = nil
@@ -130,6 +129,25 @@ struct CachePaneView: View {
     /// which earns that for the *listing* and not for these), so this is where
     /// their failures land.
     @State private var actionError: String?
+    /// Install to Mac…, while the CLI waits for PlayCover's install and after,
+    /// until dismissed (`MacInstallStrip`). A refusal goes to `actionError`.
+    @State private var macInstall: MacInstallRun?
+    /// The run `macInstall` follows, which the strip's Stop cancels: the
+    /// callback runs in it, so its CLI stops with it.
+    @State private var macInstallTask: Task<Void, Never>?
+
+    /// The file being handed over, and the CLI's answer once it's back.
+    struct MacInstallRun: Equatable {
+        let path: String
+        let app: String
+        var result: MacInstall?
+    }
+
+    /// The Install to Mac control's tooltip: what it does, and what to expect
+    /// of any app under PlayCover (spec 5d item 4).
+    static func installHelp(for record: StagedIPARecord) -> String {
+        "Install \(record.displayName) on this Mac with PlayCover. " + PlayCover.expectations
+    }
 
     /// The three controls a row draws.
     ///
@@ -446,6 +464,15 @@ struct CachePaneView: View {
             if let blocked {
                 objectionBar(blocked)
             }
+            if let macInstall {
+                MacInstallStrip(
+                    app: macInstall.app,
+                    lines: macInstall.result?.summaryLines(app: macInstall.app, retry: .cacheRow),
+                    onStop: { macInstallTask?.cancel() },
+                    onDismiss: { self.macInstall = nil }
+                )
+                Divider().background(Palette.line)
+            }
             content
         }
         .background(Palette.bg)
@@ -561,10 +588,21 @@ struct CachePaneView: View {
         switch control {
         case .installToMac:
             actionError = nil
-            // Nothing is shown when this succeeds, and that is the honest
-            // ceiling: `open` returns on delivery, so a "done" here would
-            // claim an install neither side can see.
-            Task { actionError = await onInstallToMac(record) }
+            let run = MacInstallRun(path: record.path, app: record.displayName)
+            macInstall = run
+            macInstallTask = Task {
+                let result = await onInstallToMac(record)
+                // Only if this is still the run on screen.
+                guard macInstall == run else { return }
+                if let complaint = result.complaint {
+                    macInstall = nil
+                    actionError = complaint
+                } else {
+                    macInstall = MacInstallRun(
+                        path: run.path, app: result.appName(or: run.app), result: result
+                    )
+                }
+            }
         case .addAsApp:
             onAddAsApp(record)
         case .delete:
@@ -778,16 +816,18 @@ struct CacheRow: View {
     /// `CachePaneTests`' click section passes if two of these swap.
     private var controls: some View {
         HStack(spacing: Self.controlSpacing) {
-            control(Symbols.installToMac,
-                    help: mac.unavailableLine ?? "Install \(record.displayName) on this Mac with PlayCover.") {
+            control(Symbols.installToMac, label: "Install \(record.displayName) on this Mac",
+                    help: mac.unavailableLine ?? CachePaneView.installHelp(for: record)) {
                 onInstall(record)
             }
             // Disabled, not gone: the three keep their places (`CachePaneTests`).
             .disabled(mac.unavailableLine != nil)
-            control(Symbols.add, help: "Add \(record.displayName) to your apps, prefilled from this dump.") {
+            control(Symbols.add, label: "Add \(record.displayName) as an app",
+                    help: "Add \(record.displayName) to your apps, prefilled from this dump.") {
                 onAdd(record)
             }
-            control(Symbols.delete, help: "Delete \(record.filename) from the cache.") {
+            control(Symbols.delete, label: "Delete \(record.filename)",
+                    help: "Delete \(record.filename) from the cache.") {
                 onDelete(record)
             }
         }
@@ -800,8 +840,11 @@ struct CacheRow: View {
     /// idiom `TweaksView`'s toolbar Refresh uses, which is what makes the
     /// whole square answer a click rather than only the inked pixels of the
     /// glyph.
+    ///
+    /// `label` is what VoiceOver reads: a glyph alone reads by its symbol's
+    /// name, "Trash" on every row.
     private func control(
-        _ symbol: Symbol, help: String, action: @escaping () -> Void
+        _ symbol: Symbol, label: String, help: String, action: @escaping () -> Void
     ) -> some View {
         Button(action: action) { symbol.image }
             .buttonStyle(.plain)
@@ -809,5 +852,6 @@ struct CacheRow: View {
             .frame(width: Self.controlSize, height: Self.controlSize)
             .contentShape(Rectangle())
             .help(help)
+            .accessibilityLabel(label)
     }
 }

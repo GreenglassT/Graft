@@ -28,9 +28,10 @@ final class UpdateStoreTests: XCTestCase {
     /// One `update-check` line, through `JSONSerialization`.
     private func line(
         ok: Bool = true, current: String = "2.0", latest: String? = "2.0.1",
-        available: Bool = true, url: String? = page, message: String? = nil
+        available: Bool = true, url: String? = page, message: String? = nil,
+        needsMacos: String? = nil
     ) -> String {
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "type": "update-check", "ok": ok, "current": current,
             "latest": (ok ? latest : nil) as Any? ?? NSNull(),
             "url": (ok ? url : nil) as Any? ?? NSNull(),
@@ -39,6 +40,7 @@ final class UpdateStoreTests: XCTestCase {
             "status": NSNull(),
             "message": message as Any? ?? NSNull(),
         ]
+        if let needsMacos { payload["needs_macos"] = needsMacos }
         let data = try! JSONSerialization.data(withJSONObject: payload)
         return String(data: data, encoding: .utf8)!
     }
@@ -494,11 +496,15 @@ final class UpdateStoreTests: XCTestCase {
 
     private static func notDownloaded(
         _ reason: String, _ message: String, version: String = "2.0.1",
-        url: String? = nil
+        url: String? = nil, needsMacos: String? = nil
     ) -> String {
-        json(["type": "update-download-end", "ok": false, "current": "2.0", "version": nil, "app_path": nil,
-              "url": url ?? "https://github.com/GreenglassT/Graft/releases/tag/v\(version)",
-              "reason": reason, "message": message])
+        var payload: [String: Any?] = [
+            "type": "update-download-end", "ok": false, "current": "2.0", "version": nil, "app_path": nil,
+            "url": url ?? "https://github.com/GreenglassT/Graft/releases/tag/v\(version)",
+            "reason": reason, "message": message,
+        ]
+        if let needsMacos { payload["needs_macos"] = needsMacos }
+        return json(payload)
     }
 
     private static func installed(ok: Bool = true, message: String? = nil, reason: String = "not-writable") -> String {
@@ -518,7 +524,8 @@ final class UpdateStoreTests: XCTestCase {
     private static let appPath = "/private/var/empty/Example/Graft.app"
 
     private func updatingStore(
-        _ cli: UpdateCLI, defaults: UserDefaults, appVersion: String = "2.0"
+        _ cli: UpdateCLI, defaults: UserDefaults, appVersion: String = "2.0",
+        support: MacSupport = .appleSilicon, macOSVersion: [Int]? = nil
     ) -> UpdateStore {
         UpdateStore(
             runner: cli.runner, defaults: defaults, now: { [clock] in clock.now },
@@ -527,7 +534,8 @@ final class UpdateStoreTests: XCTestCase {
             host: SelfUpdateHost(
                 appPath: Self.appPath, pid: 4242, hold: hold,
                 terminate: { [weak self] in self?.terminated += 1 }
-            )
+            ),
+            support: support, macOSVersion: macOSVersion
         )
     }
 
@@ -854,7 +862,7 @@ final class UpdateStoreTests: XCTestCase {
 
         let sut = updatingStore(cli, defaults: defaults)
 
-        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake, retryable: false))
+        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake(.appleSilicon), retryable: false))
         XCTAssertNil(defaults.data(forKey: UpdateStore.Key.attempt), "said once")
         XCTAssertEqual(defaults.string(forKey: UpdateStore.Key.failedVersion), "2.0.1")
     }
@@ -983,7 +991,7 @@ final class UpdateStoreTests: XCTestCase {
 
         let sut = updatingStore(try UpdateCLI(test: self), defaults: defaults)
 
-        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake, retryable: false))
+        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake(.appleSilicon), retryable: false))
     }
 
     /// A time with anything but a plain ±hhmm after it isn't the helper's,
@@ -1031,7 +1039,7 @@ final class UpdateStoreTests: XCTestCase {
 
             let sut = updatingStore(try UpdateCLI(test: self), defaults: defaults)
 
-            XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake, retryable: false), name)
+            XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake(.appleSilicon), retryable: false), name)
             XCTAssertEqual(defaults.string(forKey: UpdateStore.Key.failedVersion), "2.0.1", name)
         }
     }
@@ -1046,7 +1054,7 @@ final class UpdateStoreTests: XCTestCase {
 
         let sut = updatingStore(try UpdateCLI(test: self), defaults: defaults)
 
-        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake, retryable: false))
+        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake(.appleSilicon), retryable: false))
     }
 
     /// Only the log's last stretch is read: the helper appends to it on
@@ -1355,7 +1363,8 @@ final class UpdateStoreTests: XCTestCase {
             hold: hold,
             present: { _, _ in XCTFail("nothing is held: nothing to ask"); return { $0() } },
             reply: { replies.append($0) },
-            schedule: { _, _ in }
+            schedule: { _, _ in },
+            notice: { _ in }
         )
         quitGuard.handover = sut
 
@@ -1389,6 +1398,69 @@ final class UpdateStoreTests: XCTestCase {
 
         XCTAssertEqual(UpdatesSection.toggleTitle, "Check for updates automatically")
         XCTAssertEqual(UpdatesSection.installToggleTitle, "Download and install updates automatically")
+    }
+
+    /// Downloading the update by hand names the download that opens on this
+    /// Mac. An Intel Mac's is Graft-Intel.zip, on any macOS. Graft.zip needs
+    /// macOS 14, so an Apple silicon Mac before it gets Graft-Intel.zip, and
+    /// why. On an Apple silicon Mac from macOS 14 the words are as they were.
+    func test_a_by_hand_update_names_the_download_for_this_macs_macos() async throws {
+        let appleSiliconBefore14 = [
+            MacSupport(appleSiliconMac: true, build: .flavor(.x86_64), macOSMajorVersion: 13),
+        ]
+        let intelMac = [
+            MacSupport(appleSiliconMac: false, build: .flavor(.x86_64), macOSMajorVersion: 13),
+            MacSupport(appleSiliconMac: false, build: .flavor(.x86_64), macOSMajorVersion: 15),
+        ]
+        let appleSiliconFrom14 = [
+            MacSupport.appleSilicon,
+            MacSupport(appleSiliconMac: true, build: .flavor(.x86_64), macOSMajorVersion: 14),
+        ]
+        let intelOnly = "(Graft-Intel.zip, since Graft.zip needs macOS 14 or later)"
+        let intel = "(Graft-Intel.zip)"
+        let either = "(Graft.zip, or Graft-Intel.zip for an Intel Mac)"
+        XCTAssertEqual(UpdateStore.installDidNotTake(.appleSilicon),
+                       "Graft couldn't replace itself, so it's still the version you had. Download the "
+                       + "new version from the release page (Graft.zip, or Graft-Intel.zip for an Intel "
+                       + "Mac) and replace Graft.app in Applications. The update log is in "
+                       + "~/Library/Logs/Graft/update.log.",
+                       "on macOS 14 and later, word for word as before")
+
+        for (supports, words, other) in [
+            (appleSiliconBefore14, intelOnly, either), (intelMac, intel, "Graft.zip,"),
+            (appleSiliconFrom14, either, intelOnly),
+        ] {
+            for support in supports {
+                let name = "\(support)"
+                // An install that didn't take, read at launch.
+                let defaults = try throwawayDefaults()
+                defaults.set(try JSONEncoder().encode(UpdateStore.Attempt(version: "2.0.1", from: "2.0")),
+                             forKey: UpdateStore.Key.attempt)
+                let relaunched = UpdateStore(
+                    runner: try fakeCLI(line()).runner, defaults: defaults, now: { [clock] in clock.now },
+                    appVersion: "2.0", open: { _ in }, updateLog: updateLog, support: support
+                )
+                guard case let .failed(_, message, _) = relaunched.phase else {
+                    XCTFail("the attempt didn't read as failed: \(name)")
+                    continue
+                }
+                XCTAssertEqual(message, UpdateStore.installDidNotTake(support), name)
+                XCTAssertTrue(message.contains(words), "\(message) — \(name)")
+                XCTAssertFalse(message.contains(other), "\(message) — \(name)")
+
+                // Check for Updates… in a copy that can't update itself.
+                let cannot = UpdateStore(
+                    runner: try fakeCLI(line()).runner, defaults: try throwawayDefaults(),
+                    now: { [clock] in clock.now }, appVersion: "2.0", open: { _ in },
+                    updateLog: updateLog, support: support
+                )
+                await cannot.checkNow()
+                let alert = try XCTUnwrap(cannot.answerAlert?.message, name)
+                XCTAssertTrue(alert.contains("Download the new version from its release page \(words)"),
+                              "\(alert) — \(name)")
+                XCTAssertFalse(alert.contains(other), "\(alert) — \(name)")
+            }
+        }
     }
 
     // MARK: Check for Updates… while updating
@@ -1579,6 +1651,241 @@ final class UpdateStoreTests: XCTestCase {
         }
     }
 
+    // MARK: A release this Mac's macOS can't run
+
+    private static let floorLine = "Graft 2.0.1 needs macOS 15.0 or later; this Mac stays on Graft 2.0."
+
+    /// The check says the latest release needs a newer macOS than this
+    /// Mac's (`needs_macos`, with `update_available` false). Check for
+    /// Updates… said "You're up to date"; it says what the release needs,
+    /// with its page and nothing to update with. The banner says it too, as
+    /// information, until it's dismissed for that release; a newer release
+    /// that needs it too is said again.
+    func test_a_release_that_needs_a_newer_macos_is_said_and_not_offered() async throws {
+        let defaults = try throwawayDefaults()
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line(available: false, needsMacos: "15.0"))
+        try cli.write("download.sh", Self.prints(Self.downloaded()))
+        let sut = updatingStore(cli, defaults: defaults)
+
+        await sut.checkNow()
+
+        XCTAssertEqual(sut.lastAnswer?.needsMacos, "15.0", "decoded")
+        XCTAssertEqual(sut.answerAlert, UpdateStore.CheckAlert(
+            title: "Graft 2.0.1 needs a newer macOS", message: Self.floorLine, action: nil,
+            release: sut.lastAnswer, cancel: "OK"
+        ))
+        XCTAssertEqual(sut.notice, UpdateStore.Notice(version: "2.0.1", state: .needsNewerMacOS(Self.floorLine)))
+        XCTAssertEqual(UpdateNotice.text(try XCTUnwrap(sut.notice)), Self.floorLine)
+        sut.update()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(cli.runs(of: "--download-update"), [], "nothing this Mac can run to download")
+
+        sut.dismissAnswer()
+        sut.dismissMacOSFloor()
+        XCTAssertNil(sut.notice, "dismissed")
+        let relaunched = updatingStore(cli, defaults: defaults)
+        XCTAssertNil(relaunched.notice, "dismissed for that release, across a launch")
+        await relaunched.checkNow()
+        XCTAssertEqual(relaunched.answerAlert?.title, "Graft 2.0.1 needs a newer macOS", "asked, it still says")
+
+        try cli.write("check", line(latest: "2.0.2", available: false, needsMacos: "15.0"))
+        await relaunched.checkNow()
+        XCTAssertEqual(relaunched.notice?.version, "2.0.2", "a newer release is said again")
+        XCTAssertEqual(cli.runs(of: "--download-update"), [])
+    }
+
+    /// A download the CLI refused because this Mac's macOS is older than
+    /// the release needs (`not-for-this-mac`, with `needs_macos`, or saying
+    /// so in its sentence). Not a failure: no warning and no Try Again, and
+    /// no later launch downloads it again (each did, with automatic install
+    /// on, and put up a warning that couldn't be dismissed). It's said once,
+    /// as information. The CLI's next check names the floor it now knows.
+    func test_a_download_refused_for_this_macos_is_said_once_and_not_tried_again() async throws {
+        let sentence = "Graft 2.0.1 needs macOS 15.0 or later, and this Mac has macOS 14.6, so there's no "
+            + "update for this Mac. It stays on Graft 2.0."
+        for (name, end) in [
+            ("field", Self.notDownloaded("not-for-this-mac", sentence, needsMacos: "15.0")),
+            ("sentence", Self.notDownloaded("not-for-this-mac", sentence)),
+        ] {
+            let defaults = try throwawayDefaults()
+            let cli = try UpdateCLI(test: self)
+            try cli.write("check", line())
+            try cli.write("download.sh", Self.prints(end, status: 1))
+            let sut = updatingStore(cli, defaults: defaults)
+            await sut.checkIfDue()
+            await eventually({ sut.notice?.state == .needsNewerMacOS(Self.floorLine) }, name)
+            XCTAssertEqual(sut.phase, .idle, "\(name): not a failure")
+
+            try cli.write("check", line(available: false, needsMacos: "15.0"))
+            await sut.checkNow()
+            XCTAssertEqual(sut.answerAlert, UpdateStore.CheckAlert(
+                title: "Graft 2.0.1 needs a newer macOS", message: Self.floorLine, action: nil,
+                release: sut.lastAnswer, cancel: "OK"
+            ), "\(name): no Try Again")
+
+            let relaunched = updatingStore(cli, defaults: defaults)
+            await relaunched.checkIfDue()
+            try await Task.sleep(for: .milliseconds(300))
+            XCTAssertEqual(cli.runs(of: "--download-update").count, 1, "\(name): a launch downloaded it again")
+            XCTAssertEqual(relaunched.notice?.state, .needsNewerMacOS(Self.floorLine), name)
+            relaunched.dismissMacOSFloor()
+            XCTAssertNil(relaunched.notice, name)
+            XCTAssertNil(updatingStore(cli, defaults: defaults).notice, "\(name): dismissed stays dismissed")
+        }
+    }
+
+    /// The refusal is kept for the macOS it was made on: once this Mac is
+    /// on a newer one, the release is offered and downloaded again.
+    func test_a_macos_refusal_lapses_on_a_newer_macos() async throws {
+        let defaults = try throwawayDefaults()
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        try cli.write("download1.sh", Self.prints(
+            Self.notDownloaded("not-for-this-mac", "Graft 2.0.1 needs macOS 15.0 or later.", needsMacos: "15.0"),
+            status: 1))
+        try cli.write("download.sh", Self.prints(Self.downloaded()))
+        let sut = updatingStore(cli, defaults: defaults,
+                                support: MacSupport(appleSiliconMac: true, build: .flavor(.arm64), macOSMajorVersion: 14))
+        await sut.checkIfDue()
+        await eventually({ sut.notice?.state == .needsNewerMacOS(Self.floorLine) })
+
+        let upgraded = updatingStore(cli, defaults: defaults,
+                                     support: MacSupport(appleSiliconMac: true, build: .flavor(.arm64), macOSMajorVersion: 15))
+        XCTAssertNil(upgraded.floorRefusal)
+        XCTAssertNil(upgraded.macOSFloor)
+        await upgraded.checkIfDue()
+        await eventually({ upgraded.phase == .ready(version: "2.0.1") }, "downloaded on the newer macOS")
+        XCTAssertEqual(cli.runs(of: "--download-update").count, 2)
+    }
+
+    /// A floor can be a minor version: 2.0.1 needs macOS 15.4, refused on
+    /// 15.2. After 15.3 it's still refused; after 15.5 it's offered and
+    /// downloaded, without waiting for macOS 16 or a newer release.
+    func test_a_macos_refusal_lapses_on_a_minor_upgrade_that_meets_it() async throws {
+        let defaults = try throwawayDefaults()
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        try cli.write("download1.sh", Self.prints(
+            Self.notDownloaded("not-for-this-mac", "Graft 2.0.1 needs macOS 15.4 or later.", needsMacos: "15.4"),
+            status: 1))
+        try cli.write("download.sh", Self.prints(Self.downloaded()))
+        let line154 = "Graft 2.0.1 needs macOS 15.4 or later; this Mac stays on Graft 2.0."
+        let refused = updatingStore(cli, defaults: defaults, macOSVersion: [15, 2])
+        await refused.checkIfDue()
+        await eventually({ refused.notice?.state == .needsNewerMacOS(line154) }, "refused on 15.2")
+
+        let stillOlder = updatingStore(cli, defaults: defaults, macOSVersion: [15, 3, 1])
+        await stillOlder.checkIfDue()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(stillOlder.notice?.state, .needsNewerMacOS(line154), "15.3.1 is still older than 15.4")
+        XCTAssertEqual(cli.runs(of: "--download-update").count, 1)
+
+        let upgraded = updatingStore(cli, defaults: defaults, macOSVersion: [15, 5])
+        XCTAssertNil(upgraded.floorRefusal, "15.5 meets 15.4")
+        XCTAssertNil(upgraded.macOSFloor)
+        await upgraded.checkIfDue()
+        await eventually({ upgraded.phase == .ready(version: "2.0.1") }, "downloaded on 15.5")
+        XCTAssertEqual(cli.runs(of: "--download-update").count, 2)
+    }
+
+    /// A check that offers the refused release and names no floor drops the
+    /// refusal, so it's offered and, on the next launch, downloaded again:
+    /// the CLI, which reads the release, knows better than a refusal kept
+    /// from before.
+    func test_a_check_offering_the_refused_release_drops_the_refusal() async throws {
+        let defaults = try throwawayDefaults()
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        try cli.write("download1.sh", Self.prints(
+            Self.notDownloaded("not-for-this-mac", "Graft 2.0.1 needs macOS 15.4 or later.", needsMacos: "15.4"),
+            status: 1))
+        try cli.write("download.sh", Self.prints(Self.downloaded()))
+        let sut = updatingStore(cli, defaults: defaults, macOSVersion: [15, 2])
+        await sut.checkIfDue()
+        await eventually({ sut.floorRefusal != nil }, "premise: refused")
+
+        await sut.checkNow()
+
+        XCTAssertNil(sut.floorRefusal)
+        XCTAssertNil(defaults.data(forKey: UpdateStore.Key.floorRefusal), "and not kept for the next launch")
+        XCTAssertEqual(sut.answerAlert?.action, .update, "offered again")
+        let relaunched = updatingStore(cli, defaults: defaults, macOSVersion: [15, 2])
+        await relaunched.checkIfDue()
+        await eventually({ relaunched.phase == .ready(version: "2.0.1") }, "downloaded on the next launch")
+        XCTAssertEqual(cli.runs(of: "--download-update").count, 2)
+    }
+
+    /// A check's "needs macOS 15.4" kept from 15.2 doesn't outlast an upgrade
+    /// to 15.5: the launch drops it and checks again at once, rather than
+    /// the banner saying it needs a newer macOS until the day is up.
+    func test_a_saved_needs_macos_answer_lapses_once_this_mac_meets_it() async throws {
+        let defaults = try throwawayDefaults()
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check1", line(available: false, needsMacos: "15.4"))
+        try cli.write("check", line())
+        try cli.write("download.sh", Self.prints(Self.downloaded()))
+        let before = updatingStore(cli, defaults: defaults, macOSVersion: [15, 2])
+        await before.checkIfDue()
+        XCTAssertEqual(before.notice?.state,
+                       .needsNewerMacOS("Graft 2.0.1 needs macOS 15.4 or later; this Mac stays on Graft 2.0."))
+        XCTAssertEqual(updatingStore(cli, defaults: defaults, macOSVersion: [15, 2]).macOSFloor?.version, "2.0.1",
+                       "kept across a launch on the same macOS")
+
+        let upgraded = updatingStore(cli, defaults: defaults, macOSVersion: [15, 5])
+        XCTAssertNil(upgraded.lastAnswer, "the saved answer is dropped")
+        XCTAssertNil(upgraded.notice)
+        await upgraded.checkIfDue()
+        XCTAssertEqual(cli.runs(of: "--check-update").count, 2, "checked again at once, not in a day")
+        await eventually({ upgraded.phase == .ready(version: "2.0.1") }, "and the release downloaded")
+    }
+
+    func test_a_macos_meets_a_floor_number_by_number() {
+        XCTAssertTrue(UpdateStore.macOS([15, 5], meets: "15.4"))
+        XCTAssertTrue(UpdateStore.macOS([15, 4], meets: "15.4"))
+        XCTAssertTrue(UpdateStore.macOS([15, 4, 0], meets: "15.4"))
+        XCTAssertTrue(UpdateStore.macOS([16], meets: "15.4"))
+        XCTAssertFalse(UpdateStore.macOS([15, 3, 9], meets: "15.4"))
+        XCTAssertFalse(UpdateStore.macOS([15], meets: "15.0.1"))
+        XCTAssertFalse(UpdateStore.macOS([14, 9], meets: "15"))
+    }
+
+    /// `not-for-this-mac` for a release with no zip of this build yet keeps
+    /// its old meaning: a failure Try Again can help, as the zip can be added
+    /// at any time.
+    func test_a_release_with_no_zip_for_this_mac_is_still_a_retryable_failure() async throws {
+        let missing = "The latest release has no Graft.zip, the download for Macs with Apple silicon, so "
+            + "there's no update for this Mac yet."
+        let cli = try UpdateCLI(test: self)
+        try cli.write("check", line())
+        try cli.write("download.sh", Self.prints(Self.notDownloaded("not-for-this-mac", missing), status: 1))
+        let sut = updatingStore(cli, defaults: try throwawayDefaults())
+        await sut.checkIfDue()
+        await eventually({ if case .failed = sut.phase { return true }; return false })
+        XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: missing, retryable: true))
+        XCTAssertNil(sut.floorRefusal)
+        await sut.checkNow()
+        XCTAssertEqual(sut.answerAlert?.action, .tryAgain)
+    }
+
+    /// What tells the two meanings of `not-for-this-mac` apart: the field
+    /// first, then the sentence, and only plain versions.
+    func test_a_macos_floor_is_read_from_the_field_then_the_sentence() throws {
+        func end(_ reason: String, _ message: String, needsMacos: String? = nil) throws -> UpdateDownloadRecord {
+            let json = Self.notDownloaded(reason, message, needsMacos: needsMacos)
+            guard case let .updateDownloadEnd(record)? = json.buildEvents().first else {
+                XCTFail("fixture did not decode: \(json)")
+                throw FixtureError()
+            }
+            return record
+        }
+        XCTAssertEqual(UpdateStore.macOSFloor(of: try end("not-for-this-mac", "No.", needsMacos: "15.0")), "15.0")
+        XCTAssertEqual(UpdateStore.macOSFloor(of: try end("not-for-this-mac", "It needs macOS 15.2 or later.")), "15.2")
+        XCTAssertNil(UpdateStore.macOSFloor(of: try end("not-for-this-mac", "No zip for this Mac yet.")))
+        XCTAssertNil(UpdateStore.macOSFloor(of: try end("signature", "It needs macOS 15.0 or later.")))
+        XCTAssertNil(UpdateStore.macOSFloor(of: try end("not-for-this-mac", "No.", needsMacos: "15/../x")))
+    }
+
     /// An install that didn't take (the next launch is still the old
     /// version) says to download it by hand: no Try Again. An install the
     /// helper couldn't start is the same as a download: Try Again unless
@@ -1593,7 +1900,7 @@ final class UpdateStoreTests: XCTestCase {
         await relaunched.checkNow()
 
         XCTAssertEqual(relaunched.answerAlert, UpdateStore.CheckAlert(
-            title: "Graft couldn't update to 2.0.1", message: UpdateStore.installDidNotTake, action: nil,
+            title: "Graft couldn't update to 2.0.1", message: UpdateStore.installDidNotTake(.appleSilicon), action: nil,
             release: relaunched.lastAnswer, cancel: "Later"
         ))
 

@@ -84,7 +84,7 @@ final class ObservableStoresTests: XCTestCase {
             A view holds a store it doesn't observe, and reads it while drawing, so it \
             would not redraw when the store changes. Use @ObservedObject (@StateObject \
             where the view makes it, @ObservedOptionalObject for an optional one). \
-            @PassedThrough, or plain @State for a store the view makes, is only for a \
+            @PassedThrough, or @KeptState for a store the view makes, is only for a \
             store the view hands to a child view's initializer or uses inside a Task:
             \(found.map(\.description).joined(separator: "\n"))
             """)
@@ -155,13 +155,22 @@ final class ObservableStoresTests: XCTestCase {
             @PassedThrough var leaky: SampleStore
             @PassedThrough var called: SampleStore
             @PassedThrough var bound: SampleStore
+            @State private var keyed: SampleStore
+            @PassedThrough var keyRead: SampleStore
+            @KeptState private var lazily: SampleStore
+            @KeptState private var lazilyRead: SampleStore
             @ObservedObject var outer: OuterStore
-            init(handed: SampleStore, leaky: SampleStore, called: SampleStore, bound: SampleStore, outer: OuterStore) {
+            init(handed: SampleStore, leaky: SampleStore, called: SampleStore, bound: SampleStore,
+                 keyRead: SampleStore, outer: OuterStore) {
                 self.handed = handed
                 _kept = State(initialValue: SampleStore())
                 self.leaky = leaky
                 self.called = called
                 self.bound = bound
+                _keyed = State(initialValue: SampleStore())
+                self.keyRead = keyRead
+                _lazily = KeptState(wrappedValue: SampleStore())
+                _lazilyRead = KeptState(wrappedValue: SampleStore())
                 self.outer = outer
             }
             var body: some View {
@@ -174,8 +183,14 @@ final class ObservableStoresTests: XCTestCase {
                     Text("\\(outer.inner.shown)")
                     Text("\\(outer.sent.shown)")
                     SampleChild(store: outer.inner)
+                    SampleChild(store: lazily)
+                    Text("\\(lazilyRead.shown)")
                 }
                 .task { await kept.work() }
+                .task(id: [AnyHashable(1), AnyHashable(outer.sent.shown)]) {
+                    await keyed.work()
+                }
+                .task(id: AnyHashable(keyRead.shown)) {}
                 .onAppear { Task { outer.inner.work() } }
             }
         }
@@ -192,11 +207,12 @@ final class ObservableStoresTests: XCTestCase {
         XCTAssertEqual(scan.unobserved.map(\.text), [
             "let bad: SampleStore", "var optional: SampleStore? = nil", "@State private var made = SampleStore()",
             "@PassedThrough var leaky: SampleStore", "@PassedThrough var called: SampleStore",
-            "@PassedThrough var bound: SampleStore",
+            "@PassedThrough var bound: SampleStore", "@PassedThrough var keyRead: SampleStore",
+            "@KeptState private var lazilyRead: SampleStore",
         ])
-        XCTAssertEqual(scan.passedThrough, 2, "handed and kept are only handed on")
+        XCTAssertEqual(scan.passedThrough, 4, "handed, kept, keyed and lazily are only handed on")
         XCTAssertEqual(scan.readsNested.map(\.text), [#"Text("\(outer.inner.shown)")"#])
-        XCTAssertEqual(scan.holding, 13)
+        XCTAssertEqual(scan.holding, 17)
     }
 
     /// What `declared(in:)` found across every source, which a file's scan
@@ -330,7 +346,7 @@ final class ObservableStoresTests: XCTestCase {
                     let observes = ["@ObservedObject", "@StateObject", "@ObservedOptionalObject"]
                     if observes.contains(where: { held.attributes.contains($0) }) {
                         // Observed: fine.
-                    } else if held.attributes.contains("@PassedThrough") || held.attributes.contains("@State"),
+                    } else if ["@PassedThrough", "@State", "@KeptState"].contains(where: { held.attributes.contains($0) }),
                               reads(of: held.name, in: body, views: declared.views).isEmpty {
                         scan.passedThrough += 1
                     } else {
@@ -364,10 +380,32 @@ final class ObservableStoresTests: XCTestCase {
         func at(_ i: Int) -> Character? {
             i >= 0 && i < text.length ? Character(UnicodeScalar(text.character(at: i)) ?? " ") : nil
         }
+        /// The `{` a `Task` or `.task` closure opens with, from just past the
+        /// word: through its arguments, if it has any, to the parenthesis that
+        /// closes them — matched by depth, so `.task(id: [AnyHashable(a),
+        /// AnyHashable(b)])` is one call. nil when no closure follows. Only
+        /// the closure is after drawing: an argument, a `.task(id:)`'s id, is
+        /// read while drawing, and stays a read.
+        func actionBrace(after end: Int) -> Int? {
+            var j = end
+            while let c = at(j), c.isWhitespace { j += 1 }
+            if at(j) == "(" {
+                var depth = 0
+                while let c = at(j) {
+                    if c == "(" { depth += 1 }
+                    if c == ")" { depth -= 1; if depth == 0 { break } }
+                    j += 1
+                }
+                guard at(j) == ")" else { return nil }
+                j += 1
+                while let c = at(j), c.isWhitespace { j += 1 }
+            }
+            return at(j) == "{" ? j : nil
+        }
         var actions: [Range<Int>] = []
-        let action = try! NSRegularExpression(pattern: #"(?<![\w.])Task\s*(?:\([^)]*\))?\s*\{|\.task\s*(?:\([^)]*\))?\s*\{"#)
+        let action = try! NSRegularExpression(pattern: #"(?<![\w.])Task\b|\.task\b"#)
         for m in action.matches(in: code, range: whole) {
-            let open = m.range.location + m.range.length - 1
+            guard let open = actionBrace(after: m.range.location + m.range.length) else { continue }
             var depth = 0, j = open
             while let c = at(j) {
                 if c == "{" { depth += 1 }
@@ -553,6 +591,78 @@ final class ObservableStoresTests: XCTestCase {
         let app = try XCTUnwrap(Self.appSources().first { $0.path == "GraftApp.swift" }).source
         XCTAssertTrue(app.contains("    @State private var store: ConfigStore\n"))
         XCTAssertTrue(app.contains("    @State private var updates: UpdateStore\n"))
+    }
+
+    /// `@State(initialValue:)` makes its value on every init of the view and
+    /// keeps the first: `ContentView`, made again each time `GraftApp`'s body
+    /// runs, made seven stores each time and threw them away. A store a view
+    /// makes and only hands on is `@KeptState`, made once.
+    func test_no_view_makes_a_store_on_every_init() throws {
+        let sources = try Self.appSources()
+        let declared = Self.declared(in: sources)
+        let made = try NSRegularExpression(pattern: #"\bState\(\s*initialValue:\s*([\w.]+)\("#)
+        var found: [String] = []
+        for (path, source) in sources {
+            let code = NoRealDefaultsTests.blankCommentsAndStrings(source)
+            for m in made.matches(in: code, range: NSRange(code.startIndex..., in: code)) {
+                guard let r = Range(m.range(at: 1), in: code),
+                      declared.stores.contains(String(code[r]).split(separator: ".").last.map(String.init) ?? "")
+                else { continue }
+                found.append("\(path): \(code[r])")
+            }
+        }
+        XCTAssertEqual(found, [], "make these with @KeptState, which makes a store once")
+        let content = try XCTUnwrap(sources.first { $0.path == "Views/ContentView.swift" }).source
+        XCTAssertTrue(content.contains("    @KeptState private var artworkStore: ArtworkStore\n"),
+                      "premise: ContentView's stores were found")
+    }
+
+    /// `@KeptState` makes its value the first time the view is on screen,
+    /// once, however often the view is made again; `@State(initialValue:)`,
+    /// beside it, makes one per init.
+    func test_kept_state_makes_its_value_once() {
+        KeptHarness.Kept.made = 0
+        KeptHarness.Plain.made = 0
+        let first = KeptHarness(generation: 0)
+        XCTAssertEqual(KeptHarness.Kept.made, 0, "nothing is made before the view is on screen")
+        let host = NSHostingView(rootView: first)
+        host.frame = NSRect(x: 0, y: 0, width: 200, height: 40)
+        host.layoutSubtreeIfNeeded()
+        for generation in 1...5 {
+            host.rootView = KeptHarness(generation: generation)
+            host.layoutSubtreeIfNeeded()
+        }
+        XCTAssertEqual(KeptHarness.Plain.made, 6, "premise: the view was made six times")
+        XCTAssertEqual(KeptHarness.Kept.made, 1)
+        XCTAssertEqual(KeptHarness.shown, 1, "every draw read the one value made")
+    }
+
+    private struct KeptHarness: View {
+        final class Kept {
+            static var made = 0
+            let serial: Int
+            init() { Kept.made += 1; serial = Kept.made }
+        }
+        final class Plain {
+            static var made = 0
+            init() { Plain.made += 1 }
+        }
+        static var shown = 0
+
+        let generation: Int
+        @KeptState private var kept: Kept
+        @State private var plain: Plain
+
+        init(generation: Int) {
+            self.generation = generation
+            _kept = KeptState(wrappedValue: Kept())
+            _plain = State(initialValue: Plain())
+        }
+
+        var body: some View {
+            Self.shown = kept.serial
+            return Text("\(generation)")
+        }
     }
 
     /// The properties views bind or read that a test can set directly:

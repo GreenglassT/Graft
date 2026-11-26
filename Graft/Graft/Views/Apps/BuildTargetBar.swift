@@ -17,12 +17,17 @@ import SwiftUI
 /// nothing at all about the options the build will carry.
 ///
 /// **The sentences, longest first, because they are what has to fit one line at
-/// the app's 900pt minimum width.** `.noDevice` 58 characters, `.notDelivering`
-/// up to 55 when it stays quiet ("Install skipped …"), `.overrideUnreadable`
-/// 52, `.overrideMissing` 51, `.notDelivering` 47 when it speaks up about a
-/// chosen phone, `.noDefault` 37, `.unreadable` 36 at two phones and one more
+/// the app's 900pt minimum width.** Counted with "iPhone 15 Pro" and "iPad Air"
+/// where a sentence names a device: `.fallback` 85 characters, `.thisBuild` 77,
+/// `.overrideMissing` 72, `.liveContainerMissing` 65, `.fallback` with no
+/// default set 65, `.notDelivering` up to 63 when it speaks up about several
+/// devices, `.defaultMissing` 60, `.noDefault` 60, `.noDevice` 58,
+/// `.notDelivering` up to 55 when it stays quiet ("Install skipped …"),
+/// `.overrideUnreadable` 55, `.notDelivering` 47 when it speaks up about a
+/// chosen device, `.defaultUnreadable` 46, `.unreadable` 36 at two phones and one more
 /// per decimal digit of the count, `.notDelivering` 36 when it speaks up about
-/// an empty bench, `.scanning` 20.
+/// an empty bench, `.scanning` 20. The two longest put their parenthetical and
+/// their "· then …" at the lowest `layoutPriority`, so those give first.
 ///
 /// This inventory is documentation and nothing more — **no test can hold it to
 /// account, and one used to claim it could.** Every sentence below renders
@@ -42,21 +47,40 @@ import SwiftUI
 enum BuildTarget: Equatable {
     /// A connected phone is marked as the default, so the destination is known.
     case device(name: String, mode: String)
-    /// Phones are connected and none of them is the default.
+    /// A device picked for the next Build & Install only (the bar's Change,
+    /// or Build options' Device), connected. `then` is where the build after
+    /// it goes: "back to iPhone 15 Pro", or `BuildTargetBar.askEachTime`. The
+    /// pick goes when that build ends (`ConfigStore.launchBuild`). An update
+    /// never takes it: it goes to the device the app was last delivered to.
+    case thisBuild(name: String, mode: String, then: String)
+    /// Nothing picked, and spec §5b's table chose: the only device connected,
+    /// because the default isn't ("iPhone 15 Pro, your default, isn't
+    /// connected") or none is set ("no default device is set").
+    case fallback(name: String, mode: String, because: String)
+    /// The default is set and not connected, several others are, and none
+    /// was picked: the person picks, and Build & Install waits.
+    case defaultMissing(name: String)
+    /// The default is on the bus and the CLI couldn't describe it. The build
+    /// still goes there (the CLI's usbmux listing sees a locked phone) and
+    /// may fail at the install.
+    case defaultUnreadable(name: String)
+    /// A LiveContainer app, and the device the build goes to has none, as a
+    /// listing that could read its apps said (`DeviceRecord.livecontainerKnown`).
+    /// Build & Install waits. `kind` is "iPhone", "iPad" or "iPod".
+    case liveContainerMissing(name: String, udid: String, kind: String)
+    /// Several devices are connected, Settings names no default (Ask each
+    /// time), and none was picked for Build & Install: the person picks, and
+    /// Build & Install waits (spec §5b's table).
     ///
-    /// **Not a tie to break.** The CLI marks at most one device
-    /// (`json_output.py`: `is_default` is set where the udid matches
-    /// `default_device_udid`), so nothing marked means the config names a phone
-    /// that is not here, or names none at all — and the two have genuinely
-    /// different outcomes. `installer.select_device` raises "requested device
-    /// … not connected" in the first case and silently takes `devices[0]` in
-    /// the second, and this side cannot tell which from what it can see. That
-    /// is exactly why the bar must not guess a name: picking the first device
-    /// would print a confident destination that is wrong half the time.
+    /// **Not a tie to break.** `installer.resolve_target` raises "several
+    /// devices are connected: pick one" here, so the bar must not guess a
+    /// name either: picking the first device would print a confident
+    /// destination the CLI then refuses. With a default set and absent, the
+    /// same row is `.defaultMissing`, which can name it.
     case noDefault
     /// Nothing is connected at all.
     case noDevice
-    /// Build options names a phone that is not connected.
+    /// The device picked for Build & Install (Change, or Build options' Device) is not connected.
     ///
     /// **Not `.noDefault`.** That case means "nothing is marked" — the config
     /// is quiet and the CLI will pick something. This one is the user having
@@ -67,14 +91,13 @@ enum BuildTarget: Equatable {
     /// earns its own case because the two need opposite advice — plug *that*
     /// phone in or clear the pill, versus mark one in Settings.
     ///
-    /// Carries the udid, not a name, and that is not a shortcut. The only
-    /// source of device names in this process is the `--devices` scan, and this
-    /// case is defined by the phone being absent from it — a `name: String?`
-    /// would be nil at every call site that can exist. The udid is what is
-    /// known, what the pill in the header shows when it cannot resolve a name,
-    /// and what the CLI's own error quotes.
-    case overrideMissing(udid: String)
-    /// The phone chosen in Build options is on the bus, and the CLI could not
+    /// Carries the udid, which is what the CLI's own error quotes, and the
+    /// device's name when anything still knows it: the name the pick was
+    /// made with (`ConfigStore.devicePickName(for:)`), else the remembered
+    /// one (`device-seen`). Build & Install waits on it (`blocksBuild`), with
+    /// ✕ as the way out, rather than failing minutes in.
+    case overrideMissing(udid: String, name: String? = nil)
+    /// The phone picked for Build & Install is on the bus, and the CLI could not
     /// describe it.
     ///
     /// **Split out of `.unreadable`, which this situation was violating the
@@ -180,9 +203,9 @@ enum BuildTarget: Equatable {
     var needsAttention: Bool {
         switch self {
         case .noDefault, .noDevice, .overrideMissing, .overrideUnreadable, .unreadable,
-             .needsPaidAccount:
+             .needsPaidAccount, .defaultMissing, .defaultUnreadable, .liveContainerMissing:
             return true
-        case .device, .scanning:
+        case .device, .scanning, .thisBuild, .fallback:
             return false
         case let .notDelivering(option, device):
             return option.stillResolvesDevice && device.isCertainDeviceFailure
@@ -194,17 +217,16 @@ enum BuildTarget: Equatable {
     /// answer, which is what makes it the definition of "guaranteed" as well as
     /// the wording for it.
     ///
-    /// Only two are guaranteed, and both by a `raise` in
-    /// `installer.select_device` with nothing conditional in front of it: an
-    /// empty list raises "no iOS devices connected", and a `preferred_udid` that
-    /// is not in the list raises "requested device … not connected".
+    /// Three are guaranteed, each by a `raise` in `installer.resolve_target`
+    /// with nothing conditional in front of it: an empty list raises "no iOS
+    /// devices connected", a `--device` that is not in the list raises
+    /// "requested device … not connected", and several devices with none the
+    /// default and none picked raise "several devices are connected: pick
+    /// one" (`.noDefault`, `.defaultMissing`).
     ///
     /// The rest are deliberately absent, and each for its own reason rather
     /// than for want of checking:
     ///
-    ///  - `.noDefault` — `select_device(None)` returns `devices[0]`. That is the
-    ///    *unpredictable* outcome this bar refuses to name a phone for, but it
-    ///    is not a failure.
     ///  - `.unreadable` and `.overrideUnreadable` — the list `select_device`
     ///    walks comes from a usbmux enumeration (`preflight.
     ///    list_connected_devices_with_transport`, through pymobiledevice3)
@@ -223,8 +245,9 @@ enum BuildTarget: Equatable {
         switch self {
         case .noDevice: return "no device is connected."
         case .overrideMissing: return "the chosen device isn't connected."
-        case .device, .noDefault, .overrideUnreadable, .scanning, .unreadable, .notDelivering,
-             .needsPaidAccount:
+        case .noDefault, .defaultMissing: return "several devices are connected and none was picked."
+        case .device, .overrideUnreadable, .scanning, .unreadable, .notDelivering,
+             .needsPaidAccount, .thisBuild, .fallback, .defaultUnreadable, .liveContainerMissing:
             return nil
         }
     }
@@ -239,6 +262,29 @@ enum BuildTarget: Equatable {
     /// a state added to one list and not the other would render amber with no
     /// sentence, or a sentence with no amber.
     var isCertainDeviceFailure: Bool { certainFailureClause != nil }
+
+    /// Whether Build & Install waits: a device to pick, a picked device that
+    /// isn't connected, or no LiveContainer on the device the build would go
+    /// to (spec §5b). Only for a build that
+    /// installs: a dry run or a skipped install is `.notDelivering`, which
+    /// never waits.
+    var blocksBuild: Bool {
+        switch self {
+        case .noDefault, .defaultMissing, .liveContainerMissing, .overrideMissing:
+            return true
+        case .device, .thisBuild, .fallback, .defaultUnreadable, .noDevice,
+             .overrideUnreadable, .scanning, .unreadable, .notDelivering, .needsPaidAccount:
+            return false
+        }
+    }
+
+    /// "iPad", "iPod" or "iPhone", from a product type such as `iPad13,16`:
+    /// how a sentence names the kind of device ("the iPad's page").
+    static func deviceKind(model: String) -> String {
+        if model.hasPrefix("iPad") { return "iPad" }
+        if model.hasPrefix("iPod") { return "iPod" }
+        return "iPhone"
+    }
 
     /// The bar's sentence for `.needsPaidAccount`: short, because the bar is
     /// one line; the tooltip has the rest.
@@ -280,8 +326,9 @@ enum BuildTarget: Equatable {
 /// assumed, because a review found the surrounding claims were neither.** With
 /// `.fixedSize()` injected into `missing`/`pending`, the pane in a 900pt window
 /// stays at 900pt for a sentence of 84 characters and reaches 907pt at 86 — so
-/// the tripwire sits at roughly **85 characters, about 180pt beyond the longest
-/// sentence this bar renders** (`.noDevice`, 58). That slack is the honest
+/// the tripwire sits at roughly **85 characters**, measured when the longest
+/// sentence was `.noDevice`'s 58; `.fallback` (85) now reaches it, which is why
+/// its parenthetical truncates first. That slack is the honest
 /// scope of the guard: it catches a structural regression that demands width,
 /// once the demand is large enough to cross the gap, and it catches nothing at
 /// all about a sentence that merely got longer, because `lineLimit(1)` means a
@@ -292,19 +339,38 @@ enum BuildTarget: Equatable {
 /// documentation that has to be maintained by hand.
 struct BuildTargetBar: View {
     let target: BuildTarget
-    /// What the Change control does — in the app, select the Settings section.
+    /// The connected devices, for the Change menu (`DevicesStore.devices`).
+    var devices: [DeviceRecord] = []
+    /// The app's delivery mode: the menu says whether LiveContainer is on a
+    /// device only for a LiveContainer app.
+    var delivery: DeliveryMode = .livecontainer
+    /// This app's pick for its next Build & Install
+    /// (`ConfigStore.devicePick(for:)`), or nil. The ✕ shows while there is one.
+    var pick: String? = nil
+    /// Pick a device for this app's next Build & Install; nil clears the pick
+    /// (`ConfigStore.pickDevice(_:for:)`).
+    var onPick: (String?) -> Void = { _ in }
+    /// "Make … the default": write `default_device_udid`
+    /// (`SettingsStore.makeDefaultDevice`).
+    var onMakeDefault: (String) -> Void = { _ in }
+    /// Open Set Up LiveContainer for a device (spec §5c), for "LiveContainer
+    /// isn't on …": `ContentView` presents the sheet over the app pane. Nil
+    /// offers no button.
+    var onSetUpLiveContainer: ((String) -> Void)? = nil
+    /// What the menu's Open Settings does — in the app, select the Settings section.
     ///
     /// A closure rather than a `Binding<SidebarItem?>` reached for from here:
     /// `ContentView` owns `selection`, and this bar has no other reason to know
     /// that a sidebar exists.
     ///
-    /// Change *navigates*; it deliberately does not lift Settings' picker into
-    /// a popover. That picker is bound to `SettingsStore`'s **draft**
-    /// (`$store.draft.edited.defaultDeviceUDID`), which has its own
+    /// Open Settings *navigates*; the menu deliberately does not lift Settings'
+    /// picker into a popover. That picker is bound to `SettingsStore`'s
+    /// **draft** (`$store.draft.edited.defaultDeviceUDID`), which has its own
     /// edit-and-save lifecycle — so an inline copy would mean either driving
     /// another pane's draft from here or building a second save path to the
-    /// same config key. Both are worse than a navigation to the one screen that
-    /// already owns this setting.
+    /// same config key. "Make … the default" is the one exception, and it
+    /// writes that one key and leaves an edited draft alone
+    /// (`SettingsStore.makeDefaultDevice`).
     let onChange: () -> Void
 
     /// Which phone a build started right now would be delivered to.
@@ -312,11 +378,11 @@ struct BuildTargetBar: View {
     /// The order of the guards is the whole function.
     ///
     /// **`overrideUDID` is answered first**, before "nothing connected" and
-    /// before "nothing marked". It is Build options' Device picker, and it does
-    /// not *refine* the default — it replaces it: `cli.py` resolves the target
-    /// as `select_device(device or cfg.default_device_udid)` at both install
-    /// sites, so `--device` on the invocation makes `default_device_udid`
-    /// irrelevant. Reading the marked phone first was the defect this parameter
+    /// before "nothing marked". It is this app's pick for Build & Install (the
+    /// bar's Change menu or Build options' Device picker), and it does not
+    /// *refine* the default — it replaces it: `installer.resolve_target`
+    /// installs on an explicit `--device` and nowhere else, so the pick makes
+    /// `default_device_udid` irrelevant for that build. Reading the marked phone first was the defect this parameter
     /// exists for: with a device chosen in Build options, the bar named the
     /// default while the build went to the other phone, forty points from a
     /// `device: <name>` pill naming the one it was really going to.
@@ -335,6 +401,16 @@ struct BuildTargetBar: View {
     ///
     /// Then, unchanged: "nothing connected" before "nothing marked", because an
     /// empty list satisfies both and only the first is the useful thing to say.
+    ///
+    /// Then spec §5b's table, as `installer.resolve_target` reads it: the
+    /// marked default; else, when exactly one device is on the bus, that one
+    /// (`.fallback`, saying why); else the person picks (`.defaultMissing`
+    /// when the absent default can be named from `remembered`, `.noDefault`
+    /// when none is set). A locked phone counts, because the CLI's usbmux
+    /// listing sees it: `devices.count + deviceErrors.count` is the bench.
+    /// `remembered` is `DevicesStore.remembered`, the `device-seen` events.
+    /// A LiveContainer app whose target has no LiveContainer, as a listing
+    /// that could tell said, is `.liveContainerMissing` instead.
     ///
     /// `delivery` is the *app's* configured mode, not anything read off the
     /// device. A phone can have LiveContainer installed and still be the target
@@ -396,7 +472,9 @@ struct BuildTargetBar: View {
         deviceErrors: [DeviceErrorRecord] = [],
         hasLoaded: Bool = true,
         notDelivering: BuildOptions.Option? = nil,
-        account: AccountMode? = nil
+        account: AccountMode? = nil,
+        remembered: [SeenDeviceRecord] = [],
+        overrideName: String? = nil
     ) -> BuildTarget {
         // Ahead of everything, the build options included: the refusal is the
         // first thing a build of this app does, so no device and no option
@@ -411,13 +489,20 @@ struct BuildTargetBar: View {
                 option: option,
                 device: target(
                     devices: devices, delivery: delivery, overrideUDID: overrideUDID,
-                    deviceErrors: deviceErrors, hasLoaded: hasLoaded, notDelivering: nil
+                    deviceErrors: deviceErrors, hasLoaded: hasLoaded, notDelivering: nil,
+                    remembered: remembered, overrideName: overrideName
                 )
             )
         }
         if let chosen = overrideUDID, !chosen.isEmpty {
             if let match = devices.first(where: { $0.udid == chosen }) {
-                return .device(name: match.name, mode: delivery.displayName)
+                if let missing = liveContainerMissing(on: match, delivery: delivery) { return missing }
+                // Picking the default is no pick: the build goes there anyway.
+                if match.isDefault { return .device(name: match.name, mode: delivery.displayName) }
+                return .thisBuild(
+                    name: match.name, mode: delivery.displayName,
+                    then: afterwards(devices: devices, remembered: remembered)
+                )
             }
             // Positive evidence beats both guards below it: a chosen phone
             // sitting in `deviceErrors` *is* connected, so "not connected"
@@ -438,7 +523,10 @@ struct BuildTargetBar: View {
             // the first second of every launch accuses the user's own choice of
             // being unplugged.
             guard hasLoaded else { return .scanning }
-            return .overrideMissing(udid: chosen)
+            return .overrideMissing(
+                udid: chosen,
+                name: overrideName ?? remembered.first(where: { $0.udid == chosen })?.displayName
+            )
         }
         guard !devices.isEmpty else {
             // The same three-way split `SidebarView`'s Devices section makes —
@@ -461,9 +549,54 @@ struct BuildTargetBar: View {
             guard deviceErrors.isEmpty else { return .unreadable(count: deviceErrors.count) }
             return .noDevice
         }
-        guard let marked = devices.first(where: \.isDefault) else { return .noDefault }
-        return .device(name: marked.name, mode: delivery.displayName)
+        if let marked = devices.first(where: \.isDefault) {
+            return liveContainerMissing(on: marked, delivery: delivery)
+                ?? .device(name: marked.name, mode: delivery.displayName)
+        }
+        let absentDefault = remembered.first(where: \.isDefault)
+        if let absentDefault, deviceErrors.contains(where: { $0.udid == absentDefault.udid }) {
+            return .defaultUnreadable(name: absentDefault.displayName)
+        }
+        if devices.count + deviceErrors.count == 1, let only = devices.first {
+            return liveContainerMissing(on: only, delivery: delivery) ?? .fallback(
+                name: only.name, mode: delivery.displayName,
+                because: absentDefault.map { "\($0.displayName), your default, isn't connected" }
+                    ?? "no default device is set"
+            )
+        }
+        if let absentDefault { return .defaultMissing(name: absentDefault.displayName) }
+        return .noDefault
     }
+
+    /// `.liveContainerMissing` for a LiveContainer app on `device`, when a
+    /// listing that could read its apps found none; else nil. An unread
+    /// listing (`livecontainerKnown` false: a locked phone, or an older CLI)
+    /// says nothing, so it never blocks a build.
+    static func liveContainerMissing(on device: DeviceRecord, delivery: DeliveryMode) -> BuildTarget? {
+        guard delivery == .livecontainer, device.livecontainerKnown,
+              device.livecontainerBundleId == nil
+        else { return nil }
+        return .liveContainerMissing(
+            name: device.name, udid: device.udid, kind: BuildTarget.deviceKind(model: device.model)
+        )
+    }
+
+    /// Settings' "Ask each time", as the bar's "· then …" says it.
+    static let askEachTime = "Ask each time"
+
+    /// Where the build after a picked one goes: "back to" the default by name
+    /// when it's connected, "back to the default rules" when it isn't, or
+    /// Settings' Ask each time.
+    static func afterwards(devices: [DeviceRecord], remembered: [SeenDeviceRecord]) -> String {
+        if let marked = devices.first(where: \.isDefault) { return "back to \(marked.name)" }
+        // The default is unplugged: the build after doesn't go "back to" it
+        // but wherever the table says then.
+        if remembered.contains(where: \.isDefault) { return backToTheRules }
+        return askEachTime
+    }
+
+    /// The "· then …" for a default that isn't connected.
+    static let backToTheRules = "back to the default rules"
 
     var body: some View {
         HStack(spacing: Metrics.controlGap) {
@@ -471,11 +604,25 @@ struct BuildTargetBar: View {
                 .foregroundStyle(tint)
                 // The sentence beside it says the same thing in words.
                 .accessibilityHidden(true)
+            // One element for VoiceOver: the split `Text`s are for truncation,
+            // not for reading word by word.
             sentence
+                .accessibilityElement(children: .combine)
+            // A pick is for one Build & Install, and says so: the ✕ takes it
+            // back now (spec §5b). Mid-build too: the build already carries
+            // its own `--device`, and the cleanup leaves a changed pick alone.
+            if pick != nil {
+                Button { onPick(nil) } label: {
+                    Symbols.clearOption.image(size: 8)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Palette.textMuted)
+                .help("Clear the device picked for Build & Install")
+                .accessibilityLabel("Clear the device picked for Build & Install")
+            }
             Spacer(minLength: Metrics.controlGap)
-            Button("Change") { onChange() }
-                .controlSize(.small)
-                .help("Open Settings, where the default device is chosen")
+            action
+            changeMenu
         }
         .padding(.horizontal, Metrics.paneGutter)
         .padding(.vertical, Metrics.controlGap)
@@ -488,6 +635,110 @@ struct BuildTargetBar: View {
         // the first item in the scrolling column below it.
         .background(Palette.surface.opacity(0.5))
         .help(explanation)
+    }
+
+    /// The one button a state offers beside the menu: for a device without
+    /// LiveContainer, Set Up LiveContainer…, which opens the sheet for it
+    /// over this pane. It replaced Plan E's "Open the iPad's Page", which
+    /// sent the person away from the build they were about to make.
+    @ViewBuilder
+    private var action: some View {
+        if case let (udid, kind)? = Self.setUpTarget(target), let onSetUpLiveContainer {
+            Button(DeviceLiveContainerSection.setUpLabel) { onSetUpLiveContainer(udid) }
+                .controlSize(.small)
+                .help(Self.setUpHelp(kind: kind))
+        }
+    }
+
+    /// The device the bar's Set Up LiveContainer… sets up, and its kind
+    /// ("iPad"), or nil when the target doesn't lack one.
+    /// `liveContainerMissing(on:delivery:)` makes that case only when the
+    /// scan could read the device's apps (`livecontainerKnown`), so a locked
+    /// phone is never offered a setup.
+    static func setUpTarget(_ target: BuildTarget) -> (udid: String, kind: String)? {
+        if case let .liveContainerMissing(_, udid, kind) = target { return (udid, kind) }
+        return nil
+    }
+
+    /// Set Up LiveContainer…'s tooltip. The bar doesn't know the account, and
+    /// a free Apple ID's sheet installs nothing (SideStore or iloader does),
+    /// so it promises no install and no certificate.
+    static func setUpHelp(kind: String) -> String {
+        "Set up LiveContainer on this \(kind), in one sheet over this pane"
+    }
+
+    /// Change: every connected device, the next Build & Install's target
+    /// checked (picking one targets that build only; an update doesn't take
+    /// it), then "Make … the default" and "Open Settings" (spec §5b). An
+    /// inline picker, so the current target carries the menu's own checkmark
+    /// and VoiceOver reads it as selected. Nothing waits for a build: the
+    /// build in flight already carries its device (spec §11.5).
+    private var changeMenu: some View {
+        Menu {
+            Picker("Device for Build & Install", selection: Binding(
+                get: { Self.currentTarget(devices: devices, pick: pick) },
+                set: { udid in
+                    guard let udid else { return }
+                    onPick(Self.pick(udid, devices: devices))
+                }
+            )) {
+                ForEach(devices) { device in
+                    Text(Self.menuLabel(device, delivery: delivery)).tag(String?.some(device.udid))
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+            if !devices.isEmpty { Divider() }
+            if let candidate = Self.makeDefaultCandidate(devices: devices, pick: pick) {
+                Button("Make \(candidate.name) the default") { onMakeDefault(candidate.udid) }
+            }
+            Button("Open Settings") { onChange() }
+        } label: {
+            Text("Change")
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .controlSize(.small)
+        .help("Pick the device for the next Build & Install, or set the default device")
+        .accessibilityLabel("Change the device for Build & Install")
+    }
+
+    /// The device the menu checks: the pick when it's connected, else the
+    /// connected default, else the only device connected; nil when the next
+    /// Build & Install has no single device to go to.
+    static func currentTarget(devices: [DeviceRecord], pick: String?) -> String? {
+        if let pick, devices.contains(where: { $0.udid == pick }) { return pick }
+        if let marked = devices.first(where: \.isDefault) { return marked.udid }
+        return devices.count == 1 ? devices.first?.udid : nil
+    }
+
+    /// One menu row: "iPad Air — iOS 26.1 · LiveContainer (default)". Whether
+    /// LiveContainer is there only for a LiveContainer app, and only when the
+    /// scan could tell.
+    static func menuLabel(_ device: DeviceRecord, delivery: DeliveryMode) -> String {
+        var label = "\(device.name) — iOS \(device.iosVersion)"
+        if delivery == .livecontainer, device.livecontainerKnown {
+            label += device.livecontainerBundleId == nil ? " · no LiveContainer" : " · LiveContainer"
+        }
+        if device.isDefault { label += " (default)" }
+        return label
+    }
+
+    /// What choosing `udid` in the menu sets: a pick, or none for the
+    /// connected default, where a build goes anyway.
+    static func pick(_ udid: String, devices: [DeviceRecord]) -> String? {
+        devices.first(where: { $0.udid == udid })?.isDefault == true ? nil : udid
+    }
+
+    /// The device "Make … the default" names, or nil to leave the item out:
+    /// the picked device when it isn't the default; else, with no connected
+    /// default, the one device connected.
+    static func makeDefaultCandidate(devices: [DeviceRecord], pick: String?) -> DeviceRecord? {
+        if let pick, let picked = devices.first(where: { $0.udid == pick }), !picked.isDefault {
+            return picked
+        }
+        guard !devices.contains(where: \.isDefault), devices.count == 1 else { return nil }
+        return devices.first
     }
 
     /// The sentence, in the three shapes it comes in.
@@ -518,8 +769,57 @@ struct BuildTargetBar: View {
             }
             .font(AppFont.body)
             .lineLimit(1)
+        case let .thisBuild(name, mode, then):
+            // "Next Build & Install: iPad Air via LiveContainer · then back to
+            // iPhone 15 Pro" (spec §5b): visibly temporary, and visibly Build
+            // & Install's, since an update doesn't take the pick. The
+            // "· then" gives first.
+            HStack(spacing: 0) {
+                Text("Next Build & Install: ")
+                    .foregroundStyle(Palette.textMuted)
+                Text(name)
+                    .foregroundStyle(Palette.text)
+                    .fontWeight(.medium)
+                    .truncationMode(.tail)
+                    .layoutPriority(-1)
+                Text(" via \(mode)")
+                    .foregroundStyle(Palette.textMuted)
+                    .layoutPriority(1)
+                Text(" · then \(then)")
+                    .foregroundStyle(Palette.textMuted)
+                    .truncationMode(.tail)
+                    .layoutPriority(-2)
+            }
+            .font(AppFont.body)
+            .lineLimit(1)
+        case let .fallback(name, mode, because):
+            HStack(spacing: 0) {
+                Text("Installs to ")
+                    .foregroundStyle(Palette.textMuted)
+                Text(name)
+                    .foregroundStyle(Palette.text)
+                    .fontWeight(.medium)
+                    .truncationMode(.tail)
+                    .layoutPriority(-1)
+                Text(" via \(mode)")
+                    .foregroundStyle(Palette.textMuted)
+                    .layoutPriority(1)
+                Text(" (\(because))")
+                    .foregroundStyle(Palette.textMuted)
+                    .truncationMode(.tail)
+                    .layoutPriority(-2)
+            }
+            .font(AppFont.body)
+            .lineLimit(1)
+        case let .defaultMissing(name):
+            missing("\(name), your default, isn't connected: pick a device.")
+        case let .defaultUnreadable(name):
+            missing("\(name), your default, couldn't be read.")
+        case let .liveContainerMissing(name, _, _):
+            // The button beside it says what to do (`action`).
+            missing("LiveContainer isn't on \(name)")
         case .noDefault:
-            missing("Nothing is set as the default device.")
+            missing("Several devices are connected: pick one for Build & Install.")
         case .noDevice:
             missing("No device is connected, so a build has nowhere to install.")
         case .overrideMissing:
@@ -528,10 +828,14 @@ struct BuildTargetBar: View {
             // Change control off its own right-hand edge, and it names the
             // phone to nobody — the header's `device:` pill already carries it
             // for anyone who wants to read it back.
-            missing("The device chosen in Build options isn't connected.")
+            if case let .overrideMissing(_, name) = target, let name {
+                missing("\(name), picked for Build & Install, isn't connected: plug it in, or ✕.")
+            } else {
+                missing("The device picked for Build & Install isn't connected: plug it in, or ✕.")
+            }
         case .overrideUnreadable:
             // Same reasoning as the case above: the udid stays in the tooltip.
-            missing("The device chosen in Build options couldn't be read.")
+            missing("The device picked for Build & Install couldn't be read.")
         case let .unreadable(count):
             missing("\(pluralized(count, "connected phone")) couldn't be read.")
         case .scanning:
@@ -601,8 +905,12 @@ struct BuildTargetBar: View {
     /// the argument label rather than for a literal shaped like a glyph.
     private var symbol: Symbol {
         switch target {
-        case .device: return Symbols.device
-        case .noDefault: return Symbols.noDefaultDevice
+        case .device, .thisBuild: return Symbols.device
+        // Not the usual device, and the reason may have truncated off the line.
+        case .fallback: return Symbols.deviceFallback
+        case .noDefault, .defaultMissing: return Symbols.noDefaultDevice
+        // A phone that is there and can't take this app: something to fix.
+        case .liveContainerMissing: return Symbols.attention
         case .noDevice: return Symbols.noDevice
         // Not `noDevice` again: that one is "no phone", and this state is
         // "a phone, and it isn't here" — an exclamation reads as the thing
@@ -611,7 +919,7 @@ struct BuildTargetBar: View {
         // A lock, because that is what it almost always is: the phone is on the
         // bus and the lockdown handshake was refused. Naming the likely cause
         // in the glyph is worth more here than another warning triangle.
-        case .unreadable, .overrideUnreadable: return Symbols.deviceLocked
+        case .unreadable, .overrideUnreadable, .defaultUnreadable: return Symbols.deviceLocked
         case .scanning: return Symbols.scanning
         // "Nothing is going out" is the whole of this state only while the
         // build is going to survive. When it is not — a dry run that will die
@@ -639,7 +947,10 @@ struct BuildTargetBar: View {
     /// `.device`, which is neither a problem nor a wait but the bar doing its
     /// job, and so takes the accent rather than either.
     private var tint: Color {
-        if case .device = target { return Palette.accent }
+        switch target {
+        case .device, .thisBuild, .fallback: return Palette.accent
+        default: break
+        }
         return target.needsAttention ? Palette.warn : Palette.textMuted
     }
 
@@ -666,31 +977,57 @@ struct BuildTargetBar: View {
     static func explanation(for target: BuildTarget) -> String {
         switch target {
         case let .device(name, mode):
-            return "Build & Install sends this app to \(name) via \(mode). "
-                + "Change the default device in Settings."
+            return "Build & Install sends this app to \(name), your default device, via \(mode). "
+                + "Change picks another device for one Build & Install."
+        case let .thisBuild(name, mode, then):
+            let after = then == askEachTime
+                ? "the one after follows Settings' Ask each time"
+                : then == backToTheRules
+                ? "the one after goes to the default when it's connected, else to the only "
+                    + "device connected"
+                : "the one after goes \(then)"
+            return "The next Build & Install sends this app to \(name) via \(mode), picked for "
+                + "that build only. The pick clears when that build ends, if it started installing or "
+                + "succeeded, and \(after). A build that fails or is stopped before installing keeps "
+                + "it, for the retry. An update doesn't use the pick. The ✕ clears it now."
+        case let .fallback(name, mode, because):
+            return "\(name) is the only device connected (\(because)), so Build & Install sends "
+                + "this app there via \(mode). Change picks another device for one Build & "
+                + "Install, or makes this one the default."
+        case let .defaultMissing(name):
+            return "Settings' default device, \(name), isn't connected, and more than one other "
+                + "device is, so Graft won't guess which gets the build. Pick one for Build & "
+                + "Install with Change, or plug \(name) in."
         case .noDefault:
-            return "No connected phone is marked as the default: either Settings is set "
-                + "to 'Ask each time', or the phone it names is not plugged in. A build "
-                + "that names no device goes to whichever phone is enumerated first, and "
-                + "one naming an absent phone fails outright — so this pane cannot say "
-                + "where the next build lands."
+            return "Several devices are connected and Settings is set to Ask each time, so Graft "
+                + "won't guess which gets the build. Pick one for Build & Install with Change, or "
+                + "make one the default."
+        case let .defaultUnreadable(name):
+            return "Settings' default device, \(name), is connected but couldn't be described: "
+                + "usually it's passcode-locked, or hasn't been told to trust this Mac. The build "
+                + "still goes to it, since a locked iPhone or iPad still counts as connected, and "
+                + "may then fail at the install. Unlock it, or pick another device with Change."
+        case let .liveContainerMissing(name, _, kind):
+            return "This app is delivered into LiveContainer, and \(name)'s apps don't include "
+                + "it, so Build & Install waits. Set Up LiveContainer… opens its setup for this "
+                + "\(kind) without leaving this pane, or pick another device with Change."
         case .noDevice:
-            return "No iOS device is connected. A build can still make the IPA with "
+            return "No iPhone or iPad is connected. A build can still make the IPA with "
                 + "Skip install under Build options, but it has nothing to deliver to."
-        case let .overrideMissing(udid):
-            return "Build options is set to device \(udid), which is not connected. "
-                + "That choice replaces the default rather than narrowing it, so the "
-                + "build fails with \"requested device … not connected\" instead of "
-                + "falling back to another phone. Clear the device pill in Build "
-                + "options, or plug that phone in."
+        case let .overrideMissing(udid, name):
+            let named = name.map { "\($0) (\(udid))" } ?? "device \(udid)"
+            return "Build & Install is set to \(named), which isn't connected, so it waits. A "
+                + "pick replaces the default rather than narrowing it, so the build would fail "
+                + "with \"requested device … not connected\" instead of going to another "
+                + "device. Plug that iPhone or iPad in, or clear the pick with ✕ to go back to "
+                + "the default rules."
         case let .overrideUnreadable(udid):
-            return "Build options is set to device \(udid), which is connected but could "
-                + "not be described by the CLI — usually a phone that is passcode-locked, "
-                + "or that has not been told to trust this Mac. This is not the same as "
-                + "its not being here: the build asks usbmuxd for the phones on the bus, "
-                + "which needs no lockdown handshake, so the build "
-                + "will very likely still resolve this phone and may then fail at the "
-                + "install instead. Unlock it, or clear the device pill in Build options."
+            return "Build & Install is set to device \(udid), which is connected but could not "
+                + "be described by the CLI — usually an iPhone or iPad that is passcode-locked, "
+                + "or that has not been told to trust this Mac. This is not the same as its not "
+                + "being here: the build asks usbmuxd for the devices on the bus, which needs no "
+                + "lockdown handshake, so the build will very likely still resolve this device "
+                + "and may then fail at the install instead. Unlock it, or clear it with ✕."
         case let .unreadable(count):
             // `pluralized` carries the whole noun phrase rather than leaving a
             // verb outside it: "2 phones is connected" is what the obvious
@@ -719,14 +1056,13 @@ struct BuildTargetBar: View {
                 + "IPA and stops — nothing is sent to any phone, whatever is plugged in. "
             guard option.stillResolvesDevice else {
                 return opening
-                    + "No phone is looked for either: `cli.py` gates `select_device` and "
-                    + "the preflight's device checks alike on Skip install, so nothing "
-                    + "about what is on the bench can make this build fail."
+                    + "No phone is looked for either: Skip install skips the device lookup "
+                    + "and the preflight's device checks alike, so nothing about what is on "
+                    + "the bench can make this build fail."
             }
-            // The dry-run caveat, which used to be stated as a generality
-            // whatever the bench looked like. It is now answered against the
-            // device state this build actually faces, because that is the
-            // difference between a footnote and a prediction.
+            // The dry-run caveat, answered against the device state this
+            // build actually faces: the difference between a footnote and a
+            // prediction.
             switch device {
             case .noDevice:
                 return opening
@@ -734,18 +1070,25 @@ struct BuildTargetBar: View {
                     + "first, and nothing is connected — so this build will not do "
                     + "nothing quietly, it will stop with \"no iOS devices connected\". "
                     + "Plug a phone in, or use Skip install instead, which never looks."
-            case let .overrideMissing(udid):
+            case let .overrideMissing(udid, _):
                 return opening
                     + "But a dry run is not Skip install: it still resolves a device "
-                    + "first, and Build options names device \(udid), which is not "
+                    + "first, and this build names device \(udid), which is not "
                     + "connected — so this build will stop with \"requested device … not "
-                    + "connected\". Clear the device pill, plug that phone in, or use "
-                    + "Skip install instead, which never looks."
+                    + "connected\". Clear it with ✕, plug that phone in, or use Skip "
+                    + "install instead, which never looks."
+            case .noDefault, .defaultMissing:
+                return opening
+                    + "But a dry run is not Skip install: it still resolves a device "
+                    + "first, and with several connected and none picked it stops there, "
+                    + "with \"several devices are connected: pick one\". Pick one with "
+                    + "Change, or use Skip install instead, which never looks."
             // `.needsPaidAccount` never sits under `.notDelivering`: `target`
             // returns it ahead of the options. Listed so the switch stays
             // exhaustive without a `default:` that would hide a new case.
-            case .device, .noDefault, .overrideUnreadable, .scanning, .unreadable,
-                 .notDelivering, .needsPaidAccount:
+            case .device, .overrideUnreadable, .scanning, .unreadable, .notDelivering,
+                 .needsPaidAccount, .thisBuild, .fallback, .defaultUnreadable,
+                 .liveContainerMissing:
                 return opening
                     + "One caveat worth knowing: a dry run still resolves a device "
                     + "before deciding to do nothing, so it can still fail with \"no iOS "

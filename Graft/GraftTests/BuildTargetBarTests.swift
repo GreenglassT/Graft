@@ -40,13 +40,15 @@ final class BuildTargetBarTests: XCTestCase {
         iosVersion: String = "26.1",
         connection: String = "Network",
         liveContainer: String? = nil,
-        isDefault: Bool? = false
+        isDefault: Bool? = false,
+        liveContainerKnown: Bool? = nil
     ) -> String {
         let lc = liveContainer.map { "\"\($0)\"" } ?? "null"
         let flag = isDefault.map { ",\"is_default\":\($0)" } ?? ""
+        let known = liveContainerKnown.map { ",\"livecontainer_known\":\($0)" } ?? ""
         return #"{"type":"device","udid":"\#(udid)","name":"\#(name)","model":"\#(model)","#
             + #""ios_version":"\#(iosVersion)","connection_type":"\#(connection)","#
-            + #""livecontainer_bundle_id":\#(lc)\#(flag)}"#
+            + #""livecontainer_bundle_id":\#(lc)\#(flag)\#(known)}"#
     }
 
     // MARK: - A phone is marked
@@ -130,27 +132,24 @@ final class BuildTargetBarTests: XCTestCase {
         )
     }
 
-    /// One phone connected and unmarked, which is the case most likely to be
-    /// "helpfully" resolved: there is no ambiguity about *which* phone, only
-    /// about whether it is the configured one. It is not — the config names an
-    /// unplugged handset, or names none — and a build would either fail or land
-    /// somewhere this pane cannot predict.
-    func test_one_unmarked_phone_is_still_no_default() throws {
+    /// One phone connected and unmarked, and no default remembered as absent:
+    /// spec §5b's table sends the build there ("no default set, one device"),
+    /// as `installer.resolve_target` does, and the bar says why.
+    func test_one_unmarked_phone_is_that_phone() throws {
         let phone = try device(Self.deviceJSON())
         XCTAssertFalse(phone.isDefault, "premise: the only phone is not the default")
 
         XCTAssertEqual(
             BuildTargetBar.target(devices: [phone], delivery: .livecontainer),
-            .noDefault,
-            "the only connected phone is not necessarily the configured one"
+            .fallback(name: "iPhone 15 Pro", mode: "LiveContainer", because: "no default device is set")
         )
     }
 
     /// An older `graft` that does not emit `is_default` at all.
     ///
     /// `DeviceRecord` decodes the field with `decodeIfPresent(...) ?? false`
-    /// precisely so the phone still appears; the bar then has to degrade to
-    /// "no default" rather than inventing one.
+    /// precisely so the phone still appears; the bar then reads it as no
+    /// default set, and the table sends the build to the one phone there.
     func test_a_cli_that_omits_is_default_reports_no_default() throws {
         let phone = try device(Self.deviceJSON(isDefault: nil))
         XCTAssertFalse(
@@ -160,7 +159,7 @@ final class BuildTargetBarTests: XCTestCase {
 
         XCTAssertEqual(
             BuildTargetBar.target(devices: [phone], delivery: .livecontainer),
-            .noDefault
+            .fallback(name: "iPhone 15 Pro", mode: "LiveContainer", because: "no default device is set")
         )
     }
 
@@ -188,8 +187,8 @@ final class BuildTargetBarTests: XCTestCase {
                 devices: [fifteen, thirteen], delivery: .livecontainer,
                 overrideUDID: thirteen.udid
             ),
-            .device(name: "iPhone 13 Pro", mode: "LiveContainer"),
-            "Build options replaces the default rather than narrowing it"
+            .thisBuild(name: "iPhone 13 Pro", mode: "LiveContainer", then: "back to iPhone 15 Pro"),
+            "a pick replaces the default rather than narrowing it, for this build only"
         )
     }
 
@@ -269,7 +268,7 @@ final class BuildTargetBarTests: XCTestCase {
             BuildTargetBar.target(
                 devices: [unmarked], delivery: .livecontainer, overrideUDID: nil
             ),
-            .noDefault
+            .fallback(name: "iPhone 15 Pro", mode: "LiveContainer", because: "no default device is set")
         )
         XCTAssertEqual(
             BuildTargetBar.target(devices: [], delivery: .livecontainer, overrideUDID: nil),
@@ -585,7 +584,7 @@ final class BuildTargetBarTests: XCTestCase {
     /// The device states a dry run survives stay quiet too — it is *certain*
     /// failure that earns the amber, not any device imperfection.
     ///
-    /// `.noDefault` resolves: `select_device(None)` returns `devices[0]`.
+    /// A lone unmarked phone resolves: the table sends the build to it (`.fallback`).
     /// `.unreadable` very likely resolves too, because the list it walks comes
     /// from a usbmux enumeration (pymobiledevice3) with no lockdown handshake.
     /// `.scanning` is not yet an answer about anything.
@@ -594,7 +593,7 @@ final class BuildTargetBarTests: XCTestCase {
         let locked = try deviceError(Self.deviceErrorJSON())
         let cases: [(BuildTarget, String)] = [
             (BuildTargetBar.target(devices: [unmarked], delivery: .livecontainer,
-                                   notDelivering: .dryRun), "noDefault"),
+                                   notDelivering: .dryRun), "fallback"),
             (BuildTargetBar.target(devices: [], delivery: .livecontainer,
                                    deviceErrors: [locked], notDelivering: .dryRun),
              "unreadable"),
@@ -611,7 +610,9 @@ final class BuildTargetBarTests: XCTestCase {
         XCTAssertEqual(
             cases.map(\.0),
             [
-                .notDelivering(option: .dryRun, device: .noDefault),
+                .notDelivering(option: .dryRun, device: .fallback(
+                    name: "iPhone 15 Pro", mode: "LiveContainer", because: "no default device is set"
+                )),
                 .notDelivering(option: .dryRun, device: .unreadable(count: 1)),
                 .notDelivering(option: .dryRun, device: .scanning),
             ],
@@ -806,5 +807,349 @@ final class BuildTargetBarTests: XCTestCase {
         XCTAssertTrue(BuildTargetBar.explanation(for: .noDevice).contains("make the IPA"))
         XCTAssertTrue(BuildTargetBar.explanation(for: .overrideUnreadable(udid: "U"))
             .contains("asks usbmuxd"))
+    }
+}
+
+// MARK: - Spec §5b's table
+
+extension BuildTargetBarTests {
+    private static let phoneUDID = "00008030-0000000000000001"
+    private static let ipadUDID = "00008030-0000000000000002"
+
+    private func remembered(_ udid: String, name: String?, isDefault: Bool = true) throws -> SeenDeviceRecord {
+        let shown = name.map { "\"\($0)\"" } ?? "null"
+        let line = #"{"type":"device-seen","udid":"\#(udid)","name":\#(shown),"model":null,"ios_version":null,"is_default":\#(isDefault)}"#
+        guard case let .deviceSeen(record) = try BuildEvent.decode(line: line) else {
+            throw XCTSkip("fixture is not a device-seen event")
+        }
+        return record
+    }
+
+    private func ipad(liveContainer: String? = "com.kdt.livecontainer.ABCDE12345",
+                      known: Bool? = true) throws -> DeviceRecord {
+        try device(Self.deviceJSON(
+            udid: Self.ipadUDID, name: "iPad Air", model: "iPad13,16",
+            liveContainer: liveContainer, isDefault: false, liveContainerKnown: known
+        ))
+    }
+
+    private func spare() throws -> DeviceRecord {
+        try device(Self.deviceJSON(udid: "00008030-0000000000000003", name: "Spare iPad",
+                                   model: "iPad13,1"))
+    }
+
+    func test_the_default_connected_is_the_target_whatever_else_is() throws {
+        let phone = try device(Self.deviceJSON(isDefault: true))
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [try ipad(), phone], delivery: .livecontainer),
+            .device(name: "iPhone 15 Pro", mode: "LiveContainer")
+        )
+    }
+
+    func test_the_default_missing_and_one_other_is_that_one_and_says_why() throws {
+        let target = BuildTargetBar.target(
+            devices: [try ipad()], delivery: .livecontainer,
+            remembered: [try remembered(Self.phoneUDID, name: "iPhone 15 Pro")]
+        )
+        XCTAssertEqual(target, .fallback(
+            name: "iPad Air", mode: "LiveContainer", because: "iPhone 15 Pro, your default, isn't connected"
+        ))
+        XCTAssertFalse(target.blocksBuild)
+        XCTAssertFalse(target.needsAttention)
+    }
+
+    func test_the_default_missing_and_several_others_asks() throws {
+        let target = BuildTargetBar.target(
+            devices: [try ipad(), try spare()], delivery: .livecontainer,
+            remembered: [try remembered(Self.phoneUDID, name: "iPhone 15 Pro")]
+        )
+        XCTAssertEqual(target, .defaultMissing(name: "iPhone 15 Pro"))
+        XCTAssertTrue(target.blocksBuild, "Build waits for a pick")
+        XCTAssertTrue(target.needsAttention)
+        XCTAssertEqual(target.certainFailureClause, "several devices are connected and none was picked.")
+    }
+
+    func test_a_default_never_seen_is_named_by_its_udid() throws {
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [try ipad(), try spare()], delivery: .livecontainer,
+                                  remembered: [try remembered(Self.phoneUDID, name: nil)]),
+            .defaultMissing(name: Self.phoneUDID)
+        )
+    }
+
+    func test_no_default_and_several_asks() throws {
+        let target = BuildTargetBar.target(devices: [try ipad(), try spare()], delivery: .livecontainer)
+        XCTAssertEqual(target, .noDefault)
+        XCTAssertTrue(target.blocksBuild)
+    }
+
+    /// The CLI's usbmux listing counts a locked phone, so the bar does: one
+    /// readable phone and one locked one is "several".
+    func test_a_locked_phone_counts_as_connected() throws {
+        let locked = try deviceError(Self.deviceErrorJSON())
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [try ipad()], delivery: .livecontainer, deviceErrors: [locked]),
+            .noDefault
+        )
+    }
+
+    func test_a_locked_default_is_still_the_target() throws {
+        let locked = try deviceError(Self.deviceErrorJSON())
+        let target = BuildTargetBar.target(
+            devices: [try ipad()], delivery: .livecontainer, deviceErrors: [locked],
+            remembered: [try remembered(locked.udid, name: "iPhone 15 Pro")]
+        )
+        XCTAssertEqual(target, .defaultUnreadable(name: "iPhone 15 Pro"))
+        XCTAssertFalse(target.blocksBuild, "the build still goes there, and may fail at the install")
+    }
+
+    func test_none_connected_is_still_no_device() throws {
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [], delivery: .livecontainer,
+                                  remembered: [try remembered(Self.phoneUDID, name: "iPhone 15 Pro")]),
+            .noDevice
+        )
+    }
+
+    func test_a_pick_says_this_build_and_where_the_next_one_goes() throws {
+        let phone = try device(Self.deviceJSON(isDefault: true))
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [phone, try ipad()], delivery: .livecontainer,
+                                  overrideUDID: Self.ipadUDID),
+            .thisBuild(name: "iPad Air", mode: "LiveContainer", then: "back to iPhone 15 Pro")
+        )
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [try ipad()], delivery: .livecontainer,
+                                  overrideUDID: Self.ipadUDID,
+                                  remembered: [try remembered(Self.phoneUDID, name: "iPhone 15 Pro")]),
+            .thisBuild(name: "iPad Air", mode: "LiveContainer", then: BuildTargetBar.backToTheRules),
+            "the default unplugged: the build after follows the table, not a device that isn't there"
+        )
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [try ipad()], delivery: .livecontainer,
+                                  overrideUDID: Self.ipadUDID),
+            .thisBuild(name: "iPad Air", mode: "LiveContainer", then: BuildTargetBar.askEachTime)
+        )
+    }
+
+    func test_picking_the_default_reads_as_the_default() throws {
+        let phone = try device(Self.deviceJSON(isDefault: true))
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [phone, try ipad()], delivery: .livecontainer,
+                                  overrideUDID: phone.udid),
+            .device(name: "iPhone 15 Pro", mode: "LiveContainer")
+        )
+    }
+
+    func test_livecontainer_known_missing_blocks_the_build() throws {
+        let target = BuildTargetBar.target(
+            devices: [try ipad(liveContainer: nil, known: true)], delivery: .livecontainer,
+            overrideUDID: Self.ipadUDID
+        )
+        XCTAssertEqual(target, .liveContainerMissing(name: "iPad Air", udid: Self.ipadUDID, kind: "iPad"))
+        XCTAssertTrue(target.blocksBuild)
+        XCTAssertTrue(target.needsAttention)
+    }
+
+    func test_livecontainer_missing_on_the_default_and_on_the_fallback() throws {
+        let phone = try device(Self.deviceJSON(liveContainer: nil, isDefault: true, liveContainerKnown: true))
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [phone], delivery: .livecontainer),
+            .liveContainerMissing(name: "iPhone 15 Pro", udid: phone.udid, kind: "iPhone")
+        )
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [try ipad(liveContainer: nil, known: true)],
+                                  delivery: .livecontainer),
+            .liveContainerMissing(name: "iPad Air", udid: Self.ipadUDID, kind: "iPad")
+        )
+    }
+
+    func test_livecontainer_unread_or_not_needed_never_blocks() throws {
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [try ipad(liveContainer: nil, known: false)],
+                                  delivery: .livecontainer, overrideUDID: Self.ipadUDID),
+            .thisBuild(name: "iPad Air", mode: "LiveContainer", then: BuildTargetBar.askEachTime),
+            "a listing that couldn't read the apps says nothing about LiveContainer"
+        )
+        let bare = try ipad(liveContainer: nil, known: true)
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [bare], delivery: .sideload, overrideUDID: Self.ipadUDID),
+            .thisBuild(name: "iPad Air", mode: "Sideload", then: BuildTargetBar.askEachTime),
+            "a sideload app needs no LiveContainer"
+        )
+        XCTAssertFalse(
+            BuildTargetBar.target(devices: [bare], delivery: .livecontainer, overrideUDID: Self.ipadUDID,
+                                  notDelivering: .skipInstall).blocksBuild,
+            "a skipped install needs no LiveContainer"
+        )
+    }
+
+    func test_the_kind_of_device_comes_from_its_model() {
+        XCTAssertEqual(BuildTarget.deviceKind(model: "iPad13,16"), "iPad")
+        XCTAssertEqual(BuildTarget.deviceKind(model: "iPod9,1"), "iPod")
+        XCTAssertEqual(BuildTarget.deviceKind(model: "iPhone16,1"), "iPhone")
+        XCTAssertEqual(BuildTarget.deviceKind(model: "unknown"), "iPhone")
+    }
+
+    func test_the_new_states_have_tooltips_and_no_cli_jargon() {
+        let states: [BuildTarget] = [
+            .thisBuild(name: "iPad Air", mode: "LiveContainer", then: "back to iPhone 15 Pro"),
+            .thisBuild(name: "iPad Air", mode: "LiveContainer", then: BuildTargetBar.askEachTime),
+            .fallback(name: "iPad Air", mode: "LiveContainer", because: "iPhone 15 Pro, your default, isn't connected"),
+            .defaultMissing(name: "iPhone 15 Pro"),
+            .defaultUnreadable(name: "iPhone 15 Pro"),
+            .liveContainerMissing(name: "iPad Air", udid: Self.ipadUDID, kind: "iPad"),
+            .notDelivering(option: .dryRun, device: .defaultMissing(name: "iPhone 15 Pro")),
+        ]
+        for state in states {
+            let text = BuildTargetBar.explanation(for: state)
+            XCTAssertFalse(text.isEmpty, "\(state)")
+            XCTAssertFalse(text.contains("select_device"), "\(state): \(text)")
+            XCTAssertFalse(text.contains("idevice_id"), "\(state): \(text)")
+        }
+    }
+
+    /// The pick is Build & Install's alone: an update (`--update`) takes no
+    /// `--device` and goes where the CLI's table says, so the bar and its
+    /// tooltips name Build & Install wherever they speak of the pick.
+    func test_the_pick_is_worded_as_build_and_install_s() {
+        let picked = BuildTarget.thisBuild(name: "iPad Air", mode: "LiveContainer",
+                                           then: "back to iPhone 15 Pro")
+        let tooltip = BuildTargetBar.explanation(for: picked)
+        XCTAssertTrue(tooltip.contains("Build & Install"), tooltip)
+        XCTAssertTrue(tooltip.contains("An update doesn't use the pick"), tooltip)
+        for state in [BuildTarget.overrideMissing(udid: "U"), .overrideUnreadable(udid: "U"), .noDefault] {
+            XCTAssertTrue(BuildTargetBar.explanation(for: state).contains("Build & Install"), "\(state)")
+        }
+    }
+
+    /// How long a pick lasts (spec §11.5, review part 1 #1): used up only
+    /// once its build starts installing or succeeds; a build that fails or
+    /// is stopped before installing keeps it, for the retry. The tooltip
+    /// says that, not that every ending clears it.
+    func test_the_picks_tooltip_says_how_long_it_lasts() {
+        let picked = BuildTarget.thisBuild(name: "iPad Air", mode: "LiveContainer", then: "back to iPhone 15 Pro")
+        XCTAssertEqual(
+            BuildTargetBar.explanation(for: picked),
+            "The next Build & Install sends this app to iPad Air via LiveContainer, picked for that build "
+                + "only. The pick clears when that build ends, if it started installing or succeeded, and "
+                + "the one after goes back to iPhone 15 Pro. A build that fails or is stopped before "
+                + "installing keeps it, for the retry. An update doesn't use the pick. The ✕ clears it now."
+        )
+        XCTAssertFalse(BuildTargetBar.explanation(for: picked).contains("however it ends"))
+    }
+}
+
+// MARK: - The Change menu
+
+extension BuildTargetBarTests {
+    func test_a_menu_row_names_the_device_its_ios_and_livecontainer() throws {
+        let phone = try device(Self.deviceJSON(isDefault: true, liveContainerKnown: true))
+        let withLC = try device(Self.deviceJSON(
+            udid: "00008030-0000000000000002", name: "iPad Air", model: "iPad13,16",
+            liveContainer: "com.kdt.livecontainer.ABCDE12345", liveContainerKnown: true
+        ))
+        let unread = try device(Self.deviceJSON(
+            udid: "00008030-0000000000000002", name: "iPad Air", model: "iPad13,16",
+            liveContainerKnown: false
+        ))
+
+        XCTAssertEqual(BuildTargetBar.menuLabel(withLC, delivery: .livecontainer),
+                       "iPad Air — iOS 26.1 · LiveContainer")
+        XCTAssertEqual(BuildTargetBar.menuLabel(phone, delivery: .livecontainer),
+                       "iPhone 15 Pro — iOS 26.1 · no LiveContainer (default)")
+        XCTAssertEqual(BuildTargetBar.menuLabel(phone, delivery: .sideload),
+                       "iPhone 15 Pro — iOS 26.1 (default)", "a sideload app needs no LiveContainer")
+        XCTAssertEqual(BuildTargetBar.menuLabel(unread, delivery: .livecontainer),
+                       "iPad Air — iOS 26.1", "an unread listing says nothing")
+    }
+
+    func test_picking_the_default_is_no_pick() throws {
+        let phone = try device(Self.deviceJSON(isDefault: true))
+        let other = try device(Self.deviceJSON(udid: "00008030-0000000000000002", name: "iPad Air"))
+
+        XCTAssertNil(BuildTargetBar.pick(phone.udid, devices: [phone, other]))
+        XCTAssertEqual(BuildTargetBar.pick(other.udid, devices: [phone, other]), other.udid)
+    }
+
+    func test_make_default_names_the_pick_or_the_only_device() throws {
+        let phone = try device(Self.deviceJSON(isDefault: true))
+        let other = try device(Self.deviceJSON(udid: "00008030-0000000000000002", name: "iPad Air"))
+        let spare = try device(Self.deviceJSON(udid: "00008030-0000000000000003", name: "Spare iPad"))
+
+        XCTAssertEqual(
+            BuildTargetBar.makeDefaultCandidate(devices: [phone, other], pick: other.udid)?.udid,
+            other.udid
+        )
+        XCTAssertNil(BuildTargetBar.makeDefaultCandidate(devices: [phone, other], pick: nil),
+                     "the default is connected and nothing is picked")
+        XCTAssertEqual(BuildTargetBar.makeDefaultCandidate(devices: [other], pick: nil)?.udid,
+                       other.udid, "no connected default, one device")
+        XCTAssertNil(BuildTargetBar.makeDefaultCandidate(devices: [other, spare], pick: nil),
+                     "several and nothing picked: pick first")
+    }
+}
+
+// MARK: - Review fixes (spec §11.5)
+
+extension BuildTargetBarTests {
+    /// A picked device that isn't connected stops Build & Install, named as
+    /// it was picked, else as remembered, with ✕ as the way out.
+    func test_a_picked_device_that_is_unplugged_blocks_and_is_named() throws {
+        let phone = try device(Self.deviceJSON(isDefault: true))
+        let gone = "00008030-0000000000000009"
+
+        let picked = BuildTargetBar.target(devices: [phone], delivery: .livecontainer,
+                                           overrideUDID: gone, overrideName: "Spare iPad")
+        XCTAssertEqual(picked, .overrideMissing(udid: gone, name: "Spare iPad"))
+        XCTAssertTrue(picked.blocksBuild)
+        XCTAssertTrue(BuildTargetBar.explanation(for: picked).contains("✕"))
+        XCTAssertTrue(BuildTargetBar.explanation(for: picked).contains("Spare iPad"))
+
+        let seen = try remembered(gone, name: "Old iPad", isDefault: false)
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [phone], delivery: .livecontainer, overrideUDID: gone,
+                                  remembered: [seen]),
+            .overrideMissing(udid: gone, name: "Old iPad")
+        )
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [phone], delivery: .livecontainer, overrideUDID: gone),
+            .overrideMissing(udid: gone), "nothing knows its name: the udid, in the tooltip"
+        )
+    }
+
+    /// The menu checks where the next Build & Install goes.
+    func test_the_menu_checks_the_current_target() throws {
+        let phone = try device(Self.deviceJSON(isDefault: true))
+        let other = try device(Self.deviceJSON(udid: "00008030-0000000000000002", name: "iPad Air"))
+        let spare = try device(Self.deviceJSON(udid: "00008030-0000000000000003", name: "Spare iPad"))
+
+        XCTAssertEqual(BuildTargetBar.currentTarget(devices: [phone, other], pick: nil), phone.udid)
+        XCTAssertEqual(BuildTargetBar.currentTarget(devices: [phone, other], pick: other.udid), other.udid)
+        XCTAssertEqual(BuildTargetBar.currentTarget(devices: [other], pick: nil), other.udid)
+        XCTAssertNil(BuildTargetBar.currentTarget(devices: [other, spare], pick: nil),
+                     "no single device: nothing checked")
+        XCTAssertEqual(BuildTargetBar.currentTarget(devices: [phone], pick: "gone"), phone.udid,
+                       "a pick that isn't here isn't checked")
+    }
+
+    /// The words this plan wrote say "iPhone or iPad", never "phone" or "No
+    /// iOS device", and none names usbmuxd but the one that explains it.
+    func test_the_switcher_s_tooltips_say_iphone_or_ipad() {
+        let states: [BuildTarget] = [
+            .device(name: "iPhone 15 Pro", mode: "LiveContainer"),
+            .thisBuild(name: "iPad Air", mode: "LiveContainer", then: BuildTargetBar.backToTheRules),
+            .fallback(name: "iPad Air", mode: "LiveContainer", because: "no default device is set"),
+            .defaultMissing(name: "iPhone 15 Pro"), .defaultUnreadable(name: "iPhone 15 Pro"),
+            .liveContainerMissing(name: "iPad Air", udid: "U", kind: "iPad"), .noDefault, .noDevice,
+            .overrideMissing(udid: "U", name: "iPad Air"),
+        ]
+        for state in states {
+            let text = BuildTargetBar.explanation(for: state)
+            let words = text.replacingOccurrences(of: "iPhone", with: "")
+            XCTAssertFalse(words.lowercased().contains("phone"), "\(state): \(text)")
+            XCTAssertFalse(text.contains("No iOS device"), "\(state): \(text)")
+            XCTAssertFalse(text.contains("usbmux"), "\(state): \(text)")
+        }
     }
 }

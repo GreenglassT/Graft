@@ -25,13 +25,18 @@ from __future__ import annotations
 
 import os
 import platform
+import plistlib
+import re
 import shutil
 import subprocess
 import tempfile
 import zipfile
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
+from xml.parsers.expat import ExpatError
 
-from . import macho, tools
+from . import deb, macho, tools
 from .child_env import child_env
 
 #: What to do on a Mac without what a stand-in framework needs. The Command
@@ -81,6 +86,199 @@ def linked_private_frameworks(binary: Path) -> list[str]:
             hint=str(exc)[:200],
         ) from exc
     return [n for n in STUBBABLE_PRIVATE_FRAMEWORKS if _private_framework_path(n) in deps]
+
+
+#: The roots this Mac keeps the frameworks an iPhone or iPad app can load
+#: under: its own, and the iOS support PlayCover's apps run on. Each is read
+#: as `<root>/System/Library/{Frameworks,PrivateFrameworks}`. Tests point both
+#: at scratch folders.
+FRAMEWORK_ROOTS: tuple[Path, ...] = (Path("/"), Path("/System/iOSSupport"))
+
+_FRAMEWORK_KINDS = ("Frameworks", "PrivateFrameworks")
+
+#: A dependency on a system framework, by the framework's name.
+_SYSTEM_FRAMEWORK = re.compile(r"^/System/Library/(?:Frameworks|PrivateFrameworks)/([^/]+)\.framework/")
+
+
+def framework_present(name: str) -> bool:
+    """Whether this Mac has `name`.framework in either root.
+
+    **The directory, never its binary.** Since macOS 11 a system framework's
+    binary lives only in the dyld shared cache, so
+    `Foundation.framework/Foundation` isn't on disk on any Mac. Known limit:
+    presence doesn't promise the symbols a tweak uses.
+    """
+    return any(
+        (root / "System" / "Library" / kind / f"{name}.framework").is_dir()
+        for root in FRAMEWORK_ROOTS for kind in _FRAMEWORK_KINDS
+    )
+
+
+def unsupported_frameworks(binary: Path) -> list[str]:
+    """The system frameworks `binary` can't load without that macOS lacks
+    and Graft doesn't stub, by name, in load order.
+
+    Weak links are left out (dyld skips a missing weak library), and so is
+    `/usr/lib`: on macOS those libraries are in the shared cache, not on
+    disk, so their absence can't be told. Raises `PlayCoverPrepError` for a
+    binary whose load commands can't be read.
+    """
+    try:
+        deps = macho.required_dylib_names(binary)
+    except macho.MachOError as exc:
+        raise PlayCoverPrepError(
+            f"couldn't read {binary.name}'s linked libraries",
+            hint=str(exc)[:200],
+        ) from exc
+    found: list[str] = []
+    for dep in deps:
+        match = _SYSTEM_FRAMEWORK.match(dep)
+        if match is None:
+            continue
+        name = match.group(1)
+        if name in STUBBABLE_PRIVATE_FRAMEWORKS or name in found or framework_present(name):
+            continue
+        found.append(name)
+    return found
+
+
+def tweak_origins(tweaks: Iterable[Path]) -> dict[str, str]:
+    """Which names in an app's `Frameworks/` the attached tweaks brought,
+    each to the tweak's filename: every `.dylib` and every `.framework` in a
+    .deb's data (cyan puts both in `Frameworks/`), and an attached bare
+    `.dylib` or `.framework` itself.
+
+    A .deb it can't read (`deb.data_names` None) claims nothing, so its
+    binaries are taken for the app's own: they warn instead of refusing.
+    """
+    origins: dict[str, str] = {}
+    for path in tweaks:
+        if path.suffix == ".deb":
+            for name in deb.data_names(path) or []:
+                parts = name.split("/")
+                bundle = next((p for p in parts[:-1] if p.endswith(".framework")), None)
+                if bundle is not None:
+                    origins.setdefault(bundle, path.name)
+                elif parts[-1].endswith(".dylib"):
+                    origins.setdefault(parts[-1], path.name)
+        elif path.suffix in (".dylib", ".framework"):
+            origins.setdefault(path.name, path.name)
+    return origins
+
+
+@dataclass(frozen=True)
+class UnsupportedLink:
+    """One binary in `Frameworks/` needing one framework this Mac lacks."""
+
+    #: Its name in `Frameworks/`: `Example.dylib` or `ExampleKit.framework`.
+    binary: str
+    framework: str
+    #: The tweak that brought it (its filename), or None for the app's own
+    #: binary, or one whose origin can't be told.
+    tweak: str | None
+
+    @property
+    def refuses(self) -> bool:
+        """Only a tweak's binary refuses: the app's own legitimately link
+        things, and refusing them would block apps PlayCover may run."""
+        return self.tweak is not None
+
+
+def _framework_binary(bundle: Path) -> Path | None:
+    """A `.framework`'s executable: its Info.plist's `CFBundleExecutable`,
+    else the bundle's own name; None when there's no such file."""
+    name = bundle.stem
+    try:
+        with (bundle / "Info.plist").open("rb") as fh:
+            exe = plistlib.load(fh).get("CFBundleExecutable")
+        if isinstance(exe, str) and exe and "/" not in exe:
+            name = exe
+    except (OSError, ValueError, AttributeError, ExpatError):
+        # ExpatError, which is no ValueError: XML cut off part way.
+        pass
+    binary = bundle / name
+    return binary if binary.is_file() else None
+
+
+def _frameworks_binaries(frameworks: Path) -> list[tuple[str, Path]]:
+    """Every `*.dylib`, then every `*.framework`'s executable, in
+    `frameworks`, by its name there."""
+    if not frameworks.is_dir():
+        return []
+    found = [(p.name, p) for p in sorted(frameworks.glob("*.dylib")) if p.is_file()]
+    for bundle in sorted(frameworks.glob("*.framework")):
+        if bundle.is_dir() and (binary := _framework_binary(bundle)) is not None:
+            found.append((bundle.name, binary))
+    return found
+
+
+def scan_frameworks(frameworks: Path, origins: dict[str, str] | None) -> list[UnsupportedLink]:
+    """What in `frameworks` needs an iOS framework this Mac lacks.
+
+    `origins` is `tweak_origins`'s answer, or None when which files the
+    tweaks added can't be told (an archive with no build record): nothing
+    refuses then. A framework whose executable isn't a readable Mach-O is
+    passed over; a `.dylib`'s raises, as `linked_private_frameworks` does.
+    """
+    found: list[UnsupportedLink] = []
+    for name, binary in _frameworks_binaries(frameworks):
+        try:
+            missing = unsupported_frameworks(binary)
+        except PlayCoverPrepError:
+            if name.endswith(".framework"):
+                continue
+            raise
+        tweak = origins.get(name) if origins is not None else None
+        found += [UnsupportedLink(name, framework, tweak) for framework in missing]
+    return found
+
+
+def check_ipa(ipa: Path, origins: dict[str, str] | None) -> list[UnsupportedLink]:
+    """`scan_frameworks` on an archive's `Payload/<App>.app/Frameworks`,
+    reading only its dylibs and its frameworks' Info.plists and binaries."""
+    with zipfile.ZipFile(ipa) as zf, tempfile.TemporaryDirectory() as td:
+        names = zf.namelist()
+        app = next((n.split("/")[1] for n in names
+                    if n.startswith("Payload/") and n.count("/") >= 2 and n.split("/")[1].endswith(".app")),
+                   None)
+        if app is None:
+            return []
+        prefix = f"Payload/{app}/Frameworks/"
+        wanted = []
+        for name in names:
+            if not name.startswith(prefix):
+                continue
+            rest = name[len(prefix):].split("/")
+            if len(rest) == 1 and rest[0].endswith(".dylib"):
+                wanted.append(name)
+            elif len(rest) == 2 and rest[0].endswith(".framework") and rest[1]:
+                wanted.append(name)  # a framework's top level: its Info.plist and binary
+        if not wanted:
+            return []
+        zf.extractall(td, members=wanted)
+        return scan_frameworks(Path(td) / "Payload" / app / "Frameworks", origins)
+
+
+def refusal_message(links: list[UnsupportedLink]) -> str:
+    """The refusal: one sentence per tweak, naming what it needs."""
+    by_tweak: dict[str, list[str]] = {}
+    for link in links:
+        if link.tweak is not None and link.framework not in by_tweak.setdefault(link.tweak, []):
+            by_tweak[link.tweak].append(link.framework)
+    return " ".join(
+        f"{tweak} needs iOS's {' and '.join(frameworks)}, which macOS doesn't have, so it "
+        "can't run under PlayCover. Phone builds can still use it; to build for this Mac, "
+        "remove it from the app first."
+        for tweak, frameworks in by_tweak.items()
+    )
+
+
+def warning_message(link: UnsupportedLink) -> str:
+    """The warning for an app's own binary, or one whose origin can't be told."""
+    return (
+        f"{link.binary} in the app needs iOS's {link.framework}, which macOS doesn't "
+        "have, so the app may not run under PlayCover."
+    )
 
 
 def developer_dir() -> Path | None:
@@ -184,7 +382,7 @@ def _run_tool(argv: list[str], *, doing: str) -> None:
         raise PlayCoverPrepError(f"{doing} failed: {exc}") from exc
 
 
-def retarget_to_bundled_framework(binary: Path, framework: str) -> None:
+def retarget_to_bundled_framework(binary: Path, framework: str, *, rpath: str = "@loader_path") -> None:
     """Point `binary` at `@rpath/<framework>.framework/...` instead of /System.
 
     Re-signs afterward, and the honest reason is narrower than it looks.
@@ -212,11 +410,14 @@ def retarget_to_bundled_framework(binary: Path, framework: str) -> None:
     # than `@executable_path` because these dylibs sit *in* Frameworks/ beside
     # the framework, and that stays true however the app is launched.
     #
+    # A framework's binary sits a level deeper, in `Frameworks/X.framework/`,
+    # so its rpath is `@loader_path/..` (`prepare_frameworks_dir`).
+    #
     # Adding a duplicate rpath is a warning, not an error, and this runs again
     # on an already-prepared IPA, so an existing one is checked for first.
-    if "@loader_path" not in _rpaths(binary):
+    if rpath not in _rpaths(binary):
         _run_tool(
-            [tool, "-add_rpath", "@loader_path", str(binary)],
+            [tool, "-add_rpath", rpath, str(binary)],
             doing=f"giving {binary.name} an rpath that reaches the bundle",
         )
     _run_tool(["codesign", "-f", "-s", "-", str(binary)],
@@ -304,7 +505,12 @@ def build_stub(framework: str, dest_dir: Path) -> Path:
 
 
 def prepare_frameworks_dir(frameworks: Path) -> list[str]:
-    """Make every dylib in `frameworks` loadable on macOS. Returns what it fixed.
+    """Make every dylib and framework in `frameworks` loadable on macOS.
+    Returns what it fixed.
+
+    A framework is its executable (`CFBundleExecutable`): tweaks ship
+    frameworks too, and a settings library's links Preferences. One whose
+    executable isn't a readable Mach-O is passed over, as in `scan_frameworks`.
 
     Operates on an already-extracted `Payload/<App>.app/Frameworks`, not on a
     zip, so the caller owns unpacking and repacking. That keeps this testable
@@ -317,13 +523,22 @@ def prepare_frameworks_dir(frameworks: Path) -> list[str]:
     if not frameworks.is_dir():
         return []
     fixed: list[str] = []
-    for binary in sorted(frameworks.glob("*.dylib")):
-        for framework in linked_private_frameworks(binary):
+    for name, binary in _frameworks_binaries(frameworks):
+        in_bundle = name.endswith(".framework")
+        try:
+            needed = linked_private_frameworks(binary)
+        except PlayCoverPrepError:
+            if in_bundle:
+                continue
+            raise
+        for framework in needed:
             bundled = frameworks / f"{framework}.framework"
             if not bundled.exists():
                 build_stub(framework, frameworks)
-            retarget_to_bundled_framework(binary, framework)
-            fixed.append(f"{binary.name} → bundled {framework}.framework")
+            retarget_to_bundled_framework(
+                binary, framework, rpath="@loader_path/.." if in_bundle else "@loader_path",
+            )
+            fixed.append(f"{name} → bundled {framework}.framework")
     return fixed
 
 

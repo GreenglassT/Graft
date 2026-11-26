@@ -67,6 +67,8 @@ import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from typing import Any, TypeVar
 
+from . import stop_deferral
+
 T = TypeVar("T")
 
 # pymobiledevice3 logs through `logging`, and graft configures none, so its
@@ -178,6 +180,11 @@ def run(coro: Coroutine[Any, Any, T]) -> T:
     default handler, the process ends as it would have. A signal that was
     ignored stays ignored (`nohup`).
 
+    Under `graft --update` (`stop_deferral`), the first Stop during a push or
+    an install is the update's to hold, and the session runs on; the second
+    cancels it as above. A tweak write is never cancelled. The update takes
+    Ctrl-C as a Stop, so while its gate is installed the session does too.
+
     Off the main thread no handler is set: handlers can only be set on the
     main thread, and `--lc-install`'s worker is abandoned on a Stop by design
     (`lc_manage._install_one`).
@@ -221,6 +228,12 @@ async def _cancelled_by_signals(coro: Coroutine[Any, Any, T], received: list[int
         return await coro
 
     def on_signal(signum: int, _frame: object) -> None:
+        # Under `graft --update`, the first Stop during a push or an install,
+        # and every Stop during a tweak write, waits (`stop_deferral`): the
+        # session runs on. A second Stop during a push or an install cancels
+        # it, here, as a first one does outside an update.
+        if stop_deferral.absorb(signum):
+            return
         # Only a note and a wake-up, so it is safe at any bytecode: the
         # cancel itself happens in the loop, between its callbacks.
         received.append(signum)
@@ -229,7 +242,11 @@ async def _cancelled_by_signals(coro: Coroutine[Any, Any, T], received: list[int
     # In this task's context, so `coro`, which runs in this task, sees it.
     _stops.set(received)
     previous = {}
-    for sig in _STOP_SIGNALS:
+    # An update's gate takes Ctrl-C as a Stop too; so, while it is there,
+    # does the session, so a second one cancels at an await rather than
+    # tearing through the loop.
+    signals = _STOP_SIGNALS + ((signal.SIGINT,) if stop_deferral.installed() else ())
+    for sig in signals:
         if signal.getsignal(sig) in (signal.SIG_IGN, None):
             continue
         previous[sig] = signal.signal(sig, on_signal)

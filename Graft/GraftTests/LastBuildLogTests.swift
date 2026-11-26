@@ -1,3 +1,4 @@
+import SwiftUI
 import XCTest
 @testable import Graft
 
@@ -367,7 +368,7 @@ final class StoppedBuildPaneTests: XCTestCase {
         let sheet = ReinstallSheet(
             build: build, runner: CLIRunner(executable: cli),
             config: ConfigStore(runner: sh, cliArgs: ["-c", "true"], notify: { _ in }),
-            artwork: ArtworkStore(runner: sh), onClose: {}
+            artwork: ArtworkStore(runner: sh), appUpdates: nil, onClose: {}
         )
         let box = hosted(sheet, size: NSSize(width: 640, height: 460))
         var shown: [String] = []
@@ -386,5 +387,38 @@ final class StoppedBuildPaneTests: XCTestCase {
         shown = try AccessibilityTree.texts(in: box.window)
         XCTAssertTrue(shown.contains { $0.caseInsensitiveCompare("stopped") == .orderedSame }, "\(shown)")
         XCTAssertFalse(shown.contains { $0.caseInsensitiveCompare("failed") == .orderedSame }, "\(shown)")
+    }
+}
+
+/// The log panel under the app pane, the re-install sheet, a build's saved
+/// log and the update sheet, whose transcript runs across every app it
+/// updates: thousands of lines. It drew every one of them on each new line
+/// (review 23-2, §11). It draws the lines in view now, as a lazy stack, and
+/// still follows the log to its last line.
+@MainActor
+final class BuildLogPanelTests: XCTestCase {
+    final class Transcript: ObservableObject {
+        @Published var lines: [LogLine] = []
+    }
+
+    struct Harness: View {
+        @ObservedObject var transcript: Transcript
+        var body: some View { BuildLogPanel(lines: transcript.lines) }
+    }
+
+    func test_a_long_log_draws_the_lines_in_view_and_follows_the_last() async throws {
+        try AccessibilityTree.requireServed()
+        let transcript = Transcript()
+        let size = NSSize(width: 480, height: 240)
+        let box = hosted(Harness(transcript: transcript).frame(width: size.width, height: size.height), size: size)
+        settle(box, seconds: 0.2)
+
+        transcript.lines = (1...1000).map { LogLine(kind: .plain, text: "line \($0) of an update") }
+        settle(box, seconds: 0.6)
+
+        let shown = try AccessibilityTree.texts(in: box.window).filter { $0.hasPrefix("line ") }
+        XCTAssertLessThan(shown.count, 200, "the panel drew all \(shown.count) lines, not the ones in view")
+        XCTAssertTrue(shown.contains("line 1000 of an update"),
+                      "the panel didn't follow the log to its last line: \(shown.suffix(3))")
     }
 }

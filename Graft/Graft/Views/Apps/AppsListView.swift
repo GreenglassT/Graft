@@ -20,6 +20,10 @@ struct AppSidebarRow: View {
     /// This app's real icon, already resolved by the caller. nil draws the
     /// lettered tile, which is a fallback and not an error — see `AppIcon`.
     let artwork: NSImage?
+    /// This app's plan from the last update check, or nil when none was read
+    /// (the switch off and nothing checked by hand, or before the first
+    /// check).
+    var update: UpdatePlanApp? = nil
 
     var body: some View {
         HStack(spacing: 8) {
@@ -33,7 +37,7 @@ struct AppSidebarRow: View {
                 // can't wrap, which means the row's shortfall lands here
                 // instead — and unlimited, a long name wrapped to two or three
                 // lines, making badged rows taller than unbadged ones.
-                Text(app.displayName ?? app.name)
+                Text(app.shownName)
                     .font(AppFont.bodyMedium)
                     .foregroundStyle(Palette.text)
                     .lineLimit(1)
@@ -64,11 +68,27 @@ struct AppSidebarRow: View {
             // be decided by a nullable label instead, which is how `current`
             // came within a word of growing a dot on every app in the list.
             // This is one of the three calls that keeps that true.
-            if let state, state.kind.needsAttention {
+            //
+            // One mark per row (spec 4.2): the update glyph whenever the plan
+            // has something Update can do now, a stale delivery included;
+            // nothing for work that waits for a device (§11.3); otherwise the
+            // dot, which stays for an app never delivered.
+            // `AppUpdateText.indicator` decides, and never answers both. A
+            // glyph and not an "Update" chip, for the reason above (review S8):
+            // 11 pt beside the 6 pt dot it replaces, with VoiceOver's words.
+            switch AppUpdateText.indicator(plan: update, delivery: state) {
+            case .update:
+                Symbols.updateAvailable.image(size: 11)
+                    .foregroundStyle(Palette.accent)
+                    .help(AppUpdateText.indicatorHelp(update))
+                    .accessibilityLabel(AppUpdateText.badgeLabel)
+            case .deliveryDot:
                 Circle()
                     .fill(Palette.warn)
                     .frame(width: 6, height: 6)
-                    .help(state.detail)
+                    .help(state?.detail ?? "")
+            case nil:
+                EmptyView()
             }
             // Pinned, not deprioritised. Given a negative layout priority this
             // *compressed* rather than yielding — "LC" rendered as "L" on every

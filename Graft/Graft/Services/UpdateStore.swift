@@ -100,6 +100,58 @@ final class UpdateStore: ObservableObject, QuitHandover {
         /// A version that failed its checks or its install: not downloaded on
         /// its own again (Update still tries it).
         static let failedVersion = "updateInstall.failedVersion"
+        /// A download the CLI refused because this Mac's macOS is older than
+        /// the release needs (`FloorRefusal`).
+        static let floorRefusal = "updateInstall.macOSFloor"
+        /// The release whose "needs a newer macOS" notice was dismissed.
+        static let dismissedFloor = "updateCheck.dismissedMacOSFloor"
+    }
+
+    /// A download refused for this Mac's macOS: the release, and the macOS
+    /// it needs. It lapses once this Mac's macOS is that or later
+    /// (`macOSVersion`), or a check offers the release with no floor.
+    struct FloorRefusal: Codable, Equatable {
+        let version: String
+        let needs: String
+    }
+
+    /// Whether macOS `have` ([15, 5] for 15.5) is `floor` ("15.4") or later:
+    /// number by number, a missing one counting as 0.
+    nonisolated static func macOS(_ have: [Int], meets floor: String) -> Bool {
+        let need = floor.split(separator: ".").map { Int($0) ?? 0 }
+        for index in 0..<max(have.count, need.count) {
+            let mine = index < have.count ? have[index] : 0
+            let wanted = index < need.count ? need[index] : 0
+            if mine != wanted { return mine > wanted }
+        }
+        return true
+    }
+
+    /// A newer release this Mac's macOS can't run, and the line that says
+    /// so (`macOSFloor`).
+    struct MacOSFloor: Equatable {
+        let version: String
+        let line: String
+    }
+
+    /// The line for a release that needs a newer macOS than this Mac's.
+    nonisolated static func needsMacOSLine(version: String, needs: String, current: String) -> String {
+        "Graft \(version) needs macOS \(needs) or later; this Mac stays on Graft \(current)."
+    }
+
+    /// The macOS a refused download needs, from the CLI's `needs_macos`, or
+    /// else from its sentence ("needs macOS 15.0 or later"), and only for
+    /// `not-for-this-mac`. Nil for that reason's other meaning, a release
+    /// with no zip of this build yet. Plain, or nil: it goes in a sentence
+    /// and is kept in `defaults`.
+    nonisolated static func macOSFloor(of end: UpdateDownloadRecord) -> String? {
+        guard end.reason == "not-for-this-mac" else { return nil }
+        if let needs = end.needsMacos { return isPlainVersion(needs) ? needs : nil }
+        guard let message = end.message,
+              let range = message.range(of: #"needs macOS [0-9]+(\.[0-9]+)*"#, options: .regularExpression)
+        else { return nil }
+        let needs = String(message[range].dropFirst("needs macOS ".count))
+        return isPlainVersion(needs) ? needs : nil
     }
 
     /// An install handed over at a quit: the version, the version it
@@ -185,6 +237,9 @@ final class UpdateStore: ObservableObject, QuitHandover {
             case installing
             /// The sentence, and `Phase.failed`'s `retryable`.
             case failed(String, retryable: Bool)
+            /// A newer release this Mac's macOS can't run, its line
+            /// (`MacOSFloor`): information, which can be dismissed.
+            case needsNewerMacOS(String)
         }
 
         let version: String
@@ -192,11 +247,14 @@ final class UpdateStore: ObservableObject, QuitHandover {
     }
 
     /// The install failed after Graft quit: the next launch is still the
-    /// old version.
-    static let installDidNotTake = "Graft couldn't replace itself, so it's still the version "
-        + "you had. Download the new version from the release page (Graft.zip, or "
-        + "Graft-Intel.zip for an Intel Mac) and replace Graft.app in Applications. The update "
-        + "log is in ~/Library/Logs/Graft/update.log."
+    /// old version. It names the download for this Mac
+    /// (`MacSupport.manualDownload`).
+    static func installDidNotTake(_ support: MacSupport) -> String {
+        "Graft couldn't replace itself, so it's still the version "
+            + "you had. Download the new version from the release page (\(support.manualDownload)) "
+            + "and replace Graft.app in Applications. The update "
+            + "log is in ~/Library/Logs/Graft/update.log."
+    }
 
     /// What Check for Updates… says when the CLI's answer named a version
     /// that isn't digits and dots.
@@ -270,7 +328,12 @@ final class UpdateStore: ObservableObject, QuitHandover {
     /// Not a release with no zip of this build yet (`not-for-this-mac`: "no
     /// update for this Mac yet"): the zip can be added to the release at any
     /// time, and Try Again then gets it. Nor is it remembered as refused, so
-    /// a later check downloads it on its own.
+    /// a later check downloads it on its own. The same reason for a release
+    /// that needs a newer macOS than this Mac's (`macOSFloor(of:)`) is no
+    /// failure at all, and never reaches this: no try helps until macOS is
+    /// upgraded, so it's remembered (`floorRefusal`), not downloaded again,
+    /// and said once, as information (`macOSFloor`), until this Mac's macOS
+    /// meets the floor or a check offers the release with no floor.
     static let retryCantHelp: Set<String> = refusedForWhatItIs.subtracting(worthTryingAgain).union([
         "translocated", "not-writable", "not-graft",
     ])
@@ -284,6 +347,12 @@ final class UpdateStore: ObservableObject, QuitHandover {
     let runner: CLIRunner
     /// This copy's CFBundleShortVersionString: what the CLI compares against.
     let appVersion: String
+    /// This Mac and this copy of Graft: which download a by-hand update
+    /// names (`MacSupport.manualDownload`).
+    let support: MacSupport
+    /// This Mac's macOS, whole ([15, 5] for 15.5): what a release's macOS
+    /// floor is held against, since a floor can be a minor version.
+    let macOSVersion: [Int]
     /// Nil when this copy can't update itself (`SelfUpdateHost`).
     let host: SelfUpdateHost?
     private let defaults: UserDefaults
@@ -323,6 +392,11 @@ final class UpdateStore: ObservableObject, QuitHandover {
     /// its button (`perform`) is the banner's.
     @Published private(set) var answerAlert: CheckAlert?
     @Published private(set) var phase: Phase = .idle
+    /// The download the CLI refused for this Mac's macOS, for this macOS.
+    @Published private(set) var floorRefusal: FloorRefusal?
+    /// The release whose "needs a newer macOS" notice was dismissed: not
+    /// shown again for it.
+    @Published private(set) var dismissedFloor: String?
     /// From the quit taking the install until the helper is started (or
     /// couldn't be).
     @Published private(set) var installPending = false
@@ -359,13 +433,20 @@ final class UpdateStore: ObservableObject, QuitHandover {
     /// Every dependency is a parameter: `GraftApp` passes the real
     /// preferences, clock, browser, update log and host, a test its own
     /// (`NoRealDefaultsTests`). No host, no self-update: the banner then
-    /// links the release page, as before 2.0.2.
+    /// links the release page, as before 2.0.2. `support` is `MacSupport.thisMac`
+    /// in the app; a test's default is everything, on macOS 14.
+    /// `macOSVersion` is `ProcessInfo`'s in the app; with none, `support`'s
+    /// major version alone.
     init(
         runner: CLIRunner, defaults: UserDefaults, now: @escaping () -> Date,
         appVersion: String, open: @escaping (URL) -> Void, updateLog: URL,
-        host: SelfUpdateHost? = nil
+        host: SelfUpdateHost? = nil, support: MacSupport = .appleSilicon,
+        macOSVersion: [Int]? = nil
     ) {
         self.runner = runner
+        self.support = support
+        let macOSVersion = macOSVersion ?? [support.macOSMajorVersion]
+        self.macOSVersion = macOSVersion
         self.defaults = defaults
         self.now = now
         self.appVersion = appVersion
@@ -378,11 +459,33 @@ final class UpdateStore: ObservableObject, QuitHandover {
             // Anyone running as this user can write it: one that doesn't
             // decode, or names a version that isn't plain, is dropped.
             if let saved = try? JSONDecoder().decode(UpdateCheckRecord.self, from: data), Self.isUsable(saved) {
-                if saved.current == appVersion { lastAnswer = saved }
+                if let needs = saved.needsMacos, Self.isPlainVersion(needs),
+                   Self.macOS(macOSVersion, meets: needs) {
+                    // Saved before this Mac's macOS met the release's floor:
+                    // asked again now, rather than the banner saying it needs
+                    // a newer macOS for up to a day.
+                    defaults.removeObject(forKey: Key.lastAnswer)
+                    defaults.removeObject(forKey: Key.lastChecked)
+                } else if saved.current == appVersion {
+                    lastAnswer = saved
+                }
             } else {
                 defaults.removeObject(forKey: Key.lastAnswer)
             }
         }
+        if let data = defaults.data(forKey: Key.floorRefusal) {
+            // As `lastAnswer`: written by anyone running as this user, so
+            // only plain versions; and only while this Mac's macOS is older
+            // than the floor.
+            if let saved = try? JSONDecoder().decode(FloorRefusal.self, from: data),
+               Self.isPlainVersion(saved.version), Self.isPlainVersion(saved.needs),
+               !Self.macOS(macOSVersion, meets: saved.needs) {
+                floorRefusal = saved
+            } else {
+                defaults.removeObject(forKey: Key.floorRefusal)
+            }
+        }
+        dismissedFloor = defaults.string(forKey: Key.dismissedFloor).flatMap { Self.isPlainVersion($0) ? $0 : nil }
         if let data = defaults.data(forKey: Key.attempt) {
             defaults.removeObject(forKey: Key.attempt)
             // Still the version it was to replace: the helper didn't install
@@ -395,7 +498,7 @@ final class UpdateStore: ObservableObject, QuitHandover {
                !Self.installLogged(attempt, in: updateLog) {
                 defaults.set(attempt.version, forKey: Key.failedVersion)
                 // Its sentence says to download it by hand: no Try Again.
-                phase = .failed(version: attempt.version, message: Self.installDidNotTake, retryable: false)
+                phase = .failed(version: attempt.version, message: Self.installDidNotTake(support), retryable: false)
             }
         }
     }
@@ -529,6 +632,32 @@ final class UpdateStore: ObservableObject, QuitHandover {
         return lastAnswer.latest
     }
 
+    /// A newer release this Mac's macOS can't run: from the last check
+    /// (`needs_macos`), or from a download the CLI refused for it
+    /// (`floorRefusal`). Nil once neither applies.
+    var macOSFloor: MacOSFloor? {
+        if let lastAnswer, let latest = lastAnswer.latest, let needs = lastAnswer.needsMacos,
+           Self.isPlainVersion(needs), !Self.macOS(macOSVersion, meets: needs) {
+            return MacOSFloor(version: latest,
+                              line: Self.needsMacOSLine(version: latest, needs: needs, current: appVersion))
+        }
+        if let refused = floorRefusal, refused.version == availableVersion,
+           !Self.macOS(macOSVersion, meets: refused.needs) {
+            return MacOSFloor(version: refused.version,
+                              line: Self.needsMacOSLine(version: refused.version, needs: refused.needs,
+                                                        current: appVersion))
+        }
+        return nil
+    }
+
+    /// The banner's dismiss on "needs a newer macOS": not shown again for
+    /// that release. Check for Updates… still says it.
+    func dismissMacOSFloor() {
+        guard let floor = macOSFloor else { return }
+        dismissedFloor = floor.version
+        defaults.set(floor.version, forKey: Key.dismissedFloor)
+    }
+
     /// What the banner shows, or nil for no banner.
     var notice: Notice? {
         switch phase {
@@ -547,6 +676,11 @@ final class UpdateStore: ObservableObject, QuitHandover {
             if availableVersion == nil || availableVersion == version {
                 return Notice(version: version, state: .failed(message, retryable: retryable))
             }
+        }
+        // Information rather than an offer: nothing to update to here.
+        if let floor = macOSFloor {
+            guard dailyCheck, floor.version != dismissedFloor else { return nil }
+            return Notice(version: floor.version, state: .needsNewerMacOS(floor.line))
         }
         guard let release = banner, let latest = release.latest else { return nil }
         return Notice(version: latest, state: .available(canUpdate: canUpdate))
@@ -629,6 +763,12 @@ final class UpdateStore: ObservableObject, QuitHandover {
         case let .available(record):
             let version = record.latest ?? ""
             let have = "You have Graft \(appVersion)."
+            // Nothing to update to: what it needs, and its page. Said even
+            // when the banner's notice was dismissed: this was asked.
+            if let floor = macOSFloor, floor.version == version {
+                return CheckAlert(title: "Graft \(version) needs a newer macOS", message: floor.line,
+                                  action: nil, release: record, cancel: "OK")
+            }
             let banner = notice.flatMap { $0.version == version ? $0.state : nil }
             switch banner {
             case .downloading?, .verifying?:
@@ -655,12 +795,12 @@ final class UpdateStore: ObservableObject, QuitHandover {
             case let .failed(why, retryable)?:
                 return CheckAlert(title: "Graft couldn't update to \(version)", message: why,
                                   action: canUpdate && retryable ? .tryAgain : nil, release: record, cancel: "Later")
-            case .available?, nil:
+            case .available?, .needsNewerMacOS?, nil:
                 guard canUpdate else {
                     return CheckAlert(
                         title: "Graft \(version) is available",
-                        message: "\(have) Download the new version from its release page (Graft.zip, "
-                            + "or Graft-Intel.zip for an Intel Mac), then replace Graft.app in "
+                        message: "\(have) Download the new version from its release page "
+                            + "(\(support.manualDownload)), then replace Graft.app in "
                             + "Applications. Your settings, apps and builds carry over.",
                         action: nil, release: record, cancel: "Later"
                     )
@@ -728,8 +868,19 @@ final class UpdateStore: ObservableObject, QuitHandover {
             defaults.set(data, forKey: Key.lastAnswer)
         }
         lastAnswer = record
+        // The check offers the release a download was refused for, and names
+        // no floor: the refusal is out of date (this Mac's macOS was updated,
+        // or the CLI knows better), so the release can be got again.
+        if let refused = floorRefusal, record.latest == refused.version,
+           record.updateAvailable, record.needsMacos == nil {
+            floorRefusal = nil
+            defaults.removeObject(forKey: Key.floorRefusal)
+        }
         guard says else { return nil }
-        return record.updateAvailable ? .available(record) : .upToDate
+        // A release this Mac can't run is no "up to date": `alert(for:)`
+        // says what it needs.
+        let needsNewerMacOS = record.needsMacos.map(Self.isPlainVersion) == true
+        return record.updateAvailable || needsNewerMacOS ? .available(record) : .upToDate
     }
 
     // MARK: Updating
@@ -740,7 +891,8 @@ final class UpdateStore: ObservableObject, QuitHandover {
     func startDownloadIfWanted() {
         guard autoInstall, host != nil, let latest = availableVersion,
               !triedOnItsOwn.contains(latest),
-              defaults.string(forKey: Key.failedVersion) != latest
+              defaults.string(forKey: Key.failedVersion) != latest,
+              macOSFloor == nil
         else { return }
         startDownload(userAsked: false)
     }
@@ -755,7 +907,8 @@ final class UpdateStore: ObservableObject, QuitHandover {
     /// way. Returns the download's task, for a test to wait on.
     @discardableResult
     func startDownload(userAsked asked: Bool) -> Task<Void, Never>? {
-        guard let host, let latest = availableVersion, !installPending else { return nil }
+        guard let host, let latest = availableVersion, !installPending, macOSFloor?.version != latest
+        else { return nil }
         switch phase {
         case let .downloading(version, _) where version == latest:
             if asked { userAsked = true }
@@ -816,6 +969,16 @@ final class UpdateStore: ObservableObject, QuitHandover {
         guard generation == mine else { return }
         downloadTask = nil
         guard let end, end.ok, let path = end.appPath, let got = end.version else {
+            // This Mac's macOS is too old for it: no failure, and no warning.
+            // Kept until this Mac's macOS meets the floor, so no launch
+            // downloads it again, and the banner says it once (`macOSFloor`).
+            if let end, let needs = Self.macOSFloor(of: end) {
+                let refused = FloorRefusal(version: version, needs: needs)
+                floorRefusal = refused
+                if let data = try? JSONEncoder().encode(refused) { defaults.set(data, forKey: Key.floorRefusal) }
+                phase = .idle
+                return
+            }
             if let reason = end?.reason, Self.refusedForWhatItIs.contains(reason) {
                 defaults.set(version, forKey: Key.failedVersion)
             }

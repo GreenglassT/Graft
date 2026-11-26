@@ -53,6 +53,9 @@ struct DeviceAppsSection: View {
     let apps: [AppRecord]
     /// This phone's delivery states, or why there are none yet.
     let readout: DeviceDeliveryStore.Readout
+    /// What the page calls the device: "iPad", "iPhone", or "device"
+    /// (`DeviceRecord.kindName`). A bounded word, unlike its name above.
+    let kind: String
     /// The icon cache. Held as the store rather than resolved by the caller so
     /// that reading `image(for:)` inside each row registers the dependency on
     /// `ArtworkStore.generation` that makes icons appear when a load finishes —
@@ -61,7 +64,7 @@ struct DeviceAppsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.titleGap) {
-            SectionTitle(text: "Your apps on this phone")
+            SectionTitle(text: "Your apps on this \(kind)")
             caption
             if case let .failed(message) = readout {
                 // The failure belongs to the phone, not to any one app, so it
@@ -71,7 +74,7 @@ struct DeviceAppsSection: View {
                 // CLI error be shown in a pane with this one's history.
                 ErrorBanner(
                     message: message,
-                    title: "Couldn't read this phone's delivery log.",
+                    title: "Couldn't read this \(kind)'s delivery log.",
                     fit: .inset
                 )
             }
@@ -86,7 +89,7 @@ struct DeviceAppsSection: View {
                         DeviceAppDeliveryRow(
                             app: app,
                             state: Self.state(of: app.name, in: readout),
-                            status: Self.statusLine(of: app.name, in: readout),
+                            status: Self.statusLine(of: app.name, in: readout, kind: kind),
                             artwork: artwork.image(for: app.bundleId)
                         )
                     }
@@ -95,21 +98,21 @@ struct DeviceAppsSection: View {
         }
     }
 
-    /// What "on this phone" means, said once.
+    /// What "on this iPad" means, said once.
     ///
-    /// Deliberately a constant string with no device name interpolated into it.
+    /// Deliberately no device name interpolated into it, only its kind.
     /// The name is whatever the user typed into Settings on the phone — the one
     /// unbounded input this pane takes — and it is already on screen in the
     /// header, bounded there. The fuller explanation lives in the tooltip
     /// rather than on the pane, because the sentence that actually explains the
     /// disagreement is long and this is not the pane to put a long sentence on.
     private var caption: some View {
-        Text("Delivery state below is for this phone alone.")
+        Text("Delivery state below is for this \(kind) alone.")
             .font(AppFont.monoSmall)
             .foregroundStyle(Palette.textDim)
             .lineLimit(1)
             .help(
-                "An app delivered to another phone and never to this one reads as "
+                "An app delivered to another device and never to this one reads as "
                 + "never delivered here. The app list's own badge means \"delivered "
                 + "anywhere\", which is why the two can disagree."
             )
@@ -146,11 +149,11 @@ struct DeviceAppsSection: View {
     /// "we haven't asked yet" must never render as "never delivered", which is
     /// the one wrong answer this section can give.
     static func statusLine(
-        of appName: String, in readout: DeviceDeliveryStore.Readout
+        of appName: String, in readout: DeviceDeliveryStore.Readout, kind: String
     ) -> String {
         switch readout {
         case .pending:
-            return "Reading this phone's delivery log…"
+            return "Reading this \(kind)'s delivery log…"
         case let .ready(states):
             guard let state = states[appName] else {
                 // Same meaning, and now literally the same string, as
@@ -201,7 +204,7 @@ private struct DeviceAppDeliveryRow: View {
             // draws the same tile in both lists.
             AppIcon(name: app.name, size: 22, image: artwork)
             VStack(alignment: .leading, spacing: 2) {
-                Text(app.displayName ?? app.name)
+                Text(app.shownName)
                     .font(AppFont.bodyMedium)
                     .foregroundStyle(Palette.text)
                     .lineLimit(1)

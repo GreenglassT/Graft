@@ -20,6 +20,12 @@ A `.deb` or `.dylib` you already have goes into the tweaks folder too.
   apps that use it. Deleting one an app still uses asks first, and offers
   Detach and Delete. Deleted tweaks go to the Trash.
 
+Updating an app (**Update & Install** on its pane, or `graft --update`) also
+updates every tweak it uses that has a newer build, once for all the apps that
+share it. While an update of an app runs, the **Update** button in Tweaks for
+the tweaks that app uses waits until it's done. See
+[Updating your apps](building-and-delivery.md#updating-your-apps).
+
 ![The Tweaks pane listing three example tweaks with their file names and sizes.](img/tweaks-pane.png "The Tweaks pane, listing the library.")
 
 ## Shared libraries

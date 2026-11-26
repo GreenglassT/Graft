@@ -45,6 +45,10 @@ struct GraftApp: App {
     /// because the menu and the delegate need it. The same runner as
     /// `store`'s.
     @State private var updates: UpdateStore
+    /// One-click Update (`AppUpdatesStore`): the window's badges, daily check
+    /// and sheet. Here, beside `updates`, because it is given the real
+    /// preferences and hold. The same runner and `ConfigStore` as the window.
+    @State private var appUpdates: AppUpdatesStore
     /// Help › Remove Graft's Data…: its sheet, over the main window. Here
     /// because the menu reaches it. The same runner as `store`'s.
     @StateObject private var removeData: RemoveDataStore
@@ -80,9 +84,17 @@ struct GraftApp: App {
             runner: runner, defaults: .standard, now: Date.init,
             appVersion: AboutGraft.version(of: .main), open: { NSWorkspace.shared.open($0) },
             updateLog: URL.libraryDirectory.appending(path: "Logs/Graft/update.log"),
-            host: SelfUpdateHost.running()
+            host: SelfUpdateHost.running(), support: support,
+            macOSVersion: {
+                let running = ProcessInfo.processInfo.operatingSystemVersion
+                return [running.majorVersion, running.minorVersion, running.patchVersion]
+            }()
         )
         _updates = State(initialValue: updateStore)
+        let appUpdateStore = AppUpdatesStore(
+            runner: runner, config: config, defaults: .standard, now: Date.init, hold: .shared
+        )
+        _appUpdates = State(initialValue: appUpdateStore)
         let removeData = RemoveDataStore(
             runner: runner, hold: .shared,
             // The app's own preferences, which the CLI only lists. Never in a
@@ -123,7 +135,7 @@ struct GraftApp: App {
                 Group {
                     if rebuild.phase == .ready {
                         ContentView(
-                            store: store, adminShell: adminShell, updates: updates,
+                            store: store, adminShell: adminShell, updates: updates, appUpdates: appUpdates,
                             // Set Up Decryption's "Open <App>", named here
                             // like `openURL` above (`NoRealDefaultsTests`).
                             openApp: {
@@ -278,7 +290,8 @@ final class GraftAppDelegate: NSObject, NSApplicationDelegate {
         hold: .shared,
         present: QuitAlert.present,
         reply: { NSApp.reply(toApplicationShouldTerminate: $0) },
-        schedule: QuitAlert.afterDelay
+        schedule: QuitAlert.afterDelay,
+        notice: QuitAlert.notice
     )
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -391,6 +404,71 @@ enum QuitAlert {
         var alert: NSAlert?
         var takenDown = false
         var afterTakeDown: (@MainActor () -> Void)?
+    }
+
+    /// What Quit Anyway says while it waits for a step to finish
+    /// (`QuitGuard.Notice`): "Finishing the install on iPad Air, then
+    /// quitting…", in a small panel with a spinner. No buttons: the choice
+    /// was made, and the panel goes once the step is done and Graft quits, or
+    /// at `QuitGuard.finishGrace`. A panel, not a second alert, so nothing
+    /// waits on it.
+    ///
+    /// Never on screen in a test host (`AdminShell.insideTests`).
+    @MainActor
+    static func notice(_ note: String?) {
+        guard !AdminShell.insideTests else { return }
+        guard let note else {
+            QuitNotice.shown?.panel.orderOut(nil)
+            QuitNotice.shown = nil
+            return
+        }
+        let shown = QuitNotice.shown ?? QuitNotice()
+        QuitNotice.shown = shown
+        shown.say(note)
+    }
+
+    /// The panel `notice` shows, while it shows one.
+    @MainActor
+    private final class QuitNotice {
+        static var shown: QuitNotice?
+
+        let panel: NSPanel
+        private let label: NSTextField
+
+        init() {
+            label = NSTextField(wrappingLabelWithString: "")
+            label.preferredMaxLayoutWidth = 320
+            let spinner = NSProgressIndicator()
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isIndeterminate = true
+            spinner.startAnimation(nil)
+            let stack = NSStackView(views: [spinner, label])
+            stack.orientation = .horizontal
+            stack.alignment = .centerY
+            stack.spacing = 10
+            stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
+            // Titled and nothing else: no close button, nothing to choose.
+            panel = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: 380, height: 64),
+                styleMask: [.titled], backing: .buffered, defer: false
+            )
+            panel.title = "Graft"
+            panel.isReleasedWhenClosed = false
+            panel.hidesOnDeactivate = false
+            panel.level = .modalPanel
+            panel.contentView = stack
+        }
+
+        func say(_ note: String) {
+            // Said to VoiceOver too: the panel takes no focus (review part
+            // 2, #8).
+            if label.stringValue != note { VoiceOverAnnouncement.thisMac.post(note) }
+            label.stringValue = note
+            if let content = panel.contentView { panel.setContentSize(content.fittingSize) }
+            if !panel.isVisible { panel.center() }
+            panel.orderFrontRegardless()
+        }
     }
 }
 

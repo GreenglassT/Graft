@@ -106,7 +106,7 @@ def test_versions_are_newest_first_with_details_for_the_page_asked(config: Path,
     (end,) = _events(result, "appstore-releases-end")
     assert end == {
         "type": "appstore-releases-end", "app": "example", "bundle_id": "com.example.app",
-        "count": 4, "offset": 0, "limit": 2, "held_version": None,
+        "count": 4, "offset": 0, "limit": 2, "held_version": None, "held_version_id": None,
     }
     assert _events(result)[-1] == end, "the sentinel comes last"
     listed = [c["argv"] for c in fakes.calls("ipatool") if c["argv"][:1] == ["list-versions"]]
@@ -318,10 +318,10 @@ def test_a_get_by_version_downloads_that_version_and_holds_the_app_at_it(
     assert [e["type"] for e in _events(result)][-2:] == ["ipa-provided", "appstore-hold"]
     assert _events(result, "appstore-hold") == [{
         "type": "appstore-hold", "app": "example", "bundle_id": "com.example.app",
-        "version": "1.2.0", "previous": None,
+        "version": "1.2.0", "version_id": "800200", "previous": None,
     }]
     assert _pin(config) == "1.2.0"
-    assert (cache_dir / "com.example.app_1.2.0.ipa").is_file()
+    assert (cache_dir / "com.example.app_1.2.0_800200.ipa").is_file()
 
 
 def test_a_plain_get_does_not_name_a_version(config: Path, fakes: FakeTools) -> None:
@@ -338,7 +338,7 @@ def test_get_latest_lets_go_of_the_hold(config: Path, fakes: FakeTools) -> None:
     assert result.exit_code == 0, result.output
     assert _events(result, "appstore-hold") == [{
         "type": "appstore-hold", "app": "example", "bundle_id": "com.example.app",
-        "version": None, "previous": "1.2.0",
+        "version": None, "version_id": None, "previous": "1.2.0",
     }]
     assert _pin(config) == "latest"
 
@@ -460,6 +460,268 @@ def test_version_id_belongs_to_the_get(config: Path, fakes: FakeTools) -> None:
 
     assert result.exit_code == 2
     assert "--version-id is not valid with --appstore-check" in " ".join(result.output.split())
+
+
+# --- Holds by build (spec §6) -----------------------------------------------------
+
+#: Two builds of 1.2.0, the older with the lower id, as the App Store numbers them.
+TWIN_IDS = ["800200", "800250", "800400"]
+TWIN_META = {
+    "800400": {"version": "1.4.0", "date": "2026-10-01T07:00:00Z"},
+    "800250": {"version": "1.2.0", "date": "2026-08-15T07:00:00Z"},
+    "800200": {"version": "1.2.0", "date": "2026-08-01T07:00:00Z"},
+}
+
+
+def _build_of(fakes: FakeTools, tmp_path: Path, marker: str, version: str = "1.2.0") -> None:
+    """UnfairPlay hands back a `version` IPA marked `marker`, as a get of that build would."""
+    fakes.set(decrypted_ipa=str(make_ipa(
+        tmp_path / "fixtures" / f"{marker}.ipa", version=version, encrypted=False, marker=marker,
+    )))
+
+
+def _marker(ipa: Path) -> str:
+    import zipfile
+
+    with zipfile.ZipFile(ipa) as z:
+        return z.read("Payload/App.app/marker.txt").decode()
+
+
+def _downloads(fakes: FakeTools) -> list[list[str]]:
+    return [c["argv"] for c in fakes.calls("ipatool") if c["argv"][:1] == ["download"]]
+
+
+@pytest.fixture
+def twins(config: Path, fakes: FakeTools, tmp_path: Path, cache_dir: Path) -> FakeTools:
+    """Two builds of 1.2.0 listed, and a plain 1.2.0 file staged by an
+    earlier get of the latest, which could be either build."""
+    fakes.set(versions=TWIN_IDS, version_metadata=TWIN_META)
+    assert _run(["--json", "--appstore-versions", "--app", "example"]).exit_code == 0
+    make_ipa(cache_dir / "com.example.app_1.2.0.ipa", version="1.2.0", encrypted=False, marker="plain")
+    _build_of(fakes, tmp_path, "build 1")
+    return fakes
+
+
+def test_a_get_by_id_of_a_build_another_shares_its_number_with_downloads_it(
+    config: Path, twins: FakeTools
+) -> None:
+    """A plain 1.2.0 could be either build. Before 2.3 a get of build 1 called
+    it already staged, downloaded nothing, and held the app at what may have
+    been build 2."""
+    from graft_ipa.ipa_cache import find_in_cache
+
+    result = _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"])
+
+    assert result.exit_code == 0, result.output
+    assert _events(result, "appstore-already-staged") == []
+    assert len(_downloads(twins)) == 1
+    cfg = load_config(config)
+    used = find_in_cache(cfg, cfg.get_app("example"))
+    assert used is not None and _marker(used.path) == "build 1", "builds use the build got"
+
+
+def test_the_builds_of_one_number_are_counted_as_the_sheet_counts_them() -> None:
+    """Trimmed as the Older Versions sheet compares versions, numbers only,
+    oldest (lowest id) first, by value and not by spelling."""
+    def meta(version: str) -> ipatool.VersionMetadata:
+        return ipatool.VersionMetadata(version=version, release_date=None)
+
+    known = {
+        "1000": meta("1.2.0"), "999": meta(" 1.2.0\n"), "abc": meta("1.2.0"),
+        "1001": meta("1.3.0"), "１２": meta("1.2.0"),
+    }
+
+    assert appstore.same_version_ids(known, "1.2.0") == ["999", "1000"]
+    assert appstore.same_version_ids(known, "1.2.0 ") == ["999", "1000"]
+    assert appstore.same_version_ids(known, "1.3.0") == ["1001"]
+    assert appstore.same_version_ids(known, "9.9.9") == []
+
+
+def test_a_get_by_id_downloads_that_build_beside_its_twin_and_holds_it(
+    config: Path, twins: FakeTools, cache_dir: Path
+) -> None:
+    result = _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"])
+
+    assert result.exit_code == 0, result.output
+    assert len(_downloads(twins)) == 1, "a plain 1.2.0 could be either build: it downloads"
+    own = cache_dir / "com.example.app_1.2.0_800200.ipa"
+    assert _marker(own) == "build 1"
+    assert _marker(cache_dir / "com.example.app_1.2.0.ipa") == "plain", "the twin stays"
+    assert [(e["version"], e["version_id"]) for e in _events(result, "appstore-hold")] == [("1.2.0", "800200")]
+    app = load_config(config).get_app("example")
+    assert (app.preferred_version, app.preferred_version_id) == ("1.2.0", "800200")
+    from graft_ipa.ipa_cache import find_in_cache
+
+    assert find_in_cache(load_config(config), app).path == own
+
+
+def test_a_version_id_is_the_number_its_row_lists_however_it_is_spelled(
+    config: Path, twins: FakeTools, cache_dir: Path
+) -> None:
+    """`0800200` is the id listed as 800200. Taken as typed, it found no row
+    (so downloaded again), named a file of its own, and held a build no
+    listing knows, so the sheet marked no row held."""
+    result = _run(["--json", "--appstore-get", "--app", "example", "--version-id", "0800200"])
+
+    assert result.exit_code == 0, result.output
+    (download,) = _downloads(twins)
+    assert download[download.index("--external-version-id") + 1] == "800200"
+    assert (cache_dir / "com.example.app_1.2.0_800200.ipa").is_file()
+    assert not (cache_dir / "com.example.app_1.2.0_0800200.ipa").exists()
+    assert [(e["version"], e["version_id"]) for e in _events(result, "appstore-hold")] == [("1.2.0", "800200")]
+
+    again = _run(["--json", "--appstore-get", "--app", "example", "--version-id", "00800200"])
+
+    assert again.exit_code == 0, again.output
+    assert len(_downloads(twins)) == 1, "the same build, already staged"
+    assert [e["filename"] for e in _events(again, "appstore-already-staged")] == [
+        "com.example.app_1.2.0_800200.ipa"
+    ]
+
+
+def test_a_hold_by_build_for_a_person_names_the_build(config: Path, twins: FakeTools) -> None:
+    result = _run(["--appstore-get", "--app", "example", "--version-id", "800200"])
+
+    assert result.exit_code == 0, result.output
+    assert "held at 1.2.0 (App Store version id 800200)" in " ".join(result.stdout.split())
+
+
+def test_a_get_of_the_held_build_again_downloads_nothing(
+    config: Path, twins: FakeTools, cache_dir: Path
+) -> None:
+    assert _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"]).exit_code == 0
+
+    again = _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"])
+
+    assert again.exit_code == 0, again.output
+    assert len(_downloads(twins)) == 1
+    (staged,) = _events(again, "appstore-already-staged")
+    assert staged["filename"] == "com.example.app_1.2.0_800200.ipa"
+    assert _events(again, "appstore-hold") == [], "already held there"
+
+
+def test_a_get_of_the_other_build_moves_the_hold(
+    config: Path, twins: FakeTools, cache_dir: Path, tmp_path: Path
+) -> None:
+    assert _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"]).exit_code == 0
+    _build_of(twins, tmp_path, "build 2")
+
+    result = _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800250"])
+
+    assert result.exit_code == 0, result.output
+    assert _marker(cache_dir / "com.example.app_1.2.0_800250.ipa") == "build 2"
+    assert (cache_dir / "com.example.app_1.2.0_800200.ipa").is_file()
+    assert [(e["version"], e["version_id"], e["previous"]) for e in _events(result, "appstore-hold")] == [
+        ("1.2.0", "800250", "1.2.0")
+    ]
+    assert load_config(config).get_app("example").preferred_version_id == "800250"
+
+
+def test_get_latest_lets_go_of_the_build_too(
+    config: Path, twins: FakeTools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"]).exit_code == 0
+    monkeypatch.setattr(
+        itunes, "lookup_by_bundle_id",
+        lambda bundle_id, country=None: itunes.ITunesApp(track_id=1, bundle_id=bundle_id, name="x", version="1.4.0"),
+    )
+    _build_of(twins, tmp_path, "latest", version="1.4.0")
+
+    result = _run(["--json", "--appstore-get", "--app", "example"])
+
+    assert result.exit_code == 0, result.output
+    entry = yaml.safe_load(config.read_text())["apps"]["example"]
+    assert entry["preferred_version"] == "latest"
+    assert "preferred_build" not in entry
+    assert [(e["version"], e["version_id"]) for e in _events(result, "appstore-hold")] == [(None, None)]
+
+
+def test_a_unique_version_already_staged_is_held_by_version_as_before(
+    config: Path, old_build: FakeTools, cache_dir: Path
+) -> None:
+    """One build of 1.2.0: the plain file is that build, nothing downloads,
+    and the hold carries no id (it needs none)."""
+    assert _run(["--json", "--appstore-versions", "--app", "example"]).exit_code == 0
+    make_ipa(cache_dir / "com.example.app_1.2.0.ipa", version="1.2.0", encrypted=False)
+
+    result = _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"])
+
+    assert result.exit_code == 0, result.output
+    assert _downloads(old_build) == []
+    assert [(e["version"], e["version_id"]) for e in _events(result, "appstore-hold")] == [("1.2.0", None)]
+    assert load_config(config).get_app("example").preferred_version_id is None
+
+
+def test_the_check_says_which_build_is_held(
+    config: Path, twins: FakeTools, store: None
+) -> None:
+    assert _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"]).exit_code == 0
+
+    (event,) = _events(_run(["--json", "--appstore-check", "--app", "example"]))
+
+    assert (event["held_version"], event["held_version_id"]) == ("1.2.0", "800200")
+    assert event["held_build"] == {"number": 1, "count": 2}
+    assert event["cached_version"] == "1.2.0"
+    assert event["update_available"] is False
+
+
+def test_the_check_for_a_person_names_the_build(config: Path, twins: FakeTools, store: None) -> None:
+    assert _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800250"]).exit_code == 0
+
+    result = _run(["--appstore-check", "--app", "example"])
+
+    assert "held at 1.2.0 (build 2 of 2)" in result.stdout
+
+
+def test_a_hold_by_hand_names_no_build(config: Path, twins: FakeTools, store: None) -> None:
+    set_app_options(config, "example", preferred_version="1.2.0")
+
+    (event,) = _events(_run(["--json", "--appstore-check", "--app", "example"]))
+
+    assert (event["held_version_id"], event["held_build"]) == (None, None)
+
+
+def test_the_listing_stages_and_holds_by_build(config: Path, twins: FakeTools) -> None:
+    assert _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"]).exit_code == 0
+
+    result = _run(["--json", "--appstore-versions", "--app", "example"])
+
+    rows = {r["external_id"]: r for r in _events(result, "appstore-release")}
+    assert rows["800200"]["staged"] is True, "its own file"
+    assert rows["800250"]["staged"] is False, "the plain 1.2.0 could be either build"
+    (end,) = _events(result, "appstore-releases-end")
+    assert (end["held_version"], end["held_version_id"]) == ("1.2.0", "800200")
+
+    person = _run(["--appstore-versions", "--app", "example"])
+    held_lines = [line for line in person.stdout.splitlines() if "held" in line]
+    assert len(held_lines) == 1 and "800200" in held_lines[0], person.stdout
+
+
+def test_a_first_listing_counts_the_builds_it_has_read_so_far(
+    config: Path, fakes: FakeTools, cache_dir: Path
+) -> None:
+    """Rows go out as they are read, newest first, so by the older build's row
+    both builds of 1.2.0 have been read, and the plain file is neither's."""
+    fakes.set(versions=TWIN_IDS, version_metadata=TWIN_META)
+    make_ipa(cache_dir / "com.example.app_1.2.0.ipa", version="1.2.0", encrypted=False)
+
+    result = _run(["--json", "--appstore-versions", "--app", "example"])
+
+    rows = {r["external_id"]: r for r in _events(result, "appstore-release")}
+    assert rows["800200"]["staged"] is False
+
+
+def test_a_hold_by_build_of_a_number_with_one_build_counts_nothing(
+    config: Path, old_build: FakeTools, store: None
+) -> None:
+    assert _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"]).exit_code == 0
+
+    (unread,) = _events(_run(["--json", "--appstore-check", "--app", "example"]))
+    assert _run(["--json", "--appstore-versions", "--app", "example"]).exit_code == 0
+    (read,) = _events(_run(["--json", "--appstore-check", "--app", "example"]))
+
+    assert (unread["held_version_id"], unread["held_build"]) == ("800200", None), "no listing read it"
+    assert (read["held_version_id"], read["held_build"]) == ("800200", None), "one build of 1.2.0"
 
 
 # --- --appstore-check and the hold ----------------------------------------------
@@ -891,6 +1153,46 @@ def test_a_preferred_version_edited_during_the_get_is_kept(
     assert _events(result, "appstore-hold") == []
     warnings = [e["line"] for e in _events(result, "log") if e["source"] == "warning"]
     assert len(warnings) == 1 and f"changed to {edited} while this get ran" in warnings[0], warnings
+    assert f"so Graft kept {edited} instead of" in warnings[0], warnings
+
+
+def _held_during_the_get(monkeypatch: pytest.MonkeyPatch, config: Path, new: tuple[str, str | None]) -> None:
+    """The hold becomes `new` while the get runs (Edit App, or another get)."""
+    from graft_ipa.config import swap_preferred_version
+
+    real = cli_mod._stage_ipa
+
+    def stage(cfg: Any, **kwargs: Any) -> str:
+        swap_preferred_version(config, "example", expected=("latest", None), new=new)
+        return real(cfg, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "_stage_ipa", stage)
+
+
+@pytest.mark.parametrize(("meanwhile", "said"), [
+    (("1.2.0", None), "example's hold changed to 1.2.0 by version while this get ran, so Graft "
+                      "kept it instead of holding the build this get asked for (App Store version id 800200)"),
+    (("1.2.0", "800250"), "example's hold changed to a build of 1.2.0 (App Store version id 800250) "
+                          "while this get ran, so Graft kept it instead of holding the build this get "
+                          "asked for (App Store version id 800200)"),
+])
+def test_a_hold_moved_within_the_same_version_says_what_moved(
+    config: Path, twins: FakeTools, monkeypatch: pytest.MonkeyPatch,
+    meanwhile: tuple[str, str | None], said: str,
+) -> None:
+    """It said "changed to 1.2.0 while this get ran, so Graft left it there
+    instead of holding it at 1.2.0": the same number twice, and nothing of
+    the build, which is what differs."""
+    _held_during_the_get(monkeypatch, config, meanwhile)
+
+    result = _run(["--json", "--appstore-get", "--app", "example", "--version-id", "800200"])
+
+    assert result.exit_code == 0, result.output
+    assert _events(result, "appstore-hold") == []
+    warnings = [e["line"] for e in _events(result, "log") if e["source"] == "warning"]
+    assert warnings == [said]
+    app = load_config(config).get_app("example")
+    assert (app.preferred_version, app.preferred_version_id) == meanwhile
 
 
 def test_a_hold_written_after_an_edit_keeps_the_edit(

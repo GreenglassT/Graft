@@ -201,7 +201,7 @@ final class AppStoreVersionsTests: XCTestCase {
         guard case .failed = store.phase else { return XCTFail("expected a failure, got \(store.phase)") }
         XCTAssertEqual(store.heldVersion, "1.4.0")
         let row = try XCTUnwrap(store.releases.first)
-        XCTAssertFalse(AppStoreVersionsSheet.offersGet(row, held: store.heldVersion, state: .ready),
+        XCTAssertFalse(AppStoreVersionsSheet.offersGet(row, held: store.heldVersion, heldId: store.heldVersionId, state: .ready),
                        "the held version is staged: nothing to get")
     }
 
@@ -356,12 +356,12 @@ final class AppStoreVersionsTests: XCTestCase {
         let newest = Self.record("800400", index: 0, version: "1.4.0", staged: true)
         XCTAssertEqual(AppStoreVersionsSheet.headline(newest, state: .ready), "1.4.0")
         XCTAssertEqual(
-            AppStoreVersionsSheet.detailLine(newest, held: "1.4.0", state: .ready),
+            AppStoreVersionsSheet.detailLine(newest, held: "1.4.0", heldId: nil, state: .ready),
             "Aug 1, 2026 · newest · held: builds use this one · staged · id 800400"
         )
         let unread = Self.record("800100", index: 12, version: nil)
         XCTAssertEqual(AppStoreVersionsSheet.headline(unread, state: .unread), "Not read yet")
-        XCTAssertEqual(AppStoreVersionsSheet.detailLine(unread, held: nil, state: .unread), "Show More reads it · id 800100")
+        XCTAssertEqual(AppStoreVersionsSheet.detailLine(unread, held: nil, heldId: nil, state: .unread), "Show More reads it · id 800100")
         XCTAssertEqual(AppStoreVersionsSheet.headline(unread, state: .reading), "Reading…")
     }
 
@@ -374,9 +374,9 @@ final class AppStoreVersionsTests: XCTestCase {
 
     @MainActor
     func test_get_says_whether_it_downloads() {
-        XCTAssertTrue(AppStoreVersionsSheet.getHelp(Self.record("1", index: 1, version: "1.2.0", staged: true))
+        XCTAssertTrue(AppStoreVersionsSheet.getHelp(Self.record("1", index: 1, version: "1.2.0", staged: true), held: nil, heldId: nil)
             .contains("without downloading"))
-        XCTAssertTrue(AppStoreVersionsSheet.getHelp(Self.record("1", index: 1, version: "1.2.0"))
+        XCTAssertTrue(AppStoreVersionsSheet.getHelp(Self.record("1", index: 1, version: "1.2.0"), held: nil, heldId: nil)
             .contains("Download, decrypt and stage 1.2.0"))
     }
 
@@ -390,16 +390,16 @@ final class AppStoreVersionsTests: XCTestCase {
         let heldGone = Self.record("800200", index: 2, version: "1.2.0", staged: false)
         let other = Self.record("800300", index: 1, version: "1.3.0")
 
-        XCTAssertFalse(Sheet.offersGet(heldStaged, held: "1.2.0", state: .ready))
-        XCTAssertTrue(Sheet.offersGet(heldGone, held: "1.2.0", state: .ready), "a held version that isn't staged")
-        XCTAssertTrue(Sheet.offersGet(other, held: "1.2.0", state: .ready))
-        XCTAssertTrue(Sheet.offersGet(heldStaged, held: nil, state: .ready), "staged but not held: Get holds it")
+        XCTAssertFalse(Sheet.offersGet(heldStaged, held: "1.2.0", heldId: nil, state: .ready))
+        XCTAssertTrue(Sheet.offersGet(heldGone, held: "1.2.0", heldId: nil, state: .ready), "a held version that isn't staged")
+        XCTAssertTrue(Sheet.offersGet(other, held: "1.2.0", heldId: nil, state: .ready))
+        XCTAssertTrue(Sheet.offersGet(heldStaged, held: nil, heldId: nil, state: .ready), "staged but not held: Get holds it")
         let unread = Self.record("800100", index: 12, version: nil)
         for state in [AppStoreVersionsStore.RowState.reading, .unread, .unavailable("gone")] {
-            XCTAssertFalse(Sheet.offersGet(unread, held: nil, state: state), "\(state)")
+            XCTAssertFalse(Sheet.offersGet(unread, held: nil, heldId: nil, state: state), "\(state)")
         }
-        XCTAssertTrue(Sheet.getHelp(heldGone, held: "1.2.0").contains("isn't staged any more"))
-        XCTAssertTrue(Sheet.getHelp(other, held: "1.2.0").contains("Download, decrypt and stage 1.3.0"))
+        XCTAssertTrue(Sheet.getHelp(heldGone, held: "1.2.0", heldId: nil).contains("isn't staged any more"))
+        XCTAssertTrue(Sheet.getHelp(other, held: "1.2.0", heldId: nil).contains("Download, decrypt and stage 1.3.0"))
     }
 
     @MainActor
@@ -536,7 +536,7 @@ final class AppStoreVersionsTests: XCTestCase {
         printf '%s\\n' '\(Self.end(count: 3))'
         """)
         let store = AppStoreVersionsStore(runner: runner)
-        let sheet = AppStoreVersionsSheet(app: "example", displayName: "Example", store: store,
+        let sheet = AppStoreVersionsSheet(app: "example", heldId: nil, displayName: "Example", store: store,
                                           getBlockedReason: nil, onGet: { _ in })
         let box = hosted(sheet, size: NSSize(width: 520, height: 540))
         addTeardownBlock { takeDown(box) }
@@ -551,15 +551,24 @@ final class AppStoreVersionsTests: XCTestCase {
         let newerRow = nodes.first { said($0).contains("2026.42.0 (build 2 of 2)") }
         let olderRow = nodes.first { said($0).contains("2026.42.0 (build 1 of 2)") }
         // The row is one element (its children combined), whose help is the
-        // build's and then Get's.
-        let get = AppStoreVersionsSheet.getHelp(Self.record("100000002", index: 1, version: "2026.42.0"))
-        XCTAssertEqual(newerRow?.help?.contains(newer), true, "\(dump)")
-        XCTAssertEqual(olderRow?.help?.contains(older), true, "\(dump)")
-        XCTAssertEqual(olderRow?.help?.contains(get), true, "Get's help is still there: \(dump)")
+        // build's and then Get's, as two sentences. Joined by SwiftUI it read
+        // "…(build 1)., Download…" to VoiceOver.
+        let get = AppStoreVersionsSheet.getHelp(Self.record("100000002", index: 1, version: "2026.42.0"), held: nil, heldId: nil)
+        XCTAssertEqual(newerRow?.help, "\(newer) \(get).", "\(dump)")
+        XCTAssertEqual(olderRow?.help, "\(older) \(get).", "Get's help is still there: \(dump)")
         let ownRow = try XCTUnwrap(nodes.first { said($0).contains("2026.41.0") }, "\(dump)")
         XCTAssertFalse(said(ownRow).contains("build"), "\(dump)")
-        XCTAssertEqual(ownRow.help, AppStoreVersionsSheet.getHelp(Self.record("100000001", index: 2, version: "2026.41.0")),
+        XCTAssertEqual(ownRow.help, AppStoreVersionsSheet.getHelp(Self.record("100000001", index: 2, version: "2026.41.0"), held: nil, heldId: nil),
                        "Get's help alone, as before: \(dump)")
+    }
+
+    /// A build's row help is two sentences however Get's ends.
+    func test_a_builds_row_help_joins_two_sentences() {
+        let build = AppStoreVersionsStore.DuplicateBuild(version: "1.0", number: 1, count: 2)
+        XCTAssertEqual(AppStoreVersionsSheet.rowHelp(build: build, get: "Get it"), "\(build.help) Get it.")
+        XCTAssertEqual(AppStoreVersionsSheet.rowHelp(build: build, get: "Get it."), "\(build.help) Get it.")
+        XCTAssertEqual(AppStoreVersionsSheet.rowHelp(build: build, get: nil), build.help)
+        XCTAssertNil(AppStoreVersionsSheet.rowHelp(build: nil, get: "Get it"))
     }
 
     // MARK: Getting a picked version
@@ -673,6 +682,90 @@ final class AppStoreVersionsTests: XCTestCase {
                        "Held at 1.2.0 · couldn't check the App Store: offline")
         XCTAssertEqual(Row.versionLine(Self.version(store: "1.4.0", cached: "1.2.0", held: nil, update: true)),
                        "App Store 1.4.0 · cached 1.2.0 — update available")
+    }
+
+    /// Spec §6: a hold by build says which build, in the sheet's own words
+    /// (`DuplicateBuild.suffix`).
+    @MainActor
+    func test_a_hold_by_build_says_which_build() {
+        typealias Row = AppStoreSourceRow
+        func held(
+            store: String?, cached: String?, build: AppStoreVersionRecord.HeldBuild?
+        ) -> AppStoreVersionRecord {
+            AppStoreVersionRecord(
+                app: "example", bundleId: "com.example.app", storeVersion: store,
+                cachedVersion: cached, updateAvailable: false, error: store == nil ? "offline" : nil,
+                heldVersion: "2026.42.0", heldVersionId: "800200", heldBuild: build
+            )
+        }
+        let first = AppStoreVersionRecord.HeldBuild(number: 1, count: 2)
+        let second = AppStoreVersionRecord.HeldBuild(number: 2, count: 2)
+        XCTAssertEqual(Row.versionLine(held(store: "2026.47.0", cached: "2026.42.0", build: first)),
+                       "Held at 2026.42.0 (build 1 of 2) · newest 2026.47.0")
+        XCTAssertEqual(Row.versionLine(held(store: "2026.42.0", cached: "2026.42.0", build: first)),
+                       "Held at 2026.42.0 (build 1 of 2) · newest 2026.42.0 (build 2 of 2)",
+                       "build 1 is not the App Store's newest, though its number is")
+        XCTAssertEqual(Row.versionLine(held(store: "2026.42.0", cached: "2026.42.0", build: second)),
+                       "Held at 2026.42.0 (build 2 of 2) · the App Store's newest")
+        XCTAssertEqual(Row.versionLine(held(store: "2026.47.0", cached: nil, build: first)),
+                       "Held at 2026.42.0 (build 1 of 2) (not staged) · newest 2026.47.0")
+        XCTAssertEqual(Row.versionLine(held(store: nil, cached: "2026.42.0", build: first)),
+                       "Held at 2026.42.0 (build 1 of 2) · couldn't check the App Store: offline")
+        XCTAssertEqual(Row.versionLine(held(store: "2026.47.0", cached: "2026.42.0", build: nil)),
+                       "Held at 2026.42.0 · newest 2026.47.0", "one build of that number: no count")
+    }
+
+    // MARK: Holds by build
+
+    func test_a_hold_by_build_marks_only_that_build() {
+        typealias Sheet = AppStoreVersionsSheet
+        let first = Self.record("800200", index: 2, version: "2026.42.0", staged: true)
+        let second = Self.record("800250", index: 1, version: "2026.42.0", staged: true)
+
+        XCTAssertTrue(Sheet.isHeld(first, held: "2026.42.0", heldId: "800200"))
+        XCTAssertFalse(Sheet.isHeld(second, held: "2026.42.0", heldId: "800200"))
+        XCTAssertTrue(Sheet.detailLine(first, held: "2026.42.0", heldId: "800200", state: .ready)
+            .contains("held: builds use this one"))
+        XCTAssertFalse(Sheet.detailLine(second, held: "2026.42.0", heldId: "800200", state: .ready)
+            .contains("held:"))
+        XCTAssertFalse(Sheet.offersGet(first, held: "2026.42.0", heldId: "800200", state: .ready),
+                       "held and staged: nothing to get")
+        XCTAssertTrue(Sheet.offersGet(second, held: "2026.42.0", heldId: "800200", state: .ready),
+                      "the other build of the same number can be got")
+    }
+
+    func test_a_hold_without_a_build_marks_every_row_of_its_version() {
+        typealias Sheet = AppStoreVersionsSheet
+        let first = Self.record("800200", index: 2, version: "2026.42.0")
+        let second = Self.record("800250", index: 1, version: "2026.42.0")
+
+        XCTAssertTrue(Sheet.isHeld(first, held: "2026.42.0", heldId: nil))
+        XCTAssertTrue(Sheet.isHeld(second, held: "2026.42.0", heldId: nil))
+        XCTAssertFalse(Sheet.isHeld(first, held: nil, heldId: nil))
+    }
+
+    @MainActor
+    func test_the_list_says_which_build_is_held() async throws {
+        let (runner, _) = try scriptRunner("""
+        printf '%s\\n' '\(Self.row("800250", index: 0, version: "2026.42.0"))'
+        printf '%s\\n' '\(Self.row("800200", index: 1, version: "2026.42.0", staged: true))'
+        printf '%s\\n' '{"type":"appstore-releases-end","app":"example","bundle_id":"com.example.app","count":2,"offset":0,"limit":10,"held_version":"2026.42.0","held_version_id":"800200"}'
+        """)
+        let store = AppStoreVersionsStore(runner: runner)
+
+        store.load(app: "example", held: "2026.42.0", heldId: "800250")
+        XCTAssertEqual(store.heldVersionId, "800250", "what the sheet opened with, until the list says")
+        await waitUntil { store.phase != .loading }
+
+        XCTAssertEqual(store.phase, .loaded)
+        XCTAssertEqual(store.heldVersionId, "800200", "from the list")
+        let rows = Dictionary(uniqueKeysWithValues: store.releases.map { ($0.externalId, $0) })
+        typealias Sheet = AppStoreVersionsSheet
+        XCTAssertEqual(Sheet.accessory(try XCTUnwrap(rows["800200"]), in: store), .nothing)
+        XCTAssertEqual(Sheet.accessory(try XCTUnwrap(rows["800250"]), in: store), .get)
+
+        store.reset()
+        XCTAssertNil(store.heldVersionId)
     }
 
     /// Held, the button is Get latest whatever is staged: it is how the hold

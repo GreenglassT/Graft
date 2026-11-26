@@ -137,12 +137,14 @@ git -C "$REPO_ROOT" archive --format=tar "$HEAD_AT_START" | tar -x -C "$EXPORT"
 # Info.plist's GraftBundleArch (written below). An app whose code doesn't read
 # it would show Intel Macs the old "needs Apple silicon" screen, and nothing
 # else here would notice. So an Intel release needs the key's name, as a
-# string, in the app's own code (Graft/Graft, not its tests), where it is
-# compiled: not in a comment, nor in an `#if false` block (swift_literal.py).
+# string, in the app's own code (Graft/Graft, not its tests), where a Release
+# build certainly compiles it: not in a comment or another string, nor in an
+# `#if` branch that Release leaves out or may (swift_literal.py).
 if [[ "$ARCH" == x86_64 ]]; then
   if ! "$PY" "$EXPORT/scripts/swift_literal.py" "$EXPORT/Graft/Graft" GraftBundleArch; then
     echo "error: an Intel release needs an app that reads Info.plist's GraftBundleArch, and no Swift file of" >&2
-    echo "       the app's own (Graft/Graft) names it in code that's compiled (outside comments and #if false):" >&2
+    echo "       the app's own (Graft/Graft) names it in code a Release build compiles (outside comments," >&2
+    echo "       other strings, and #if branches Release leaves out or might, such as #if DEBUG):" >&2
     echo "       on an Intel Mac, this commit's app would still say it" >&2
     echo "       needs Apple silicon. Build it from a commit with the app's Intel support." >&2
     exit 1

@@ -44,11 +44,15 @@ func click(at point: NSPoint, in window: NSWindow) {
 /// Here rather than in `SetupTests`, where it was written, once a second test
 /// (`StoppedBuildPaneTests`) needed it — the fate of `click(at:in:)` above is
 /// what a second private copy turns into.
+///
+/// `role` widens it to another control a click presses: `kAXCheckBoxRole`
+/// for a checkbox `Toggle` (Set Up LiveContainer's "I imported the
+/// certificate").
 @MainActor
-func clickButton(named name: String, in window: NSWindow) throws {
+func clickButton(named name: String, in window: NSWindow, role: String = kAXButtonRole) throws {
     let nodes = try AccessibilityTree.nodes(in: window)
     let button = try XCTUnwrap(
-        nodes.first { $0.role == kAXButtonRole && $0.name == name }, "no \(name) button"
+        nodes.first { $0.role == role && $0.name == name }, "no \(name) (\(role))"
     )
     let element = button.element
     let frame = AccessibilityTree.offMain { () -> CGRect? in

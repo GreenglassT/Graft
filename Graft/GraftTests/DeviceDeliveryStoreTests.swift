@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 @testable import Graft
 
@@ -199,7 +200,7 @@ final class DeviceAppsSectionCopyTests: XCTestCase {
             "example": Self.record(kind: .never, summary: "Never delivered to a device."),
         ])
         XCTAssertEqual(
-            DeviceAppsSection.statusLine(of: "example", in: readout),
+            DeviceAppsSection.statusLine(of: "example", in: readout, kind: "iPhone"),
             "Never delivered to a device."
         )
     }
@@ -212,7 +213,7 @@ final class DeviceAppsSectionCopyTests: XCTestCase {
             "example": Self.record(kind: .current, summary: "Matches the last delivery."),
         ])
         XCTAssertEqual(
-            DeviceAppsSection.statusLine(of: "charlie", in: readout),
+            DeviceAppsSection.statusLine(of: "charlie", in: readout, kind: "iPhone"),
             "No delivery state reported for this app."
         )
     }
@@ -220,8 +221,8 @@ final class DeviceAppsSectionCopyTests: XCTestCase {
     /// The load hasn't landed. This is the assertion the section exists to keep
     /// honest: an unanswered question must not read as `never`.
     func test_a_pending_read_says_it_is_still_reading() {
-        let line = DeviceAppsSection.statusLine(of: "example", in: .pending)
-        XCTAssertEqual(line, "Reading this phone's delivery log…")
+        let line = DeviceAppsSection.statusLine(of: "example", in: .pending, kind: "iPhone")
+        XCTAssertEqual(line, "Reading this iPhone's delivery log…")
         XCTAssertFalse(
             line.lowercased().contains("never"),
             "a state nobody has read yet must never be phrased as a delivery verdict"
@@ -233,7 +234,7 @@ final class DeviceAppsSectionCopyTests: XCTestCase {
     /// than the same apology N times.
     func test_a_failed_read_leaves_the_row_blank_rather_than_guessing() {
         XCTAssertEqual(
-            DeviceAppsSection.statusLine(of: "example", in: .failed("database is locked")),
+            DeviceAppsSection.statusLine(of: "example", in: .failed("database is locked"), kind: "iPhone"),
             "—"
         )
     }
@@ -314,5 +315,75 @@ final class DeviceAppsSectionCopyTests: XCTestCase {
             reads as never delivered here, and that disagreement is the feature.
             """
         )
+    }
+}
+
+/// The device page names the device by its kind (hands-on of 2.3): an iPad's
+/// page said "Your apps on this phone" and "Delivery state below is for this
+/// phone alone." The kind is the model's, "iPad" or "iPhone", and "device"
+/// when the model doesn't say.
+@MainActor
+final class DeviceKindWordingTests: XCTestCase {
+    private static let udid = "00008030-0000000000000004"
+
+    private static func device(model: String) throws -> DeviceRecord {
+        let json = #"{"udid":"\#(udid)","name":"Example iPad","model":"\#(model)","ios_version":"17.0","connection_type":"USB","is_default":false}"#
+        return try JSONDecoder().decode(DeviceRecord.self, from: Data(json.utf8))
+    }
+
+    func test_the_kind_is_the_models_or_device() throws {
+        XCTAssertEqual(try Self.device(model: "iPad13,16").kindName, "iPad")
+        XCTAssertEqual(try Self.device(model: "iPhone14,2").kindName, "iPhone")
+        XCTAssertEqual(try Self.device(model: "iPod9,1").kindName, "iPod")
+        XCTAssertEqual(try Self.device(model: "").kindName, "device")
+        XCTAssertEqual(try Self.device(model: "Unknown1,1").kindName, "device")
+    }
+
+    /// The two lines a test can't catch on screen: a read still under way.
+    func test_the_reading_lines_name_the_kind() {
+        XCTAssertEqual(DeviceAppsSection.statusLine(of: "example", in: .pending, kind: "iPad"),
+                       "Reading this iPad's delivery log…")
+        XCTAssertEqual(InstalledAppsSection.emptyStateMessage(isLoading: true, kind: "iPad"),
+                       "Reading everything installed on this iPad…")
+    }
+
+    /// An iPad's page, rendered: every line that said "phone" says "iPad",
+    /// and nothing on it says "phone".
+    func test_an_ipads_page_says_ipad_not_phone() async throws {
+        try AccessibilityTree.requireServed()
+        let iPad = try Self.device(model: "iPad13,16")
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let deviceApps = DeviceAppsStore(runner: runner)
+        let listing = #"{"type":"device-app","bundle_id":"com.example.app","name":"Example","version":"1.0","encrypted":true,"frontmost":false}\n"#
+            + #"{"type":"device-apps-end","count":1,"encrypted":1}\n"#
+        await deviceApps.load(udid: Self.udid, argsOverride: ["-c", "printf '\(listing)'"])
+        XCTAssertEqual(deviceApps.apps[Self.udid]?.count, 1, "premise: the listing reached the store")
+        let page = VStack(alignment: .leading) {
+            DeviceAppsSection(apps: [UpdatePlanFixture.appRecord("example")], readout: .failed("database is locked"),
+                              kind: iPad.kindName, artwork: ArtworkStore(runner: runner))
+            DeviceDecryptSection(device: iPad, deviceApps: deviceApps, staged: [:], configuredByBundleId: [:],
+                                 onAdd: { _ in })
+            InstalledAppsSection(device: iPad, deviceApps: deviceApps)
+        }
+        let pane = hosted(page, width: 700)
+        settle(pane)
+        let sheet = hosted(SSHPasswordSheet(device: iPad, onSave: { _ in }), width: 420)
+        settle(sheet)
+
+        let words = try (AccessibilityTree.nodes(in: pane.window) + AccessibilityTree.nodes(in: sheet.window))
+            .flatMap { [$0.name, $0.value as? String, $0.help].compactMap { $0 } }
+            .joined(separator: "\n").lowercased()
+
+        for line in [
+            "your apps on this ipad", "delivery state below is for this ipad alone.",
+            "an app delivered to another device and never to this one",
+            "couldn't read this ipad's delivery log.", "the app is launched on the ipad",
+            "keychain for this ipad", "everything on this ipad", "launch example on the ipad",
+            "pulls the app bundle off the ipad over ssh",
+        ] {
+            XCTAssertTrue(words.contains(line), "\(line) isn't on the iPad's page")
+        }
+        XCTAssertFalse(words.replacingOccurrences(of: "iphone", with: "").contains("phone"),
+                       "the iPad's page says phone:\n\(words)")
     }
 }

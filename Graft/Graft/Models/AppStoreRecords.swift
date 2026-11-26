@@ -118,6 +118,20 @@ struct AppStoreVersionRecord: Decodable, Equatable {
     /// A held app's `updateAvailable` is always false: the row says "Held at
     /// 1.2.0 · newest 1.4.0" instead, with Get latest to let go.
     var heldVersion: String? = nil
+    /// The held build's App Store version id, when a get of a chosen version
+    /// set the hold (config.yaml's `preferred_build`); nil for a hold by hand or from
+    /// before 2.3.
+    var heldVersionId: String? = nil
+    /// Which of its version's builds the hold names, when the App Store has
+    /// more than one under that number: the line says "(build 1 of 2)".
+    var heldBuild: HeldBuild? = nil
+
+    /// `held_build`, numbered from the oldest as the Older Versions sheet
+    /// numbers them (`AppStoreVersionsStore.duplicateBuilds`).
+    struct HeldBuild: Decodable, Equatable {
+        let number: Int
+        let count: Int
+    }
 
     enum CodingKeys: String, CodingKey {
         case app, error
@@ -126,6 +140,8 @@ struct AppStoreVersionRecord: Decodable, Equatable {
         case cachedVersion = "cached_version"
         case updateAvailable = "update_available"
         case heldVersion = "held_version"
+        case heldVersionId = "held_version_id"
+        case heldBuild = "held_build"
     }
 }
 
@@ -171,27 +187,36 @@ struct AppStoreReleasesEndRecord: Decodable, Equatable {
     let limit: Int
     /// As `AppStoreVersionRecord.heldVersion`.
     let heldVersion: String?
+    /// As `AppStoreVersionRecord.heldVersionId`.
+    var heldVersionId: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case app, count, offset, limit
         case bundleId = "bundle_id"
         case heldVersion = "held_version"
+        case heldVersionId = "held_version_id"
     }
 }
 
 /// `appstore-hold`: a get changed the version the app is held at, which is
 /// its `preferred_version`: a get of a chosen version holds it there, and a
 /// get of the latest lets go (`version` nil). Sent only on a change. The app
-/// list is read again, since the pin is part of it.
+/// list is read again, since the pin is part of it. A drop of the version an
+/// app is held at by build sends it too, with `versionId` nil: the hold is by
+/// version from then on (`appstore.let_go_of_the_build`).
 struct AppStoreHoldRecord: Decodable, Equatable {
     let app: String
     let bundleId: String
     let version: String?
     let previous: String?
+    /// The build held, when the get named one (`preferred_build`); nil
+    /// for a hold by version, a release, or a CLI before 2.3.
+    var versionId: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case app, version, previous
         case bundleId = "bundle_id"
+        case versionId = "version_id"
     }
 }
 

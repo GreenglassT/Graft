@@ -276,7 +276,7 @@ def test_both_connections_are_closed_when_the_describe_fails() -> None:
     with _a_phone_that_describes(proxy) as lock:
         with patch.object(
             devices_mod,
-            "_detect_livecontainer_async",
+            "_livecontainer_on_device_async",
             new=AsyncMock(side_effect=RuntimeError("boom")),
         ):
             listing = asyncio.run(devices_mod._list_devices_async())
@@ -400,3 +400,39 @@ def test_two_primaries_still_report_a_livecontainer(monkeypatch) -> None:
 
 def test_no_livecontainer_is_none(monkeypatch) -> None:
     assert _detect(monkeypatch, ["com.example.app", "com.example.livecontainer.X"]) is None
+
+
+# ---- whether a missing LiveContainer is known (spec §5b) ------------------------
+
+
+@pytest.mark.parametrize(("installed", "expected"), [
+    ([f"com.kdt.livecontainer.{TEAM}"], (f"com.kdt.livecontainer.{TEAM}", True)),
+    (["com.example.app"], (None, True)),
+    ([], (None, False)),
+])
+def test_livecontainer_is_known_missing_only_from_a_listing_with_apps(
+    monkeypatch, installed, expected
+) -> None:
+    """A locked phone lists no apps at all: that says nothing about
+    LiveContainer, so the app mustn't disable Build over it."""
+    from .test_lc_discovery import fake_device
+
+    fake_device(monkeypatch, installed)
+
+    assert asyncio.run(devices_mod._livecontainer_on_device_async(object())) == expected
+
+
+def test_a_device_described_without_saying_is_unknown() -> None:
+    """Unknown is the default: only a listing that read the phone's apps says
+    LiveContainer is missing, and an unknown one never disables Build."""
+    assert DeviceInfo(udid="U", name="n", model="m", ios_version="26.1",
+                      connection_type="USB", livecontainer_bundle_id=None).livecontainer_known is False
+
+
+def test_a_listing_that_fails_knows_nothing(monkeypatch) -> None:
+    from graft_ipa import lc_discovery
+
+    monkeypatch.setattr(lc_discovery, "installed_bundle_ids",
+                        AsyncMock(side_effect=RuntimeError("busy")))
+
+    assert asyncio.run(devices_mod._livecontainer_on_device_async(object())) == (None, False)

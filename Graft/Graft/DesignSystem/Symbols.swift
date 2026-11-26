@@ -4,7 +4,7 @@ import SwiftUI
 /// renders.
 ///
 /// The three travel together because they are one decision. An 11pt readiness
-/// tick beside `AppFont.monoSmall` and an 18pt drop-zone tray want different
+/// checkmark beside `AppFont.monoSmall` and an 18pt drop-zone tray want different
 /// weights to sit at the same optical density as the text next to them, and
 /// that pairing is a property of the icon's *role*, not of the view that
 /// happens to draw it. Held as a value, the decision is made once and every
@@ -59,7 +59,7 @@ struct Symbol {
     /// of a filled body as a genuine hole — `ok`, `blocked`, `advisory`,
     /// `detach`, `updateAvailable`, `failure` and `checkboxOn`. In monochrome
     /// the hole is the surface color and the body is the state color, which
-    /// is what makes a tick and a cross tell each other apart at 11pt across
+    /// is what makes a checkmark and a cross tell each other apart at 11pt across
     /// the width of a card.
     ///
     /// **What hierarchical does to those is not what an earlier draft of this
@@ -509,6 +509,11 @@ enum Symbols {
     /// Phones are connected; none is marked default.
     static let noDefaultDevice = Symbol(name: "questionmark.circle", weight: .medium)
 
+    /// The build goes to a device that isn't the default because the table
+    /// chose it (the only one connected): the build-target bar's `.fallback`,
+    /// whose reason may truncate, so the glyph says "not the usual one" too.
+    static let deviceFallback = Symbol(name: "iphone.and.arrow.forward", weight: .medium)
+
     /// Nothing is plugged in.
     static let noDevice = Symbol(name: "iphone.slash", weight: .medium)
 
@@ -540,6 +545,6 @@ enum Symbols {
         dropIPA, checkboxOn, checkboxOff,
         ok, blocked, advisory, failure, attention, encrypted, updateAvailable,
         held, note, waiting, keychainLocked,
-        device, noDefaultDevice, noDevice, deviceLocked, scanning, notDelivering,
+        device, noDefaultDevice, deviceFallback, noDevice, deviceLocked, scanning, notDelivering,
     ]
 }

@@ -58,11 +58,46 @@ struct LCStatusRecord: Decodable, Hashable {
     let updateAvailable: Bool
     /// `stable` / `nightly` → the AltStore source URL for that channel.
     let sources: [String: String]
+    /// A certificate `--lc-push-cert` put in one of these LiveContainers that
+    /// `--lc-clean` hasn't taken off yet: the build log's record, so it
+    /// survives a restart and a push from Terminal. The device page's
+    /// reminder (spec §5c). False from a CLI too old to say.
+    let certificatePushed: Bool
+    /// What a free Apple ID sets up on the device, the CLI's one copy
+    /// (`config.FREE_DEVICE_STEPS`), with the URLs the steps name. The Set
+    /// Up LiveContainer sheet shows them; empty from a CLI too old to send
+    /// them.
+    let freeSetupSteps: [String]
+
+    /// One of the LiveContainers is the primary, the one `--lc-push-cert`
+    /// puts the certificate in.
+    var hasPrimary: Bool { instances.contains { $0.role == "primary" } }
 
     enum CodingKeys: String, CodingKey {
         case udid, reachable, error, instances, latest, sources
         case managedBy = "managed_by"
         case updateAvailable = "update_available"
+        case certificatePushed = "certificate_pushed"
+        case freeSetupSteps = "free_setup_steps"
+    }
+}
+
+extension LCStatusRecord {
+    /// The synthesized decoding, plus defaults for the two fields an older
+    /// CLI doesn't send. In an extension, so the memberwise initializer
+    /// stays.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        udid = try c.decode(String.self, forKey: .udid)
+        reachable = try c.decode(Bool.self, forKey: .reachable)
+        error = try c.decodeIfPresent(String.self, forKey: .error)
+        instances = try c.decode([LCInstanceRecord].self, forKey: .instances)
+        managedBy = try c.decode(ManagedBy.self, forKey: .managedBy)
+        latest = try c.decodeIfPresent(Latest.self, forKey: .latest)
+        updateAvailable = try c.decode(Bool.self, forKey: .updateAvailable)
+        sources = try c.decode([String: String].self, forKey: .sources)
+        certificatePushed = try c.decodeIfPresent(Bool.self, forKey: .certificatePushed) ?? false
+        freeSetupSteps = try c.decodeIfPresent([String].self, forKey: .freeSetupSteps) ?? []
     }
 }
 

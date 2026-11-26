@@ -53,9 +53,10 @@ UNIVERSAL = ("x86_64", "arm64")
 def dummy_app(where: Path, version: str, *, bundle_id: str = app_update.BUNDLE_ID,
               marker: str = "", flavor: str | None = app_update.ARM64,
               executable: tuple[str, ...] = UNIVERSAL, python: tuple[str, ...] | None = None,
-              python_name: str = "python3.13") -> Path:
+              python_name: str = "python3.13", minimum_macos: Any = None) -> Path:
     """A tiny unsigned Graft.app in `where`: an Info.plist naming `flavor`
-    (no `GraftBundleArch` at all for None, as before 2.2), a main
+    (no `GraftBundleArch` at all for None, as before 2.2) and, unless it is
+    None, `minimum_macos` as its LSMinimumSystemVersion, whatever it is; a main
     executable and an embedded Python that are Mach-O headers with code for
     `executable` and `python` (the flavor's, else arm64's), and a
     framework with the usual `Versions/Current` link. `python_name` is the
@@ -65,7 +66,7 @@ def dummy_app(where: Path, version: str, *, bundle_id: str = app_update.BUNDLE_I
     contents = app / "Contents"
     (contents / "MacOS").mkdir(parents=True)
     (contents / "MacOS" / "Graft").write_bytes(macho_for(executable))
-    plist: dict[str, str] = {
+    plist: dict[str, Any] = {
         "CFBundleIdentifier": bundle_id,
         "CFBundleShortVersionString": version,
         "CFBundleExecutable": "Graft",
@@ -73,6 +74,8 @@ def dummy_app(where: Path, version: str, *, bundle_id: str = app_update.BUNDLE_I
     }
     if flavor is not None:
         plist[app_update.FLAVOR_KEY] = flavor
+    if minimum_macos is not None:
+        plist[app_update.MACOS_KEY] = minimum_macos
     with (contents / "Info.plist").open("wb") as f:
         plistlib.dump(plist, f)
     bin_dir = contents.joinpath(*app_update.EMBEDDED_PYTHON[1:])
@@ -201,6 +204,9 @@ class FakeTools:
         #: Which build the running Graft is (`own_flavor`, which the
         #: `tools` fixture answers with this).
         self.flavor = app_update.ARM64
+        #: This Mac's macOS (`running_macos`, which the `tools` fixture
+        #: answers with this): never the host's. None is "can't tell".
+        self.macos: str | None = "14.6"
         self.calls: list[list[str]] = []
         self.own_calls: list[list[str]] = []
         # Kept now: a test may then put this fake in `run_tool`'s place.

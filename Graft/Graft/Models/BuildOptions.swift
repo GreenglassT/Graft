@@ -236,6 +236,26 @@ struct BuildOptions: Equatable {
         return options
     }
 
+    /// These options with the device picked for this build
+    /// (`ConfigStore.devicePick(for:)`), which the pane keeps on the store
+    /// rather than here, so it outlives the pane and goes with its build.
+    func picking(_ udid: String?) -> BuildOptions {
+        var options = self
+        options.deviceUDID = udid
+        return options
+    }
+
+    /// Whether a run with these options uses up its device pick: the pick is
+    /// on its command line (`--device`) and the run installs. A dry run, Skip
+    /// install, a Mac build and an export keep the pick for the build after.
+    var usesDevicePick: Bool {
+        let carriesDevice = activeOptions.contains { option in
+            if case .device = option { return true }
+            return false
+        }
+        return carriesDevice && deliverySuppressor == nil
+    }
+
     /// "Default" means "renders no arguments" — so this stays correct
     /// automatically as options are added, and agrees with `cliArgs` about
     /// edge cases like an empty UDID string.

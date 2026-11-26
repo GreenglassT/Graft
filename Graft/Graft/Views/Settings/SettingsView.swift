@@ -28,6 +28,9 @@ struct SettingsView: View {
     /// The update switches. Nil hides Updates, which only tests of other
     /// sections do.
     @ObservedOptionalObject var updates: UpdateStore? = nil
+    /// The apps' update check's switch, and Check for updates now. Nil hides
+    /// them, which only tests of other sections do.
+    @ObservedOptionalObject var appUpdates: AppUpdatesStore? = nil
     @State private var showAccountSheet = false
     @State private var confirmingSwitchToFree = false
 
@@ -50,7 +53,7 @@ struct SettingsView: View {
                 }
                 pathsSection
                 if let updates {
-                    UpdatesSection(updates: updates)
+                    UpdatesSection(updates: updates, appUpdates: appUpdates)
                 }
                 versionSection
             }
@@ -514,12 +517,20 @@ struct SettingsView: View {
                 if let saved = store.settings?.defaultDeviceUDID,
                    !saved.isEmpty,
                    !devicesStore.devices.contains(where: { $0.udid == saved }) {
-                    Text("\(saved) (not connected)").tag(saved)
+                    Text(Self.notConnectedLabel(saved, remembered: devicesStore.remembered))
+                        .tag(saved)
                 }
             }
             .labelsHidden()
             .pickerStyle(.menu)
         }
+    }
+
+    /// The picker's row for a default that isn't connected: its last-known
+    /// name (`device-seen`, spec §5b), else its UDID.
+    static func notConnectedLabel(_ udid: String, remembered: [SeenDeviceRecord]) -> String {
+        let name = remembered.first(where: { $0.udid == udid })?.displayName ?? udid
+        return "\(name) (not connected)"
     }
 
     private var keepStepper: some View {
@@ -867,6 +878,8 @@ private struct PathRow: View {
 /// and what each does.
 struct UpdatesSection: View {
     @ObservedObject var updates: UpdateStore
+    /// The apps' daily check (`AppUpdatesToggle`), or nil.
+    @ObservedOptionalObject var appUpdates: AppUpdatesStore? = nil
 
     static let toggleTitle = "Check for updates automatically"
     static let installToggleTitle = "Download and install updates automatically"
@@ -898,10 +911,50 @@ struct UpdatesSection: View {
                     .font(AppFont.body)
                     .foregroundStyle(Palette.textMuted)
                     .fixedSize(horizontal: false, vertical: true)
+                if let appUpdates {
+                    AppUpdatesToggle(store: appUpdates)
+                }
             }
             .padding(.horizontal, Metrics.cardPadding).padding(.vertical, Metrics.innerPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
             .cardStyle()
+        }
+    }
+}
+
+/// Settings › Updates' third switch: the daily check of the apps (spec 4.1),
+/// on unless turned off, and Check for updates now, which asks whether it is
+/// on or off (spec §11.4). The line is the release session's privacy draft,
+/// so the app and the site say the same, with the rechecks it left out.
+struct AppUpdatesToggle: View {
+    @ObservedObject var store: AppUpdatesStore
+
+    static let title = "Check my apps for updates"
+    /// The device clause is what `AppUpdatesStore.deviceSetChanged` does: a
+    /// change in the connected devices reads the plan only while an update
+    /// waits for a device, at most every 10 minutes (review part 1, nits).
+    static let note = "Once a day, and after each get, build, tweak update, update or change to an app's "
+        + "options or tweaks, and when a device connects or disconnects while an update waits for one (at "
+        + "most every 10 minutes). Sends your "
+        + "apps' bundle IDs to Apple's App Store lookup and your tweaks' package IDs to canister.me. No "
+        + "Apple ID or Mac identifier."
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Metrics.rowGap) {
+            Toggle(Self.title, isOn: $store.checkApps)
+                .font(AppFont.body)
+            Text(Self.note)
+                .font(AppFont.body)
+                .foregroundStyle(Palette.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: Metrics.controlGap) {
+                Button(AppUpdateText.checkNow) { Task { await store.checkNow() } }
+                    .controlSize(.small)
+                    .disabled(store.isChecking)
+                if store.isChecking {
+                    ProgressView().controlSize(.small)
+                }
+            }
         }
     }
 }

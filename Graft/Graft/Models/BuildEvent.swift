@@ -41,8 +41,24 @@ struct AppRecord: Decodable, Identifiable, Hashable {
     /// reason: only then is there a `--store-country` to send, so only then
     /// does the Edit sheet show its store picker.
     let reportsStoreCountry: Bool
+    /// Whether installing it needs Developer Mode on the phone: true when it
+    /// is signed with a development profile, which the app can't read for
+    /// itself (the CLI's `developer_mode.needed`); false for ad hoc,
+    /// enterprise or LiveContainer; nil when its profile couldn't be read, or
+    /// from a CLI before 2.3. The device page's Developer Mode row reads it
+    /// (`DeviceDeveloperModeRow.shown`).
+    let needsDeveloperMode: Bool?
 
     var id: String { name }
+
+    /// The name a person reads: the display name, or the config's short name
+    /// (`name`, which the CLI and its commands take) when there's none. What
+    /// the sidebar shows, and every title and sentence that names the app.
+    var shownName: String {
+        guard let displayName, !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return name }
+        return displayName
+    }
 
     enum CodingKeys: String, CodingKey {
         case name, tweaks, delivery, account
@@ -57,6 +73,7 @@ struct AppRecord: Decodable, Identifiable, Hashable {
         case stripExtensions = "strip_extensions"
         case stripSupportedDevices = "strip_supported_devices"
         case compressionLevel = "compression_level"
+        case needsDeveloperMode = "needs_developer_mode"
     }
 
     init(from decoder: Decoder) throws {
@@ -96,6 +113,8 @@ struct AppRecord: Decodable, Identifiable, Hashable {
         profileOverride = (try? c.decodeIfPresent(String.self, forKey: .profileOverride)) ?? nil
         reportsStoreCountry = c.contains(.storeCountry)
         storeCountry = (try? c.decodeIfPresent(String.self, forKey: .storeCountry)) ?? nil
+        // Optional, for `account`'s reason: no CLI before 2.3 sends it.
+        needsDeveloperMode = (try? c.decodeIfPresent(Bool.self, forKey: .needsDeveloperMode)) ?? nil
     }
 }
 
@@ -264,10 +283,11 @@ struct StagedIPAInUseRecord: Decodable, Hashable {
 
 /// One staged IPA handed to PlayCover for installation on this Mac.
 ///
-/// Emitted when `open -b io.playcover.PlayCover` succeeds — which means the
-/// file was handed over, **not** that PlayCover finished installing it. `open`
-/// returns as soon as delivery happens, so there is no completion status to
-/// carry here; PlayCover reports its own progress.
+/// Emitted the moment `open -b io.playcover.PlayCover` succeeds — which means
+/// the file was handed over, **not** that PlayCover finished installing it.
+/// The CLI then waits for the install, up to two minutes, and ends with
+/// `playcover-installed` or `playcover-install-unconfirmed`; in between the
+/// app says "Waiting for PlayCover to install <displayName>…".
 ///
 /// Named `handed-to-playcover` on the wire, not `installed-to-mac` — the verb
 /// that triggers this (`--install-to-mac`) describes the user's intent, which
@@ -278,10 +298,85 @@ struct HandedToPlayCoverRecord: Decodable, Hashable {
     let filename: String
     let path: String
     let bundleId: String
+    /// The app's name, from the archive. Optional: a CLI before 2.3 didn't
+    /// send it.
+    let displayName: String?
 
     enum CodingKeys: String, CodingKey {
         case filename, path
         case bundleId = "bundle_id"
+        case displayName = "display_name"
+    }
+}
+
+/// What Graft did to an app's two PlayCover settings once it was installed
+/// (spec 5d item 1): the keys its first-handoff defaults turned off, and the
+/// keys PlayCover changed that Graft put back. Key names as the CLI sends
+/// them, "keymapping" and "playChain"; empty when nothing.
+struct PlayCoverSettingsChange: Hashable {
+    var disabled: [String] = []
+    var restored: [String] = []
+
+    init(disabled: [String] = [], restored: [String] = []) {
+        self.disabled = disabled
+        self.restored = restored
+    }
+
+    fileprivate init<K: CodingKey>(
+        _ c: KeyedDecodingContainer<K>, disabled: K, restored: K
+    ) throws {
+        self.disabled = try c.decodeIfPresent([String].self, forKey: disabled) ?? []
+        self.restored = try c.decodeIfPresent([String].self, forKey: restored) ?? []
+    }
+}
+
+/// PlayCover installed the handed app: its copy carries the handed version
+/// and build, written since the handoff began.
+struct PlayCoverInstalledRecord: Decodable, Hashable {
+    let bundleId: String
+    let version: String
+    let displayName: String?
+    let settings: PlayCoverSettingsChange
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case bundleId = "bundle_id"
+        case displayName = "display_name"
+        case settingsDisabled = "settings_disabled"
+        case settingsRestored = "settings_restored"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bundleId = try c.decode(String.self, forKey: .bundleId)
+        version = try c.decode(String.self, forKey: .version)
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
+        settings = try PlayCoverSettingsChange(c, disabled: .settingsDisabled, restored: .settingsRestored)
+    }
+}
+
+/// The wait for PlayCover's install ran out (`waitedSeconds`), with PlayCover
+/// still installing or failed. Not a failure: the CLI exits 0.
+struct PlayCoverInstallUnconfirmedRecord: Decodable, Hashable {
+    let bundleId: String
+    let waitedSeconds: Double
+    let displayName: String?
+    let settings: PlayCoverSettingsChange
+
+    enum CodingKeys: String, CodingKey {
+        case bundleId = "bundle_id"
+        case waitedSeconds = "waited_s"
+        case displayName = "display_name"
+        case settingsDisabled = "settings_disabled"
+        case settingsRestored = "settings_restored"
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        bundleId = try c.decode(String.self, forKey: .bundleId)
+        waitedSeconds = try c.decode(Double.self, forKey: .waitedSeconds)
+        displayName = try c.decodeIfPresent(String.self, forKey: .displayName)
+        settings = try PlayCoverSettingsChange(c, disabled: .settingsDisabled, restored: .settingsRestored)
     }
 }
 
@@ -990,6 +1085,11 @@ struct DeviceRecord: Decodable, Identifiable, Hashable {
     /// the *entire* device from the list, not just its chip. The difference
     /// this default is buying is between a missing chip and a missing phone.
     let isDefault: Bool
+    /// Whether `livecontainerBundleId == nil` means "not installed": false
+    /// when the scan couldn't list the phone's apps (a locked phone lists
+    /// none), and from a CLI before 2.3, which doesn't say. Only a known
+    /// missing LiveContainer disables Build (`BuildTarget.liveContainerMissing`).
+    let livecontainerKnown: Bool
 
     var id: String { udid }
 
@@ -999,6 +1099,7 @@ struct DeviceRecord: Decodable, Identifiable, Hashable {
         case connectionType = "connection_type"
         case livecontainerBundleId = "livecontainer_bundle_id"
         case isDefault = "is_default"
+        case livecontainerKnown = "livecontainer_known"
     }
 
     // Written out rather than left to the synthesised conformance:
@@ -1018,6 +1119,9 @@ struct DeviceRecord: Decodable, Identifiable, Hashable {
             String.self, forKey: .livecontainerBundleId
         )
         isDefault = try container.decodeIfPresent(Bool.self, forKey: .isDefault) ?? false
+        livecontainerKnown = try container.decodeIfPresent(
+            Bool.self, forKey: .livecontainerKnown
+        ) ?? false
     }
 }
 
@@ -1064,6 +1168,11 @@ struct DeviceInfoRecord: Decodable, Hashable {
     let freeBytes: Int?
     let batteryPercent: Int?
     let batteryCharging: Bool?
+    /// Developer Mode, on iOS 16 and later; nil before, when it couldn't be
+    /// read, or from a CLI before 2.3. The device page's row shows only a
+    /// reading (`DeviceDeveloperModeRow`); a sideload build is stopped by the
+    /// CLI, not here.
+    let developerMode: Bool?
 
     enum CodingKeys: String, CodingKey {
         case udid, reachable
@@ -1071,6 +1180,7 @@ struct DeviceInfoRecord: Decodable, Hashable {
         case freeBytes = "free_bytes"
         case batteryPercent = "battery_percent"
         case batteryCharging = "battery_charging"
+        case developerMode = "developer_mode"
     }
 }
 
@@ -1103,16 +1213,42 @@ struct DeviceErrorRecord: Decodable, Identifiable, Hashable {
     }
 }
 
+/// A device Graft has seen before that the last full `--devices` didn't
+/// describe (`device-seen`): what it said last time, from
+/// `devices-seen.json`. It is unplugged, or connected and locked (then it is
+/// in `deviceErrors` too). The default device is one whenever it is set and
+/// not described. Every field but `udid` and `isDefault` can be nil: a
+/// default never seen has only its UDID.
+struct SeenDeviceRecord: Decodable, Identifiable, Hashable {
+    let udid: String
+    let name: String?
+    let model: String?
+    let iosVersion: String?
+    let isDefault: Bool
+
+    var id: String { udid }
+
+    /// What to call it: its last-known name, else its UDID.
+    var displayName: String { name ?? udid }
+
+    enum CodingKeys: String, CodingKey {
+        case udid, name, model
+        case iosVersion = "ios_version"
+        case isDefault = "is_default"
+    }
+}
+
 struct PreflightCheck: Decodable, Identifiable, Hashable {
     let name: String
     let ok: Bool
     let detail: String?
     let hint: String?
     let actionKey: String?
-    /// The row reports a fact rather than passing a test — today only a free
-    /// Apple ID's `account` row, which is always `ok`. Rendered as
-    /// information, and counted as neither OK nor Fail: a free account is not
-    /// a check that passed. Absent on the wire for every other row.
+    /// The row reports a fact rather than passing a test: a free Apple ID's
+    /// `account` row, which is always `ok`, and the row that says no device
+    /// is connected. Rendered as information, and counted as neither OK nor
+    /// Fail: neither is a check that passed. Absent on the wire for every
+    /// other row.
     let info: Bool?
     /// The exact command that installs this row's tool, or nil when there is
     /// none to give — a row that is not a tool (no phone connected), or a
@@ -1445,10 +1581,15 @@ struct UpdateCheckRecord: Codable, Hashable {
     let status: Int?
     /// The CLI's sentence for a failure, which Check for Updates… shows.
     let message: String?
+    /// The macOS the latest release needs ("15.0"), when this Mac's is older:
+    /// `updateAvailable` is then false, as this Mac can't run it. Nil when
+    /// this Mac can, or the CLI doesn't know, or is from before the field.
+    var needsMacos: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case ok, current, latest, url, reason, status, message
         case updateAvailable = "update_available"
+        case needsMacos = "needs_macos"
     }
 }
 
@@ -1491,10 +1632,14 @@ struct UpdateDownloadRecord: Codable, Hashable {
     /// Why it failed (`app_update`'s names), and the CLI's sentence for it.
     let reason: String?
     let message: String?
+    /// With `not-for-this-mac`, the macOS the release needs, when that is
+    /// why: absent from a CLI that says it only in `message`.
+    var needsMacos: String? = nil
 
     enum CodingKeys: String, CodingKey {
         case ok, current, version, url, reason, message
         case appPath = "app_path"
+        case needsMacos = "needs_macos"
     }
 }
 
@@ -1509,6 +1654,21 @@ struct UpdateInstallRecord: Codable, Hashable {
     let url: String?
     let reason: String?
     let message: String?
+}
+
+/// `update-target-dropped`: `--drop-update-target` stopped `graft --update`
+/// installing `app` on the device `udid` (its `deviceName`, if Graft knows
+/// it) until the app is delivered there again (spec §11.3, "Devices that are
+/// gone").
+struct UpdateTargetDroppedRecord: Decodable, Equatable {
+    let app: String
+    let udid: String
+    let deviceName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case app, udid
+        case deviceName = "device_name"
+    }
 }
 
 enum CanisterFetchResult: Equatable {
@@ -1562,6 +1722,8 @@ enum BuildEvent {
     case stagedIPADeleted(StagedIPADeletedRecord)
     case stagedIPAInUse(StagedIPAInUseRecord)
     case handedToPlayCover(HandedToPlayCoverRecord)
+    case playCoverInstalled(PlayCoverInstalledRecord)
+    case playCoverInstallUnconfirmed(PlayCoverInstallUnconfirmedRecord)
     case ipaExported(IPAExportedRecord)
     case tweakAttached(TweakMutationRecord)
     case tweakDetached(TweakMutationRecord)
@@ -1590,6 +1752,7 @@ enum BuildEvent {
     case lcCleaned(LCCleanedRecord)
     case artwork(ArtworkRecord)
     case deviceError(DeviceErrorRecord)
+    case deviceSeen(SeenDeviceRecord)
     case devicesEnd(count: Int)
     case preflightCheck(PreflightCheck)
     /// `account` is nil from a CLI that predates free mode.
@@ -1626,6 +1789,13 @@ enum BuildEvent {
     case updateProgress(UpdateProgressRecord)
     case updateDownloadEnd(UpdateDownloadRecord)
     case updateInstall(UpdateInstallRecord)
+    /// `graft --update` (`UpdateRecords.swift`).
+    case updatePlan(UpdatePlanRecord)
+    case updateStep(UpdateStepRecord)
+    case updateStopping(UpdateStoppingRecord)
+    case updateAppEnd(UpdateAppEndRecord)
+    case updateEnd(UpdateEndRecord)
+    case updateTargetDropped(UpdateTargetDroppedRecord)
     case unknown(type: String, raw: [String: Any])
 
     enum DecodeError: Error {
@@ -1853,6 +2023,8 @@ enum BuildEvent {
             return .artwork(try decoder.decode(ArtworkRecord.self, from: data))
         case "device-error":
             return .deviceError(try decoder.decode(DeviceErrorRecord.self, from: data))
+        case "device-seen":
+            return .deviceSeen(try decoder.decode(SeenDeviceRecord.self, from: data))
         case "devices-end":
             let p = try decoder.decode(DevicesEndPayload.self, from: data)
             return .devicesEnd(count: p.count ?? 0)
@@ -1945,6 +2117,12 @@ enum BuildEvent {
             return .stagedIPAInUse(try decoder.decode(StagedIPAInUseRecord.self, from: data))
         case "handed-to-playcover":
             return .handedToPlayCover(try decoder.decode(HandedToPlayCoverRecord.self, from: data))
+        case "playcover-installed":
+            return .playCoverInstalled(try decoder.decode(PlayCoverInstalledRecord.self, from: data))
+        case "playcover-install-unconfirmed":
+            return .playCoverInstallUnconfirmed(
+                try decoder.decode(PlayCoverInstallUnconfirmedRecord.self, from: data)
+            )
         case "ipa-exported":
             return .ipaExported(try decoder.decode(IPAExportedRecord.self, from: data))
         case "tweak-attached":
@@ -2019,6 +2197,18 @@ enum BuildEvent {
             return .updateDownloadEnd(try decoder.decode(UpdateDownloadRecord.self, from: data))
         case "update-install":
             return .updateInstall(try decoder.decode(UpdateInstallRecord.self, from: data))
+        case "update-plan":
+            return .updatePlan(try decoder.decode(UpdatePlanRecord.self, from: data))
+        case "update-step":
+            return .updateStep(try decoder.decode(UpdateStepRecord.self, from: data))
+        case "update-stopping":
+            return .updateStopping(try decoder.decode(UpdateStoppingRecord.self, from: data))
+        case "update-app-end":
+            return .updateAppEnd(try decoder.decode(UpdateAppEndRecord.self, from: data))
+        case "update-end":
+            return .updateEnd(try decoder.decode(UpdateEndRecord.self, from: data))
+        case "update-target-dropped":
+            return .updateTargetDropped(try decoder.decode(UpdateTargetDroppedRecord.self, from: data))
         case "init-step":
             return .initStep(try decoder.decode(InitStepRecord.self, from: data))
         case "init-result":

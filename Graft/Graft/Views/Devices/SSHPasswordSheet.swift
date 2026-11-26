@@ -34,7 +34,7 @@ struct SSHPasswordSheet: View {
                     .font(AppFont.bodyMedium)
                     .foregroundStyle(Palette.text)
                 Text("\(device.name) — needed by the frida-ios-dump decrypt backend, "
-                     + "which pulls the app bundle off the phone over SSH. On a stock "
+                     + "which pulls the app bundle off the \(device.kindName) over SSH. On a stock "
                      + "jailbreak this is `alpine`; if you changed it, use yours.")
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.textDim)

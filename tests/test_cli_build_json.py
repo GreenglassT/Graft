@@ -45,7 +45,7 @@ def test_build_emits_stage_events_in_order_via_json_mode(tmp_path: Path, capsys)
          patch.object(cli_mod, "extract_ipa"), \
          patch.object(cli_mod, "verify_decrypted", return_value=[]), \
          patch.object(cli_mod, "run_cyan") as cyan, \
-         patch.object(cli_mod, "select_device", return_value=("00008130-test-udid", "usb")), \
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("00008130-test-udid", None, "usb")), \
          patch.object(cli_mod, "lc_runner") as lc:
         acquire.return_value.path = tmp_path / "in.ipa"
         acquire.return_value.version = "1.0"

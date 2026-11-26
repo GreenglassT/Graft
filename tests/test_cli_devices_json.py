@@ -25,6 +25,7 @@ def test_devices_json_emits_records(temp_config_env: Path) -> None:
             ios_version="26.0.1",
             connection_type="USB",
             livecontainer_bundle_id="com.kdt.livecontainer.ABCDE12345",
+            livecontainer_known=True,
         ),
         DeviceInfo(
             udid="00008101-000ABCDEF0123456",
@@ -33,6 +34,7 @@ def test_devices_json_emits_records(temp_config_env: Path) -> None:
             ios_version="17.5",
             connection_type="Network",
             livecontainer_bundle_id=None,
+            livecontainer_known=True,
         ),
     ]
 
@@ -49,6 +51,7 @@ def test_devices_json_emits_records(temp_config_env: Path) -> None:
     assert devices[0]["livecontainer_bundle_id"] == "com.kdt.livecontainer.ABCDE12345"
     assert devices[0]["connection_type"] == "USB"
     assert devices[1]["livecontainer_bundle_id"] is None
+    assert [d["livecontainer_known"] for d in devices] == [True, True]
     end = [e for e in events if e["type"] == "devices-end"]
     assert end == [{"type": "devices-end", "count": 2, "failed": 0}]
 
@@ -226,3 +229,19 @@ def test_the_brief_listing_does_not_gain_the_field(temp_config_env: Path) -> Non
     assert brief == [
         {"type": "device-brief", "udid": "PHONE-A", "connection_type": "USB"}
     ]
+
+
+def test_a_listing_remembers_each_phones_livecontainer(temp_config_env: Path) -> None:
+    """`--update --plan --quick` opens no session to the phone, so the
+    LiveContainer it shows is what the last full listing found."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa import devices_seen
+
+    phone = DeviceInfo(udid="00008130-FAKE00000000PHONE1", name="Example iPhone", model="iPhone16,1",
+                       ios_version="18.1", connection_type="USB",
+                       livecontainer_bundle_id="com.kdt.livecontainer")
+    cfg = load_config(temp_config_env)
+    with patch.object(cli_mod, "list_devices", return_value=_listing([phone])):
+        cli_mod._do_devices(cfg, emitter=JsonEmitter(stream=StringIO()))
+
+    assert devices_seen.seen(cfg.state_dir, phone.udid)["livecontainer_bundle_id"] == "com.kdt.livecontainer"

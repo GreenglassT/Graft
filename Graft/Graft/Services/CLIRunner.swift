@@ -340,6 +340,151 @@ private let drainGrace: TimeInterval = 0.5
 /// is still killed, only later.
 let cliStopGrace: TimeInterval = 10
 
+/// A Stop a caller sends a streamed run itself, whose SIGKILL the CLI can
+/// hold off.
+///
+/// Canceling the Task stops a run as every Stop does: SIGTERM to the CLI and
+/// its children, then SIGKILL `cliStopGrace` later (`ProcessHandle.stop`).
+/// `graft --update` finishes an install or a tweak swap it has begun before
+/// it stops, which can take minutes, and says so (`update-stopping`). A
+/// SIGKILL in the middle would leave a half-written install on the phone, so
+/// the kill is held while that step finishes (`read`, on the reader's
+/// thread), and armed again, with its whole `grace` from then:
+/// - when the step it was held for has ended: that app's `update-app-end`,
+///   the shared tweak step's end, or `update-end`;
+/// - on a second Stop (spec §11.2), which also sends a second SIGTERM: the
+///   CLI cancels a held push or install on it, as `device_session` does on
+///   a SIGTERM. Nothing is held after that.
+///
+/// `forceKill` is Force Stop: SIGKILL now, held or not.
+///
+/// `grace` is `cliStopGrace` in the app; a test shortens it.
+final class RunStopper: @unchecked Sendable {
+    let grace: TimeInterval
+    private let lock = NSLock()
+    private var handle: ProcessHandle?
+    /// How many Stops were asked for.
+    private var stops = 0
+    private var killHeld = false
+    /// The step the kill is held for (`update-stopping`'s), when the CLI
+    /// said which.
+    private var heldFor: UpdateStoppingRecord?
+    /// Numbers the kill timers: only the newest may fire, so a kill armed
+    /// again gets its whole grace from then.
+    private var armed = 0
+    private var forced = false
+
+    init(grace: TimeInterval) {
+        self.grace = grace
+    }
+
+    /// SIGTERM now; SIGKILL after `grace` unless the kill is held by then.
+    /// A second Stop sends SIGTERM again and arms the kill again, held or
+    /// not.
+    func stop() {
+        let (target, generation, again): (ProcessHandle?, Int, Bool) = lock.withLock {
+            stops += 1
+            if stops > 1 {
+                killHeld = false
+                heldFor = nil
+            }
+            armed += 1
+            return (handle, armed, stops > 1)
+        }
+        if again {
+            target?.stopAgain(grace: grace, mayKill: mayKill(generation))
+        } else {
+            target?.cancel(grace: grace, mayKill: mayKill(generation))
+        }
+    }
+
+    /// The CLI said it is finishing a step: no SIGKILL for this run, until
+    /// the kill is armed again.
+    func holdKill() {
+        hold(for: nil)
+    }
+
+    /// Arm the kill again: SIGKILL `grace` from now, unless it is held again
+    /// by then. Nothing when it isn't held.
+    func rearmKill() {
+        let (target, generation): (ProcessHandle?, Int?) = lock.withLock {
+            guard killHeld else { return (nil, nil) }
+            killHeld = false
+            heldFor = nil
+            armed += 1
+            return (handle, armed)
+        }
+        guard let target, let generation else { return }
+        target.scheduleKill(after: grace, mayKill: mayKill(generation))
+    }
+
+    /// Force Stop: SIGKILL the CLI and its children now.
+    func forceKill() {
+        let target: ProcessHandle? = lock.withLock {
+            forced = true
+            killHeld = false
+            heldFor = nil
+            return handle
+        }
+        target?.killNow()
+    }
+
+    var isKillHeld: Bool { lock.withLock { killHeld } }
+    var wasStopped: Bool { lock.withLock { stops > 0 } }
+    var wasForced: Bool { lock.withLock { forced } }
+
+    /// Each event the run writes, as `stream`'s reader decodes it, on the
+    /// reader's thread. `update-stopping` holds the kill here and not after
+    /// a hop to the main actor: a main actor busy past `grace` would let the
+    /// SIGKILL win, and cut off the install the CLI is finishing. The end of
+    /// the step it was held for arms it again.
+    func read(_ event: BuildEvent) {
+        switch event {
+        case let .updateStopping(record):
+            hold(for: record)
+        case let .updateAppEnd(record):
+            if lock.withLock({ heldFor.map { $0.app != nil && $0.app == record.app } ?? false }) { rearmKill() }
+        case let .updateStep(step) where step.app == nil && step.status != CLIContract.Update.statusStart:
+            if lock.withLock({ heldFor.map { $0.app == nil } ?? false }) { rearmKill() }
+        case .updateEnd:
+            rearmKill()
+        default:
+            break
+        }
+    }
+
+    private func hold(for step: UpdateStoppingRecord?) {
+        lock.withLock {
+            // After a second Stop nothing is held again: the person asked
+            // for the run to end, whatever it was finishing.
+            guard stops < 2 else { return }
+            killHeld = true
+            heldFor = step
+        }
+    }
+
+    /// Whether the kill timer numbered `generation` may fire: the newest,
+    /// and not held.
+    private func mayKill(_ generation: Int) -> @Sendable () -> Bool {
+        { [weak self] in
+            guard let self else { return true }
+            return self.lock.withLock { !self.killHeld && self.armed == generation }
+        }
+    }
+
+    /// The runner hands over the run's handle as it makes it. A Stop asked
+    /// for before then stops the run as it starts, so it never launches.
+    fileprivate func attach(_ handle: ProcessHandle) {
+        let (stopNow, generation): (Bool, Int) = lock.withLock {
+            self.handle = handle
+            return (stops > 0, armed)
+        }
+        if stopNow {
+            handle.cancel(grace: grace, mayKill: mayKill(generation))
+        }
+    }
+}
+
 final class CLIRunner {
     struct RunResult {
         let exitCode: Int32
@@ -535,7 +680,7 @@ final class CLIRunner {
         drainToEOF(err.fileHandleForReading, into: errBox, done: errDone)
 
         return try await launch(
-            proc, out: out, err: err, inPipe: inPipe, stdin: stdin, input: nil,
+            proc, out: out, err: err, inPipe: inPipe, stdin: stdin, input: nil, stopper: nil,
             drained: [outDone, errDone]
         ) { status in
             RunResult(exitCode: status, stdout: outBox.string(), stderr: errBox.string())
@@ -558,10 +703,12 @@ final class CLIRunner {
         inPipe: Pipe?,
         stdin: String?,
         input: ChildInput?,
+        stopper: RunStopper?,
         drained: [DispatchSemaphore],
         makeResult: @escaping @Sendable (Int32) -> RunResult
     ) async throws -> RunResult {
         let handle = ProcessHandle()
+        stopper?.attach(handle)
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<RunResult, Error>) in
                 func releaseDrainers() {
@@ -1175,9 +1322,13 @@ extension CLIRunner {
     /// Run the command and call `onEvent` for each JSON-Lines event on stdout.
     /// Returns when the subprocess exits. With an `input`, the child's stdin
     /// is a pipe the caller writes to as it runs (`ChildInput`).
+    ///
+    /// `stopper` is a Stop of the caller's own beside canceling the Task, one
+    /// whose SIGKILL the CLI can hold off (`RunStopper`).
     func stream(
         arguments: [String],
         input: ChildInput? = nil,
+        stopper: RunStopper? = nil,
         onEvent: @escaping @MainActor (BuildEvent) -> Void
     ) async throws -> RunResult {
         let target = await self.target()
@@ -1215,6 +1366,8 @@ extension CLIRunner {
                 for line in lines {
                     if let event = try? BuildEvent.decode(line: line) {
                         eventsBox.append(event)
+                        // Here, before the hop: see `RunStopper.read`.
+                        stopper?.read(event)
                         Task { @MainActor in onEvent(event) }
                     }
                 }
@@ -1223,6 +1376,7 @@ extension CLIRunner {
             if !remainder.isEmpty,
                let event = try? BuildEvent.decode(line: remainder) {
                 eventsBox.append(event)
+                stopper?.read(event)
                 Task { @MainActor in onEvent(event) }
             }
             outDone.signal()
@@ -1231,7 +1385,7 @@ extension CLIRunner {
         drainToEOF(err.fileHandleForReading, into: stderrBox, done: errDone)
 
         return try await launch(
-            proc, out: out, err: err, inPipe: inPipe, stdin: nil, input: input,
+            proc, out: out, err: err, inPipe: inPipe, stdin: nil, input: input, stopper: stopper,
             drained: [outDone, errDone]
         ) { status in
             RunResult(
@@ -1298,6 +1452,11 @@ private final class ProcessHandle: @unchecked Sendable {
     /// which failed at 30.02s, the child's whole sleep.
     private var stopIssued = false
 
+    /// The grace and the kill check the stop uses: `cliStopGrace` and always,
+    /// unless a `RunStopper` says otherwise.
+    private var stopGrace: TimeInterval = cliStopGrace
+    private var mayKill: @Sendable () -> Bool = { true }
+
     /// Take ownership just before launching. Returns false when cancellation
     /// already arrived, in which case the caller must not launch at all —
     /// otherwise a Task canceled during setup still spawns a subprocess that
@@ -1317,12 +1476,14 @@ private final class ProcessHandle: @unchecked Sendable {
         process = nil
     }
 
-    func cancel() {
+    func cancel(grace: TimeInterval = cliStopGrace, mayKill: @escaping @Sendable () -> Bool = { true }) {
         lock.lock()
         cancelled = true
+        stopGrace = grace
+        self.mayKill = mayKill
         let victim = (finished || stopIssued) ? nil : process
         lock.unlock()
-        if Self.stop(victim) { markStopped() }
+        if Self.stop(victim, grace: grace, mayKill: mayKill) { markStopped() }
     }
 
     /// Called immediately after `Process.run()` succeeds.
@@ -1357,8 +1518,10 @@ private final class ProcessHandle: @unchecked Sendable {
     func launched() -> Bool {
         lock.lock()
         let victim = (cancelled && !finished && !stopIssued) ? process : nil
+        let grace = stopGrace
+        let mayKill = self.mayKill
         lock.unlock()
-        let killed = Self.stop(victim)
+        let killed = Self.stop(victim, grace: grace, mayKill: mayKill)
         if killed { markStopped() }
         return killed
     }
@@ -1368,9 +1531,35 @@ private final class ProcessHandle: @unchecked Sendable {
         stopIssued = true
     }
 
+    /// The process while it hasn't finished, to signal.
+    private var unfinished: Process? {
+        lock.lock(); defer { lock.unlock() }
+        return finished ? nil : process
+    }
+
+    /// A second Stop (`RunStopper`): SIGTERM again, and a kill `grace` later.
+    func stopAgain(grace: TimeInterval, mayKill: @escaping @Sendable () -> Bool) {
+        if Self.stop(unfinished, grace: grace, mayKill: mayKill) { markStopped() }
+    }
+
+    /// A kill armed again (`RunStopper.rearmKill`): SIGKILL `grace` from now.
+    func scheduleKill(after grace: TimeInterval, mayKill: @escaping @Sendable () -> Bool) {
+        guard let victim = unfinished, victim.isRunning else { return }
+        Self.scheduleKill(victim, after: grace, mayKill: mayKill)
+    }
+
+    /// Force Stop (`RunStopper.forceKill`): SIGKILL now.
+    func killNow() {
+        guard let victim = unfinished, victim.isRunning else { return }
+        Self.killTree(victim)
+    }
+
     /// Returns whether it actually signaled anything.
     @discardableResult
-    private static func stop(_ victim: Process?) -> Bool {
+    private static func stop(
+        _ victim: Process?, grace: TimeInterval = cliStopGrace,
+        mayKill: @escaping @Sendable () -> Bool = { true }
+    ) -> Bool {
         guard let victim, victim.isRunning else { return false }
         // Descendants first, and while the parent is still alive to be walked:
         // once it is reaped its children are re-parented to launchd and there
@@ -1385,7 +1574,16 @@ private final class ProcessHandle: @unchecked Sendable {
         // spinning on output nobody will read. `isRunning` is re-checked under
         // Process's own bookkeeping, which holds the pid until the child is
         // reaped, so this can't signal a recycled pid.
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + cliStopGrace) {
+        scheduleKill(victim, after: grace, mayKill: mayKill)
+        return true
+    }
+
+    /// SIGKILL `victim` and its children `grace` from now, if it still runs
+    /// then and `mayKill` says yes.
+    private static func scheduleKill(
+        _ victim: Process, after grace: TimeInterval, mayKill: @escaping @Sendable () -> Bool
+    ) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + grace) {
             // Re-walked here, never the `cliStopGrace`-old `orphans` snapshot.
             // Those pids are very likely dead and reaped by now, and a reaped
             // pid is free to be handed to something else — on a machine forking
@@ -1399,13 +1597,20 @@ private final class ProcessHandle: @unchecked Sendable {
             // the SIGTERM they were already sent and nothing more. Leaking a
             // process that ignores SIGTERM is a smaller harm than killing an
             // unrelated one.
-            guard victim.isRunning else { return }
-            for pid in descendants(of: victim.processIdentifier) {
-                kill(pid, SIGKILL)
-            }
-            kill(victim.processIdentifier, SIGKILL)
+            //
+            // `mayKill`: a `RunStopper` whose CLI said it is finishing an
+            // install says no, so the install isn't cut off halfway.
+            guard victim.isRunning, mayKill() else { return }
+            killTree(victim)
         }
-        return true
+    }
+
+    /// SIGKILL `victim`'s children, re-walked now, then `victim`.
+    private static func killTree(_ victim: Process) {
+        for pid in descendants(of: victim.processIdentifier) {
+            kill(pid, SIGKILL)
+        }
+        kill(victim.processIdentifier, SIGKILL)
     }
 
     /// Every descendant of `pid`, deepest last.

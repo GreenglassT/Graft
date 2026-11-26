@@ -5,12 +5,17 @@ private typealias Flag = CLIContract.Flag
 struct ReinstallSheet: View {
     let build: BuildRecord
     let runner: CLIRunner
-    /// Only so the delivery badges can be refreshed when this finishes.
-    /// `--reinstall-build` pushes to the phone and records a delivery exactly
-    /// like a build does, and nothing else in the Builds section holds the
-    /// store that carries those badges.
+    /// For the delivery badges, refreshed when this finishes, and the app's
+    /// display name in the title (`BuildsView.appName`). `--reinstall-build`
+    /// pushes to the phone and records a delivery exactly like a build does,
+    /// and nothing else in the Builds section holds the store that carries
+    /// those badges.
     @ObservedObject var config: ConfigStore
     @ObservedObject var artwork: ArtworkStore
+    /// The update plan, read again for the app once the re-install ends, so
+    /// its Update badge follows (spec 4.1). Nil in a test that hosts this
+    /// sheet for something else.
+    @PassedThrough var appUpdates: AppUpdatesStore?
     /// Held while `--reinstall-build` runs (`reinstall`); a test passes its own.
     var hold: TerminationHold = .shared
     let onClose: () -> Void
@@ -55,7 +60,7 @@ struct ReinstallSheet: View {
             // `BuildLogView` for why that is the right key here.
             AppIcon(name: build.app, size: 36, image: artwork.image(for: build.bundleId))
             VStack(alignment: .leading, spacing: 2) {
-                Text("Re-install \(build.app)")
+                Text("Re-install \(BuildsView.appName(for: build, apps: config.apps))")
                     .font(AppFont.bodyMedium)
                     .foregroundStyle(Palette.text)
                 Text("\(build.bundleId) · \(build.version)")
@@ -166,6 +171,12 @@ struct ReinstallSheet: View {
         // phone holds an older build, until the next launch. The push already
         // happened; reading back what it did is not the sheet's to cancel.
         config.refreshDeliveryStatesDetached()
+        // And the app's update plan, detached for the same reason: the
+        // re-install may be the install an update was offering, or an older
+        // build the update now offers to replace, and the Update badge said
+        // otherwise until the next check (review 23-2, item 7).
+        let app = build.app
+        Task { await appUpdates?.recheck(apps: [app]) }
     }
 
     /// A non-zero exit the event stream never accounted for.

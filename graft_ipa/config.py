@@ -718,6 +718,16 @@ class AppConfig:
     #: `--appstore-check` and `--artwork` look it up there. None asks this
     #: Mac's region's store, then the US (`host.look_up`).
     store_country: str | None = None
+    #: The App Store version id (`--version-id`) of the build `preferred_version`
+    #: holds, when a get of a chosen version set the hold. None for `latest`,
+    #: for a version set by hand (Edit App), which holds by display version
+    #: only, and for a hold from before 2.3. Two builds can share a display
+    #: version (2026.42.0 twice); only this says which one is held, and builds
+    #: then use that build's own file (`ipa_cache.admits`).
+    #:
+    #: Written as `preferred_build: {version, version_id}`, and read only
+    #: while that `version` is `preferred_version` (`_held_build_id`).
+    preferred_version_id: str | None = None
 
     @classmethod
     def from_dict(
@@ -740,10 +750,11 @@ class AppConfig:
             raise ConfigError(
                 f"app '{name}': invalid delivery '{delivery}' (must be 'sideload' or 'livecontainer')"
             )
+        preferred_version = str(data.get("preferred_version", "latest"))
         return cls(
             name=name,
             bundle_id=str(data["bundle_id"]),
-            preferred_version=str(data.get("preferred_version", "latest")),
+            preferred_version=preferred_version,
             tweaks=_names(data.get("tweaks"), where=f"app '{name}': tweaks"),
             cyan=CyanOptions.from_dict(data.get("cyan"), app=name),
             auto_profile=bool(data.get("auto_profile", False)),
@@ -752,7 +763,48 @@ class AppConfig:
             delivery=delivery,
             lc_bundle_id=(str(data["lc_bundle_id"]) if data.get("lc_bundle_id") else None),
             store_country=store_country,
+            preferred_version_id=_held_build_id(data.get("preferred_build"), preferred_version),
         )
+
+
+#: An App Store external version id: ASCII digits, as
+#: `ipatool.is_external_version_id` takes them (this module can't import it).
+_EXTERNAL_ID = re.compile(r"[0-9]{1,20}")
+
+
+def _external_id(value: Any) -> str | None:
+    """`preferred_build`'s `version_id` as written: a string of digits, or the
+    int YAML reads an unquoted one as. Anything else is no id, and the hold is
+    by display version, as before 2.3. (A YAML boolean is an int too, and
+    reads as "True" or "False", which aren't digits.)"""
+    if isinstance(value, int):
+        value = str(value)
+    return value if isinstance(value, str) and _EXTERNAL_ID.fullmatch(value) else None
+
+
+def _held_build_id(value: Any, preferred_version: str) -> str | None:
+    """The build a hold names: `preferred_build`'s `version_id`, but only
+    while its `version` is `preferred_version`, and never for `latest`.
+
+    The id is written with the version it is a build of, because the
+    version can change without it: a hand edit of `preferred_version`, or
+    Edit App on 2.2.1, which knows nothing of `preferred_build` and leaves it
+    in place. An id honored at another version would hold the app to a file
+    that can't exist (`ipa_cache.admits`), and the hint to get that build
+    again would move the hold back. So a build of another version is no
+    build: the hold is by display version, and the next write of the apps
+    removes it (`_drop_unheld_builds`).
+
+    Both sides go through `str`, so `1.2` that YAML read as a float on each
+    key still matches. A 2.3 beta's bare `preferred_version_id` says no
+    version, so it is never read.
+    """
+    if preferred_version == "latest" or not isinstance(value, dict):
+        return None
+    version = value.get("version")
+    if version is None or str(version) != preferred_version:
+        return None
+    return _external_id(value.get("version_id"))
 
 
 def _store_country(value: Any, *, app: str) -> tuple[str | None, str | None]:
@@ -1430,6 +1482,23 @@ def _quote_store_countries(apps: dict[str, Any]) -> None:
             entry["store_country"] = _Quoted(value)
 
 
+def _drop_unheld_builds(apps: dict[str, Any]) -> None:
+    """Remove every app's `preferred_build` that `_held_build_id` doesn't
+    honor (a build of another version, or one that doesn't read as a build),
+    and a 2.3 beta's bare `preferred_version_id`. Neither changes what a build
+    uses; left in place, a hand edit back to that version would revive the
+    old build without anyone choosing it."""
+    for entry in apps.values():
+        if not isinstance(entry, dict):
+            continue
+        entry.pop("preferred_version_id", None)
+        if "preferred_build" not in entry:
+            continue
+        version = str(entry.get("preferred_version", "latest"))
+        if _held_build_id(entry["preferred_build"], version) is None:
+            del entry["preferred_build"]
+
+
 def _commit_apps(path: Path, raw: dict[str, Any], apps: dict[str, Any]) -> None:
     """Reattach ``apps`` to ``raw`` and write config.yaml atomically.
 
@@ -1438,6 +1507,7 @@ def _commit_apps(path: Path, raw: dict[str, Any], apps: dict[str, Any]) -> None:
     write a config with no apps in it.
     """
     _quote_store_countries(apps)
+    _drop_unheld_builds(apps)
     raw["apps"] = apps
     _atomic_write_yaml(path, raw)
 
@@ -1517,6 +1587,53 @@ def set_app_tweaks(path: Path, name: str, tweaks: list[str]) -> None:
     _commit_apps(path, raw, apps)
 
 
+def swapped_tweaks(
+    entries: list[str], *, key: Callable[[str], object], old_key: object, new_filename: str,
+) -> list[str]:
+    """`entries` with every reference to the old tweak (`key(entry) ==
+    old_key`) replaced by `new_filename` where it stood, then collapsed by
+    identity, so an app that already listed the new file after the old one
+    gets it once. `cli._repoint`'s rule, and `repoint_tweak`'s."""
+    substituted = [new_filename if key(entry) == old_key else entry for entry in entries]
+    seen: set[object] = set()
+    out: list[str] = []
+    for entry in substituted:
+        k = key(entry)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(entry)
+    return out
+
+
+@_locked
+def repoint_tweak(
+    path: Path, *, key: Callable[[str], object], old_key: object, new_filename: str,
+) -> list[str]:
+    """Point every app that lists the old tweak at `new_filename`, in **one**
+    write under `config.yaml.lock`: `graft --update`'s tweak step
+    (`update_tweaks`), which builds the apps it re-points straight afterward
+    and must never leave some on the old build and some on the new.
+
+    Returns the apps changed, in config order. Writes nothing when no app
+    lists it. `key` is `Config.tweak_key`, so a path-form or mis-cased entry
+    for the same file counts.
+    """
+    raw, apps = _load_apps(path)
+    changed: list[str] = []
+    for name, entry in apps.items():
+        if not isinstance(entry, dict):
+            continue
+        tweaks = _names(entry.get("tweaks"), where=f"app '{name}': tweaks")
+        if not any(key(t) == old_key for t in tweaks):
+            continue
+        entry["tweaks"] = swapped_tweaks(tweaks, key=key, old_key=old_key, new_filename=new_filename)
+        changed.append(name)
+    if changed:
+        _commit_apps(path, raw, apps)
+    return changed
+
+
 @_locked
 def remove_app(path: Path, name: str) -> None:
     """Delete an app entry from ``config.yaml``'s ``apps:`` mapping.
@@ -1590,6 +1707,9 @@ def set_app_options(
 
     if preferred_version is not None:
         entry["preferred_version"] = preferred_version
+        # A version set by hand (Edit App) holds by display version: the build
+        # a get by id recorded goes with the version it was the build of.
+        entry.pop("preferred_build", None)
     if delivery is not None:
         entry["delivery"] = delivery
     if store_country is not None:
@@ -1629,22 +1749,36 @@ def set_app_options(
 
 
 @_locked
-def swap_preferred_version(path: Path, name: str, *, expected: str, new: str) -> str:
-    """Set app `name`'s `preferred_version` to `new`, but only if the file
-    still says `expected`; return what it said (`"latest"` when unset, as
-    `AppConfig` reads it).
+def swap_preferred_version(
+    path: Path, name: str, *,
+    expected: tuple[str, str | None], new: tuple[str, str | None],
+) -> tuple[str, str | None]:
+    """Set app `name`'s hold to `new`, a (`preferred_version`, version id)
+    pair, but only if the file still says `expected`; return what it said
+    (`("latest", None)` when unset, as `AppConfig` reads it: a
+    `preferred_build` of another version is no build, `_held_build_id`).
 
     Read and written under the config lock, so nothing lands between the
     look and the write. For a change that was decided against a config read
     earlier (`appstore.hold`, after a download that may have taken minutes):
-    when the pin is no longer what it was then, someone changed it since (Edit
-    App), and that later choice is kept. Writes nothing when it already says
-    `new`. Only `preferred_version` is written (`set_app_options`).
+    when the hold is no longer what it was then, someone changed it since (Edit
+    App, or another get), and that later choice is kept. Writes nothing when
+    it already says `new`. The two keys are written together: an id is
+    written as `preferred_build: {version, version_id}`, and an id of None,
+    or `latest`, removes `preferred_build`.
     """
-    _, apps = _load_apps(path)
-    found = str(_require_app_mapping(apps, name, path).get("preferred_version", "latest"))
+    raw, apps = _load_apps(path)
+    entry = _require_app_mapping(apps, name, path)
+    version = str(entry.get("preferred_version", "latest"))
+    found = (version, _held_build_id(entry.get("preferred_build"), version))
     if found == expected and found != new:
-        set_app_options(path, name, preferred_version=new)
+        new_version, new_id = new
+        entry["preferred_version"] = new_version
+        if new_id is None or new_version == "latest":
+            entry.pop("preferred_build", None)
+        else:
+            entry["preferred_build"] = {"version": new_version, "version_id": new_id}
+        _commit_apps(path, raw, apps)
     return found
 
 

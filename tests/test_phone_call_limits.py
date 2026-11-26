@@ -172,8 +172,26 @@ class HouseArrest:
         await self._maybe_hang("get_file_contents")
         return b""
 
-    async def set_file_contents(self, path, data):
-        await self._maybe_hang("set_file_contents")
+    # The certificate push writes as an IPA push does
+    # (`lc_runner._write_into_place`): a partial file, then a rename.
+    async def fopen(self, path, mode="r"):
+        await self._maybe_hang("fopen")
+        return 1
+
+    async def fwrite(self, handle, data):
+        await self._maybe_hang("fwrite")
+
+    async def fclose(self, handle):
+        pass
+
+    async def exists(self, path):
+        return False
+
+    async def rename(self, source, target):
+        await self._maybe_hang("rename")
+
+    async def rm_single(self, path, force=False):
+        return True
 
     async def rm(self, path):
         await self._maybe_hang("rm")
@@ -186,7 +204,8 @@ class HouseArrest:
     ("create", lambda d: d.list_documents(UDID, "com.kdt.livecontainer")),
     ("listdir", lambda d: d.list_documents(UDID, "com.kdt.livecontainer")),
     ("get_file_contents", lambda d: d.read_document(UDID, "com.kdt.livecontainer", "cert.p12")),
-    ("set_file_contents", lambda d: d.push_document(UDID, "com.kdt.livecontainer", "cert.p12", b"x")),
+    ("fopen", lambda d: d.push_document(UDID, "com.kdt.livecontainer", "cert.p12", b"x")),
+    ("rename", lambda d: d.push_document(UDID, "com.kdt.livecontainer", "cert.p12", b"x")),
     ("rm", lambda d: d.remove_document(UDID, "com.kdt.livecontainer", "cert.p12")),
 ])
 def test_livecontainer_s_documents_give_up_on_a_silent_phone(

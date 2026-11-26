@@ -96,6 +96,15 @@ class PreflightError(GraftError):
     exit_code = 3
 
 
+class DeveloperModeOffError(PreflightError):
+    """The device a development-signed build installs on has Developer Mode
+    off (iOS 16 and later): the app would install and then not open. Raised
+    before the build starts (`developer_mode.require_on`). A device that
+    isn't ready, so a `PreflightError`, with no code of its own; the build
+    that hits it exits 1, as any failed build does, with the message and the
+    hint in its `build-end.error`."""
+
+
 class IPANotFoundError(GraftError):
     """Raised when a build has no decrypted IPA to start from in the cache."""
 
@@ -120,10 +129,47 @@ class SigningError(GraftError):
     exit_code = 7
 
 
+class DeviceNotRegisteredError(SigningError):
+    """The device an install targets isn't registered (enabled) in the Apple
+    developer account, so no profile can include it. Graft never registers
+    one itself: that would spend one of the account's yearly device slots."""
+
+
 class InstallError(GraftError):
     """Raised when installing the IPA on the device fails."""
 
     exit_code = 8
+
+
+class NoDeviceConnectedError(InstallError):
+    """No iPhone or iPad is on usbmux, so a build has nowhere to install
+    (`installer.resolve_target`, `installer.select_device`)."""
+
+
+class SeveralDevicesError(InstallError):
+    """Several devices are connected, none of them the default, and none was
+    picked for this build: the person chooses (spec §5b's table).
+
+    An `InstallError`, for the callers that catch every "nowhere to install"
+    (`installer.resolve_target`'s three), with a code of its own: nothing
+    was installed, and nothing failed but the choice of device."""
+
+    exit_code = 22
+
+
+class DeviceNotConnectedError(InstallError):
+    """The device named for this install (`--device`, a pick on the app's
+    bar, the device `--update` goes to) isn't on usbmux.
+
+    `udid` is that device and `label` what to call it: its last-known name
+    (`devices_seen`), else the UDID. The message stays "requested device …
+    not connected", which the app's bar quotes; `--update` says
+    "<label> isn't connected" (spec §11.6)."""
+
+    def __init__(self, udid: str, *, label: str | None = None, hint: str | None = None) -> None:
+        super().__init__(f"requested device {udid} not connected", hint=hint)
+        self.udid = udid
+        self.label = label or udid
 
 
 class RepoError(GraftError):
@@ -245,6 +291,7 @@ EXIT_CODES: dict[int, str] = {
     17: "StagedIPAInUseError — the app keys on it",
     20: "AppStoreError",
     EXIT_LIVECONTAINER: "LiveContainerError (lc_runner.py)",
+    22: "SeveralDevicesError: several devices are connected, and none was named or picked",
     64: "a build with no app named (usage)",
     EXIT_BROKEN_PIPE: "the reader of stdout hung up",
     128 + 1: "Stopped by SIGHUP",

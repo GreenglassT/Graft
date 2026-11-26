@@ -466,8 +466,42 @@ NOT_READ = {
     "in a nested /* */ block": '/* outer /* inner */\n    static let infoKey = "GraftBundleArch"\n*/\n',
     "inside a doc block": '/**\n * let key = "GraftBundleArch"\n */\n',
     "the name, not as a string": "let GraftBundleArch = 1\n",
-    # A raw string's inner quote leaves a string open: it ends with its line.
+    # A raw string's inner quote leaves no string open: the next line is a comment.
     "commented out after a raw string": 'let r = #"a "b"#\n// static let infoKey = "GraftBundleArch"\n',
+    # What a Release build leaves out (the independent review of 2.2.1's check).
+    "only in an #if DEBUG block": "#if DEBUG\n" + REAL_LINE + "#endif\n",
+    "in the #else of an #if true": "#if true\nlet a = 1\n#else\n" + REAL_LINE + "#endif\n",
+    "in an #if !true block": "#if !true\n" + REAL_LINE + "#endif\n",
+    "in an #if (false) block": "#if (false)\n" + REAL_LINE + "#endif\n",
+    "in an #if false && os(macOS) block": "#if false && os(macOS)\n" + REAL_LINE + "#endif\n",
+    "in an #elseif false": "#if DEBUG\nlet a = 1\n#elseif false\n" + REAL_LINE + "#endif\n",
+    "in an #if true && DEBUG block": "#if true && DEBUG\n" + REAL_LINE + "#endif\n",
+    "in a condition continued in parentheses": "#if (true\n    && false)\n" + REAL_LINE + "#endif\n",
+    # `#"""#` is a one-line raw string holding a quote, so the #if DEBUG
+    # after it is a directive (the 23-queue-py review).
+    "in an #if DEBUG after a one-line raw quote": ('let q = #"""#\n#if DEBUG\n'
+                                                   + REAL_LINE + "#endif\n"),
+    "in an #if DEBUG between two one-line raw quotes": ('let q = #"""#\n#if DEBUG\nlet r = #"""#\n'
+                                                        + REAL_LINE + "#endif\n"),
+    "in a multi-line raw string": '#"""\n' + REAL_LINE + '"""#\n',
+    # A closure in an interpolation can hold #if blocks: swiftc accepts it.
+    "in an #if DEBUG in a closure in an interpolation": (
+        'let s = """\n\\({ () -> String in\n#if DEBUG\n    return "GraftBundleArch"\n'
+        '#else\n    return ""\n#endif\n}())\n"""\n'),
+    "past an #endif inside a multi-line string": ('#if false\nlet s = """\n#endif\n"""\n'
+                                                   + REAL_LINE + "#endif\n"),
+    "in a multi-line string": 'let s = """\n' + REAL_LINE + '    """\n',
+    "a comment after a raw string that ends in a backslash": 'let s = #"\\"#; // "GraftBundleArch"\n',
+    # Unknown to the check, so maybe not compiled: never counted.
+    "only in an #if os(macOS) block": "#if os(macOS)\n" + REAL_LINE + "#endif\n",
+    "only in an #if arch(x86_64) block": "#if arch(x86_64)\n" + REAL_LINE + "#endif\n",
+    "in the #else of an #if canImport(AppKit)": ("#if canImport(AppKit)\nlet a = 1\n#else\n"
+                                                 + REAL_LINE + "#endif\n"),
+    "only in an #if compiler(>=6) block": "#if compiler(>=6)\n" + REAL_LINE + "#endif\n",
+    "only under a flag the check doesn't know": "#if RELEASE\n" + REAL_LINE + "#endif\n",
+    "in an #if false inside an #if os(macOS)": ("#if os(macOS)\n#if false\n" + REAL_LINE
+                                                + "#endif\n#endif\n"),
+    "escaped, not the literal": 'let k = "Graft\\u{42}undleArch"\n',
 }
 
 #: Swift that does read it, around the things the check strips: each passes.
@@ -482,6 +516,32 @@ READ = {
     "after an escaped quote": 'let q = "a \\" // b"; let k = "GraftBundleArch"\n',
     "after an active #if": "#if DEBUG\nlet a = 1\n#endif\n" + REAL_LINE,
     "after a multi-line string holding /*": 'let s = """\n  /* not a comment "\n  """\n' + REAL_LINE,
+    # Valid code the check used to refuse (the independent review of 2.2.1's check).
+    "after a raw string holding /*": 'let r = #"a"b/*c"#\n' + REAL_LINE,
+    "after interpolations holding /* and //": 'let s = "\\(d["a/*b"]) \\(d["c//d"])"\n' + REAL_LINE,
+    "after a multi-line string holding #if false": 'let s = """\n#if false\n"""\n' + REAL_LINE,
+    # What a Release build compiles.
+    "in an #if !DEBUG block": "#if !DEBUG\n" + REAL_LINE + "#endif\n",
+    "in the #else of an #if DEBUG": "#if DEBUG\nlet a = 1\n#else\n" + REAL_LINE + "#endif\n",
+    "in an #if true || os(iOS) block": "#if true || os(iOS)\n" + REAL_LINE + "#endif\n",
+    "in an #elseif true": "#if false\nlet a = 1\n#elseif true\n" + REAL_LINE + "#endif\n",
+    "in the #else of an #if false && os(macOS)": ("#if false && os(macOS)\nlet a = 1\n#else\n"
+                                                  + REAL_LINE + "#endif\n"),
+    "with comments on the directives": ("#if DEBUG // dev only\nlet a = 1\n#else /* release */\n"
+                                        + REAL_LINE + "#endif\n"),
+    "after an #if false holding #endif in a string": ('#if false\nlet s = """\n#endif\n"""\n#endif\n'
+                                                      + REAL_LINE),
+    "inside an interpolation": 'let v = "\\(info["GraftBundleArch"] ?? "")"\n',
+    "as a raw string": '    static let infoKey = #"GraftBundleArch"#\n',
+    "after a raw string with two #": 'let r = ##"a"#b"##\n' + REAL_LINE,
+    "after a nested /* */ holding a quote": '/* a /* "b */ c" */\n' + REAL_LINE,
+    "after an extended regex holding a quote": 'let r = #/"/#\n' + REAL_LINE,
+    "in a condition continued in parentheses": "#if (false\n    || true)\n" + REAL_LINE + "#endif\n",
+    "after a one-line raw quote": 'let q = #"""#\n' + REAL_LINE,
+    "after a one-line raw string that starts with two quotes": 'let q = #"""a"#\n' + REAL_LINE,
+    "in the #else in a closure in an interpolation": (
+        'let s = """\n\\({ () -> String in\n#if DEBUG\n    return ""\n'
+        '#else\n    return "GraftBundleArch"\n#endif\n}())\n"""\n'),
 }
 
 
@@ -493,6 +553,22 @@ def test_swift_that_names_the_key_only_where_it_isnt_compiled_doesnt_read_it(swi
 @pytest.mark.parametrize("swift", READ.values(), ids=READ.keys())
 def test_swift_that_names_the_key_in_code_reads_it(swift):
     assert swift_literal.names_literal(swift, "GraftBundleArch")
+
+
+@pytest.mark.parametrize(("condition", "value"), [
+    ("true", True), ("false", False), ("DEBUG", False), ("!DEBUG", True), ("!true", False),
+    ("(false)", False), ("!(true && false)", True), ("true || false && false", True),
+    ("(true || false) && false", False),
+    # Unknown, unless the rest decides.
+    ("os(macOS)", None), ("arch(x86_64)", None), ("canImport(AppKit)", None),
+    ("compiler(>=5.9)", None), ("targetEnvironment(simulator)", None), ("RELEASE", None),
+    ("!os(iOS)", None), ("os(macOS) && true", None),
+    ("false && os(macOS)", False), ("os(macOS) && false", False), ("true || arch(arm64)", True),
+    # Not a condition the check can read: unknown too.
+    ("", None), ("true false", None), ("(true", None), ("true)", None), ("&& true", None), ("1", None),
+])
+def test_a_condition_is_read_as_a_release_build_reads_it(condition, value):
+    assert swift_literal.evaluate(condition) is value
 
 
 def test_the_apps_own_code_reads_the_key_and_its_tests_are_not_counted(tmp_path):

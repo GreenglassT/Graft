@@ -29,9 +29,11 @@ class CheckResult:
     # (e.g. "set-p12-password" → "Set Password…" button). Independent of
     # the human-readable `name`, which is free to change.
     action_key: str | None = None
-    # A row that reports a fact rather than passing a test — the account
-    # mode. Always `ok`: nothing about it can fail, and counting it as a
-    # failure would turn a free Apple ID into a broken setup.
+    # A row that reports a fact rather than passing a test: the account
+    # mode, or no device connected where none is needed (`check_devices`).
+    # Always `ok`: nothing about it can fail, and counting it as a failure
+    # would turn a free Apple ID, or a phone left in a pocket, into a broken
+    # setup.
     info: bool = False
     # The exact command that installs what this row found missing, or None.
     # The same command the hint says after "install with: ", without the
@@ -400,8 +402,9 @@ def list_connected_devices_with_transport() -> list[tuple[str, str]]:
     bare PATH could never find, so it never saw a device.
 
     A phone on both transports (a cable and Wi-Fi sync) is listed once, as
-    USB. usbmuxd unreachable is no devices, not an error: the device row says
-    so, with the fix.
+    USB. usbmuxd unreachable is no devices here, not an error: a run that
+    needs a device fails on none, and `--check`, which doesn't, asks again
+    (`usbmux_problem`) and says it couldn't look.
     """
     from .devices import list_devices_brief
 
@@ -414,25 +417,75 @@ def list_connected_devices_with_transport() -> list[tuple[str, str]]:
     ]
 
 
+DEVICES_CHECK_NAME = "connected ios device(s)"
+#: The device row's detail when none is connected and none is needed. The
+#: row is information then, which shows no hint, so the detail says what to
+#: do.
+NOT_CONNECTED_DETAIL = (
+    "not connected: plug in an iPhone or iPad with a USB cable and trust this Mac "
+    "before you install on it"
+)
+
+
+def usbmux_problem() -> str | None:
+    """Why macOS's usbmuxd couldn't say which devices are connected, or None
+    when it answered. `list_connected_devices` reads no answer as no devices,
+    which a run that needs one fails on either way; where none is needed
+    (`check_devices`), "not connected" would hide it. Asked only then, after
+    an empty listing: a second listing, without a lockdown session, is about
+    0.05s."""
+    from .devices import list_devices_brief
+
+    try:
+        list_devices_brief()
+    except Exception as e:
+        text = str(e).strip()
+        return f"{type(e).__name__}: {text}" if text else type(e).__name__
+    return None
+
+
 def check_devices(
     cfg: Config,
     *,
     check_profile: bool = True,
     app: AppConfig | None = None,
     udids: list[str] | None = None,
+    required: bool = True,
+    target: str | None = None,
 ) -> list[CheckResult]:
     """`udids` is the connected devices when the caller has already listed
-    them; otherwise they are listed here."""
+    them; otherwise they are listed here.
+
+    `required` is whether this run needs a device: a build that installs
+    does, so none connected fails. `--check` doesn't: there, none connected
+    is information (`NOT_CONNECTED_DETAIL`), which Settings › Preflight draws
+    as such and counts as neither OK nor Fail. Graft not being able to ask
+    (`usbmux_problem`) is a failure either way."""
     results: list[CheckResult] = []
     udids = list_connected_devices() if udids is None else udids
-    results.append(
-        CheckResult(
-            name="connected ios device(s)",
-            ok=bool(udids),
-            detail=", ".join(udids) if udids else "none",
-            hint="plug an iPhone in via USB and trust this Mac",
+    problem = usbmux_problem() if not udids and not required else None
+    if udids or required:
+        results.append(
+            CheckResult(
+                name=DEVICES_CHECK_NAME,
+                ok=bool(udids),
+                detail=", ".join(udids) if udids else "none",
+                hint="plug an iPhone in via USB and trust this Mac",
+            )
         )
-    )
+    elif problem is None:
+        results.append(CheckResult(name=DEVICES_CHECK_NAME, ok=True, info=True,
+                                   detail=NOT_CONNECTED_DETAIL))
+    else:
+        results.append(
+            CheckResult(
+                name=DEVICES_CHECK_NAME,
+                ok=False,
+                detail=f"couldn't ask macOS which devices are connected: {problem}",
+                hint="plug the iPhone or iPad in again; if Graft still can't see it, "
+                     "restart this Mac",
+            )
+        )
     # The provisioning-profile device match only matters when we sign; a
     # livecontainer build runs unsigned, so its profile is irrelevant here.
     #
@@ -487,11 +540,18 @@ def check_devices(
             # promise a refresh that never happens — or hard-fail a build whose
             # profile does list the phone.
             listed = {u.lower() for u in provisioned}
-            matches = [u for u in udids if u.lower() in listed]
+            # The build's own device when it has one (`installer.resolve_target`):
+            # a profile listing another connected device is no use to an
+            # install on this one. With none (`--check`), any connected
+            # device in the profile is enough.
+            judged = [target] if target else udids
+            matches = [u for u in judged if u.lower() in listed]
             ok = bool(matches)
             detail = (
                 ", ".join(matches)
                 if matches
+                else f"this build's device {target} isn't in it; provisioned={provisioned}"
+                if target
                 else f"connected={udids} provisioned={provisioned}"
             )
             hint = (
@@ -504,8 +564,11 @@ def check_devices(
                 # names, so a connected phone is only "about to be added" if it
                 # is one of them. A phone nobody configured would fail at zsign
                 # instead, which is a worse place to learn it.
-                configured = {c.lower() for c in auto_profile_device_udids(cfg)}
-                renewing = [u for u in udids if u.lower() in configured]
+                # The build's own device is one stage 4 provisions for too
+                # (`signer.target_profile_udids`), after re-reading the
+                # registered devices if it has to.
+                configured = {c.lower() for c in auto_profile_device_udids(cfg, target=target)}
+                renewing = [u for u in judged if u.lower() in configured]
                 if renewing:
                     ok, hint = True, ""
                     detail = (
@@ -550,6 +613,8 @@ def run_all_checks(
     will_install: bool = True,
     app: AppConfig | None = None,
     deliveries: Iterable[str] | None = None,
+    device_required: bool = True,
+    target: str | None = None,
 ) -> list[CheckResult]:
     """Pre-flight checks scoped to what this build actually needs.
 
@@ -570,6 +635,12 @@ def run_all_checks(
     list only matters then too. The signing rows stay: a paid config's
     identity is what `--lc-install` and `--lc-push-cert` sign with, and
     those report the tools they need when they run.
+
+    `device_required` is False for `--check`, which installs nothing: no
+    device connected is then information, not a failure (`check_devices`).
+
+    `target` is the device a build will install on (`installer.resolve_target`):
+    the profile check counts it as one stage 4 provisions for.
     """
     modes = [delivery] if deliveries is None else list(deliveries)
     sideloads = "sideload" in modes
@@ -582,7 +653,8 @@ def run_all_checks(
         results.extend(check_signing_files(cfg, app=app))
         results.extend(check_profile_contents(cfg, app=app))
     if will_install:
-        results.extend(check_devices(cfg, check_profile=sideloads, app=app))
+        results.extend(check_devices(cfg, check_profile=sideloads, app=app,
+                                     required=device_required, target=target))
     return results
 
 
@@ -634,7 +706,7 @@ def check_livecontainer(
     look for different things — and once unpinned when there are no such apps
     yet. The device checked is the default one when it is connected, else
     every connected one, each listed once. No device, no row: the device row
-    has already failed.
+    already says there's none.
 
     `installed_apps` defaults to `_installed_bundle_ids`, looked up when the
     check runs rather than bound at import, so a test that replaces the module
@@ -701,9 +773,10 @@ def run_free_account_checks(
     """`graft --check` for a free Apple ID.
 
     What a LiveContainer build needs and nothing it does not: the account as
-    information, cyan, a device, and a LiveContainer on it. No zsign,
-    no .p12, profile or password — a free Apple ID has none of them, and a red
-    row for each would read as a broken setup rather than a different one.
+    information, cyan, a device (none connected is information too), and a
+    LiveContainer on it. No zsign, no .p12, profile or password — a free
+    Apple ID has none of them, and a red row for each would read as a broken
+    setup rather than a different one.
     `installed_apps` is `check_livecontainer`'s, None for the real device.
 
     But an app the config does say to sideload is a failure: every build of
@@ -714,7 +787,7 @@ def run_free_account_checks(
         check_account(cfg),
         *check_app_deliveries(cfg),
         *check_tools(required_tools_for("livecontainer")),
-        *check_devices(cfg, check_profile=False, udids=udids),
+        *check_devices(cfg, check_profile=False, udids=udids, required=False),
         *check_livecontainer(cfg, udids, installed_apps=installed_apps),
     ]
 

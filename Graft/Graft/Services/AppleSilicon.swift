@@ -134,6 +134,17 @@ struct MacSupport: Equatable, Sendable {
     /// on an Apple silicon Mac through Rosetta.
     var opensAppleSiliconDownload: Bool { macOSMajorVersion >= 14 }
 
+    /// The download to get by hand, as a new version's messages name it
+    /// (`UpdateStore`). An Intel Mac's is Graft-Intel.zip, on any macOS. On
+    /// an Apple silicon Mac, either, by Mac, from macOS 14; before it,
+    /// Graft-Intel.zip, since Graft.zip won't open.
+    var manualDownload: String {
+        guard appleSiliconMac else { return "Graft-Intel.zip" }
+        return opensAppleSiliconDownload
+            ? "Graft.zip, or Graft-Intel.zip for an Intel Mac"
+            : "Graft-Intel.zip, since Graft.zip needs macOS 14 or later"
+    }
+
     /// The one line beside an Apple-silicon-only action that is disabled
     /// here, or nil where it isn't.
     var unavailableLine: String? {

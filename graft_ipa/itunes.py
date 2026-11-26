@@ -395,6 +395,33 @@ def lookup_by_bundle_id(bundle_id: str, *, country: str | None = None) -> ITunes
     )
 
 
+def lookup_by_bundle_ids(bundle_ids: list[str], *, country: str | None = None) -> dict[str, ITunesApp]:
+    """Every app of `bundle_ids` that `country`'s store sells, from one request
+    (`bundleId=a,b,c`), keyed by the bundle id as given.
+
+    For `graft --update`'s plan (`update_plan.store_versions`), which asks
+    each store once for all of its apps rather than once per app. An id the
+    store doesn't sell is simply absent; a listing that can't be read is
+    skipped, so one odd entry doesn't hide the rest. A request that got no
+    usable answer raises `ITunesRequestError`.
+    """
+    if not bundle_ids:
+        return {}
+    described = f"bundle ids {', '.join(bundle_ids)}"
+    data = _get_json("lookup", _in_store({"bundleId": ",".join(bundle_ids)}, country), described=described)
+    wanted = {b.casefold(): b for b in bundle_ids}
+    found: dict[str, ITunesApp] = {}
+    for item in _results(data, described=described):
+        try:
+            app = _app_from_result(item, described=described)
+        except ITunesError:
+            continue
+        key = wanted.get(app.bundle_id.casefold())
+        if key is not None and key not in found:
+            found[key] = app
+    return found
+
+
 # --- the Search API (`--appstore-search`) -------------------------------------
 
 #: The Search API's own default is 50 and its ceiling 200. Graft asks for fewer,

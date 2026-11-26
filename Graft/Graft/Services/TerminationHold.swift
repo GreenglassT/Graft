@@ -50,6 +50,10 @@ extension ProcessInfo: TerminationControl {}
 /// Remove Graft's Data) can't be stopped partway, so Quit Anyway waits for
 /// it to finish however long that takes, and the question says so.
 ///
+/// Work whose Stop waits for a step to finish (`finishing`: an install
+/// `graft --update` had begun) is waited for longer, up to
+/// `QuitGuard.finishGrace`, with a notice saying what Graft is finishing.
+///
 /// What it still doesn't stop: a Force Quit, a kill or a crash, which no app
 /// can answer.
 final class TerminationHold: @unchecked Sendable {
@@ -58,6 +62,10 @@ final class TerminationHold: @unchecked Sendable {
     static let shared = TerminationHold(control: ProcessInfo.processInfo)
 
     static let building = "Graft is building and installing an app"
+    /// A build with nothing to install: a dry run, Install skipped, or
+    /// Build for this Mac (`reason(forBuild:)`).
+    static let buildingOnly = "Graft is building an app"
+    static let exporting = "Graft is exporting an IPA"
     static let gettingFromAppStore = "Graft is getting an app from the App Store"
     static let staging = "Graft is staging an IPA"
     static let claiming = "Graft is getting a free app for this Apple ID"
@@ -67,11 +75,23 @@ final class TerminationHold: @unchecked Sendable {
     static let reinstalling = "Graft is re-installing a build on a device"
     static let decrypting = "Graft is decrypting an app from a device"
     static let removingData = "Graft is removing its data"
+    /// `graft --update` (`AppUpdatesStore`): its Stop finishes an install it
+    /// has begun first.
+    static let updatingApps = "Graft is updating apps"
+    /// Waiting for PlayCover's install, which the CLI does for up to two
+    /// minutes after a handoff: Install to Mac… from Builds or the Cache
+    /// (`StagedIPAStore.installToMac`), whose Stop ends the wait, never the
+    /// handoff; and an app pane's Mac build once it has handed over, whose
+    /// hold is renamed for the wait rather than saying "building an app"
+    /// (`ConfigStore.noteWaitingForPlayCover`, review part 2, COPY).
+    static let waitingForPlayCover = "Graft is waiting for PlayCover to install an app"
 
     /// Each reason in the words the quit question uses: "Quit while Graft
     /// is …?" (`QuitQuestion`).
     static let activities: [String: String] = [
         building: "building and installing an app",
+        buildingOnly: "building an app",
+        exporting: "exporting an IPA",
         gettingFromAppStore: "getting an app from the App Store",
         staging: "staging an IPA for a build",
         claiming: "getting a free app for your Apple ID",
@@ -81,7 +101,18 @@ final class TerminationHold: @unchecked Sendable {
         reinstalling: "re-installing a build on a device",
         decrypting: "decrypting an app from a device",
         removingData: "removing its data",
+        updatingApps: "updating your apps",
+        waitingForPlayCover: "waiting for PlayCover to install an app",
     ]
+
+    /// A build's reason, by what it does with what it builds: `building`
+    /// when it installs it, or nothing says it won't; `buildingOnly` when an
+    /// option keeps it off the device (`EffectiveDelivery.notDelivered`).
+    /// Export IPA… names its own (`exporting`).
+    static func reason(forBuild delivery: EffectiveDelivery) -> String {
+        if case .notDelivered = delivery { return buildingOnly }
+        return building
+    }
 
     /// One `begin`, which `end` takes back.
     struct Ticket: Hashable, Sendable {
@@ -92,6 +123,14 @@ final class TerminationHold: @unchecked Sendable {
     private struct Held {
         let ticket: Ticket
         let stop: (@MainActor () -> Void)?
+        /// What Quit Anyway says while this work finishes a step its stop
+        /// waits for (`finishing`); nil otherwise.
+        var finishing: String?
+        /// What the work is doing now, when it isn't what it began as
+        /// (`relabel`).
+        var relabeled: String?
+
+        var reason: String { relabeled ?? ticket.reason }
     }
 
     private let control: TerminationControl
@@ -133,7 +172,18 @@ final class TerminationHold: @unchecked Sendable {
     /// What is running: the reason of each `begin` not yet ended, oldest
     /// first.
     var reasons: [String] {
-        lock.withLock { held.map(\.ticket.reason) }
+        lock.withLock { held.map(\.reason) }
+    }
+
+    /// The work `ticket` holds for is now doing `reason` (nil: what it
+    /// began as again), for the quit question to say: a Mac build waiting
+    /// for PlayCover's install (`waitingForPlayCover`). A ticket already
+    /// ended does nothing.
+    func relabel(_ ticket: Ticket, as reason: String?) {
+        lock.withLock {
+            guard let index = held.firstIndex(where: { $0.ticket == ticket }) else { return }
+            held[index].relabeled = reason
+        }
     }
 
     /// Something is running.
@@ -141,10 +191,31 @@ final class TerminationHold: @unchecked Sendable {
         lock.withLock { !held.isEmpty }
     }
 
+    /// The work `ticket` holds for is finishing a step its stop waits for,
+    /// so it can't be cut off halfway: an install `graft --update` had begun
+    /// when it was told to stop (`update-stopping`), until that app's
+    /// `update-app-end`. `note` is what Graft says while Quit Anyway waits
+    /// for it ("Finishing the install on iPad Air, then quitting…"), and nil
+    /// once the step is done. Quit Anyway waits for such a step up to
+    /// `QuitGuard.finishGrace`, past its usual `stopGrace`. A ticket already
+    /// ended does nothing.
+    func finishing(_ ticket: Ticket, note: String?) {
+        lock.withLock {
+            guard let index = held.firstIndex(where: { $0.ticket == ticket }) else { return }
+            held[index].finishing = note
+        }
+    }
+
+    /// What held work is finishing (`finishing`), in its own words, oldest
+    /// first.
+    var finishingNotes: [String] {
+        lock.withLock { held.compactMap(\.finishing) }
+    }
+
     /// The reasons of what runs with no stop (`begin`'s nil `stop`), oldest
     /// first: work Quit Anyway can only wait for.
     var reasonsWithoutStop: [String] {
-        lock.withLock { held.filter { $0.stop == nil }.map(\.ticket.reason) }
+        lock.withLock { held.filter { $0.stop == nil }.map(\.reason) }
     }
 
     /// Something with no stop is running.
@@ -190,9 +261,15 @@ struct QuitQuestion: Equatable {
     /// For when no reason has words of its own.
     static let working = "working"
 
-    static let detail = "Quit Anyway stops what Graft is doing and leaves it unfinished. "
-        + "Keep Working cancels the quit, and any logout or restart, so it can finish. "
+    static let stops = "Quit Anyway stops what Graft is doing and leaves it unfinished."
+    static let keeps = "Keep Working cancels the quit, and any logout or restart, so it can finish. "
         + "If it finishes while this message is open, Graft quits then."
+    static let detail = stops + " " + keeps
+
+    /// Said when an update is among the work (review part 2, COPY): its Stop
+    /// lets an install it has begun finish, and Quit Anyway waits for that
+    /// (`QuitGuard.finishGrace`).
+    static let updateFinishes = "An install the update has begun finishes first, for up to a minute."
 
     /// For work with no words of its own that can't be stopped.
     static let unnamedWork = "what it's doing"
@@ -217,15 +294,17 @@ struct QuitQuestion: Equatable {
     /// the detail says Graft waits for them.
     init(reasons: [String], withoutStop: [String] = []) {
         title = "Quit while Graft is \(Self.words(reasons) ?? Self.working)?"
+        // An update Quit Anyway stops still finishes an install it has begun.
+        let update = reasons.contains(TerminationHold.updatingApps) ? " " + Self.updateFinishes : ""
         guard !withoutStop.isEmpty else {
-            detail = Self.detail
+            detail = Self.stops + update + " " + Self.keeps
             return
         }
         // `withoutStop` is some of `reasons`: any more, and something runs
         // that Quit Anyway does stop.
         detail = Self.waitingDetail(
             Self.words(withoutStop) ?? Self.unnamedWork, others: reasons.count > withoutStop.count
-        )
+        ) + update
     }
 
     /// `reasons` in `TerminationHold.activities`' words, each once, in
@@ -276,7 +355,11 @@ protocol QuitHandover: AnyObject {
 ///   with it.
 /// - Quit Anyway: `TerminationHold.stopAll()` first, then true once the hold
 ///   has cleared, or after `stopGrace` if it hasn't. Work with no stop is
-///   waited for to its end, past `stopGrace`: the question said so.
+///   waited for to its end, past `stopGrace`: the question said so. Work
+///   finishing a step its stop waits for (`TerminationHold.finishing`) is
+///   waited for up to `finishGrace`, with a notice on screen (`notice`)
+///   saying what is finishing; its `stopGrace` runs on once the step is
+///   done.
 /// - The work ends by itself while the question is up: the question comes
 ///   down and the reply is true at once. The quit was asked for, and nothing
 ///   is left that asking was about.
@@ -303,6 +386,10 @@ final class QuitGuard {
     typealias TakeDown = @MainActor (_ then: @escaping @MainActor () -> Void) -> Void
     /// Runs `block` once, `delay` seconds from now.
     typealias Schedule = @MainActor (_ delay: TimeInterval, _ block: @escaping @MainActor () -> Void) -> Void
+    /// Shows `note` on screen while Quit Anyway waits for a step to finish
+    /// (`TerminationHold.finishing`), in place of what it showed; nil takes it
+    /// down. Called only when what it shows changes.
+    typealias Notice = @MainActor (_ note: String?) -> Void
 
     /// How long Quit Anyway waits for the stopped work to end: past
     /// `cliStopGrace`, when the runner SIGKILLs a stopped CLI still running
@@ -321,6 +408,13 @@ final class QuitGuard {
     /// reaped yet (`ProcessHandle.stop`), which can't, and Graft staying
     /// until it has fired is all it needs.
     static let stopGrace: TimeInterval = cliStopGrace + 3
+    /// How long Quit Anyway waits for work finishing a step its stop waits
+    /// for (`TerminationHold.finishing`): an install `graft --update` had
+    /// begun, which it finishes so the phone isn't left with half of one
+    /// (spec 4.5). The CLI holds off the runner's SIGKILL meanwhile
+    /// (`RunStopper.holdKill`), so this is the bound: past it, Graft quits,
+    /// as it does when stopped work outlasts `stopGrace`.
+    static let finishGrace: TimeInterval = 60
     /// How often the hold is looked at, while the question is up and while
     /// Quit Anyway waits.
     static let checkEvery: TimeInterval = 0.1
@@ -329,6 +423,9 @@ final class QuitGuard {
     private let present: Present
     private let reply: @MainActor (Bool) -> Void
     private let schedule: Schedule
+    private let notice: Notice
+    /// What `notice` shows now.
+    private var noticeShown: String?
 
     /// The question on screen, until it is answered or taken down.
     private final class Asking {
@@ -344,12 +441,14 @@ final class QuitGuard {
 
     init(
         hold: TerminationHold, present: @escaping Present,
-        reply: @escaping @MainActor (Bool) -> Void, schedule: @escaping Schedule
+        reply: @escaping @MainActor (Bool) -> Void, schedule: @escaping Schedule,
+        notice: @escaping Notice
     ) {
         self.hold = hold
         self.present = present
         self.reply = reply
         self.schedule = schedule
+        self.notice = notice
     }
 
     func shouldTerminate() -> NSApplication.TerminateReply {
@@ -396,22 +495,46 @@ final class QuitGuard {
     }
 
     /// Stop everything that holds, then quit once the hold has cleared, or
-    /// once `stopGrace` has passed and nothing with no stop is left.
+    /// once `stopGrace` has passed and nothing with no stop is left, or, while
+    /// work is finishing a step, once `finishGrace` has.
     private func quitAnyway() {
         hold.stopAll()
-        wait(checksLeft: Int((Self.stopGrace / Self.checkEvery).rounded(.up)))
+        wait(checksLeft: Self.checks(Self.stopGrace), finishLeft: Self.checks(Self.finishGrace))
     }
 
-    private func wait(checksLeft: Int) {
+    private static func checks(_ seconds: TimeInterval) -> Int {
+        Int((seconds / checkEvery).rounded(.up))
+    }
+
+    /// `checksLeft` counts down `stopGrace`, `finishLeft` `finishGrace`, both
+    /// from Quit Anyway.
+    private func wait(checksLeft: Int, finishLeft: Int) {
+        // A step the work is finishing (an install the update had begun) is
+        // waited for up to `finishGrace`, and said on screen. `stopGrace`
+        // stands still meanwhile: once the step is done, the stopped work
+        // still has it to unwind and end.
+        let finishing = hold.finishingNotes.first
+        let inTime = finishing == nil ? checksLeft > 0 : finishLeft > 0
         // Work with no stop wasn't asked to stop, and the question said
         // Graft quits when it finishes: no deadline for it. Quitting under it
         // would leave its CLI running until its next write found no reader.
-        guard hold.isHolding, checksLeft > 0 || hold.holdsWithoutStop else { return leave() }
-        schedule(Self.checkEvery) { [weak self] in self?.wait(checksLeft: checksLeft - 1) }
+        guard hold.isHolding, inTime || hold.holdsWithoutStop else { return leave() }
+        show(finishing)
+        schedule(Self.checkEvery) { [weak self] in
+            self?.wait(checksLeft: finishing == nil ? checksLeft - 1 : checksLeft, finishLeft: finishLeft - 1)
+        }
+    }
+
+    /// `notice`, when what it says changes.
+    private func show(_ note: String?) {
+        guard note != noticeShown else { return }
+        noticeShown = note
+        notice(note)
     }
 
     /// The quit goes ahead: through the handover, if it takes it, else now.
     private func leave() {
+        show(nil)
         guard handOver() else { return finish(quit: true) }
     }
 

@@ -230,6 +230,60 @@ def test_a_failed_upload_still_removes_its_partial_and_leaves_the_old_file(tmp_p
     assert ha.files == {TARGET: b"the old build"}
 
 
+
+# --- the certificate, whole or not at all ----------------------------------------------
+
+CERT = "Documents/AppleDevelopment.p12"
+
+
+class CertSandbox(Sandbox):
+    """`Sandbox`, plus pymobiledevice3's one-call `set_file_contents`, which
+    writes at the real name and is cut off half-way here: what a dropped
+    connection leaves when a file isn't written under a partial name."""
+
+    async def set_file_contents(self, path: str, data: bytes) -> None:
+        await self._call("set_file_contents", path)
+        self.files[path] = data[: len(data) // 2]
+        raise ConnectionTerminatedError()
+
+
+def _push_cert(monkeypatch: pytest.MonkeyPatch, ha: Sandbox, data: bytes) -> None:
+    from graft_ipa import lc_manage
+
+    async def sandbox(udid: str, bundle_id: str, body):
+        return await body(ha)
+
+    monkeypatch.setattr(lc_manage.UsbmuxDevice, "_sandbox", staticmethod(sandbox))
+    lc_manage.UsbmuxDevice().push_document(
+        "UDID1", "com.kdt.livecontainer.ABCDE12345", "AppleDevelopment.p12", data
+    )
+
+
+def test_a_certificate_push_cut_off_leaves_no_truncated_certificate(monkeypatch) -> None:
+    """`--lc-push-cert` wrote `AppleDevelopment.p12` at its real name, so a
+    push cut off half-way left a truncated one that no record covers, and
+    the next push (Set Up again, resuming at the certificate) refused it as
+    someone else's. Now it goes in as an IPA push does
+    (`lc_runner._write_into_place`): under a hidden partial name, renamed in
+    once whole."""
+    ha = CertSandbox()
+    ha.fail["fwrite"] = ConnectionTerminatedError()
+
+    with pytest.raises(lc_runner.LiveContainerError):
+        _push_cert(monkeypatch, ha, b"the p12's bytes")
+
+    assert CERT not in ha.files
+    assert ha.files == {}, "the partial removed as well"
+
+
+def test_a_certificate_push_replaces_graft_s_earlier_one(monkeypatch) -> None:
+    ha = CertSandbox({CERT: b"the earlier p12"})
+
+    _push_cert(monkeypatch, ha, b"the p12's bytes")
+
+    assert ha.files == {CERT: b"the p12's bytes"}
+
+
 # --- cli-6: only "not found" is "not an archive" ----------------------------------------
 
 

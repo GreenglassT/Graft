@@ -385,18 +385,193 @@ final class StagedIPAStoreTests: XCTestCase {
         XCTAssertEqual(answer, .failed("no staged IPA named gone.ipa"))
     }
 
-    /// A handoff that worked says nothing. `open` returns as soon as the event
-    /// is delivered, so there is no finished install to report and this store
-    /// deliberately does not invent one — see `installToMac`'s own doc.
+    // MARK: - The handoff's events (spec 5d)
+
+    func test_the_handoff_and_its_two_endings_decode() throws {
+        let handed = try BuildEvent.decode(line: #"{"type":"handed-to-playcover","filename":"a.ipa","path":"/tmp/a.ipa","bundle_id":"com.example.app","display_name":"Example"}"#)
+        guard case let .handedToPlayCover(h) = handed else { return XCTFail("\(handed)") }
+        XCTAssertEqual(h.displayName, "Example")
+
+        let installed = try BuildEvent.decode(line: #"{"type":"playcover-installed","bundle_id":"com.example.app","version":"2.0","display_name":"Example","settings_disabled":["keymapping","playChain"],"settings_restored":[]}"#)
+        guard case let .playCoverInstalled(i) = installed else { return XCTFail("\(installed)") }
+        XCTAssertEqual(i.version, "2.0")
+        XCTAssertEqual(i.settings, PlayCoverSettingsChange(disabled: ["keymapping", "playChain"]))
+
+        let unconfirmed = try BuildEvent.decode(line: #"{"type":"playcover-install-unconfirmed","bundle_id":"com.example.app","waited_s":120,"display_name":"Example","settings_disabled":[],"settings_restored":["playChain"]}"#)
+        guard case let .playCoverInstallUnconfirmed(u) = unconfirmed else { return XCTFail("\(unconfirmed)") }
+        XCTAssertEqual(u.waitedSeconds, 120)
+        XCTAssertEqual(u.settings, PlayCoverSettingsChange(restored: ["playChain"]))
+    }
+
+    /// A CLI from before 2.3 sent no name and no settings lists.
+    func test_the_names_and_the_settings_are_optional() throws {
+        let handed = try BuildEvent.decode(line: #"{"type":"handed-to-playcover","filename":"a.ipa","path":"/tmp/a.ipa","bundle_id":"com.example.app"}"#)
+        guard case let .handedToPlayCover(h) = handed else { return XCTFail("\(handed)") }
+        XCTAssertNil(h.displayName)
+
+        let installed = try BuildEvent.decode(line: #"{"type":"playcover-installed","bundle_id":"com.example.app","version":"2.0"}"#)
+        guard case let .playCoverInstalled(i) = installed else { return XCTFail("\(installed)") }
+        XCTAssertEqual(i.settings, PlayCoverSettingsChange())
+    }
+
+    // MARK: - Install to Mac (spec 5d items 2 and 5)
+
+    private static let handedLine = #"{"type":"handed-to-playcover","filename":"com.a.one_1.0.ipa","path":"/tmp/x.ipa","bundle_id":"com.a.one","display_name":"Example"}"#
+    private static let installedLine = #"{"type":"playcover-installed","bundle_id":"com.a.one","version":"1.0","display_name":"Example","settings_disabled":["keymapping","playChain"],"settings_restored":[]}"#
+    private static let unconfirmedLine = #"{"type":"playcover-install-unconfirmed","bundle_id":"com.a.one","waited_s":120,"display_name":"Example","settings_disabled":[],"settings_restored":["playChain"]}"#
+
     @MainActor
-    func test_a_handoff_that_worked_has_nothing_to_report() async {
+    func test_an_install_playcover_finished_comes_back_with_its_settings() async {
         let store = StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
 
-        let complaint = await store.installToMac(
-            filename: "com.a.one_1.0.ipa", argsOverride: ["-c", "exit 0"]
+        let install = await store.installToMac(
+            filename: "com.a.one_1.0.ipa",
+            argsOverride: ["-c", "printf '%s\\n%s\\n' '\(Self.handedLine)' '\(Self.installedLine)'"]
         )
 
-        XCTAssertNil(complaint)
+        XCTAssertEqual(install.handed?.displayName, "Example")
+        guard case let .installed(record) = install.ending else { return XCTFail("\(install.ending)") }
+        XCTAssertEqual(record.settings.disabled, ["keymapping", "playChain"])
+        XCTAssertNil(install.complaint)
+    }
+
+    @MainActor
+    func test_the_handoff_is_heard_while_the_cli_is_still_waiting() async {
+        let store = StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+        var heardBeforeTheEnd = false
+        let marker = FileManager.default.temporaryDirectory
+            .appendingPathComponent("graft-handoff-\(UUID().uuidString)")
+
+        let install = await store.installToMac(
+            filename: "com.a.one_1.0.ipa",
+            argsOverride: ["-c", "printf '%s\\n' '\(Self.handedLine)'; "
+                + "i=0; while [ ! -e '\(marker.path)' ] && [ $i -lt 100 ]; do sleep 0.05; i=$((i+1)); done; "
+                + "printf '%s\\n' '\(Self.unconfirmedLine)'"],
+            onEvent: { event in
+                if case .handedToPlayCover = event {
+                    heardBeforeTheEnd = !FileManager.default.fileExists(atPath: marker.path)
+                    FileManager.default.createFile(atPath: marker.path, contents: nil)
+                }
+            }
+        )
+        try? FileManager.default.removeItem(at: marker)
+
+        XCTAssertTrue(heardBeforeTheEnd, "the waiting line must show while the CLI waits")
+        guard case .unconfirmed = install.ending else { return XCTFail("\(install.ending)") }
+    }
+
+    /// A Stop ends the wait, never the handoff: the CLI exits 143 with the
+    /// handoff already said, and that is a stopped wait, not a failure.
+    @MainActor
+    func test_a_stopped_wait_is_not_a_failure() async {
+        let store = StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+
+        let install = await store.installToMac(
+            filename: "com.a.one_1.0.ipa",
+            argsOverride: ["-c", "printf '%s\\n' '\(Self.handedLine)'; exit 143"]
+        )
+
+        XCTAssertEqual(install.ending, .stopped)
+        XCTAssertNil(install.complaint)
+    }
+
+    /// A CLI that dies after the handoff, not stopped, mustn't leave the
+    /// log ending on "Waiting for PlayCover…" with its stderr lost (review #3).
+    @MainActor
+    func test_a_cli_that_dies_after_the_handoff_says_so() async {
+        let store = StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+
+        let install = await store.installToMac(
+            filename: "com.a.one_1.0.ipa",
+            argsOverride: ["-c", "printf '%s\\n' '\(Self.handedLine)'; "
+                + "printf 'Traceback (most recent call last):\\n  File x\\nRuntimeError: boom\\n' >&2; exit 1"]
+        )
+
+        XCTAssertEqual(install.ending, .died("RuntimeError: boom"))
+        XCTAssertNil(install.complaint, "the handoff happened: not a refusal")
+        XCTAssertEqual(
+            install.endingLines(app: "Example", retry: .buildsRow).map(\.text),
+            ["Graft stopped following PlayCover's install: RuntimeError: boom"]
+        )
+    }
+
+    func test_a_death_names_the_clis_error_line_when_it_wrote_one() {
+        let install = MacInstall(
+            events: [.handedToPlayCover(try! handed())], exitCode: 1,
+            stderr: "error: couldn't write the event\nhint: try again\n", stopped: false
+        )
+        XCTAssertEqual(install.ending, .died("couldn't write the event"))
+    }
+
+    func test_a_silent_death_names_its_exit_status() {
+        let install = MacInstall(events: [.handedToPlayCover(try! handed())], exitCode: 6, stderr: "", stopped: false)
+        XCTAssertEqual(install.ending, .died("exit status 6"))
+    }
+
+    func test_only_a_clean_exit_after_the_handoff_is_handed_only() {
+        let install = MacInstall(events: [.handedToPlayCover(try! handed())], exitCode: 0, stderr: "", stopped: false)
+        XCTAssertEqual(install.ending, .handedOnly)
+    }
+
+    private func handed() throws -> HandedToPlayCoverRecord {
+        guard case let .handedToPlayCover(record) = try BuildEvent.decode(line: Self.handedLine) else {
+            throw XCTSkip("fixture")
+        }
+        return record
+    }
+
+    /// A playcover note is said plainly: after a Stop it carries the
+    /// first-handoff notice.
+    func test_a_playcover_note_is_a_plain_line() throws {
+        let note = try BuildEvent.decode(line: #"{"type":"log","source":"playcover","line":"Graft turned off PlayCover's PlayChain for Example."}"#)
+        XCTAssertEqual(MacInstall.streamLines(for: note, app: "Example").map(\.kind), [.plain])
+        let install = MacInstall(events: [note], exitCode: 143, stderr: "", stopped: true)
+        XCTAssertEqual(install.summaryLines(app: "Example", retry: .cacheRow).first?.kind, .plain)
+    }
+
+    @MainActor
+    func test_canceling_the_task_during_the_wait_stops_it() async {
+        let store = StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+        let task = Task { @MainActor in
+            await store.installToMac(
+                filename: "com.a.one_1.0.ipa",
+                argsOverride: ["-c", "printf '%s\\n' '\(Self.handedLine)'; sleep 30"],
+                onEvent: { _ in }
+            )
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        task.cancel()
+        let install = await task.value
+        XCTAssertEqual(install.ending, .stopped)
+        XCTAssertNotNil(install.handed)
+    }
+
+    /// Builds' and the Cache's Stop shows from the press, while the CLI still
+    /// gets the file ready (a large IPA takes seconds). A Stop then hands
+    /// nothing over, and it isn't PlayCover refusing it: no banner, and a
+    /// line that says so (review 23-2, §11). Nor is a Stop that came before
+    /// the CLI started.
+    @MainActor
+    func test_a_stop_before_the_handoff_is_not_a_refusal() async {
+        let store = StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+        let preparing = Task { @MainActor in
+            await store.installToMac(filename: "com.a.one_1.0.ipa", argsOverride: ["-c", "sleep 30"])
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        preparing.cancel()
+        let early = Task { @MainActor in
+            await store.installToMac(filename: "com.a.one_1.0.ipa", argsOverride: ["-c", "sleep 30"])
+        }
+        early.cancel()
+        let ends = [("while preparing", await preparing.value), ("before it ran", await early.value)]
+
+        for (when, install) in ends {
+            XCTAssertEqual(install.ending, .stoppedBeforeHandoff, when)
+            XCTAssertNil(install.complaint, "a Stop isn't a refusal: \(when)")
+            XCTAssertNil(install.handed, when)
+            XCTAssertEqual(install.endingLines(app: "Example", retry: .cacheRow).map(\.text),
+                           ["Stopped before Graft handed Example to PlayCover."], when)
+        }
     }
 
     /// And one that did not says the CLI's sentence. This is the whole reason
@@ -407,12 +582,91 @@ final class StagedIPAStoreTests: XCTestCase {
     func test_a_handoff_the_cli_could_not_make_reports_what_it_said() async {
         let store = StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
 
-        let complaint = await store.installToMac(
+        let install = await store.installToMac(
             filename: "com.a.one_1.0.ipa",
             argsOverride: ["-c", #"echo "error: PlayCover is not installed, or could not launch" >&2; exit 1"#]
         )
 
-        XCTAssertEqual(complaint, "PlayCover is not installed, or could not launch")
+        XCTAssertEqual(install.complaint, "PlayCover is not installed, or could not launch")
+        XCTAssertNil(install.handed)
+    }
+
+    @MainActor
+    func test_warnings_before_the_handoff_and_notes_after_it_are_kept() async {
+        let store = StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+        let warning = #"{"type":"log","source":"warning","line":"libX.dylib in the app needs Y"}"#
+        let note = #"{"type":"log","source":"playcover","line":"cannot follow it"}"#
+
+        let install = await store.installToMac(
+            filename: "x.ipa",
+            argsOverride: ["-c", "printf '%s\\n%s\\n%s\\n%s\\n' '\(warning)' '\(Self.handedLine)' '\(note)' '\(Self.unconfirmedLine)'"]
+        )
+
+        XCTAssertEqual(install.warnings, ["libX.dylib in the app needs Y"])
+        XCTAssertEqual(install.notes, ["cannot follow it"])
+    }
+
+    // MARK: - What it says
+
+    private func installed(disabled: [String] = [], restored: [String] = []) throws -> MacInstall {
+        let line = #"{"type":"playcover-installed","bundle_id":"com.a.one","version":"1.0","display_name":"Example","settings_disabled":"#
+            + "[\(disabled.map { "\"\($0)\"" }.joined(separator: ","))],\"settings_restored\":"
+            + "[\(restored.map { "\"\($0)\"" }.joined(separator: ","))]}"
+        guard case let .playCoverInstalled(record) = try BuildEvent.decode(line: line) else {
+            throw XCTSkip("fixture")
+        }
+        return MacInstall(handed: nil, ending: .installed(record))
+    }
+
+    func test_the_installed_line_and_the_first_handoff_notice() throws {
+        let lines = try installed(disabled: ["keymapping", "playChain"])
+            .endingLines(app: "Example", retry: .buildsRow)
+        XCTAssertEqual(lines.map(\.text), [
+            "  ✓ PlayCover installed Example 1.0. Open it from PlayCover.",
+            "Graft turned off PlayCover's keymapping and PlayChain for Example. For a game, "
+                + "turn keymapping back on in PlayCover; Graft keeps it from then on.",
+        ])
+        XCTAssertEqual(lines.map(\.kind), [.ok, .plain])
+    }
+
+    func test_only_the_keys_turned_off_are_named() throws {
+        XCTAssertEqual(
+            try installed(disabled: ["playChain"]).endingLines(app: "Example", retry: .buildsRow).last?.text,
+            "Graft turned off PlayCover's PlayChain for Example."
+        )
+    }
+
+    func test_a_restore_is_a_dim_line_not_a_notice() throws {
+        let lines = try installed(restored: ["keymapping"]).endingLines(app: "Example", retry: .buildsRow)
+        XCTAssertEqual(lines.last?.text, "Graft put back your PlayCover keymapping setting for Example.")
+        XCTAssertEqual(lines.last?.kind, .dim)
+    }
+
+    func test_the_unconfirmed_line_names_where_to_try_again() throws {
+        guard case let .playCoverInstallUnconfirmed(record) = try BuildEvent.decode(line: Self.unconfirmedLine)
+        else { return XCTFail("fixture") }
+        let install = MacInstall(handed: nil, ending: .unconfirmed(record))
+        XCTAssertEqual(
+            install.endingLines(app: "Example", retry: .buildsRow).first?.text,
+            "PlayCover hasn't finished installing Example. Check PlayCover's window; if the "
+                + "install failed there, Install to Mac… on the build's row in Builds tries again."
+        )
+        XCTAssertEqual(
+            install.endingLines(app: "Example", retry: .cacheRow).first?.text,
+            "PlayCover hasn't finished installing Example. Check PlayCover's window; if the "
+                + "install failed there, Install to Mac… on its row tries again."
+        )
+    }
+
+    func test_a_stop_says_playcover_may_still_be_installing() {
+        XCTAssertEqual(
+            MacInstall(handed: nil, ending: .stopped).endingLines(app: "Example", retry: .buildsRow).map(\.text),
+            ["Stopped waiting. PlayCover may still be installing Example."]
+        )
+    }
+
+    func test_the_waiting_line() {
+        XCTAssertEqual(MacInstall.waitingLine(app: "Example"), "Waiting for PlayCover to install Example…")
     }
 
     // MARK: - The stub these four run against

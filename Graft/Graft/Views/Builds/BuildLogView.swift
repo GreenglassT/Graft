@@ -4,6 +4,8 @@ private typealias Flag = CLIContract.Flag
 
 struct BuildLogView: View {
     let build: BuildRecord
+    /// The build's app by the name the sidebar shows (`BuildsView.appName`).
+    let appName: String
     let runner: CLIRunner
     @ObservedObject var artwork: ArtworkStore
     let onClose: () -> Void
@@ -38,16 +40,24 @@ struct BuildLogView: View {
             // is the right answer for a history that outlives the config.
             AppIcon(name: build.app, size: 36, image: artwork.image(for: build.bundleId))
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(build.app) — build log")
+                Text(Self.title(appName))
                     .font(AppFont.bodyMedium)
                     .foregroundStyle(Palette.text)
-                Text("\(build.bundleId) · \(build.version) · \(build.timestamp)")
+                Text(Self.subtitle(for: build))
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.textDim)
             }
             Spacer()
             statusBadge
         }
+    }
+
+    static func title(_ appName: String) -> String { "\(appName) — build log" }
+
+    /// The line under the title: the bundle id, the version and when it was
+    /// built, in local time rather than the CLI's ISO 8601 stamp.
+    static func subtitle(for build: BuildRecord) -> String {
+        "\(build.bundleId) · \(build.version) · \(DateHelpers.readable(build.timestamp))"
     }
 
     private var statusBadge: some View {

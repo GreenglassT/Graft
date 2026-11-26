@@ -85,22 +85,40 @@ extension View {
     /// a sentence that is discarded unless the confirmation is actually up.
     /// Read inside the message builder, it is worked out only while the alert
     /// is up.
+    ///
+    /// `waitingForPlayCover`: a Mac build that has handed over and is only
+    /// waiting for PlayCover's install, whose Stop ends the wait (`StopWords`).
+    /// A value, not a closure: a defaulted closure ahead of `onStop` is one an
+    /// unlabeled trailing closure binds to under forward-scan matching.
     func stopBuildConfirmation<T>(
         presenting item: Binding<T?>,
         name: @escaping (T) -> String,
         consequence: @escaping () -> String,
+        waitingForPlayCover: Bool = false,
         onStop: @escaping (T) -> Void
     ) -> some View {
         alert(
-            "Stop building \(item.wrappedValue.map(name) ?? "")?",
+            StopWords.title(name: item.wrappedValue.map(name) ?? "", waitingForPlayCover: waitingForPlayCover),
             isPresented: item.isPresent(),
             presenting: item.wrappedValue
         ) { value in
-            Button("Keep building", role: .cancel) {}
+            Button(StopWords.keep(waitingForPlayCover: waitingForPlayCover), role: .cancel) {}
             Button("Stop", role: .destructive) { onStop(value) }
         } message: { _ in
             Text(consequence())
         }
+    }
+}
+
+/// The Stop confirmation's words: a build's, or, once a Mac build has handed
+/// over and only the wait for PlayCover's install is left, the wait's.
+enum StopWords {
+    static func title(name: String, waitingForPlayCover: Bool) -> String {
+        waitingForPlayCover ? "Stop waiting for PlayCover?" : "Stop building \(name)?"
+    }
+
+    static func keep(waitingForPlayCover: Bool) -> String {
+        waitingForPlayCover ? "Keep waiting" : "Keep building"
     }
 }
 
@@ -333,6 +351,7 @@ struct ErrorBanner: View {
                         .foregroundStyle(.white.opacity(0.8))
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
             }
         }
         .padding(.horizontal, fit.horizontalPadding)
@@ -402,6 +421,67 @@ private extension ErrorBanner.Fit {
         case .fullBleed: return 11
         case .inset: return 10
         }
+    }
+}
+
+/// Install to Mac…'s strip in Builds and the Cache pane (spec 5d items 2 and
+/// 5): "Waiting for PlayCover to install …" while the CLI waits for the
+/// install, then what it said — the install or the wait running out, and what
+/// Graft did to the app's PlayCover settings — until dismissed. A refusal is
+/// an `ErrorBanner`, not this.
+struct MacInstallStrip: View {
+    /// The app's name, for the waiting line.
+    let app: String
+    /// nil while the CLI is still waiting.
+    let lines: [LogLine]?
+    var gutter: CGFloat = Metrics.paneGutter
+    /// Ends the wait, never the handoff: the strip's Stop, while the CLI
+    /// waits. Nil draws none.
+    var onStop: (() -> Void)? = nil
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            VStack(alignment: .leading, spacing: 4) {
+                if let lines {
+                    ForEach(lines) { line in
+                        Text(line.text.trimmingCharacters(in: .whitespaces))
+                            .font(AppFont.monoSmall)
+                            .foregroundStyle(line.kind.color)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } else {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text(MacInstall.waitingLine(app: app))
+                            .font(AppFont.monoSmall)
+                            .foregroundStyle(Palette.textMuted)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            // The CLI waits up to two minutes for PlayCover's install, and
+            // this is how that wait ends early (review 23-2, §11). It asks
+            // nothing first: PlayCover keeps the file either way.
+            if lines == nil, let onStop {
+                Button("Stop", action: onStop)
+                    .controlSize(.small)
+                    .help("Stop waiting for PlayCover's install. PlayCover keeps what it was handed.")
+            }
+            if lines != nil {
+                Button(action: onDismiss) {
+                    Symbols.dismiss.image(size: 10)
+                        .foregroundStyle(Palette.textDim)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
+            }
+        }
+        .padding(.horizontal, gutter)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

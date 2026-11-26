@@ -473,3 +473,43 @@ def _started_iproxy(bin_dir: Path) -> bool:
 
     out = _sp.run(["/bin/ps", "-axo", "command="], capture_output=True, text=True).stdout
     return str(bin_dir / "iproxy") in out
+
+
+@pytest.fixture
+def world(temp_config_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """`graft --update`'s stand-in world (`tests/update_fakes.py`)."""
+    from .update_fakes import make_world
+
+    return make_world(temp_config_env, tmp_path, monkeypatch)
+
+
+class StraySignal(Exception):
+    """A SIGTERM or SIGINT that reached `stop_safety_net`: nothing under test
+    was handling it, which under Python's default would have ended pytest
+    (SIGTERM) or interrupted the whole run (SIGINT)."""
+
+
+@pytest.fixture
+def stop_safety_net():
+    """For a test that sends real Stops to this process: a handler that
+    raises takes the default's place for SIGTERM and SIGINT, so code that
+    failed to install its own fails the test instead of killing the run, and
+    the handlers the test found come back whatever happens. No update gate
+    outlives the test."""
+    import signal
+
+    from graft_ipa import stop_deferral
+
+    before = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+
+    def stray(signum: int, _frame: object) -> None:
+        raise StraySignal(f"signal {signum} reached the test's safety net")
+
+    signal.signal(signal.SIGTERM, stray)
+    signal.signal(signal.SIGINT, stray)
+    try:
+        yield
+    finally:
+        for sig, handler in before.items():
+            signal.signal(sig, handler)
+        stop_deferral._gate = None

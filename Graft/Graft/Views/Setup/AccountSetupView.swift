@@ -360,8 +360,11 @@ struct AccountSetupView: View {
     }
 }
 
-/// One of a free Apple ID's device steps, with a link for each page it names.
-private struct FreeStepRow: View {
+/// One of a free Apple ID's device steps, with a link for each page it names:
+/// the first-run screen's done screen, and Set Up LiveContainer's free
+/// variant (`SetUpLiveContainerSheet`). Its `Link` is the one
+/// `NoRealDefaultsTests.allowedLinks` counts in this file.
+struct FreeStepRow: View {
     let number: Int
     let text: String
 

@@ -362,3 +362,85 @@ def test_empty_fields_are_omitted_rather_than_blank(tmp_path):
     # yields exactly those two and no empty `version`/`section`/`author`.
     assert fields == {"package_id": "com.example.bare", "name": "com.example.bare"}
     assert all(value for value in fields.values())
+
+
+# ---- `data_names`: what a .deb puts on disk (PlayCover's framework check) ----
+
+def _data_tar(names: list[str], *, mode: str = "w:gz", dirs: tuple[str, ...] = ()) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode=mode) as tar:
+        for d in dirs:
+            info = tarfile.TarInfo(d)
+            info.type = tarfile.DIRTYPE
+            tar.addfile(info)
+        for name in names:
+            info = tarfile.TarInfo(name)
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+    return buf.getvalue()
+
+
+def _deb_with_data(member: str, payload: bytes) -> bytes:
+    return _ar([
+        ("debian-binary", b"2.0\n"),
+        ("control.tar.gz", _control_tar()),
+        (member, payload),
+    ])
+
+
+TWEAK_FILES = [
+    "./Library/MobileSubstrate/DynamicLibraries/Example.dylib",
+    "./Library/MobileSubstrate/DynamicLibraries/Example.plist",
+    "./Library/Frameworks/ExampleKit.framework/ExampleKit",
+    "./Library/Frameworks/ExampleKit.framework/Info.plist",
+]
+
+
+@pytest.mark.parametrize("member,mode", [
+    ("data.tar.gz", "w:gz"), ("data.tar.xz", "w:xz"), ("data.tar.bz2", "w:bz2"), ("data.tar", "w"),
+])
+def test_data_names_lists_the_files_a_deb_installs(tmp_path, member, mode):
+    from graft_ipa.deb import data_names
+
+    path = tmp_path / "t.deb"
+    path.write_bytes(_deb_with_data(member, _data_tar(TWEAK_FILES, mode=mode, dirs=("./Library/",))))
+    assert data_names(path) == [n[2:] for n in TWEAK_FILES], "files only, without ./"
+
+
+def test_data_names_of_a_zstd_deb_when_this_python_can_read_one(tmp_path):
+    from graft_ipa import deb
+
+    zstd = deb._zstd()
+    if zstd is None:
+        pytest.skip("no zstd module in this Python")
+    path = tmp_path / "t.deb"
+    path.write_bytes(_deb_with_data("data.tar.zst", zstd.compress(_data_tar(TWEAK_FILES, mode="w"))))
+    assert deb.data_names(path) == [n[2:] for n in TWEAK_FILES]
+
+
+@pytest.mark.parametrize("content", [
+    b"", b"not an ar archive", b"!<arch>\n", _ar([("debian-binary", b"2.0\n")]),
+], ids=["empty", "not-ar", "no-members", "no-data"])
+def test_data_names_of_something_unreadable_is_none_never_empty(tmp_path, content):
+    """None means "can't tell", which warns; [] would mean "brings nothing",
+    which lets a tweak's binaries pass as the app's own."""
+    from graft_ipa.deb import data_names
+
+    path = tmp_path / "t.deb"
+    path.write_bytes(content)
+    assert data_names(path) is None
+
+
+def test_data_names_of_a_truncated_data_member_is_none(tmp_path):
+    from graft_ipa.deb import data_names
+
+    whole = _deb_with_data("data.tar.gz", _data_tar(TWEAK_FILES))
+    path = tmp_path / "t.deb"
+    path.write_bytes(whole[:-40])
+    assert data_names(path) is None
+
+
+def test_data_names_of_a_missing_file_is_none(tmp_path):
+    from graft_ipa.deb import data_names
+
+    assert data_names(tmp_path / "gone.deb") is None

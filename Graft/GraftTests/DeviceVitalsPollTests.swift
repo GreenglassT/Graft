@@ -159,6 +159,7 @@ final class DeviceVitalsPollTests: XCTestCase {
                 // No sidebar to navigate in this harness — it exists to
                 // watch the vitals poll's timing, not row selection.
                 onSelectApp: { _ in },
+                onSetUpLiveContainer: {},
                 vitalsPollInterval: interval
             )
             .environment(\.controlActiveState, active)
@@ -653,7 +654,8 @@ final class DeviceVitalsPollTests: XCTestCase {
             appStore: AppStoreStore(runner: config.runner, shell: NoAdminShell()),
             // No sidebar to navigate — this case only reads back
             // `vitalsPollInterval`.
-            onSelectApp: { _ in }
+            onSelectApp: { _ in },
+            onSetUpLiveContainer: {}
         )
 
         XCTAssertEqual(

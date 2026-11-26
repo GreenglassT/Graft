@@ -138,6 +138,9 @@ class FakeProfiles:
     def wildcard(self, bundle_id: str) -> Path:
         return self._file("com.kdt.x", WILDCARD_PROFILE)
 
+    def check_devices(self) -> None:
+        """Every device is registered here."""
+
 
 @pytest.fixture
 def ipa(tmp_path: Path) -> Path:
@@ -295,6 +298,37 @@ def test_the_signing_summary_is_reported(tmp_path: Path, ipa: Path) -> None:
 
     lines = [e["line"] for e in h.of("log")]
     assert any(line.startswith(f"LiveContainer.app: {TEAM}.{LC2} ") for line in lines)
+
+
+
+def test_a_fresh_install_forgets_the_certificate_record_its_documents_lost(
+    tmp_path: Path, ipa: Path
+) -> None:
+    """LiveContainer deleted from the device took its Documents with it,
+    certificate and all. A record left from before would keep the device
+    page's reminder up for a file that isn't there, and vouch for a file in
+    the new copy that Graft never pushed. The phone here has no
+    LiveContainer, so the install is fresh (`updating` false)."""
+    h = Harness(tmp_path, ipa)
+    h.log.record_cert_push(udid="u1", bundle_id=PRIMARY, name=lc_manage.CERT_NAME)
+    h.log.record_cert_push(udid="another-phone", bundle_id=PRIMARY, name=lc_manage.CERT_NAME)
+
+    h.install(instances=(1,))
+
+    assert h.log.cert_pushes("u1") == {}
+    assert h.log.cert_pushes("another-phone") == {PRIMARY: {lc_manage.CERT_NAME}}, (
+        "another device's copy is untouched"
+    )
+
+
+def test_an_update_in_place_keeps_the_certificate_record(tmp_path: Path, ipa: Path) -> None:
+    """An upgrade keeps LiveContainer's data, Documents included."""
+    h = Harness(tmp_path, ipa, device=FakeDevice({"com.example.app": {}, PRIMARY: {}}))
+    h.log.record_cert_push(udid="u1", bundle_id=PRIMARY, name=lc_manage.CERT_NAME)
+
+    h.install(instances=(1,))
+
+    assert h.log.cert_pushes("u1") == {PRIMARY: {lc_manage.CERT_NAME}}
 
 
 # ---- waiting on a running LiveContainer ----

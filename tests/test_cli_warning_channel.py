@@ -366,8 +366,11 @@ def test_a_device_that_could_not_be_queried_reaches_both_front_ends(
     """
     from graft_ipa import cli as cli_mod
 
+    # A config with no default device, as `Config` would hold it: a bare
+    # `MagicMock`'s truthy attribute reads as an unplugged default, which
+    # `--devices` now names in a `device-seen` event (spec §5b).
     with patch.object(cli_mod, "list_devices", return_value=_listing(devices=[])):
-        cli_mod._do_devices(MagicMock(), emitter=JsonEmitter())
+        cli_mod._do_devices(MagicMock(default_device_udid=None), emitter=JsonEmitter())
 
     captured = capsys.readouterr()
     events = _events(captured.out)

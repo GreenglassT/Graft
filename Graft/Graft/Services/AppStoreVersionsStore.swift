@@ -41,6 +41,10 @@ final class AppStoreVersionsStore: ObservableObject {
     /// (`load(app:held:)`), until a sentinel says. A list that fails partway
     /// sends none, and keeps the one it opened with.
     @Published private(set) var heldVersion: String?
+    /// The held build's version id, when the hold names one
+    /// (`AppStoreVersionRecord.heldVersionId`): then only that row is held,
+    /// though another build shares its number. Kept like `heldVersion`.
+    @Published private(set) var heldVersionId: String?
     /// Where the page being read, or last read, ends: rows before it whose
     /// version is still unknown are being read (or Apple wouldn't say).
     @Published private(set) var readingUpTo = 0
@@ -70,21 +74,24 @@ final class AppStoreVersionsStore: ObservableObject {
 
     /// The sheet opened for `app`, held at `held` as far as Graft knows
     /// (`AppStoreVersionRecord.heldVersion`): list from the start.
-    func load(app: String, held: String? = nil) {
-        start(app: app, offset: 0, keepRows: false, held: held)
+    func load(app: String, held: String? = nil, heldId: String? = nil) {
+        start(app: app, offset: 0, keepRows: false, held: held, heldId: heldId)
     }
 
     /// Show More: read the next page. Only once the last run has finished,
     /// and only when there is one.
     func loadMore() {
         guard let app, phase == .loaded, let nextOffset else { return }
-        start(app: app, offset: nextOffset, keepRows: true, held: heldVersion)
+        start(app: app, offset: nextOffset, keepRows: true, held: heldVersion, heldId: heldVersionId)
     }
 
     /// Try Again, after a failure: the page that failed, rows kept.
     func retry() {
         guard let app, case .failed = phase else { return }
-        start(app: app, offset: max(0, readingUpTo - Self.assumedPage), keepRows: true, held: heldVersion)
+        start(
+            app: app, offset: max(0, readingUpTo - Self.assumedPage), keepRows: true,
+            held: heldVersion, heldId: heldVersionId
+        )
     }
 
     /// The sheet closed: stop any run (the runner kills its CLI) and forget.
@@ -96,17 +103,19 @@ final class AppStoreVersionsStore: ObservableObject {
         releases = []
         phase = .idle
         heldVersion = nil
+        heldVersionId = nil
         readingUpTo = 0
         nextOffset = nil
     }
 
-    private func start(app: String, offset: Int, keepRows: Bool, held: String?) {
+    private func start(app: String, offset: Int, keepRows: Bool, held: String?, heldId: String?) {
         task?.cancel()
         generation += 1
         let mine = generation
         if !keepRows || self.app != app {
             releases = []
             heldVersion = held
+            heldVersionId = heldId
         }
         self.app = app
         phase = .loading
@@ -143,6 +152,7 @@ final class AppStoreVersionsStore: ObservableObject {
                 return
             }
             heldVersion = end.heldVersion
+            heldVersionId = end.heldVersionId
             readingUpTo = end.offset + end.limit
             nextOffset = Self.nextOffset(releases, after: readingUpTo)
             phase = .loaded

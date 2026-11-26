@@ -6,9 +6,12 @@ metadata used here are the keys the real iPad answered with on 2026-11-17.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from graft_ipa import lc_discovery, lc_manage
+from graft_ipa import config, lc_discovery, lc_manage
+from graft_ipa.lc_runner import LiveContainerError
 
 TEAM = "ABCDE12345"
 PRIMARY = f"com.kdt.livecontainer.{TEAM}"
@@ -24,9 +27,11 @@ def _app(version: str, app_id: str | None = None) -> dict:
     return meta
 
 
-def _status(apps: dict, *, ours: set[str] = frozenset(), latest=NIGHTLY) -> dict:
+def _status(
+    apps: dict, *, ours: set[str] = frozenset(), latest=NIGHTLY, certs: dict | None = None
+) -> dict:
     return lc_manage.status_payload(
-        udid="u1", apps=apps, team=TEAM, ours=set(ours), latest=latest
+        udid="u1", apps=apps, team=TEAM, ours=set(ours), latest=latest, certs=certs
     )
 
 
@@ -205,3 +210,77 @@ def test_an_unreachable_device() -> None:
     assert status["error"] == "Device not found"
     assert status["instances"] == []
     assert status["managed_by"] == "unknown"
+
+
+# --- the certificate's record, and a free Apple ID's steps (spec §5c) ----------
+
+
+def _offline(url: str):
+    raise LiveContainerError("offline")
+
+
+def test_a_certificate_push_counts_only_while_its_livecontainer_is_installed() -> None:
+    cert = {PRIMARY: {lc_manage.CERT_NAME}}
+
+    assert _status({PRIMARY: _app("3.8.14")}, certs=cert)["certificate_pushed"] is True
+    assert _status({LC2: _app("3.8.14")}, certs=cert)["certificate_pushed"] is False, (
+        "the LiveContainer it went into was deleted, and its Documents with it"
+    )
+    assert _status({PRIMARY: _app("3.8.14")}, certs={PRIMARY: set()})["certificate_pushed"] is False
+    assert _status({PRIMARY: _app("3.8.14")})["certificate_pushed"] is False, "no record"
+
+
+def test_an_unreachable_device_reminds_of_nothing() -> None:
+    assert lc_manage.unreachable_payload("u9", "Device not found")["certificate_pushed"] is False
+
+
+def test_every_status_carries_a_free_apple_ids_device_steps() -> None:
+    steps = list(config.FREE_DEVICE_STEPS)
+
+    assert _status({})["free_setup_steps"] == steps
+    assert lc_manage.unreachable_payload("u9", "Device not found")["free_setup_steps"] == steps
+
+
+def test_run_status_reads_the_record_until_a_clean_forgets_it(
+    temp_config_env: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through `run_clean`, the path the app's tick and Remove it take: the
+    clean that takes the certificate off forgets the record with it."""
+    from graft_ipa.build_log import BuildLog
+    from graft_ipa.config import load_config
+
+    from .test_lc_install import FakeDevice, Recorder
+
+    cfg = load_config(temp_config_env)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    device = FakeDevice({PRIMARY: _app("3.8.14")}, docs={PRIMARY: [lc_manage.CERT_NAME]})
+    monkeypatch.setattr(lc_manage, "UsbmuxDevice", lambda: device)
+
+    def pushed() -> bool:
+        [status] = lc_manage.run_status(
+            cfg, udid="u1", channel=None, events=Recorder().events,
+            device_ops=device, get_json=_offline,
+        )
+        return status["certificate_pushed"]
+
+    assert pushed() is False
+    log.record_cert_push(udid="another-phone", bundle_id=PRIMARY, name=lc_manage.CERT_NAME)
+    assert pushed() is False, "another device's push isn't this one's"
+    log.record_cert_push(udid="u1", bundle_id=PRIMARY, name=lc_manage.CERT_NAME)
+    assert pushed() is True
+
+    lc_manage.run_clean(cfg, udid="u1", events=Recorder().events, cert_only=True)
+
+    assert device.removed == [(PRIMARY, lc_manage.CERT_NAME)], "premise: the clean took it off"
+    assert pushed() is False
+
+
+def test_the_terminal_line_says_the_certificate_is_still_there() -> None:
+    line = lc_manage.human_line(
+        "lc-status", _status({PRIMARY: _app("3.8.14")}, certs={PRIMARY: {lc_manage.CERT_NAME}})
+    )
+
+    assert line.endswith(
+        "; the certificate Graft put there is still there: --lc-clean --cert-only removes it"
+    )
+    assert "certificate" not in lc_manage.human_line("lc-status", _status({PRIMARY: _app("3.8.14")}))

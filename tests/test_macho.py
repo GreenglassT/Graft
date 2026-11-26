@@ -156,6 +156,37 @@ def test_every_kind_of_dylib_dependency_is_a_dependency(tmp_path, cmd):
     ]
 
 
+def test_required_dylib_names_leave_out_weak_links(tmp_path):
+    """dyld skips a weak library that isn't there, so a weak link never stops
+    an app launching (PlayCover's framework check, spec 5d item 3)."""
+    data = mb.thin([
+        mb.dylib_cmd("/Library/MobileSubstrate/DynamicLibraries/libexample.dylib", cmd=mb.LC_ID_DYLIB),
+        mb.dylib_cmd("/usr/lib/libobjc.A.dylib"),
+        mb.dylib_cmd("/System/Library/PrivateFrameworks/Example.framework/Example",
+                     cmd=mb.LC_LOAD_WEAK_DYLIB),
+    ], filetype=mb.MH_DYLIB)
+    assert macho.required_dylib_names(_write(tmp_path, data)) == ["/usr/lib/libobjc.A.dylib"]
+
+
+@pytest.mark.parametrize("cmd", [
+    mb.LC_LOAD_DYLIB, mb.LC_REEXPORT_DYLIB, mb.LC_LAZY_LOAD_DYLIB, mb.LC_LOAD_UPWARD_DYLIB,
+], ids=["load", "reexport", "lazy", "upward"])
+def test_every_other_kind_of_dependency_is_required(tmp_path, cmd):
+    data = mb.thin([mb.dylib_cmd("/System/Library/PrivateFrameworks/Example.framework/Example", cmd=cmd)],
+                   filetype=mb.MH_DYLIB)
+    assert macho.required_dylib_names(_write(tmp_path, data)) == [
+        "/System/Library/PrivateFrameworks/Example.framework/Example",
+    ]
+
+
+def test_a_library_strong_in_one_slice_is_required_though_weak_in_another(tmp_path):
+    name = "/System/Library/PrivateFrameworks/Example.framework/Example"
+    weak = mb.thin([mb.dylib_cmd(name, cmd=mb.LC_LOAD_WEAK_DYLIB)], filetype=mb.MH_DYLIB)
+    strong = mb.thin([mb.dylib_cmd(name)], filetype=mb.MH_DYLIB, cputype=mb.CPU_X86_64)
+    data = mb.fat([(mb.CPU_ARM64, weak), (mb.CPU_X86_64, strong)])
+    assert macho.required_dylib_names(_write(tmp_path, data)) == [name]
+
+
 @pytest.mark.parametrize("little", [True, False])
 def test_a_32_bit_encryption_command_is_read(tmp_path, little):
     """An encrypted armv7 slice: LC_ENCRYPTION_INFO, not the _64 one."""

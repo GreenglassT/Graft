@@ -30,6 +30,14 @@ struct PlayCover {
     /// opens. The CLI's hint names the same page.
     static let releasesURL = URL(string: "https://github.com/PlayCover/PlayCover/releases")!
 
+    /// What to expect of any app under PlayCover (spec 5d item 4): in Build
+    /// for this Mac's tooltip and Install to Mac…'s in Builds and the Cache,
+    /// as in the README's "Running builds on this Mac". No app names.
+    static let expectations = "Not every iPhone or iPad app runs under PlayCover, even without "
+        + "tweaks: some open to a blank window, can't open their data, or have buttons that "
+        + "don't respond. If an app doesn't work, try it without tweaks first (Install to Mac… "
+        + "on its IPA in the Cache pane); if that fails too, PlayCover can't run that app."
+
     /// Where LaunchServices has the app with this bundle id, or nil when it
     /// has none: `NSWorkspace.urlForApplication(withBundleIdentifier:)` in the
     /// app, an answer of the test's choosing in a test.

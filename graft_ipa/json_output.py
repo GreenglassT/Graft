@@ -28,7 +28,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # One configured app, from `--list`: its config fields, plus
         # `account` — `"free"` (no `signing:` section: a free Apple ID,
         # LiveContainer delivery only) or `"paid"`. Config-wide, repeated on
-        # every app because this is the event the GUI reads at launch.
+        # every app because this is the event the GUI reads at launch. And
+        # `needs_developer_mode`: true when the app is signed with a
+        # development profile, null when its profile can't be read.
         "app",
         "app-added",
         "app-removed",
@@ -71,34 +73,49 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "appstore-status",
         # One app's App Store version against what is cached: `app`,
         # `bundle_id`, `store_version`, `cached_version`, `update_available`,
-        # `held_version`, `error`. One per app, always — a lookup that failed
-        # is this event with `store_version: null` and the reason in `error`,
-        # never silence, so the GUI can tell "not asked" from "couldn't tell".
-        # `held_version` is the version the app is held at (its
-        # `preferred_version` pin), or null; a held app's `update_available`
-        # is always false (`appstore.held_version`).
+        # `held_version`, `held_version_id`, `held_build`, `error`. One per
+        # app, always — a lookup that failed is this event with
+        # `store_version: null` and the reason in `error`, never silence, so
+        # the GUI can tell "not asked" from "couldn't tell". `held_version` is
+        # the version the app is held at (its `preferred_version` pin), or
+        # null; a held app's `update_available` is always false
+        # (`appstore.held_version`). `held_version_id` is the build held, when
+        # a get by id set the hold (`preferred_build`), else null; and
+        # `held_build` {number, count} says which of that version's builds it
+        # is, from the oldest, when the App Store has more than one, else null
+        # (`appstore.held_build`).
         "appstore-version",
         # `--appstore-versions`, one per version the App Store serves this
         # Apple ID for the app, newest first: `app`, `bundle_id`,
         # `external_id` (the id `--appstore-get --version-id` takes), `index`
         # (0 is the newest), `newest`, `version` and `release_date` (RFC 3339)
-        # once read, else null, `staged` (that version's IPA is in the cache
-        # under the name a get gives it) and `error` (why Apple wouldn't
-        # describe this version, or null). Only `--limit` versions from
+        # once read, else null, `staged` (that build's IPA is in the cache
+        # under the name a get by id gives it, or the version's plain file is
+        # while no other row read so far has the same version: a twin not yet
+        # read isn't counted) and `error` (why
+        # Apple wouldn't describe this version, or null). Only `--limit` versions from
         # `--offset` on are read; what was read before is remembered, so other
         # rows may have theirs too.
         "appstore-release",
         # `--appstore-versions`' sentinel, after the last `appstore-release`,
         # even when there are none: `app`, `bundle_id`, `count`, `offset`,
-        # `limit`, `held_version` (as on `appstore-version`).
+        # `limit`, `held_version` and `held_version_id` (as on
+        # `appstore-version`).
         "appstore-releases-end",
         # A get changed the app's hold, after it staged (or found staged)
         # what it was asked for: `app`, `bundle_id`, `version` (the version
-        # it is now held at, or null when a get of the latest let go) and
-        # `previous` (the one before, or null). Only when it changed. The
-        # hold is the app's `preferred_version`, so the GUI reads the app
-        # list again. When the preferred version was changed while the get
-        # ran (Edit App), the get leaves it and warns (`log`) instead.
+        # it is now held at, or null when a get of the latest let go),
+        # `version_id` (the build held, its App Store version id, when the get
+        # staged that build's own file, else null) and `previous` (the
+        # version before, or null). Only when it changed. The
+        # hold is the app's `preferred_version` (and `preferred_build`), so
+        # the GUI reads the app list again. When the hold was changed while
+        # the get ran (Edit App, another get), the get leaves it and warns
+        # (`log`) instead. Also sent by `--provide-ipa` (a drop) and
+        # `--decrypt` that stage the version an app is held at by build: the
+        # plain file they stage may be another build, so the hold becomes one
+        # by version (`version` and `previous` that version, `version_id`
+        # null), with a warning (`appstore.let_go_of_the_build`).
         "appstore-hold",
         # `--appstore-get` (and an encrypted `--provide-ipa`) moving on to
         # `stage`: "download", "decrypt" or "stage". Its own event rather than
@@ -110,12 +127,16 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # that was accepted — verified, or `--allow-unverified`.
         "appstore-decrypted",
         # `--appstore-get` stopped before downloading, because the App Store's
-        # current version is already staged as a get stages it
-        # (`appstore.already_staged`): `app`, `bundle_id`, `version`,
-        # `filename` and `path` of that staged IPA. The whole output of such a
-        # get, which exits 0: no `appstore-stage`, no `ipa-provided`, nothing
-        # downloaded or changed. `--again` downloads anyway. A lookup that
-        # failed or named no version never ends a get here: it downloads.
+        # current version is already staged as a get stages it,
+        # `<bundle id>_<version>.ipa` (`appstore.already_staged`), or, with
+        # `--version-id`, that build is: its own file, or the plain one while
+        # no other build of its number has been listed
+        # (`appstore.already_staged_version`). `app`, `bundle_id`, `version`,
+        # `filename` and `path` of that staged IPA. A get that exits 0 with no
+        # `appstore-stage` and no `ipa-provided`: nothing downloaded or staged.
+        # A `--version-id` get still holds the app at it, so `appstore-hold`
+        # may follow. `--again` downloads anyway. A lookup that failed or named
+        # no version never ends a get here: it downloads.
         "appstore-already-staged",
         # A get or an encrypted drop the CLI refused to stage, and why, as
         # data (C-UNVERIFIED): `app` and `reason`. Emitted just before the
@@ -288,7 +309,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "device",
         # One connected device, from `--devices` (never `--brief`): `udid`,
         # `name`, `model`, `ios_version`, `connection_type`,
-        # `livecontainer_bundle_id`, and `is_default` — whether this device's
+        # `livecontainer_bundle_id`, `livecontainer_known` (false when the
+        # app listing failed or was empty, as a locked phone's is: then a
+        # null bundle id says nothing), and `is_default` — whether this device's
         # `udid` matches the config's `default_device_udid`. At most one
         # `device` event per `--devices` call carries `is_default: true`;
         # zero do when the config names no default, or names one that is not
@@ -325,6 +348,13 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # there. The rule is about shape, not about which verb emitted it.
         "device-brief",
         "device-error",
+        # A device Graft has seen before that this `--devices` didn't
+        # describe (unplugged, or connected and locked), from
+        # `devices-seen.json`: `udid`, `name`, `model`, `ios_version` (each
+        # null when never said) and `is_default`. The configured default is
+        # always one when it's set and not described, so the app names it
+        # ("iPhone 15 Pro (not connected)") rather than showing its UDID.
+        "device-seen",
         "device-app",
         "device-apps-end",
         # One device's storage and battery, plus `reachable`. Emitted exactly
@@ -350,6 +380,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         #
         # Individual fields are null when the phone declined that domain, which
         # a locked phone routinely does — a separate condition from `reachable`.
+        # `developer_mode` is true or false on iOS 16 and later and null
+        # before, or when it couldn't be read; null never blocks a build.
         "device-info",
         "decrypt-start",
         "decrypt-end",
@@ -366,11 +398,12 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # console text on the JSON stream's own stdout.
         "encrypted-binaries",
         # One staged IPA handed to PlayCover for installation on this Mac:
-        # `filename`, `path`, `bundle_id`. Emitted when the `open` succeeds,
-        # which means the file was handed over — **not** that PlayCover
-        # finished installing it. `open` returns as soon as the event is
-        # delivered, so a completion status is not available to us, and
-        # claiming one would be a lie. PlayCover reports its own progress.
+        # `filename`, `path`, `bundle_id`, `display_name` (the app's name, for
+        # "Waiting for PlayCover to install <app>…"). Emitted the moment the
+        # `open` succeeds, which means the file was handed over — **not** that
+        # PlayCover finished installing it: `open` returns as soon as the event
+        # is delivered. The wait that follows ends in one of the two events
+        # below.
         #
         # Named for what happened rather than for the verb that triggered it:
         # `--install-to-mac` describes the user's intent and is fine for a
@@ -378,6 +411,24 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # install this app cannot observe — the GUI renders off this name, not
         # off this comment.
         "handed-to-playcover",
+        # After `handed-to-playcover`, PlayCover's copy of the app carries the
+        # handed version and build, written since the handoff began
+        # (`playcover_handoff.await_install`): `bundle_id`, `version`,
+        # `display_name`, and what Graft did to the app's PlayCover settings
+        # once it was installed: `settings_disabled` (the keys Graft's
+        # first-handoff defaults turned off: "keymapping", "playChain") and
+        # `settings_restored` (keys PlayCover changed that Graft put back),
+        # each a list, empty when nothing. Exit 0.
+        "playcover-installed",
+        # The wait for that ran out (`waited_s`, seconds) with PlayCover still
+        # installing or failed, or with a bundle id Graft can't look for
+        # (`waited_s` 0). Not a failure: exit 0. `bundle_id`, `display_name`,
+        # `settings_disabled` and `settings_restored` as above. A Stop during
+        # the wait emits neither event: the handoff stands, and the process
+        # exits as stopped (143). What the settings step managed on the way
+        # out (only what PlayCover had already written) is said as `log`
+        # lines, source `playcover`, in the same sentences.
+        "playcover-install-unconfirmed",
         # `--init --account free|paid` (`account_setup`), the setup the Mac app
         # runs. One `init-step` per thing done, in order: `step` ("profile",
         # "certificate", "keychain", "files" or "config") and `detail`, a
@@ -424,7 +475,11 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # (graft|altstore|unknown), `latest` {version, channel} or null
         # when the lookup failed, `update_available`, and `sources` — the two
         # AltStore source URLs, so the GUI can offer the one to add without
-        # spelling it itself.
+        # spelling it itself. `certificate_pushed`: a certificate
+        # `--lc-push-cert` recorded putting in a LiveContainer still
+        # installed, not yet taken off by `--lc-clean` (the app's reminder,
+        # spec §5c); false when unreachable. `free_setup_steps`:
+        # `config.FREE_DEVICE_STEPS`, for the app's Set Up LiveContainer sheet.
         "lc-status",
         # `--lc-install`'s progress: `udid`, `instance` (null for the shared
         # fetch), `step` (fetch|prepare|profile|sign|install), `detail`.
@@ -452,7 +507,8 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # not a tool, or a builtin. The hint still says "install with: <it>"
         # for a reader that predates the field. `info: true` marks a row that
         # reports a fact rather than passing a test (a free Apple ID's
-        # account row); it is always `ok`. A tool row that was found carries
+        # account row, or no device connected, "not connected"); it is always
+        # `ok`. A tool row that was found carries
         # `source`: where `tools.resolve` found it ("bundled", "PATH", ...).
         "preflight-check",
         # `ok_count`, `fail_count`, and `account` (`"free"` or `"paid"`),
@@ -533,9 +589,11 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # keys either way): `ok`; `current`, the version compared against;
         # `latest`, the latest published release's version without its "v",
         # and `url`, its page (both null on a failure); `update_available`;
-        # and on a failure `reason` (offline|http|malformed), `status` (the
-        # HTTP status, or null) and `message`, the sentence Help › Check for
-        # Updates… shows. `release_check.event` builds it.
+        # `needs_macos`, the macOS the latest release needs when a download
+        # found this Mac's older (`update_available` is then false), else
+        # null; and on a failure `reason` (offline|http|malformed), `status`
+        # (the HTTP status, or null) and `message`, the sentence Help › Check
+        # for Updates… shows. `release_check.event` builds it.
         "update-check",
         # `--download-update`'s progress, the same keys every time: `step`
         # ("download" or "verify"), `version` (the release's), `received` and
@@ -557,6 +615,69 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # was started, `url`, `reason` and `message`.
         # `app_update.install_event` builds it.
         "update-install",
+        # `graft --update`'s plan (`update_plan.payload`), first and once:
+        # `quick` (the background form: usbmux's list only, readiness
+        # "likely") and `apps`, one per app the command covers: `app`,
+        # `display_name`, `store` {from, to, skipped_reason}, `tweaks`
+        # [{filename, name, from, to, unchecked, also_affects}], `install`,
+        # `install_skipped_reason`, `manual_install` (the install is offered
+        # for the person to press, not run on its own: spec §11.1),
+        # `blocked_reason` (set only when no target with something to do can
+        # run: their reasons, joined with "; "), `readiness` ("checked" or
+        # "likely"), `readiness_note` (what a quick plan shows without
+        # blocking, or null), `targets`, `nothing_to_do` (waiting and blocked
+        # work count as work) and `actionable` (something to do now, on a
+        # target that can take it: the sidebar's indicator, Update All's
+        # count). `targets` is every device the app was delivered to (spec
+        # §11.3), the default first, then by name, less those dropped with
+        # `--drop-update-target`: {udid, device_name, delivery, lc_bundle_id,
+        # install (it installs in this run), install_skipped_reason,
+        # manual_install, waiting (the sentence when its device isn't
+        # connected), blocked_reason, readiness, readiness_note}. A get is
+        # planned when `store.to` is set and `store.skipped_reason` isn't.
+        # `--plan` emits this alone.
+        "update-plan",
+        # One step of an update starting, ending or skipped: `app` (null for
+        # the shared tweak step), `step` ("tweaks", "get", "build", or
+        # "install", once per target), `status` ("start", "end" or
+        # "skipped"), `detail` (the version a get fetches, the device a build
+        # installs on first, why a step was skipped, the error that ended it,
+        # or null), and for an install its target's `udid` and `device_name`
+        # (null for the other steps) and `waiting` (true when it ended or was
+        # skipped because its device isn't connected). The first target's
+        # install is the build's own, so its start and end come inside the
+        # build's; each other target's wraps the push or install of the same
+        # archive. A get or build that fails skips each install it would have
+        # made, with why; a device unplugged since the plan skips its install,
+        # or one unplugged during it ends it, with the waiting sentence. The
+        # step's own events (the get's `appstore-stage`, `tweak-updated`, the
+        # build's) pass through between its start and end.
+        "update-step",
+        # A Stop arrived while a step that must finish was running: a push
+        # into LiveContainer, an install, or a tweak's move and re-point.
+        # `app` (null for the tweak step) and `step` ("lc-push", "install" or
+        # "tweaks"). That step finishes, then the command stops. Once per run
+        # (`stop_deferral`).
+        "update-stopping",
+        # One app's result: `app`, `ok` (every target that isn't waiting is),
+        # `stopped`, `done` and `left` (steps, spelled as `update-step`
+        # spells them), `error` (why it didn't finish: a block, a refusal, a
+        # failure, or "not started"; null when it finished or was stopped),
+        # and `targets`, one per plan target in order: {udid, device_name,
+        # ok, error, left, waiting} (a target a Stop kept from starting: ok
+        # false, error null, left ["install"]; one whose device isn't
+        # connected: waiting true, ok false, error the waiting sentence, left
+        # ["install"]). `graft --update` again resumes at `left`, and installs
+        # only where the app isn't current.
+        "update-app-end",
+        # The run's summary, last: `ok` (every app it covered was updated),
+        # `stopped`, the apps `updated`, `failed`, `blocked` and
+        # `not_started`, and `waiting` (how many targets wait for their
+        # device).
+        "update-end",
+        # `--drop-update-target`: Update stopped installing `app` on `udid`
+        # (`device_name`, or null) until it's delivered there again.
+        "update-target-dropped",
     }
 )
 

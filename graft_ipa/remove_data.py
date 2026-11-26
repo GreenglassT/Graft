@@ -438,7 +438,10 @@ _FOLDERS: tuple[tuple[str, Callable[[], Path], str, str], ...] = (
     (
         "state", data_dirs.xdg_state_home, "Build history and logs",
         "Build history and delivery records, each build's saved log, repository indexes, "
-        "earlier versions of tweaks you updated, and Graft's record of its App Store sign-in.",
+        "earlier versions of tweaks you updated, Graft's record of its App Store sign-in, "
+        "the names of the iPhones and iPads Graft has seen, the PlayCover settings it keeps for "
+        "your apps, which devices you stopped updating an app on, and which App Store versions "
+        "your Apple ID was refused.",
     ),
     (
         "data", data_dirs.xdg_data_home, "Tools installed for Graft",

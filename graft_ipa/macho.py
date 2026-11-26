@@ -1,12 +1,14 @@
 """Read Mach-O load commands in pure Python: what Graft used `otool` for.
 
-Graft asks three things of a Mach-O, and all three are in its load commands:
+Graft asks four things of a Mach-O, and all three are in its load commands:
 
 * `cryptids`: the `cryptid` of every `LC_ENCRYPTION_INFO(_64)`, one per command
   per slice, like `otool -l`. Is this binary still FairPlay-encrypted?
 * `dylib_names`: what it links (`LC_LOAD_DYLIB` and its weak, re-export, lazy
   and upward variants), never its own `LC_ID_DYLIB`, which `otool -L` prints on
   line two and once made every tweak look Substrate-linked.
+* `required_dylib_names`: the same less weak links, which dyld skips when
+  the library isn't there (PlayCover's framework check).
 * `rpaths`: its `LC_RPATH` entries.
 
 And one of its headers alone:
@@ -271,6 +273,20 @@ def cryptids(path: Path) -> list[int]:
 def dylib_names(path: Path) -> list[str]:
     return _unique(
         lc.lc_str(8) for cmds in load_commands(path) for lc in cmds if lc.cmd in DYLIB_COMMANDS
+    )
+
+
+#: The dependencies dyld must find for the file to load: every kind but weak,
+#: which dyld skips when the library isn't there.
+REQUIRED_DYLIB_COMMANDS = DYLIB_COMMANDS - {LC_LOAD_WEAK_DYLIB}
+
+
+def required_dylib_names(path: Path) -> list[str]:
+    """What `path` can't load without: `dylib_names` less weak links. A
+    library linked weak in one slice and strong in another is required."""
+    return _unique(
+        lc.lc_str(8) for cmds in load_commands(path) for lc in cmds
+        if lc.cmd in REQUIRED_DYLIB_COMMANDS
     )
 
 

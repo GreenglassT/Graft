@@ -7,7 +7,7 @@ import XCTest
 ///
 /// `rowState` is pinned as values: a pure function of an installed app, a
 /// config, a cache and one boolean, the same treatment
-/// `DeviceAppsSectionCopyTests` gives `statusLine(of:in:)`, for the same
+/// `DeviceAppsSectionCopyTests` gives `statusLine(of:in:kind:)`, for the same
 /// reason — asserting on a rendered `body` is expensive and brittle where a
 /// value comparison is neither. What a value comparison cannot prove is
 /// whether the `Button` `.configured` draws is actually clickable where it

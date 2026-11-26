@@ -65,7 +65,8 @@ def free_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # The tools are looked up, never run; the phone is one connected device.
     monkeypatch.setattr(tools, "which", fake_path(tmp_path / "path-bin"))
     monkeypatch.setattr(preflight, "list_connected_devices", lambda: ["UDID1"])
-    monkeypatch.setattr(cli_mod, "select_device", lambda udid: ("UDID1", "usb"))
+    monkeypatch.setattr(cli_mod, "resolve_target",
+                        lambda cfg, app, explicit_udid=None: cli_mod.Target("UDID1", None, "usb"))
 
     def cyan(_cfg, _app, src, dst, *, dry_run=False):
         shutil.copyfile(src, dst)

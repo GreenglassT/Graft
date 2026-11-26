@@ -3,6 +3,153 @@
 What changed in each release of Graft, newest first. Each release's download
 is on [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
 
+## 2.3 (2026-11-26)
+
+### New
+
+- **One-click Update.** Graft now says when an app has something to update:
+  a newer version on the App Store, a newer build of a tweak it uses, or a
+  build that changed since it was last installed. The app shows an arrow
+  mark in the sidebar, and its pane says what ("Update available: App Store
+  1.2.0 · 1 tweak"). Update & Install shows what will change and where it
+  installs, then updates the tweaks, gets the App Store version, builds and
+  installs, showing its progress as it goes. Update All, when two or more
+  apps have an update, does the same for each of them.
+- An update installs on every device the app is on: one build, then the same
+  build on each. The confirmation lists each device, and the progress shows
+  each install with its own result and Try Again. A device that isn't
+  connected waits ("iPad mini isn't connected: it'll update when it is")
+  while the others install, and its install is offered again once it's
+  connected. A device that can't take the build, with Developer Mode off
+  say, doesn't stop the others. An update that only waits for a device doesn't mark the app in
+  the sidebar, and Stop updating ("Stop updating Example on iPad mini") stops
+  waiting for a device you no longer use. Graft never buys or claims an app,
+  and never moves an app off a version you're holding it at. When an updated
+  tweak is shared, the confirmation names the other apps that use it, and
+  Also install … now installs them too. After you re-install an older build
+  on a device, the pane offers Install Update for that device instead of
+  installing on its own.
+- Stop during an update stops at once, except during an install or while a
+  tweak is being swapped in, which finish first. Stop Now cancels that
+  install, and after three minutes Force Stop ends it. Try Again picks up
+  where it stopped. Quitting during an install waits for it to finish.
+- **A daily check of your apps.** At launch, once a day while it's open, and
+  after a get, build, tweak update or update, Graft checks your apps and
+  their tweaks for updates. It sends your apps' bundle IDs to Apple's App
+  Store lookup and your tweaks' package IDs to canister.me, and nothing that
+  identifies you or your Mac. Settings › Updates › Check my apps for updates
+  turns these checks off, and Check for updates now still checks when you
+  want.
+- **Pick the device for a build.** The app's bar says where the next Build &
+  Install goes, and why. Change sends the next Build & Install to another
+  connected device, then goes back to the default; a build that fails or is
+  stopped before installing keeps the pick for the retry. With the default
+  device unplugged, a build goes to the only other device connected, and
+  with several connected, the bar asks you to pick one. Settings names a
+  default device that isn't connected.
+- A build signed with a profile Graft makes, or a LiveContainer install, to
+  a device added to your developer account since you saved App Store
+  Connect, reads the account's devices again first, so the profile includes
+  it. A device that isn't registered is named in the error; Graft never
+  registers one.
+- **Set Up LiveContainer.** A device's pane sets up LiveContainer in one
+  sheet. With a paid account, Set Up checks the device against your
+  developer account, installs LiveContainer and puts the certificate on the
+  device. The sheet then lists the steps to do on the device: importing the
+  certificate, JIT-Less Diagnose, importing your apps, and Convert to Shared
+  App. LiveContainer asks for your `.p12`'s password on the device; Graft
+  can't type it for you. With a free Apple ID, it links to SideStore and
+  iloader instead. While a certificate Graft put on the device is still
+  there, the device's pane says so, with Remove it. For a LiveContainer app,
+  the bar offers Set Up LiveContainer… when the device it's building for has
+  none.
+- **Developer Mode.** On iOS 16 and later, an app signed with a development
+  profile opens only with Developer Mode on. Graft now checks before it
+  builds one. If it's off, the build stops, after making the switch appear
+  on the device in Settings › Privacy & Security › Developer Mode, which iOS
+  hides until then. The device's page shows whether it's on. In Terminal,
+  `--device-info` reports `developer_mode`, and `--list` reports
+  `needs_developer_mode`.
+- **Holds by build.** When the App Store has two builds of one version,
+  getting one holds the app at that build: the pane says "Held at 1.2.0
+  (build 1 of 2)", and builds use that build even when the other is staged
+  too. Moving between those builds marks the app out of date, and the Cache
+  pane marks the file the build uses. Dropping an IPA of the held version,
+  or decrypting it from a jailbroken device, holds the app at that version
+  by number, with a warning.
+- **Updates in Terminal.** `graft --update <app>`, or `--all`, updates the
+  app's tweaks, gets the App Store's newer version, then builds once and
+  installs on every device the app was installed on. `--plan` says what it
+  would do, device by device, and changes nothing. It never buys or claims
+  an app or lets go of a hold, and installs only what changed: after you
+  re-install an older build, it leaves that install to you. Run it again to
+  pick up where a failed or stopped update left off; it installs only where
+  the app isn't up to date. A Stop during an install lets the install
+  finish, and a second Stop ends it. `graft --drop-update-target <app>
+  --device <UDID>` stops updating an app on a device that's gone.
+  [AGENTS.md](AGENTS.md) tells an AI agent how to use it.
+- **PlayCover keeps your settings.** Graft turns off PlayCover's keymapping
+  and PlayChain only on an app's first handoff, and says so. After that it
+  keeps what you set in PlayCover: turn keymapping on for a game and it
+  stays on when you rebuild. If PlayCover changes either one anyway, Graft
+  puts yours back.
+- **Graft waits for PlayCover's install.** After handing a build over, Graft
+  waits up to two minutes and says "PlayCover installed Example 1.2.0".
+  Build for this Mac, and Install to Mac… in Builds and the Cache, show
+  "Waiting for PlayCover to install Example…" with Stop, which ends the
+  wait, not the install.
+- **A tweak that can't run on macOS is refused.** Build for this Mac and
+  Install to Mac… refuse a tweak that needs an iOS framework macOS doesn't
+  have, naming the tweak and the framework. A framework the app itself links
+  only gets a warning. A tweak's own frameworks now get the stand-in
+  Preferences framework too, as its libraries already did. The tooltips say
+  that not every iPhone or iPad app runs under PlayCover, even without
+  tweaks, and how to tell.
+
+### Fixes
+
+- An iPad's page in the sidebar says iPad where it used to say phone.
+- Check device on a LiveContainer app's pane looks on the device the app was
+  last delivered to. It used to ask whichever device was connected and say
+  the record still stood.
+- Install to Mac… in Builds says why when the handover fails; it used to say
+  nothing.
+- Re-install… asks before it installs on a phone. The confirmation names the
+  app, the build and the iPhone or iPad it goes to, and says so when that
+  device isn't connected. Return re-installs, and Escape cancels.
+- Graft no longer installs an update that needs a newer macOS than this Mac
+  has. It says which macOS the update needs, offers no Try Again, and
+  doesn't download it again at every launch; once the Mac is upgraded, the
+  update goes ahead.
+- When an update can't install itself, its message names the right
+  download: `Graft-Intel.zip` on an Intel Mac, or on an Apple silicon Mac
+  with macOS 13.
+- The Builds list shows a build as soon as it ends, without relaunching
+  Graft.
+- A window opened behind another app lists the connected devices right away,
+  instead of saying "Looking for devices…" until you switch to it.
+- An iPhone or iPad newer than Graft's list of models shows its own name, or
+  "iPad" or "iPhone", instead of its long device ID.
+- Settings › Preflight shows "not connected" as information when no iPhone
+  or iPad is plugged in, not as a failure. A build that installs still
+  needs one.
+- Edit, Remove, Stop building, Re-install, the Builds list and the build log
+  use an app's display name, not its short name.
+- The quit question names what's running: exporting an IPA, building an
+  app, or building and installing one.
+- The build log's header and the Builds list show a local date and time.
+- A device's LiveContainer section no longer says it's managed by SideStore
+  or AltStore when LiveContainer isn't installed. It says SideStore or
+  AltStore is on the device, and to install or update LiveContainer with it.
+- A get by version id downloads the build you picked when another build
+  shares its version number. It used to take a staged copy of that number,
+  which could be the other build.
+- Every icon-only button has a VoiceOver name, such as "Update" or "Delete"
+  plus the tweak's name. The Tweaks filter's placeholder fits its field.
+- A device dump's output opens on its newest line.
+- For people building Graft: the release check that the Intel build reads
+  `GraftBundleArch` now reads Swift the way a Release build compiles it.
+
 ## 2.2.1 (2026-11-25)
 
 ### New

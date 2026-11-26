@@ -400,3 +400,49 @@ def test_a_logout_that_fails_says_so(config: Path, fakes: FakeTools) -> None:
     result = _run(["--json", "--appstore-logout"])
     assert result.exit_code == 20
     assert "couldn't sign out" in " ".join(result.output.split())
+
+
+def test_a_successful_get_forgets_a_version_the_apple_id_was_refused(config: Path) -> None:
+    from graft_ipa import update_refusals
+
+    cfg = load_config(config)
+    update_refusals.remember(cfg.state_dir, cfg.get_app("example"), "21.46.3")
+
+    result = _run(["--json", "--appstore-get", "--app", "example"])
+
+    assert result.exit_code == 0, result.output
+    assert update_refusals.refused_version(cfg.state_dir, cfg.get_app("example")) is None
+
+
+def test_a_failed_get_keeps_it(config: Path, fakes: FakeTools) -> None:
+    from graft_ipa import update_refusals
+
+    cfg = load_config(config)
+    update_refusals.remember(cfg.state_dir, cfg.get_app("example"), "21.46.3")
+    fakes.set(download_error="license is required")
+
+    result = _run(["--json", "--appstore-get", "--app", "example"])
+
+    assert result.exit_code != 0
+    assert update_refusals.refused_version(cfg.state_dir, cfg.get_app("example")) == "21.46.3"
+
+
+def test_staged_as_get_reads_a_version_without_a_lookup(config: Path, cache_dir: Path) -> None:
+    cfg = load_config(config)
+    make_ipa(cache_dir / "com.example.app_2.0.ipa", version="2.0", encrypted=False)
+
+    found = appstore.staged_as_get(cfg, cfg.get_app("example"), "2.0")
+
+    assert found is not None and found.version == "2.0"
+    assert appstore.staged_as_get(cfg, cfg.get_app("example"), "3.0") is None
+    assert issubclass(appstore.GetStopped, appstore.AppStoreError)
+
+
+def test_staged_as_get_never_answers_for_apples_own_app(config: Path, cache_dir: Path) -> None:
+    """A get refuses Apple's own apps, so no staged copy of one counts as a get's."""
+    add_app(config, "apple", {"bundle_id": "com.apple.Example"})
+    make_ipa(cache_dir / "com.apple.Example_2.0.ipa", bundle_id="com.apple.Example", version="2.0",
+             encrypted=False)
+    cfg = load_config(config)
+
+    assert appstore.staged_as_get(cfg, cfg.get_app("apple"), "2.0") is None

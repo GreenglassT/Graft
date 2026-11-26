@@ -1279,6 +1279,254 @@ final class CLIRunnerTests: XCTestCase {
             "waited \(elapsed)s — the child outlived a cancellation that arrived while it launched"
         )
     }
+
+    // MARK: A caller's own Stop (`RunStopper`)
+
+    /// A CLI that ignores SIGTERM (as `--update` does while it finishes an
+    /// install), says it started, waits `seconds`, says it finished.
+    private func ignoringTerm(_ seconds: Double) throws -> ScriptCLI {
+        try ScriptCLI("""
+        trap '' TERM
+        echo '{"type":"log","source":"graft","line":"started"}'
+        /bin/sleep \(seconds)
+        echo '{"type":"log","source":"graft","line":"finished"}'
+        """, test: self)
+    }
+
+    private static func said(_ line: String, in events: [BuildEvent]) -> Bool {
+        events.contains { if case .log(_, line) = $0 { return true }; return false }
+    }
+
+    @MainActor
+    func test_a_callers_stop_kills_a_run_that_ignores_it_once_the_grace_is_up() async throws {
+        let cli = try ignoringTerm(5)
+        let stopper = RunStopper(grace: 0.3)
+        let started = Date()
+
+        let result = try await cli.runner.stream(arguments: [], stopper: stopper) { event in
+            if case .log(_, "started") = event { stopper.stop() }
+        }
+
+        XCTAssertEqual(result.exitCode, SIGKILL)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 4.5)
+        XCTAssertFalse(Self.said("finished", in: result.events))
+    }
+
+    @MainActor
+    func test_a_held_kill_lets_the_run_finish() async throws {
+        let cli = try ignoringTerm(1)
+        let stopper = RunStopper(grace: 0.3)
+
+        let result = try await cli.runner.stream(arguments: [], stopper: stopper) { event in
+            if case .log(_, "started") = event {
+                stopper.stop()
+                stopper.holdKill()
+            }
+        }
+
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertTrue(Self.said("finished", in: result.events))
+        XCTAssertTrue(stopper.wasStopped)
+    }
+
+    @MainActor
+    func test_a_stop_before_the_run_starts_never_starts_it() async throws {
+        let cli = try ignoringTerm(5)
+        let stopper = RunStopper(grace: 0.3)
+        stopper.stop()
+
+        do {
+            _ = try await cli.runner.stream(arguments: [], stopper: stopper) { _ in }
+            XCTFail("a run stopped before it started must not start")
+        } catch is CancellationError {}
+
+        XCTAssertEqual(cli.argv(), [], "the script never ran")
+    }
+
+    /// A file of JSON lines for a stand-in to `cat` from its TERM trap.
+    private func linesFile(_ lines: [String]) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "stopper_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appending(path: "lines")
+        try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+        return file
+    }
+
+    /// `update-stopping` holds the kill as the reader decodes it, not after a
+    /// hop to the main actor: a main actor busy past the grace mustn't let the
+    /// SIGKILL cut off an install the CLI is finishing.
+    @MainActor
+    func test_the_kill_is_held_as_the_reader_reads_update_stopping_with_the_main_actor_busy() async throws {
+        let stopping = try linesFile([#"{"type":"update-stopping","app":"example","step":"lc-push"}"#])
+        let cli = try ScriptCLI("""
+        trap "cat '\(stopping.path)'" TERM
+        echo '{"type":"log","source":"graft","line":"started"}'
+        i=0
+        while [ $i -lt 30 ]; do /bin/sleep 0.05; i=$((i+1)); done
+        echo '{"type":"log","source":"graft","line":"finished"}'
+        """, test: self)
+        let stopper = RunStopper(grace: 0.3)
+
+        let result = try await cli.runner.stream(arguments: [], stopper: stopper) { event in
+            guard case .log(_, "started") = event else { return }
+            stopper.stop()
+            // Busy past the grace: nothing on the main actor can hold the kill in time.
+            Thread.sleep(forTimeInterval: 1)
+        }
+
+        XCTAssertEqual(result.exitCode, 0, "not SIGKILLed")
+        XCTAssertTrue(Self.said("finished", in: result.events))
+        XCTAssertTrue(stopper.isKillHeld)
+    }
+
+    // MARK: A held kill, re-armed (spec §11.2)
+
+    /// When the run said it started, and whether the test has stopped it twice.
+    private final class Clocked: @unchecked Sendable {
+        var started: Date?
+        var stoppedAgain = false
+    }
+
+    /// A stand-in that defers its Stop as `--update` does: on SIGTERM it
+    /// counts the TERM in the returned file and says `stopping`, then goes
+    /// on. `after` seconds from its start it writes `then`; `hang` seconds
+    /// later it says it finished.
+    private func deferringCLI(stopping: String, then: [String], after: Double, hang: Double) throws
+        -> (cli: ScriptCLI, terms: URL)
+    {
+        let stoppingFile = try linesFile([stopping])
+        let thenFile = try linesFile(then)
+        let terms = stoppingFile.deletingLastPathComponent().appending(path: "terms")
+        let cli = try ScriptCLI("""
+        trap "echo x >> '\(terms.path)'; cat '\(stoppingFile.path)'" TERM
+        echo '{"type":"log","source":"graft","line":"started"}'
+        n=0
+        while [ $n -lt \(Int(after / 0.05)) ]; do /bin/sleep 0.05; n=$((n+1)); done
+        cat '\(thenFile.path)'
+        n=0
+        while [ $n -lt \(Int(hang / 0.05)) ]; do /bin/sleep 0.05; n=$((n+1)); done
+        echo '{"type":"log","source":"graft","line":"finished"}'
+        """, test: self)
+        return (cli, terms)
+    }
+
+    private static let stoppingInstall = #"{"type":"update-stopping","app":"example","step":"lc-push"}"#
+
+    private static func appEnd(_ app: String) -> String {
+        #"{"type":"update-app-end","app":"\#(app)","ok":true,"stopped":false,"done":["build"],"left":[],"error":null}"#
+    }
+
+    @MainActor
+    func test_the_held_apps_end_arms_the_kill_again() async throws {
+        let (cli, _) = try deferringCLI(stopping: Self.stoppingInstall, then: [Self.appEnd("example")],
+                                        after: 0.4, hang: 5)
+        let stopper = RunStopper(grace: 0.3)
+        let clock = Clocked()
+
+        let result = try await cli.runner.stream(arguments: [], stopper: stopper) { event in
+            if case .log(_, "started") = event { clock.started = Date(); stopper.stop() }
+        }
+
+        XCTAssertEqual(result.exitCode, SIGKILL, "the install is done: a CLI that doesn't end is killed")
+        XCTAssertLessThan(Date().timeIntervalSince(try XCTUnwrap(clock.started)), 3)
+        XCTAssertFalse(Self.said("finished", in: result.events))
+        XCTAssertFalse(stopper.isKillHeld)
+    }
+
+    @MainActor
+    func test_the_shared_tweak_steps_end_arms_the_kill_again() async throws {
+        let (cli, _) = try deferringCLI(
+            stopping: #"{"type":"update-stopping","app":null,"step":"tweaks"}"#,
+            then: [#"{"type":"update-step","app":null,"step":"tweaks","status":"end","detail":null}"#],
+            after: 0.4, hang: 5
+        )
+        let stopper = RunStopper(grace: 0.3)
+
+        let result = try await cli.runner.stream(arguments: [], stopper: stopper) { event in
+            if case .log(_, "started") = event { stopper.stop() }
+        }
+
+        XCTAssertEqual(result.exitCode, SIGKILL)
+        XCTAssertFalse(Self.said("finished", in: result.events))
+    }
+
+    @MainActor
+    func test_another_apps_end_leaves_the_kill_held() async throws {
+        let (cli, _) = try deferringCLI(stopping: Self.stoppingInstall, then: [Self.appEnd("bravo")],
+                                        after: 0.4, hang: 1)
+        let stopper = RunStopper(grace: 0.3)
+
+        let result = try await cli.runner.stream(arguments: [], stopper: stopper) { event in
+            if case .log(_, "started") = event { stopper.stop() }
+        }
+
+        XCTAssertEqual(result.exitCode, 0, "still finishing example's install")
+        XCTAssertTrue(Self.said("finished", in: result.events))
+        XCTAssertTrue(stopper.isKillHeld)
+    }
+
+    /// A second Stop during a held push or install cancels it: a second
+    /// SIGTERM, which the CLI cancels the step on, and the kill armed again
+    /// with its whole grace from then (not the first Stop's, which would cut
+    /// the CLI's unwinding short). A `stopping` the second SIGTERM brings
+    /// holds nothing.
+    @MainActor
+    func test_a_second_stop_signals_again_and_arms_the_kill_with_its_whole_grace() async throws {
+        let (cli, terms) = try deferringCLI(stopping: Self.stoppingInstall, then: [], after: 0.1, hang: 4)
+        let stopper = RunStopper(grace: 0.8)
+        let clock = Clocked()
+
+        let result = try await cli.runner.stream(arguments: [], stopper: stopper) { event in
+            switch event {
+            case .log(_, "started"):
+                clock.started = Date()
+                stopper.stop()
+            case .updateStopping where !clock.stoppedAgain:
+                clock.stoppedAgain = true
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(500))
+                    stopper.stop()
+                }
+            default: break
+            }
+        }
+
+        let took = Date().timeIntervalSince(try XCTUnwrap(clock.started))
+        XCTAssertEqual(result.exitCode, SIGKILL)
+        XCTAssertFalse(Self.said("finished", in: result.events))
+        XCTAssertGreaterThanOrEqual(took, 1.2, "the second Stop's grace, not the first's")
+        XCTAssertLessThan(took, 3.5)
+        let sent = (try? String(contentsOf: terms, encoding: .utf8)) ?? ""
+        XCTAssertEqual(sent.split(separator: "\n").count, 2, "a second SIGTERM")
+    }
+
+    /// Force Stop: SIGKILL now, held or not.
+    @MainActor
+    func test_force_kill_ends_a_held_run_at_once() async throws {
+        let (cli, _) = try deferringCLI(stopping: Self.stoppingInstall, then: [], after: 0.1, hang: 5)
+        // A grace no test waits out: only Force Stop can end this run in time.
+        let stopper = RunStopper(grace: 10)
+        let clock = Clocked()
+
+        let result = try await cli.runner.stream(arguments: [], stopper: stopper) { event in
+            switch event {
+            case .log(_, "started"):
+                clock.started = Date()
+                stopper.stop()
+            case .updateStopping:
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(200))
+                    stopper.forceKill()
+                }
+            default: break
+            }
+        }
+
+        XCTAssertEqual(result.exitCode, SIGKILL)
+        XCTAssertLessThan(Date().timeIntervalSince(try XCTUnwrap(clock.started)), 2)
+        XCTAssertTrue(stopper.wasForced)
+    }
 }
 
 /// Wall-clock deadline for anything that talks to a subprocess.

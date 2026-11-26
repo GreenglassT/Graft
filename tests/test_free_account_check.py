@@ -74,16 +74,20 @@ def test_signing_files_and_zsign_are_not_checked(tmp_path: Path, tools_and_devic
     assert all(r.ok for r in rows.values())
 
 
-def test_cyan_and_a_device_are_still_required(
+def test_cyan_is_still_required_and_no_device_is_information(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """`--check` installs nothing, so no phone plugged in is a fact, not a
+    failure (`tests/test_preflight_no_device.py`)."""
     monkeypatch.setattr(tools, "which", lambda tool: None)
     monkeypatch.setattr(preflight, "list_connected_devices", lambda: [])
+    monkeypatch.setattr(preflight, "usbmux_problem", lambda: None)
 
     rows = _rows(load_config(_free(tmp_path)), _installed(PRIMARY))
 
     assert rows["cyan"].ok is False
-    assert rows["connected ios device(s)"].ok is False
+    device = rows[preflight.DEVICES_CHECK_NAME]
+    assert (device.ok, device.info) == (True, True)
     # No device, no LiveContainer row: the device row already says why.
     assert preflight.LIVECONTAINER_CHECK_NAME not in rows
 

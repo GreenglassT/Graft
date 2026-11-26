@@ -97,7 +97,8 @@ def _check(current: str = "2.0") -> dict[str, Any]:
 def test_a_newer_release_is_available(github: FakeGitHub) -> None:
     assert _check("2.0") == {
         "ok": True, "current": "2.0", "latest": "2.0.1", "url": PAGE + "v2.0.1",
-        "update_available": True, "reason": None, "status": None, "message": None,
+        "update_available": True, "needs_macos": None, "reason": None, "status": None,
+        "message": None,
     }
 
 
@@ -322,7 +323,7 @@ def test_json_emits_one_update_check_event(github: FakeGitHub) -> None:
     events = [json.loads(line) for line in result.stdout.splitlines()]
     assert events == [{
         "type": "update-check", "ok": True, "current": "2.0", "latest": "2.0.1",
-        "url": PAGE + "v2.0.1", "update_available": True,
+        "url": PAGE + "v2.0.1", "update_available": True, "needs_macos": None,
         "reason": None, "status": None, "message": None,
     }]
 

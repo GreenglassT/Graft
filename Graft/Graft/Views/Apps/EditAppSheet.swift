@@ -241,9 +241,17 @@ struct EditAppSheet: View {
         (current == nil ? [nil] : []) + Storefronts.byName.map { Optional($0) }
     }
 
+    /// The sheet's title, by the name the sidebar shows.
+    static func title(for app: AppRecord) -> String { "Edit \(app.shownName)" }
+
+    /// A save that failed after the sheet closed, on the app's error channel.
+    static func saveFailed(_ app: AppRecord, _ why: String) -> String {
+        "Couldn't save changes to \(app.shownName): \(why)"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Edit \(app.name)")
+            Text(Self.title(for: app))
                 .font(AppFont.bodyMedium)
                 .foregroundStyle(Palette.text)
             Text(app.bundleId)
@@ -464,8 +472,7 @@ struct EditAppSheet: View {
             if warnings.isEmpty { onClose() } else { savedWarnings = warnings }
         } catch {
             if Task.isCancelled {
-                store.lastError =
-                    "Couldn't save changes to \(app.name): \(error.localizedDescription)"
+                store.lastError = Self.saveFailed(app, error.localizedDescription)
             } else {
                 self.error = error.localizedDescription
             }

@@ -53,4 +53,26 @@ final class DateHelpersTests: XCTestCase {
         )
         XCTAssertEqual(AppDetailView.lastBuildSummary(nil, now: now), "—")
     }
+
+    /// The build log's header gave the CLI's stamp as it came,
+    /// "2026-11-24T02:49:06.035089+00:00". It is the local date and time, as
+    /// the Builds list gives it.
+    func test_the_build_log_header_gives_a_readable_local_time() throws {
+        let stamp = "2026-11-24T02:49:06.035089+00:00"
+        let date = try XCTUnwrap(DateHelpers.parseISO8601(stamp), "microseconds and an offset, as Python writes")
+        XCTAssertEqual(date.timeIntervalSince1970, 1_795_488_546.035, accuracy: 0.001)
+        let shown = DateHelpers.mediumDateShortTime.string(from: date)
+        XCTAssertEqual(DateHelpers.readable(stamp), shown)
+        XCTAssertEqual(DateHelpers.readable("not a time"), "not a time", "as it came, rather than nothing")
+
+        let line = "{\"type\":\"build-record\",\"id\":2,\"timestamp\":\"\(stamp)\","
+            + "\"app\":\"example\",\"bundle_id\":\"com.example.app\",\"version\":\"1.0\","
+            + "\"tweaks\":[],\"ipa_path\":null,\"ipa_sha256\":null,\"log_path\":null,\"signing_team\":null,"
+            + "\"udid\":null,\"target\":\"device\",\"success\":true,\"error\":null}"
+        guard case let .buildRecord(record)? = line.buildEvents().first else {
+            return XCTFail("fixture did not decode: \(line)")
+        }
+        XCTAssertEqual(BuildLogView.subtitle(for: record), "com.example.app · 1.0 · \(shown)")
+        XCTAssertFalse(BuildLogView.subtitle(for: record).contains("T02:49"))
+    }
 }

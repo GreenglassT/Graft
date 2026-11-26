@@ -355,7 +355,7 @@ def test_a_sideload_install_runs_inside_the_archive_hold(tmp_path: Path) -> None
          patch.object(cli_mod, "acquire_ipa") as acquire, \
          patch.object(cli_mod, "run_cyan") as cyan, \
          patch.object(cli_mod, "run_zsign", side_effect=zsign), \
-         patch.object(cli_mod, "select_device", return_value=("u1", "usb")), \
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("u1", None, "usb")), \
          patch.object(installer.device_install, "install_ipa", side_effect=install_ipa):
         acquire.return_value.path = source
         acquire.return_value.version = "1.0"

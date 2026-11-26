@@ -356,7 +356,9 @@ def test_install_to_mac_hands_over_an_ipa_without_the_account_data(
         return Done()
 
     monkeypatch.setattr(cli_mod.subprocess, "run", run)
-    monkeypatch.setattr(cli_mod, "_tame_playcover_settings", lambda bundle_id: None)
+    from graft_ipa import playcover_handoff
+    monkeypatch.setattr(playcover_handoff, "INSTALL_WAIT_S", 0)
+    monkeypatch.setattr(playcover_handoff, "SETTINGS_WAIT_S", 0)
 
     cli_mod._do_install_to_mac(cfg, filename=staged.name, emitter=JsonEmitter(stream=StringIO()))
 

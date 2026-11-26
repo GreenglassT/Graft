@@ -368,7 +368,7 @@ final class CachePaneTests: XCTestCase {
             // Inert effects: these two cases are about what the pane *renders*,
             // and nothing here presses a control. The click section above is
             // where the callbacks are exercised.
-            onInstallToMac: { _ in nil }, onAddAsApp: { _ in },
+            onInstallToMac: { _ in MacInstall(handed: nil, ending: .handedOnly) }, onAddAsApp: { _ in },
             onDelete: { _, _ in .deleted }
         ))
         let deadline = Date().addingTimeInterval(5)
@@ -509,6 +509,14 @@ final class CachePaneTests: XCTestCase {
     /// something: a complete dump goes straight to PlayCover. A pane that
     /// confirmed every install would satisfy the stripped case below and be
     /// wrong.
+    /// The Install to Mac control's tooltip says what to expect of any app
+    /// under PlayCover (spec 5d item 4).
+    func test_install_to_mac_says_what_to_expect() throws {
+        let help = CachePaneView.installHelp(for: try stagedIPARecord())
+        XCTAssertTrue(help.hasPrefix("Install ExamplePlayer on this Mac with PlayCover. "))
+        XCTAssertTrue(help.hasSuffix(PlayCover.expectations))
+    }
+
     func test_a_complete_dump_installs_with_no_prompt() throws {
         XCTAssertEqual(
             CachePaneView.intent(.installToMac, for: try stagedIPARecord()), .perform
@@ -651,7 +659,7 @@ final class CachePaneTests: XCTestCase {
         var deleted: [String] = []
         let box = hosted(CachePaneView(
             staged: store,
-            onInstallToMac: { _ in nil },
+            onInstallToMac: { _ in MacInstall(handed: nil, ending: .handedOnly) },
             onAddAsApp: { added.append($0.filename) },
             onDelete: { record, _ in
                 deleted.append(record.filename)
@@ -703,6 +711,65 @@ final class CachePaneTests: XCTestCase {
             "Delete must raise the confirm, not run. Every delete asks first — this "
             + "verb unlinks the file"
         )
+    }
+
+    /// Install to Mac waits up to two minutes for PlayCover's install, and
+    /// the strip had no Stop (review 23-2, §11). Its Stop ends the wait the
+    /// press started, and the strip then says how it ended.
+    func test_the_install_strip_has_a_stop_that_ends_the_wait() async throws {
+        try AccessibilityTree.requireServed()
+        let store = StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")))
+        var stopped = false
+        let box = hosted(CachePaneView(
+            staged: store,
+            onInstallToMac: { _ in
+                while !Task.isCancelled { try? await Task.sleep(nanoseconds: 20_000_000) }
+                stopped = true
+                return MacInstall(handed: nil, ending: .stopped)
+            },
+            onAddAsApp: { _ in }, onDelete: { _, _ in .deleted }
+        ))
+        await store.load(argsOverride: ["-c", "printf '\(Self.twoVersionListing)'"])
+        XCTAssertTrue(store.hasLoaded, "premise: the listing never reached the store")
+        settle(box)
+        let table = try XCTUnwrap(backingTableView(in: box), "the pane drew no List")
+        let cell = try XCTUnwrap(table.view(atColumn: 0, row: 0, makeIfNecessary: true),
+                                 "row 0 was never realized, so there is nothing to click")
+        let frame = cell.convert(cell.bounds, to: nil)
+        let step = CacheRow.controlSize + CacheRow.controlSpacing
+        click(at: NSPoint(x: frame.maxX - CacheRow.controlSize / 2 - 2 * step, y: frame.midY), in: box.window)
+
+        try await Self.press("Stop", whenShownIn: box)
+        await eventually({ stopped }, "the strip's Stop never reached the install")
+        let line = MacInstall(handed: nil, ending: .stopped).endingLines(app: "Example", retry: .cacheRow)[0].text
+        try await Self.waitForText(line, in: box)
+    }
+
+    /// Click the button named `name` once the tree shows it.
+    static func press(_ name: String, whenShownIn box: Hosted, timeout: TimeInterval = 5) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            let shown = try AccessibilityTree.nodes(in: box.window)
+            if shown.contains(where: { $0.role == kAXButtonRole && $0.name == name }) { break }
+            guard Date() < deadline else { return XCTFail("no \(name) button came up") }
+            try await Task.sleep(nanoseconds: 100_000_000)
+            settle(box, seconds: 0.05)
+        }
+        try clickButton(named: name, in: box.window)
+    }
+
+    /// Wait for a static text reading `text`, trimmed as the strip trims it.
+    static func waitForText(_ text: String, in box: Hosted, timeout: TimeInterval = 5) async throws {
+        let wanted = text.trimmingCharacters(in: .whitespaces)
+        let deadline = Date().addingTimeInterval(timeout)
+        var shown: [String] = []
+        while Date() < deadline {
+            shown = try AccessibilityTree.texts(in: box.window)
+            if shown.contains(wanted) { return }
+            try await Task.sleep(nanoseconds: 100_000_000)
+            settle(box, seconds: 0.05)
+        }
+        XCTFail("“\(wanted)” never showed: \(shown)")
     }
 
     /// The second half of the two-step: **"Delete Anyway" forces.**
@@ -776,7 +843,7 @@ final class CachePaneTests: XCTestCase {
         )
         let box = hosted(CachePaneView(
             staged: StagedIPAStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))),
-            onInstallToMac: { _ in nil },
+            onInstallToMac: { _ in MacInstall(handed: nil, ending: .handedOnly) },
             onAddAsApp: { _ in },
             onDelete: { record, force in
                 attempts.all.append((record.filename, force))
@@ -906,7 +973,7 @@ final class CachePaneTests: XCTestCase {
             // Inert effects: these two cases are about what the pane *renders*,
             // and nothing here presses a control. The click section above is
             // where the callbacks are exercised.
-            onInstallToMac: { _ in nil }, onAddAsApp: { _ in },
+            onInstallToMac: { _ in MacInstall(handed: nil, ending: .handedOnly) }, onAddAsApp: { _ in },
             onDelete: { _, _ in .deleted }
         ))
         await store.load(argsOverride: ["-c", "printf '\(script)'"])

@@ -5,10 +5,11 @@ A build needs a decrypted IPA of the app. There are three ways to get one.
 - **From the App Store.** Once you've signed in and set up decryption (see
   [App Store Downloads](app-store.md)), the app's Source IPA section
   has **Get latest from App Store**. Graft downloads the app, decrypts it on
-  this Mac, and stages it. If that version is already staged, it says
-  "Already have <version>" and downloads nothing; **Get Again** downloads it
-  anyway. **Get an older version…** beside it gets one of the app's earlier
-  versions instead (see [Get an older version](app-store.md#get-an-older-version)).
+  this Mac, and stages it. If that version is already staged, by Get latest,
+  a drop or a dump, it says "Already have <version>" and downloads nothing;
+  **Get Again** downloads it anyway. **Get an older version…** beside it gets
+  one of the app's earlier versions instead (see
+  [Get an older version](app-store.md#get-an-older-version)).
 - **An IPA you already have.** Drop it on the app's pane.
 - **A dump from your own jailbroken device**, from the device's Decrypt card.
   See [Decrypt on a jailbroken device](#decrypt-on-a-jailbroken-device).

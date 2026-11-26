@@ -196,7 +196,7 @@ def test_a_decrypt_dump_is_staged_without_its_licences(
     monkeypatch.setattr(decrypt_runner, "decrypt_app", dump)
     monkeypatch.setattr(cli_mod, "verify_decrypted", lambda _d: [])
     cache = tmp_path / "cache"
-    cfg = SimpleNamespace(default_device_udid=None, cache_dir=cache)
+    cfg = SimpleNamespace(default_device_udid=None, apps={}, cache_dir=cache)
     cli_mod._do_decrypt(cfg, "com.example.app", device="U",
                         backend=decrypt_runner.FRIDA)
     (staged,) = cache.glob("*.ipa")

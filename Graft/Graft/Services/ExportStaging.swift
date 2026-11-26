@@ -507,13 +507,13 @@ extension ConfigStore {
         staging: ExportStaging?,
         _ work: @escaping @MainActor () async -> Void
     ) -> Bool {
-        let launched = launchBuild(appName: appName, delivery: delivery) {
+        let launched = launchBuild(appName: appName, delivery: delivery, reason: TerminationHold.exporting) {
             defer { staging?.discard() }
             await work()
         }
         guard launched else {
             staging?.discard()
-            lastError = Self.exportNotStarted(appName: appName, busy: busy)
+            lastError = Self.exportNotStarted(appName: shownName(of: appName), busy: busy)
             return false
         }
         return true

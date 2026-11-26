@@ -31,7 +31,7 @@ This is the whole list, by the name `--items` takes:
 |---|---|---|
 | `config` | Your setup: `config.yaml`, the `.p12` and profile Graft copied in when you set it up, your App Store Connect key and the profiles made with it, and your tweaks. The files you picked during setup stay where they were. | `~/.config/graft` |
 | `cache` | Staged IPAs, archived builds and app icons, often several GB | `~/.cache/graft` |
-| `state` | Build history and logs, repository indexes, earlier versions of tweaks you updated, and Graft's record of its App Store sign-in | `~/.local/state/graft` |
+| `state` | Build history and logs, repository indexes, earlier versions of tweaks you updated, Graft's record of its App Store sign-in, the names of the iPhones and iPads Graft has seen, the PlayCover settings it keeps for your apps, which devices you stopped updating an app on, and which App Store versions your Apple ID was refused | `~/.local/state/graft` |
 | `data` | frida-ios-dump, and tools a pipx install of Graft uses | `~/.local/share/graft` |
 | `legacy` | `tweak-build` folders from before Graft's rename that Graft left beside its own, because both held files. Only when you name it. | `~/.config/tweak-build` and the like |
 | `appstore-signin` | Your App Store sign-in: three items in your login keychain (service `ipatool-auth.service`, accounts `account`, `anisette-v4` and `kbsync-v1`) and ipatool's session cookies. Off when another ipatool made the sign-in. | the keychain, and `~/.ipatool` (or `$XDG_STATE_HOME/ipatool`) |

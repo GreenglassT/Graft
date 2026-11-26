@@ -52,7 +52,7 @@ graft --appstore-status                     # ipatool installed and signed in? U
 graft --appstore-login                      # asks for the Apple ID, the password, then the code if Apple asks
 graft --appstore-logout
 graft --appstore-check                      # App Store version vs. your staged IPA, per app
-graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if it's already staged)
+graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if <bundle id>_<version>.ipa is staged)
 graft --appstore-versions --app example     # the versions the App Store has for your Apple ID, newest first, with their ids
 graft --appstore-get --app example --version-id <id>   # get that version, and hold the app at it
 graft --appstore-claim --app example        # Get (free): only for an app the App Store lists at 0
@@ -67,12 +67,17 @@ graft --appstore-claim --app example        # Get (free): only for an app the Ap
   UnfairPlay couldn't verify, with a warning.
 - `--again` with `--appstore-get` downloads even when that version is already
   staged.
+- A get downloads nothing when what it would get is staged already: for the
+  latest, `<bundle id>_<version>.ipa`, as a get, `--provide-ipa` or `--decrypt`
+  names it. A `--version-id` get stages `<bundle id>_<version>_<version id>.ipa`
+  instead, which a plain get doesn't count, and counts the plain file only
+  while no other build of that number has been listed.
 - `--appstore-versions` reads the number and date of ten versions at a time,
   starting at `--offset` (`--limit` reads up to 50), and remembers them. The
   rest are listed by id.
 - `--version-id` holds the app at the version it gets: `preferred_version` pins
-  it, and `--appstore-check` doesn't call a newer one an update. A plain
-  `--appstore-get` lets go of the hold. See
+  it, `preferred_build` names that build, and `--appstore-check` doesn't
+  call a newer one an update. A plain `--appstore-get` lets go of the hold. See
   [Get an older version](app-store.md#get-an-older-version).
 
 To set up decryption in Terminal, list the apps that can do it, save the
@@ -136,11 +141,15 @@ graft example                       # build and deliver
 graft example other                 # several apps in turn
 graft example --dry-run             # show what would happen without doing it
 graft example --skip-install        # build (and sign, for sideload) only
-graft example --device <UDID>       # a specific device instead of the default
+graft example --device <UDID>       # this build to that device (it must be connected)
 graft example --for-playcover       # also make the build loadable on this Mac under PlayCover
 graft --install-to-mac <filename>   # hand a staged IPA or an archived build to PlayCover
 graft example --export-ipa ~/Desktop/Example.ipa   # inject the tweaks, save the IPA unsigned
 graft example -v                    # verbose, and keep the temp directory
+graft --update example              # newer tweaks, newer App Store version, then build once and install on each device it's on
+graft --update --all --plan         # what an update of every app would change; changes nothing
+graft --update example --with-affected   # also install the apps that share an updated tweak
+graft --drop-update-target example --device <UDID>   # stop updating it on a device that's gone
 ```
 
 `--export-ipa` signs nothing and touches no device (see
@@ -176,6 +185,26 @@ build.
 build where it is: nothing is recorded as a failure, and under `--json` the
 last event is
 `{"type": "build-end", "ok": false, "stopped": true, "error": null, ...}`.
+
+`--update` updates the app's tweaks that have a newer build (each one once,
+for every app that uses it), gets the App Store's newer version (never buying
+or claiming one, and never for an app held at a version), then, one app at a
+time, builds once and installs on every device the app was installed on: the
+build's own install on the first (the default device first, then by name),
+and the same build on each of the others. It also installs a change staged
+since a device's last install, on that device. A device that isn't connected
+waits while the others install, a device that fails doesn't stop the others,
+and an app never installed is left to a build. `--plan` says what it would do,
+device by device, and changes nothing; it reads no keychain. Run it again to
+pick up where a failed or stopped update left off: it installs only where the
+app isn't up to date. A Stop during an install, or while a tweak is being
+swapped in, lets that finish first, and the devices after it aren't started;
+a second Stop ends the install too. See
+[Updating your apps](building-and-delivery.md#updating-your-apps).
+
+`--drop-update-target APP --device UDID` stops updating an app on a device
+it was installed on, for a device that's gone (sold, retired or reset), until
+the app is installed there again. It changes nothing on any device.
 
 ## Build history and delivery state
 
@@ -215,7 +244,7 @@ LiveContainer a push would use.
 
 ```bash
 graft --devices                     # connected devices over USB and Wi-Fi
-graft --device-info [--device <UDID>]
+graft --device-info [--device <UDID>]   # storage, battery, Developer Mode
 graft --device-apps [--with-icons]  # user apps on the device
 ```
 

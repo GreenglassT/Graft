@@ -26,6 +26,7 @@ from . import apple_portal
 from .config import (
     ACCOUNT_FREE,
     APP_ACCOUNT_SETTINGS,
+    AppStoreConnectConfig,
     _default_delivery,
     _load_raw,
     _signing_section,
@@ -182,6 +183,37 @@ def _enabled_udids(devices: list[apple_portal.Device]) -> list[str]:
         },
         key=str.lower,
     )
+
+
+def refresh_registered_devices(cfg_path: Path) -> list[str]:
+    """Re-read the registered devices from App Store Connect and save them as
+    `app_store_connect.device_udids`: the listing Save and test takes
+    (`ASCClient.list_devices`, `_enabled_udids`), written the same way
+    (`set_app_store_connect`, under the config lock). Returns the enabled
+    UDIDs.
+
+    For an install to a device the saved list predates (spec §5b). With
+    `device_udids_pinned: true` the list is the person's: nothing is asked,
+    and the pinned list is returned. Registers nothing: a device is the
+    person's to add at developer.apple.com.
+    """
+    raw = _load_raw(cfg_path)
+    asc = AppStoreConnectConfig.from_dict(
+        raw.get("app_store_connect"), default_cache_dir=cfg_path.parent / "profiles"
+    )
+    if asc is None:
+        raise ConfigError(
+            "no App Store Connect key is set, so the registered devices can't be read",
+            hint="add one in Settings › App Store Connect, or run `graft --setup-portal`",
+        )
+    if asc.device_udids_pinned:
+        return list(asc.device_udids)
+    client = apple_portal.ASCClient(apple_portal.PortalCredentials(
+        key_id=asc.key_id, issuer_id=asc.issuer_id, key_path=asc.key_file,
+    ))
+    udids = _enabled_udids(client.list_devices())
+    set_app_store_connect(cfg_path, {"device_udids": udids})
+    return udids
 
 
 def _check_key(

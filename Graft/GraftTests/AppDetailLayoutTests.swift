@@ -501,8 +501,8 @@ final class AppDetailLayoutTests: XCTestCase {
         )
     }
 
-    /// Two phones and neither is marked — the bar's amber "nothing is set"
-    /// line, in the `missing` shape, with the Change control beside it.
+    /// Two phones and neither is marked — the bar's amber "several devices are
+    /// connected" line, in the `missing` shape, with the Change control beside it.
     ///
     /// The character-count inventory that used to live here has moved to
     /// `BuildTarget`, where it documents the sentences rather than posing as
@@ -651,13 +651,16 @@ final class AppDetailLayoutTests: XCTestCase {
     /// The bar in the detail column it ships in, without the pane around it.
     private struct BarHarness: View {
         let target: BuildTarget
+        var pick: String? = nil
+        var setUp: ((String) -> Void)? = nil
         var body: some View {
             NavigationSplitView {
                 List { Text("Bravo"); Text("Delta"); Text("Example+") }
                     .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
             } detail: {
                 VStack(alignment: .leading, spacing: 0) {
-                    BuildTargetBar(target: target, onChange: {})
+                    BuildTargetBar(target: target, pick: pick, onSetUpLiveContainer: setUp,
+                                   onChange: {})
                     Spacer(minLength: 0)
                 }
             }
@@ -1397,5 +1400,59 @@ extension AppDetailLayoutTests {
                        "premise: both rows fall back to the same filename headline")
         XCTAssertEqual(rows.compactMap(\.filenameLine), [],
                        "the headline is already the filename; a second copy says nothing")
+    }
+}
+
+// MARK: - The device switcher's states (spec §5b)
+
+extension AppDetailLayoutTests {
+    /// A pick for the next Build & Install: the "· then …" sentence with the
+    /// ✕ beside it and the Change menu.
+    func test_fits_with_a_pick_for_this_build() {
+        assertHostFits(
+            BarHarness(
+                target: .thisBuild(name: "iPad Air", mode: "LiveContainer", then: "back to iPhone 15 Pro"),
+                pick: "00008030-0000000000000002"
+            ),
+            "a pick for this build",
+            width: Metrics.windowMinWidth, height: Metrics.windowMinHeight
+        )
+    }
+
+    /// The longest sentence the bar renders.
+    func test_fits_with_the_fallback_sentence() {
+        assertHostFits(
+            BarHarness(target: .fallback(
+                name: "iPad Air", mode: "LiveContainer",
+                because: "iPhone 15 Pro, your default, isn't connected"
+            )),
+            "the fallback",
+            width: Metrics.windowMinWidth, height: Metrics.windowMinHeight
+        )
+    }
+
+    /// A picked device that's unplugged: the sentence, named, and the ✕.
+    func test_fits_with_an_unplugged_pick() {
+        assertHostFits(
+            BarHarness(
+                target: .overrideMissing(udid: "00008030-0000000000000009", name: "iPad Air"),
+                pick: "00008030-0000000000000009"
+            ),
+            "an unplugged pick",
+            width: Metrics.windowMinWidth, height: Metrics.windowMinHeight
+        )
+    }
+
+    /// No LiveContainer: the sentence, a button, and the Change menu, with
+    /// and without Plan F's Set Up hook.
+    func test_fits_with_livecontainer_missing_and_its_button() {
+        let missing = BuildTarget.liveContainerMissing(
+            name: "iPad Air", udid: "00008030-0000000000000002", kind: "iPad"
+        )
+        assertHostFits(BarHarness(target: missing), "LiveContainer missing",
+                       width: Metrics.windowMinWidth, height: Metrics.windowMinHeight)
+        assertHostFits(BarHarness(target: missing, setUp: { _ in }),
+                       "LiveContainer missing, with Set Up",
+                       width: Metrics.windowMinWidth, height: Metrics.windowMinHeight)
     }
 }

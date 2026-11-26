@@ -265,3 +265,33 @@ extension TweaksStoreTests {
                        + "ask for it")
     }
 }
+
+/// The Tweaks pane's toolbar at the narrowest the window lets it be.
+@MainActor
+final class TweaksPaneLayoutTests: XCTestCase {
+    /// The filter's placeholder read "…author or filena": too long for the
+    /// field it's in. At the window's minimum width, with the sidebar at its
+    /// widest, all of it fits.
+    func test_the_filter_placeholder_fits_its_field() throws {
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true"))
+        let config = ConfigStore(runner: runner, notify: { _ in })
+        let pane = TweaksView(store: TweaksStore(runner: runner), config: config)
+        // 900pt window, 360pt sidebar (`navigationSplitViewColumnWidth`'s max).
+        let box = hosted(pane, size: NSSize(width: Metrics.windowMinWidth - 360, height: Metrics.windowMinHeight))
+        settle(box, seconds: 0.3)
+
+        func fields(in view: NSView) -> [NSTextField] {
+            ((view as? NSTextField).map { [$0] } ?? []) + view.subviews.flatMap(fields(in:))
+        }
+        let all = fields(in: try XCTUnwrap(box.window.contentView))
+        let field = try XCTUnwrap(
+            all.first { ($0.placeholderString ?? $0.placeholderAttributedString?.string) == TweaksView.filterPlaceholder },
+            "no field with the placeholder: \(all.map { $0.placeholderString ?? $0.stringValue })"
+        )
+        let font = try XCTUnwrap(field.font)
+        let needs = (TweaksView.filterPlaceholder as NSString).size(withAttributes: [.font: font]).width
+        // The cell's own insets come out of the field's width.
+        let room = field.cell?.drawingRect(forBounds: field.bounds).width ?? field.bounds.width
+        XCTAssertLessThanOrEqual(needs, room, "the placeholder needs \(needs)pt and the field has \(room)pt")
+    }
+}

@@ -240,6 +240,20 @@ def is_team_id(value: str) -> bool:
     return _TEAM_ID.fullmatch(value) is not None
 
 
+def is_development(plist: dict) -> bool:
+    """Whether the profile is a development one: its entitlements grant
+    `get-task-allow`, which lets a debugger attach. Ad hoc, enterprise and
+    App Store profiles don't. On iOS 16 and later an app signed with a
+    development profile opens only with Developer Mode on
+    (`developer_mode.needed`).
+
+    Only a real `True`: a profile is a downloaded file, and `"true"` or `1`
+    there is a value nobody understood.
+    """
+    entitlements = plist.get("Entitlements")
+    return isinstance(entitlements, dict) and entitlements.get("get-task-allow") is True
+
+
 def provisioned_devices(plist: dict) -> list[str]:
     """The UDIDs the profile lists. Empty for a distribution profile."""
     return list(plist.get("ProvisionedDevices") or [])

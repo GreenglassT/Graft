@@ -25,6 +25,31 @@ class CachedIPA:
     path: Path
     bundle_id: str
     version: str
+    #: The App Store version id of the build in `path`, when it was staged by
+    #: a get of a chosen version (`staged_name`) and found as that build. None
+    #: for every other file.
+    external_version_id: str | None = None
+
+
+def staged_name(bundle_id: str, version: str, external_version_id: str | None = None) -> str:
+    """The name a staged IPA is given: `<bundle id>_<version>.ipa`, or, for a
+    get of a chosen version, `<bundle id>_<version>_<version id>.ipa`.
+
+    The second keeps two builds of one display version apart (2026.42.0
+    twice): each get by id stages a file of its own, and a hold by build
+    names exactly one (`admits`). It starts `<bundle id>_`, so every rule that
+    finds a staged file by name finds it (`_is_cache_candidate`), and it sorts
+    after the plain name, which therefore wins a tie for `latest`
+    (`_cache_candidates`: `.` is 0x2E, `_` is 0x5F).
+
+    The id must be ASCII digits, as `--version-id` is checked to be: it lands
+    in a file name.
+    """
+    if external_version_id is None:
+        return f"{bundle_id}_{version}.ipa"
+    if not (external_version_id.isascii() and external_version_id.isdigit()):
+        raise ValueError(f"{external_version_id!r} isn't an App Store version id")
+    return f"{bundle_id}_{version}_{external_version_id}.ipa"
 
 
 def _bundle_short_name(bundle_id: str) -> str:
@@ -75,6 +100,47 @@ def _cache_candidates(cache_dir: Path, bundle_id: str) -> list[Path]:
     return canonical + rest
 
 
+def admits(app: AppConfig, path: Path, version: str) -> bool:
+    """Whether a build of `app` may start from the staged IPA at `path`,
+    whose own Info.plist says `version`.
+
+    `latest`: any. A pinned version (set by hand, or a hold from before 2.3):
+    that version. A hold by build (`preferred_version_id`): that version in
+    that build's own file (`staged_name`) and no other, because a file of the
+    same version under another name may be the other build.
+
+    The one rule `find_in_cache` and `--delete-staged`'s guard share.
+    """
+    pinned = app.preferred_version
+    if pinned == "latest":
+        return True
+    if version != pinned:
+        return False
+    if app.preferred_version_id is None:
+        return True
+    return path.name == staged_name(app.bundle_id, pinned, app.preferred_version_id)
+
+
+def _held_build(cfg: Config, app: AppConfig) -> CachedIPA | None:
+    """The one file a hold by build may use, when it is there and its
+    Info.plist says this app and the held version."""
+    held_id = app.preferred_version_id
+    assert held_id is not None
+    path = cfg.cache_dir / staged_name(app.bundle_id, app.preferred_version, held_id)
+    if not path.is_file():
+        return None
+    memo = IPAInfoMemo.load(cfg.cache_dir)
+    try:
+        info = memo.info_for(path)
+    finally:
+        memo.save()
+    if info is None or info.bundle_id != app.bundle_id or not admits(app, path, info.version):
+        return None
+    return CachedIPA(
+        path=path, bundle_id=info.bundle_id, version=info.version, external_version_id=held_id,
+    )
+
+
 def find_in_cache(cfg: Config, app: AppConfig) -> CachedIPA | None:
     """Look in cache_dir for an IPA that matches the app.
 
@@ -93,6 +159,9 @@ def find_in_cache(cfg: Config, app: AppConfig) -> CachedIPA | None:
     """
     if not cfg.cache_dir.exists():
         return None
+    if app.preferred_version != "latest" and app.preferred_version_id is not None:
+        # A hold by build: that build's own file, or nothing (`admits`).
+        return _held_build(cfg, app)
 
     candidates: list[Path] = []
     pinned = app.preferred_version
@@ -155,6 +224,24 @@ def acquire_ipa(cfg: Config, app: AppConfig) -> CachedIPA:
     if cached:
         return cached
     pinned = app.preferred_version
+    if pinned != "latest" and app.preferred_version_id is not None:
+        # A hold by build takes only that build's own file, which only a get
+        # of it stages: a provided or dumped IPA of the same version may be
+        # the other build, so neither is offered.
+        held = app.preferred_version_id
+        raise IPANotFoundError(
+            f"no IPA found for {app.name}: the build of {pinned} it's held at "
+            f"(App Store version id {held})",
+            # Edit App lets go of the build only when its Preferred version
+            # changes, and it already says `pinned`: the command that holds by
+            # version is named outright, for an agent or Terminal.
+            hint=(
+                f"get that build again (--appstore-get --app {app.name} --version-id {held}), "
+                f"or let go of it: hold {pinned} by version (--set-app-options --app {app.name} "
+                f"--preferred-version {pinned}), set another preferred version in Edit App, "
+                f"or get the latest (--appstore-get --app {app.name})"
+            ),
+        )
     if pinned == "latest":
         message = f"no IPA found for {app.name}"
         what = f"a decrypted IPA of {app.bundle_id}"

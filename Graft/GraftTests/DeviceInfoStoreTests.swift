@@ -121,4 +121,46 @@ final class DeviceInfoStoreTests: XCTestCase {
         XCTAssertNil(record.batteryPercent)
         XCTAssertNil(record.batteryCharging)
     }
+
+    /// Developer Mode is a reading like the battery: a blip keeps it.
+    @MainActor
+    func test_an_unreachable_result_keeps_the_developer_mode_reading() async throws {
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let store = DeviceInfoStore(runner: runner)
+        let off = #"{"type":"device-info","udid":"UDID","reachable":true,"total_bytes":1,"free_bytes":1,"battery_percent":50,"battery_charging":false,"developer_mode":false}"#
+
+        await store.load(udid: "UDID", argsOverride: ["-c", "printf '\(off)\\n'"])
+        XCTAssertEqual(store.info["UDID"]?.developerMode, false, "premise: the reading landed")
+
+        await store.load(
+            udid: "UDID",
+            argsOverride: ["-c", #"printf '\#(Self.unreachableLine(udid: "UDID"))\n'"#]
+        )
+
+        XCTAssertEqual(store.info["UDID"]?.developerMode, false)
+    }
+
+    /// A reachable read that couldn't tell (a locked phone, a slow answer)
+    /// keeps the last Developer Mode reading, so the row doesn't come and go
+    /// with the vitals poll. Its other fields are the new reading, and a new
+    /// true or false replaces the old one.
+    @MainActor
+    func test_a_reachable_read_with_no_developer_mode_keeps_the_last_one() async throws {
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let store = DeviceInfoStore(runner: runner)
+        func line(battery: Int, developerMode: String) -> String {
+            #"{"type":"device-info","udid":"UDID","reachable":true,"total_bytes":1,"free_bytes":1,"battery_percent":\#(battery),"battery_charging":false,"developer_mode":\#(developerMode)}"#
+        }
+
+        await store.load(udid: "UDID", argsOverride: ["-c", "printf '\(line(battery: 50, developerMode: "false"))\\n'"])
+        await store.load(udid: "UDID", argsOverride: ["-c", "printf '\(line(battery: 40, developerMode: "null"))\\n'"])
+
+        XCTAssertEqual(store.info["UDID"]?.developerMode, false)
+        XCTAssertEqual(store.info["UDID"]?.batteryPercent, 40, "the rest is the new reading")
+        XCTAssertEqual(store.info["UDID"]?.reachable, true)
+
+        await store.load(udid: "UDID", argsOverride: ["-c", "printf '\(line(battery: 40, developerMode: "true"))\\n'"])
+
+        XCTAssertEqual(store.info["UDID"]?.developerMode, true, "a new answer replaces the old")
+    }
 }

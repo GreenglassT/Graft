@@ -310,6 +310,21 @@ final class SettingsStore: ObservableObject {
         if !draft.hasChanges { resetDraft() }
     }
 
+    /// Make `udid` the default device, from the app pane's Change menu (spec
+    /// §5b): that one setting written (`updateSettings`), the record taken
+    /// from the write, and the draft reseeded only if nobody is editing
+    /// (`reseedDraftIfIdle`), so an unsaved edit in Settings survives.
+    func makeDefaultDevice(_ udid: String, argsOverride: [String]? = nil) async throws {
+        let (_, fresh) = try await updateSettings(defaultDeviceUDID: udid, argsOverride: argsOverride)
+        if let fresh {
+            settings = fresh
+        } else {
+            // An installed graft too old to report the post-write state.
+            _ = try await loadSettings()
+        }
+        reseedDraftIfIdle()
+    }
+
     // MARK: App Store Connect key
 
     /// What the last Save and test (or Remove) came to, for the App Store

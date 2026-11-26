@@ -93,19 +93,112 @@ final class AppDetailMacBuildTests: XCTestCase {
         )
     }
 
-    /// And the success line does not claim an install, because neither side can
-    /// see one: `open -b` returns as soon as LaunchServices delivers the event.
-    func test_a_completed_handoff_claims_only_the_handoff() {
-        let lines = AppDetailView.Handoff.handedOver(filename: "x.ipa").logLines
-        XCTAssertEqual(lines.map(\.kind), [.ok])
+    /// The handoff's line, streamed the moment the CLI says it, doesn't claim
+    /// an install: `open -b` returns as soon as LaunchServices delivers the
+    /// event. The waiting line says what comes next (spec 5d item 7).
+    func test_the_handoff_streams_its_line_and_the_wait() throws {
+        let handed = try BuildEvent.decode(line: #"{"type":"handed-to-playcover","filename":"x.ipa","path":"/tmp/x.ipa","bundle_id":"com.example.app","display_name":"Example"}"#)
+        let lines = MacInstall.streamLines(for: handed, app: "example")
+        XCTAssertEqual(lines.map(\.text), [
+            "  ✓ handed x.ipa to PlayCover",
+            "Waiting for PlayCover to install Example…",
+        ])
+        XCTAssertFalse(lines[0].text.contains("installed"), "nothing has seen an install finish yet")
+    }
+
+    func test_the_wait_names_the_app_by_the_panes_name_when_the_archive_has_none() throws {
+        let handed = try BuildEvent.decode(line: #"{"type":"handed-to-playcover","filename":"x.ipa","path":"/tmp/x.ipa","bundle_id":"com.example.app"}"#)
+        XCTAssertEqual(MacInstall.streamLines(for: handed, app: "Example").last?.text,
+                       "Waiting for PlayCover to install Example…")
+    }
+
+    /// An install the CLI confirmed ends the pane's log with it, and the
+    /// first-handoff notice — still transcript only.
+    func test_a_confirmed_install_ends_the_log_with_it() throws {
+        guard case let .playCoverInstalled(record) = try BuildEvent.decode(line: #"{"type":"playcover-installed","bundle_id":"com.example.app","version":"1.0","display_name":"Example","settings_disabled":["keymapping"],"settings_restored":[]}"#)
+        else { return XCTFail("fixture") }
+        let install = MacInstall(handed: nil, ending: .installed(record))
+        let lines = AppDetailView.Handoff.of(install, filename: "x.ipa", app: "example").logLines
+        XCTAssertEqual(lines.map(\.text), [
+            "  ✓ PlayCover installed Example 1.0. Open it from PlayCover.",
+            "Graft turned off PlayCover's keymapping for Example. For a game, turn keymapping "
+                + "back on in PlayCover; Graft keeps it from then on.",
+        ])
+    }
+
+    func test_a_refusal_is_still_the_refusal() {
+        let install = MacInstall(handed: nil, ending: .refused("PlayCover is not installed"))
         XCTAssertEqual(
-            lines.first?.text,
-            "  ✓ handed x.ipa to PlayCover — it reports its own progress"
+            AppDetailView.Handoff.of(install, filename: "x.ipa", app: "example"),
+            .refused(filename: "x.ipa", complaint: "PlayCover is not installed")
         )
-        XCTAssertFalse(
-            lines.first?.text.contains("installed") ?? true,
-            "nothing here has observed an install finishing"
+    }
+
+    func test_a_stopped_wait_is_one_dim_line_not_a_failure() {
+        let lines = AppDetailView.Handoff.of(
+            MacInstall(handed: nil, ending: .stopped), filename: "x.ipa", app: "Example"
+        ).logLines
+        XCTAssertEqual(lines.map(\.kind), [.dim])
+    }
+
+    /// The wait keeps the build slot, so Stop is there while it runs (spec
+    /// 5d item 7); a phone build's slot goes when the CLI exits, as before.
+    func test_only_a_mac_build_holds_the_slot_through_the_handoff() {
+        var mac = BuildOptions()
+        mac.forPlaycover = true
+        XCTAssertTrue(AppDetailView.holdsSlotThroughHandoff(mac))
+        XCTAssertFalse(AppDetailView.holdsSlotThroughHandoff(BuildOptions()))
+    }
+
+    // MARK: - Stop during the wait
+
+    /// Once the build has handed over and only the wait for PlayCover is
+    /// left, Stop says that's what it stops.
+    func test_the_stop_confirmation_says_what_it_stops() {
+        XCTAssertEqual(StopWords.title(name: "Example", waitingForPlayCover: false), "Stop building Example?")
+        XCTAssertEqual(StopWords.keep(waitingForPlayCover: false), "Keep building")
+        XCTAssertEqual(StopWords.title(name: "Example", waitingForPlayCover: true), "Stop waiting for PlayCover?")
+        XCTAssertEqual(StopWords.keep(waitingForPlayCover: true), "Keep waiting")
+    }
+
+    @MainActor
+    func test_only_the_building_app_can_be_waiting_and_the_consequence_says_so() {
+        let store = ConfigStore(
+            runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")), notify: { _ in }
         )
+        store.noteWaitingForPlayCover("example")
+        XCTAssertNil(store.waitingForPlayCover, "nothing is building, so nothing is waiting")
+        XCTAssertFalse(store.cancelConsequence.contains("PlayCover"))
+        XCTAssertEqual(
+            ConfigStore.waitingConsequence,
+            "PlayCover keeps the build and goes on installing it. Graft only stops waiting, "
+                + "so it won't say when the install is done."
+        )
+    }
+
+    // MARK: - What to expect (spec 5d item 4)
+
+    func test_the_expectations_are_the_specs_words() {
+        XCTAssertEqual(
+            PlayCover.expectations,
+            "Not every iPhone or iPad app runs under PlayCover, even without tweaks: some open to "
+                + "a blank window, can't open their data, or have buttons that don't respond. If an "
+                + "app doesn't work, try it without tweaks first (Install to Mac… on its IPA in the "
+                + "Cache pane); if that fails too, PlayCover can't run that app."
+        )
+    }
+
+    func test_build_for_this_mac_says_what_to_expect() {
+        XCTAssertTrue(AppDetailView.macBuildHelp.hasSuffix(PlayCover.expectations))
+    }
+
+    func test_the_readme_says_the_same() throws {
+        let readme = try SourceScan.appSources()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("README.md")
+        let text = try String(contentsOf: readme, encoding: .utf8)
+            .replacingOccurrences(of: "\n", with: " ")
+        XCTAssertTrue(text.contains(PlayCover.expectations), "README's Running builds on this Mac")
     }
 
     func test_a_build_with_no_archive_says_so_rather_than_going_quiet() {

@@ -67,22 +67,80 @@ class TestThePreparationBranch:
         boom = playcover.PlayCoverPrepError(
             "couldn't build the Preferences stub", hint="is Xcode installed?"
         )
-        with patch.object(playcover, "prepare_ipa", side_effect=boom):
+        with patch.object(playcover, "prepare_ipa", side_effect=boom), \
+                patch.object(playcover, "check_ipa", return_value=[]):
             with pytest.raises(GraftError) as e:
-                cli_mod._prepare_for_playcover(tmp_path / "example-tweaked.ipa", None)
+                cli_mod._prepare_for_playcover(tmp_path / "example-tweaked.ipa", None, tweaks=[])
         assert "example-tweaked.ipa" in e.value.message
         assert "couldn't build the Preferences stub" in e.value.message
         assert e.value.hint == "is Xcode installed?", "the hint survives"
 
     def test_what_it_fixed_is_reported(self, tmp_path: Path) -> None:
         with patch.object(playcover, "prepare_ipa",
-                          return_value=["libexample.dylib → bundled X"]):
-            fixed = cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None)
+                          return_value=["libexample.dylib → bundled X"]), \
+                patch.object(playcover, "check_ipa", return_value=[]):
+            fixed = cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None, tweaks=[])
         assert fixed == ["libexample.dylib → bundled X"]
 
     def test_nothing_to_fix_is_not_a_failure(self, tmp_path: Path) -> None:
-        with patch.object(playcover, "prepare_ipa", return_value=[]):
-            assert cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None) == []
+        with patch.object(playcover, "prepare_ipa", return_value=[]), \
+                patch.object(playcover, "check_ipa", return_value=[]):
+            assert cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None, tweaks=[]) == []
+
+    def test_a_tweak_needing_a_framework_macos_lacks_refuses_the_build(self, tmp_path: Path) -> None:
+        """Spec 5d item 3: refused before the handoff, naming the tweak and
+        the framework, and before anything is retargeted."""
+        link = playcover.UnsupportedLink("Example.dylib", "SpringBoardServices", "example.deb")
+        with patch.object(playcover, "check_ipa", return_value=[link]), \
+                patch.object(playcover, "prepare_ipa") as prepare:
+            with pytest.raises(GraftError) as e:
+                cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None, tweaks=[])
+        prepare.assert_not_called()
+        assert e.value.message == playcover.refusal_message([link])
+
+    def test_the_apps_own_binary_only_warns_and_the_build_goes_on(self, tmp_path: Path) -> None:
+        link = playcover.UnsupportedLink("libAppOwn.dylib", "SpringBoardServices", None)
+        buf = StringIO()
+        with patch.object(playcover, "check_ipa", return_value=[link]), \
+                patch.object(playcover, "prepare_ipa", return_value=[]) as prepare:
+            cli_mod._prepare_for_playcover(tmp_path / "a.ipa", JsonEmitter(stream=buf), tweaks=[])
+        prepare.assert_called_once()
+        events = [json.loads(x) for x in buf.getvalue().splitlines() if x.strip()]
+        assert {"type": "log", "source": "warning", "line": playcover.warning_message(link)} in events
+
+    def test_the_check_is_told_which_files_the_apps_tweaks_brought(self, tmp_path: Path) -> None:
+        bare = tmp_path / "libexample.dylib"
+        bare.write_bytes(b"")
+        with patch.object(playcover, "check_ipa", return_value=[]) as check, \
+                patch.object(playcover, "prepare_ipa", return_value=[]):
+            cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None, tweaks=[bare])
+        assert check.call_args[0][1] == {"libexample.dylib": "libexample.dylib"}
+
+    def test_an_unreadable_tweak_binary_is_a_readable_error(self, tmp_path: Path) -> None:
+        boom = playcover.PlayCoverPrepError("couldn't read Example.dylib's linked libraries", hint="h")
+        with patch.object(playcover, "check_ipa", side_effect=boom):
+            with pytest.raises(GraftError) as e:
+                cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None, tweaks=[])
+        assert "couldn't read Example.dylib's linked libraries" in e.value.message
+
+    def test_a_check_that_breaks_is_a_readable_error(self, tmp_path: Path) -> None:
+        """Any failure of the check, a half-written plist's ExpatError
+        included, ends the Mac build with Graft's own error, not a traceback."""
+        from xml.parsers.expat import ExpatError
+
+        with patch.object(playcover, "check_ipa", side_effect=ExpatError("no element found")):
+            with pytest.raises(GraftError) as e:
+                cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None, tweaks=[])
+        assert e.value.message.startswith("couldn't check a.ipa for PlayCover")
+
+    def test_the_build_passes_the_apps_tweaks(self) -> None:
+        """`_build_one` is too long a road to run to this step here; this pins
+        the call site's argument instead."""
+        import inspect
+
+        src = inspect.getsource(cli_mod._build_one)
+        assert ("_prepare_for_playcover(\n                    tweaked, emitter, "
+                "tweaks=[cfg.tweak_path(t) for t in app_cfg.tweaks],") in src
 
 
 class TestTheRecordedTarget:

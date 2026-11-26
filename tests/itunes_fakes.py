@@ -18,6 +18,7 @@ from graft_ipa import itunes
 #: A PNG as far as `artwork._looks_like_an_image` is concerned.
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 SEARCH_URL = f"{itunes.API_BASE}/search"
+LOOKUP_URL = f"{itunes.API_BASE}/lookup"
 ARTWORK_HOST = "https://is1.example.invalid/"
 
 
@@ -46,7 +47,7 @@ def listing(n: int, **fields: Any) -> dict[str, Any]:
 
 
 class FakeITunes:
-    """`requests.get`, for `/search` and the artwork host only."""
+    """`requests.get`, for `/search`, `/lookup` and the artwork host only."""
 
     def __init__(self) -> None:
         self.results: list[Any] = []
@@ -63,6 +64,9 @@ class FakeITunes:
         self.calls: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         #: Artwork URL → how many of its bytes a reader has pulled so far.
         self.image_bytes_served: dict[str, int] = {}
+        #: `/lookup`'s answers: store country (None when no `country=`) →
+        #: the listings that store sells.
+        self.stores: dict[str | None, list[dict[str, Any]]] = {}
 
     def __call__(self, url: str, params: dict | None = None, **kwargs: Any) -> MagicMock:
         self.calls.append((url, dict(params or {}), kwargs))
@@ -78,6 +82,15 @@ class FakeITunes:
                     self.payload if self.payload is not None
                     else {"resultCount": len(self.results), "results": self.results}
                 )
+            return resp
+        if url == LOOKUP_URL:
+            if self.error is not None:
+                raise self.error
+            asked = set(str((params or {}).get("bundleId", "")).split(","))
+            country = (params or {}).get("country")
+            found = [e for e in self.stores.get(country, []) if e.get("bundleId") in asked]
+            resp.status_code = self.status
+            resp.json.return_value = {"resultCount": len(found), "results": found}
             return resp
         if url.startswith(ARTWORK_HOST):
             body = self.images.get(url)
@@ -103,6 +116,11 @@ class FakeITunes:
     def searches(self) -> list[dict[str, Any]]:
         """The params of every search request, in order."""
         return [params for url, params, _ in self.calls if url == SEARCH_URL]
+
+    @property
+    def lookups(self) -> list[dict[str, Any]]:
+        """The params of every `/lookup` request, in order."""
+        return [params for url, params, _ in self.calls if url == LOOKUP_URL]
 
     @property
     def image_requests(self) -> list[str]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -77,7 +78,11 @@ CREATE TABLE IF NOT EXISTS deliveries (
     -- When `--lc-clean` removed what this row pushed. A cleaned row no longer
     -- vouches for a file of that name (`pushed_by_instance`): one the user puts
     -- there afterward is theirs. NULL: not cleaned, or from before the column.
-    cleaned_at TEXT
+    cleaned_at TEXT,
+    -- `InputsDigest.held_version_id`: the App Store version id of the build
+    -- the app was held at, which the digest hashed. NULL: no hold by build,
+    -- or a row from before the column (whose digest hashed none).
+    held_version_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_deliveries_app ON deliveries(app);
@@ -295,6 +300,20 @@ class BuildLog:
             ).fetchall()
         return [Path(r[0]) for r in rows]
 
+    def tweaks_of(self, ipa_path: Path) -> list[str] | None:
+        """The tweaks the newest successful build archived at `ipa_path` was
+        built with, or None when no row names that archive. Matched on the
+        string `record()` writes, as `clear_ipa_path` is."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT tweaks FROM builds WHERE ipa_path = ? AND success = 1"
+                " ORDER BY id DESC LIMIT 1",
+                (str(ipa_path),),
+            ).fetchone()
+        if row is None:
+            return None
+        return [t for t in (row[0] or "").split(",") if t]
+
     def recent(self, app: str | None = None, limit: int = 10) -> list[dict]:
         """Recent build rows, as dicts whose `target` is always populated.
 
@@ -335,6 +354,7 @@ class BuildLog:
         remote_name: str | None,
         udid: str | None,
         origin: str = "build",
+        held_version_id: str | None = None,
     ) -> int:
         """Record that an artifact reached a device.
 
@@ -356,8 +376,8 @@ class BuildLog:
                 INSERT INTO deliveries (
                     timestamp, app, bundle_id, inputs_digest, digest_version, cyan,
                     tweaks, source_version, ipa_sha256, delivery, lc_bundle_id,
-                    remote_name, udid, origin
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    remote_name, udid, origin, held_version_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     datetime.now(UTC).isoformat(),
@@ -381,6 +401,7 @@ class BuildLog:
                     remote_name,
                     udid,
                     origin,
+                    held_version_id,
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -401,7 +422,23 @@ class BuildLog:
                 (app, ipa_sha256),
             ).fetchone()
 
-    def latest_delivery(self, app: str, *, udid: str | None = None) -> sqlite3.Row | None:
+    def delivery_udids(self, app: str) -> dict[str | None, int]:
+        """Every device `app` was delivered to, with the id of its newest
+        delivery there: `graft --update`'s targets (spec §11.3). Rows recorded
+        without a device are under None."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT udid, MAX(id) FROM deliveries WHERE app = ? GROUP BY udid", (app,)
+            ).fetchall()
+        out: dict[str | None, int] = {}
+        for udid, last in rows:
+            key = str(udid) if udid else None
+            out[key] = max(out.get(key, 0), int(last))
+        return out
+
+    def latest_delivery(
+        self, app: str, *, udid: str | None = None, or_unrecorded: bool = False
+    ) -> sqlite3.Row | None:
         """The most recent delivery recorded for `app`, or None.
 
         Ordered by `id`, not `timestamp`: the id is monotonic by construction,
@@ -417,12 +454,14 @@ class BuildLog:
 
         A row whose `udid` is NULL is invisible to a scoped query, because SQL
         `= NULL` never matches. That is correct: we cannot claim an artifact
-        reached this phone when nothing recorded where it went.
+        reached this phone when nothing recorded where it went. The one
+        exception is `or_unrecorded`, for a caller that has decided those
+        rows are this phone's (`graft --update`'s default device, spec §11.3).
         """
         sql = "SELECT * FROM deliveries WHERE app = ?"
         params: list[object] = [app]
         if udid is not None:
-            sql += " AND udid = ?"
+            sql += " AND (udid = ? OR udid IS NULL)" if or_unrecorded else " AND udid = ?"
             params.append(udid)
         sql += " ORDER BY id DESC LIMIT 1"
         with self._connect() as conn:
@@ -525,6 +564,25 @@ class BuildLog:
                 "SELECT DISTINCT bundle_id FROM lc_installs WHERE udid = ?", (udid,)
             ).fetchall()
         return {r[0] for r in rows}
+
+
+def delivered_udids(db_path: Path) -> set[str] | None:
+    """Every device the delivery log records a delivery to, read read-only:
+    the polled `--devices` asks, and must not migrate or write-lock the file
+    a build is writing. `set()` when there is no log yet; None when there is
+    one that can't be read, which callers treat as "don't know"."""
+    if not db_path.exists():
+        return set()
+    try:
+        with contextlib.closing(
+            sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        ) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT udid FROM deliveries WHERE udid IS NOT NULL"
+            ).fetchall()
+    except sqlite3.Error:
+        return None
+    return {str(udid) for (udid,) in rows if udid}
 
 
 def sha256_of(path: Path) -> str:

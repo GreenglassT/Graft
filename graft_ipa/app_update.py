@@ -16,6 +16,12 @@ has passed every check below, cheapest first:
 - ditto unpacks it into a folder of its own, owner-only;
 - its Info.plist names Graft's bundle id, and a CFBundleShortVersionString
   newer than the running app's;
+- its Info.plist's LSMinimumSystemVersion is this Mac's macOS or older
+  (`check_macos`). One that needs a newer macOS is no update for this Mac
+  (`NOT_FOR_THIS_MAC`), like a release without this build's zip, and this
+  Mac stays on the Graft it has. That zip isn't downloaded again until this
+  Mac has that macOS (`MACOS_NOTE`), and `--check-update` offers it no more
+  (`noted_refusal`);
 - it is the same build as the running app (`check_architecture`): its
   Info.plist says so (`FLAVOR_KEY`), and its main executable and its
   embedded Python have code for that processor, read off their Mach-O
@@ -70,6 +76,7 @@ import contextlib
 import errno
 import fcntl
 import hashlib
+import json
 import os
 import plistlib
 import posixpath
@@ -104,6 +111,9 @@ APP_NAME = "Graft.app"
 #: arm64 even inside the Intel build, and only the bundle can say which one
 #: it is.
 FLAVOR_KEY = "GraftBundleArch"
+#: Info.plist's word for the oldest macOS a Graft.app runs on ("14.0"), which
+#: Xcode writes from the app's MACOSX_DEPLOYMENT_TARGET.
+MACOS_KEY = "LSMinimumSystemVersion"
 ARM64 = "arm64"
 X86_64 = "x86_64"
 #: Each build's zip on a release. Graft.zip keeps meaning arm64: the 2.0.2 and
@@ -160,6 +170,14 @@ HEADERS = {
 }
 #: How long a download waits for another one to finish with the cache folder.
 LOCK_WAIT = 30.0
+#: The note a download refused for the macOS it needs leaves in
+#: `updates_dir`: the release's version, the SHA-256 GitHub lists for its zip,
+#: and the macOS that zip needs. The app asks again at each launch, and Check
+#: for Updates… offers Try Again, as for a release without this build's zip;
+#: the note answers each of them before the zip is downloaded again. A newer
+#: macOS, another zip or another release downloads afresh, and the next
+#: download that goes ahead deletes the note (`_clear`).
+MACOS_NOTE = "needs-macos.json"
 
 CODESIGN = "/usr/bin/codesign"
 SPCTL = "/usr/sbin/spctl"
@@ -188,7 +206,8 @@ HTTP = release_check.HTTP
 MALFORMED = release_check.MALFORMED
 NOT_NEWER = "not-newer"
 NO_ASSET = "no-asset"
-#: The latest release has no zip of this build (`ASSETS`): no update for this Mac.
+#: The latest release has no zip of this build (`ASSETS`), or its zip needs a
+#: newer macOS than this Mac has (`NeedsNewerMacOS`): no update for this Mac.
 NOT_FOR_THIS_MAC = "not-for-this-mac"
 DIGEST = "digest"
 ARCHIVE = "archive"
@@ -221,10 +240,27 @@ class UpdateError(GraftError):
     """The update can't go ahead. `reason` is one of the names above; the
     hint is where to download it by hand."""
 
-    def __init__(self, message: str, *, reason: str, url: str | None = None) -> None:
+    def __init__(self, message: str, *, reason: str, url: str | None = None,
+                 hint: str | None = None) -> None:
         self.url = url or release_check.RELEASES_PAGE + "/latest"
-        super().__init__(message, hint=f"download it from {self.url}")
+        super().__init__(message, hint=hint or f"download it from {self.url}")
         self.reason = reason
+
+
+class NeedsNewerMacOS(UpdateError):
+    """The update needs a newer macOS than this Mac has (`check_macos`):
+    no update for this Mac (`NOT_FOR_THIS_MAC`). `minimum` is the macOS it
+    needs, as its Info.plist says it."""
+
+    def __init__(self, *, version: str, minimum: str, macos: str, current: str,
+                 url: str | None = None) -> None:
+        super().__init__(
+            f"Graft {version} needs macOS {minimum} or later, and this Mac has macOS {macos}, "
+            f"so there's no update for this Mac. It stays on Graft {current}.",
+            reason=NOT_FOR_THIS_MAC, url=url,
+            hint=f"Graft {version} can update this Mac once it has macOS {minimum} or later",
+        )
+        self.minimum = minimum
 
 
 @dataclass(frozen=True)
@@ -597,6 +633,45 @@ def own_flavor(app: Path | None = None) -> str:
         ) from e
 
 
+# --- Which macOS ---------------------------------------------------------------
+
+
+#: A macOS version as Info.plist and `platform.mac_ver` write it: "14",
+#: "14.6", "13.7.1".
+_MACOS_RE = re.compile(r"[0-9]{1,4}(?:\.[0-9]{1,4}){0,2}", re.ASCII)
+
+
+def macos_version(text: object) -> tuple[int, int, int] | None:
+    """`text` as numbers to compare, "14" as (14, 0, 0); None for anything
+    that isn't a macOS version (`_MACOS_RE`). By number: 14.10 is newer
+    than 14.9."""
+    if not isinstance(text, str) or _MACOS_RE.fullmatch(text) is None:
+        return None
+    parts = [int(part) for part in text.split(".")] + [0, 0]
+    return parts[0], parts[1], parts[2]
+
+
+def running_macos() -> str | None:
+    """This Mac's macOS version ("14.6.1"), or None when it can't be read.
+    The seam the tests set (`FakeTools.macos`).
+
+    10.16 is never one Graft runs on: it is what macOS tells a program that
+    asks as an old one would (SYSTEM_VERSION_COMPAT), so it reads as "can't
+    tell", not as a Mac too old for every update."""
+    import platform
+
+    said = platform.mac_ver()[0]
+    version = macos_version(said)
+    return said if version is not None and version[0] >= 11 else None
+
+
+def _too_old(macos: str, minimum: str) -> bool:
+    """Whether a Mac on `macos` is older than `minimum`. False when either
+    can't be read."""
+    have, need = macos_version(macos), macos_version(minimum)
+    return have is not None and need is not None and have < need
+
+
 # --- Download -----------------------------------------------------------------
 
 
@@ -779,6 +854,38 @@ def check_bundle(app: Path, *, newer_than: str, release_url: str | None = None) 
     return info.version
 
 
+def check_macos(app: Path, *, macos: str | None, version: str, current: str,
+                release_url: str | None = None) -> None:
+    """`app` runs on this Mac's macOS, `macos` (`running_macos`): its
+    Info.plist's `MACOS_KEY` is that version or older. Raises
+    `NeedsNewerMacOS` when it needs a newer one, with `version`, the
+    download's, and `current`, the running Graft's, for its sentence; and
+    `UpdateError` (`BUNDLE`) for a key that is there and no version.
+
+    No key is no floor, as it is for macOS. A Mac whose macOS can't be read
+    (None) is let through, as every update was before this check: that is
+    no reason to stop them all. The plist is untrusted here, as in
+    `check_bundle`; what this rules out is a genuine Graft for a newer macOS,
+    which passes every signature check and then doesn't open."""
+    minimum = (read_info_plist(app) or {}).get(MACOS_KEY)
+    if minimum is None:
+        return
+    if macos_version(minimum) is None:
+        # Cut short: the sentence reaches the JSON and the app's banner, and
+        # the plist may hold anything up to a megabyte.
+        shown = repr(minimum)
+        if len(shown) > 40:
+            shown = shown[:39] + "…"
+        raise UpdateError(
+            f"The downloaded Graft doesn't say which macOS it needs in a way Graft can read "
+            f"({MACOS_KEY} is {shown}), so Graft deleted it.",
+            reason=BUNDLE, url=release_url,
+        )
+    if macos is not None and _too_old(macos, minimum):
+        raise NeedsNewerMacOS(version=version, minimum=minimum, macos=macos, current=current,
+                              url=release_url)
+
+
 def check_architecture(app: Path, *, flavor: str, release_url: str | None = None) -> None:
     """`app` is the `flavor` build of Graft, the running one's (`own_flavor`):
     its Info.plist says so and its embedded Python agrees (`bundle_flavor`),
@@ -851,16 +958,21 @@ def check_notarization(app: Path, run: Run, *, release_url: str | None = None) -
 
 
 def verify_app(app: Path, *, newer_than: str, team: str, flavor: str, run: Run,
-               progress: Progress, release_url: str | None = None) -> str:
+               progress: Progress, release_url: str | None = None,
+               macos: str | None = None) -> str:
     """Every check of an unpacked Graft.app, in order; its version once all
-    pass, signed by `team` (`own_team`) and the `flavor` build
-    (`own_flavor`). `progress` hears each one as it starts."""
+    pass, signed by `team` (`own_team`), the `flavor` build (`own_flavor`)
+    and for `macos` or an older one (`running_macos` when None). `progress`
+    hears each one as it starts: the macOS it needs is part of `bundle`, so
+    the app reads no check it doesn't know."""
 
     def checking(name: str) -> None:
         progress({"step": "verify", "received": None, "total": None, "check": name})
 
     checking("bundle")
     version = check_bundle(app, newer_than=newer_than, release_url=release_url)
+    check_macos(app, macos=macos if macos is not None else running_macos(), version=version,
+                current=newer_than, release_url=release_url)
     checking("architecture")
     check_architecture(app, flavor=flavor, release_url=release_url)
     checking("signature")
@@ -911,6 +1023,59 @@ def _clear(root: Path) -> None:
                 entry.unlink()
 
 
+def _noted_minimum(root: Path, *, version: str, sha256: str) -> str | None:
+    """The macOS `MACOS_NOTE` in `root` says the release `version`'s zip,
+    by its `sha256`, needs; None when there is no such note, it is about
+    another zip, or it isn't one."""
+    try:
+        with (root / MACOS_NOTE).open("rb") as f:
+            note = json.loads(f.read(4096))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(note, dict) or note.get("version") != version or note.get("sha256") != sha256:
+        return None
+    minimum = note.get("minimum")
+    return minimum if macos_version(minimum) is not None else None
+
+
+def _note_minimum(root: Path, *, version: str, sha256: str, minimum: str) -> None:
+    """Leave `MACOS_NOTE` in `root`. Best effort: without it the next try
+    downloads the zip again and refuses it again, as it always did."""
+    note = json.dumps({"version": version, "sha256": sha256, "minimum": minimum}).encode()
+    part = root / (MACOS_NOTE + ".part")
+    with contextlib.suppress(OSError):
+        fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(note)
+        os.replace(part, root / MACOS_NOTE)
+
+
+def noted_refusal(data: dict[str, Any], release: release_check.Release,
+                  current: str) -> NeedsNewerMacOS | None:
+    """For `--check-update`: the refusal a download of the latest release
+    (`release`, from GitHub's answer `data`) would meet again, when it is
+    newer than `current`, `MACOS_NOTE` says its zip of this build needs a
+    newer macOS, and this Mac still has an older one. None otherwise: no
+    note, a note about another zip or release, a macOS that can't be read,
+    or a graft outside Graft.app, which has no build of its own
+    (`own_flavor`) and never downloads one. Reads the note and nothing
+    else: no download, no lock."""
+    if not release_check.is_newer(release.version, current):
+        return None
+    macos = running_macos()
+    if macos is None:
+        return None
+    try:
+        asset = release_asset(data, flavor=own_flavor(), url=release.url)
+    except UpdateError:
+        return None
+    minimum = _noted_minimum(updates_dir(), version=release.version, sha256=asset.sha256)
+    if minimum is None or not _too_old(macos, minimum):
+        return None
+    return NeedsNewerMacOS(version=release.version, minimum=minimum, macos=macos,
+                           current=current, url=release.url)
+
+
 def _private_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     os.chmod(path, 0o700)
@@ -924,8 +1089,10 @@ def download_update(current: str, app: Path, *, progress: Progress, run: Run | N
 
     `run` is `run_tool` unless a test passes its stand-in, looked up here
     rather than as a default so the verb, which passes none, gets a test's
-    patch of the module's own."""
+    patch of the module's own. This Mac's macOS is `running_macos`'s, looked
+    up the same way."""
     run = run or run_tool
+    macos = running_macos()
     check_installable(app)
     # Before anything is downloaded: a Graft that can't say whose updates to
     # trust has no use for one.
@@ -952,6 +1119,13 @@ def download_update(current: str, app: Path, *, progress: Progress, run: Run | N
 
     root = _private_dir(updates_dir())
     with _locked(root):
+        # Refused already for the macOS it needs: no update for this Mac,
+        # answered as a release without this build's zip is, before any of
+        # it is downloaded again.
+        minimum = _noted_minimum(root, version=release.version, sha256=asset.sha256)
+        if minimum is not None and macos is not None and _too_old(macos, minimum):
+            raise NeedsNewerMacOS(version=release.version, minimum=minimum, macos=macos,
+                                  current=current, url=release.url)
         _clear(root)
         try:
             free = shutil.disk_usage(root).free
@@ -991,11 +1165,14 @@ def download_update(current: str, app: Path, *, progress: Progress, run: Run | N
                     reason=ARCHIVE, url=release.url,
                 )
             version = verify_app(staged, newer_than=current, team=team, flavor=flavor, run=run,
-                                 progress=report, release_url=release.url)
-        except BaseException:
+                                 progress=report, release_url=release.url, macos=macos)
+        except BaseException as e:
             # A failed check, a stop (SIGTERM, `lc_manage.exit_on_termination`)
             # or anything else: nothing half-checked stays behind.
             shutil.rmtree(work, ignore_errors=True)
+            if isinstance(e, NeedsNewerMacOS):
+                _note_minimum(root, version=release.version, sha256=asset.sha256,
+                              minimum=e.minimum)
             raise
     return Staged(version=version, path=staged, url=release.url)
 

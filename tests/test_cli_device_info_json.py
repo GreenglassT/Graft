@@ -37,7 +37,7 @@ def _events(text: str) -> list[dict]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
-def test_a_hit_emits_exactly_one_event_with_all_six_keys(temp_config_env: Path) -> None:
+def test_a_hit_emits_exactly_one_event_with_all_seven_keys(temp_config_env: Path) -> None:
     from graft_ipa import cli as cli_mod
 
     cfg = load_config(temp_config_env)
@@ -59,7 +59,7 @@ def test_a_hit_emits_exactly_one_event_with_all_six_keys(temp_config_env: Path) 
     assert len(events) == 1
     event = events[0]
     assert set(event) == {"type", "udid", "reachable", "total_bytes", "free_bytes",
-                           "battery_percent", "battery_charging"}
+                           "battery_percent", "battery_charging", "developer_mode"}
     assert event["reachable"] is True
     assert event["udid"] == "00008030-0000000000000001"
     assert event["total_bytes"] == 1024000000000
@@ -99,6 +99,7 @@ def test_an_unreachable_device_still_emits_an_event_saying_so(
             "free_bytes": None,
             "battery_percent": None,
             "battery_charging": None,
+            "developer_mode": None,
         }
     ]
 
@@ -188,3 +189,47 @@ def test_no_device_flag_falls_back_to_the_configured_default(temp_config_env: Pa
     assert read.call_args.args == ("CONFIGURED-DEFAULT",)
     events = [e for e in _events(buf.getvalue()) if e["type"] == "device-info"]
     assert events[0]["udid"] == "CONFIGURED-DEFAULT"
+
+
+@pytest.mark.parametrize("answer", [True, False, None])
+def test_developer_mode_is_reported(temp_config_env: Path, answer: bool | None) -> None:
+    from graft_ipa import cli as cli_mod
+
+    cfg = load_config(temp_config_env)
+    record = DeviceInfoRecord(
+        udid="UDID", total_bytes=1, free_bytes=1, battery_percent=1,
+        battery_charging=False, developer_mode=answer,
+    )
+    buf = StringIO()
+    with patch.object(device_info_mod, "read_device_info", return_value=record):
+        cli_mod._do_device_info(cfg, udid="UDID", emitter=JsonEmitter(stream=buf))
+
+    (event,) = [e for e in _events(buf.getvalue()) if e["type"] == "device-info"]
+    assert event["developer_mode"] is answer
+
+
+def test_a_reading_is_remembered_for_the_quick_plan(temp_config_env: Path) -> None:
+    from graft_ipa import cli as cli_mod
+    from graft_ipa import devices_seen
+
+    cfg = load_config(temp_config_env)
+    record = DeviceInfoRecord(
+        udid="UDID", total_bytes=1, free_bytes=1, battery_percent=1,
+        battery_charging=False, developer_mode=False,
+    )
+    with patch.object(device_info_mod, "read_device_info", return_value=record):
+        cli_mod._do_device_info(cfg, udid="UDID", emitter=JsonEmitter(stream=StringIO()))
+
+    assert devices_seen.seen(cfg.state_dir, "UDID") == {"developer_mode": False}
+
+
+def test_an_unreachable_phone_forgets_nothing(temp_config_env: Path) -> None:
+    from graft_ipa import cli as cli_mod
+    from graft_ipa import devices_seen
+
+    cfg = load_config(temp_config_env)
+    devices_seen.remember(cfg.state_dir, "UDID", developer_mode=False)
+    with patch.object(device_info_mod, "read_device_info", return_value=None):
+        cli_mod._do_device_info(cfg, udid="UDID", emitter=JsonEmitter(stream=StringIO()))
+
+    assert devices_seen.seen(cfg.state_dir, "UDID") == {"developer_mode": False}

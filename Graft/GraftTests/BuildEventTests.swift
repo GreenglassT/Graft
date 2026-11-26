@@ -67,6 +67,26 @@ final class BuildEventTests: XCTestCase {
         XCTAssertEqual(record.delivery, .livecontainer)
     }
 
+    /// `needs_developer_mode` (spec §5): whether the app is signed with a
+    /// development profile, which the app can't read for itself. Null is "its
+    /// profile couldn't be read"; a CLI from before 2.3 sends no key. Both are
+    /// no answer, and neither drops the app.
+    func test_decode_app_needs_developer_mode() throws {
+        let base = #"{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":[],"display_name":null,"delivery":"sideload","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6"#
+        let cases: [(String, Bool?)] = [
+            (#","needs_developer_mode":true}"#, true),
+            (#","needs_developer_mode":false}"#, false),
+            (#","needs_developer_mode":null}"#, nil),
+            ("}", nil),
+        ]
+        for (tail, expected) in cases {
+            guard case let .app(record) = try BuildEvent.decode(line: base + tail) else {
+                return XCTFail("expected .app for \(tail)")
+            }
+            XCTAssertEqual(record.needsDeveloperMode, expected, tail)
+        }
+    }
+
     /// `--reinstall-build` emits `delivery: null` on purpose, for an app that
     /// has since been removed from config.yaml: the guard that raises "no
     /// longer in config.yaml" runs *inside* the build envelope, so
@@ -768,6 +788,25 @@ final class BuildEventTests: XCTestCase {
         XCTAssertNil(record.batteryCharging)
     }
 
+    /// `developer_mode` (spec §5): true or false on iOS 16 and later, null
+    /// before. A CLI from before 2.3 sends no key, which is no reading, not a
+    /// decode failure.
+    func test_decode_device_info_developer_mode() throws {
+        let base = #"{"type":"device-info","udid":"00008030-0000000000000001","reachable":true,"total_bytes":1,"free_bytes":1,"battery_percent":1,"battery_charging":false"#
+        let cases: [(String, Bool?)] = [
+            (#","developer_mode":true}"#, true),
+            (#","developer_mode":false}"#, false),
+            (#","developer_mode":null}"#, nil),
+            ("}", nil),
+        ]
+        for (tail, expected) in cases {
+            guard case let .deviceInfo(record) = try BuildEvent.decode(line: base + tail) else {
+                return XCTFail("expected .deviceInfo for \(tail)")
+            }
+            XCTAssertEqual(record.developerMode, expected, tail)
+        }
+    }
+
     /// Pins the separate-type decision itself: a brief event must not decode
     /// as `.device`, and a full `device` event must not decode as
     /// `.deviceBrief`. If someone later merges `BriefDeviceRecord` into
@@ -884,6 +923,156 @@ final class BuildEventTests: XCTestCase {
         XCTAssertEqual(FreeSetupStep.links(in: "Install LiveContainer: https://example.com/guide.").map(\.absoluteString),
                        ["https://example.com/guide"])
         XCTAssertEqual(FreeSetupStep.links(in: "In LiveContainer, open Settings."), [])
+    }
+
+    // MARK: graft --update
+
+    /// An app on two devices (contract G): the iPhone installs, the iPad
+    /// waits for its device.
+    private static let planLine = #"{"type":"update-plan","quick":true,"apps":[{"app":"example","display_name":"Example+","store":{"from":"1.0","to":"2.0","skipped_reason":null},"tweaks":[{"filename":"a-tweak.deb","name":"A Tweak","from":"1.0","to":"1.1","unchecked":false,"also_affects":["bravo"]},{"filename":"b-tweak.deb","name":null,"from":"2.0","to":null,"unchecked":true,"also_affects":[]}],"install":true,"install_skipped_reason":null,"manual_install":false,"blocked_reason":null,"readiness":"likely","readiness_note":null,"actionable":true,"targets":[{"udid":"00000000-0000000000000001","device_name":"Example iPhone","delivery":"livecontainer","lc_bundle_id":"com.example.livecontainer","install":true,"install_skipped_reason":null,"manual_install":false,"waiting":null,"blocked_reason":null,"readiness":"checked","readiness_note":null},{"udid":"00000000-0000000000000002","device_name":"Example iPad","delivery":"livecontainer","lc_bundle_id":null,"install":false,"install_skipped_reason":null,"manual_install":false,"waiting":"Example iPad isn't connected: it'll update when it is","blocked_reason":null,"readiness":"likely","readiness_note":null}],"nothing_to_do":false}]}"#
+
+    func test_decode_update_plan() throws {
+        guard case let .updatePlan(record) = try BuildEvent.decode(line: Self.planLine) else {
+            return XCTFail("expected .updatePlan")
+        }
+        XCTAssertTrue(record.quick)
+        let app = try XCTUnwrap(record.apps.first)
+        XCTAssertEqual(app.app, "example")
+        XCTAssertEqual(app.displayName, "Example+")
+        XCTAssertEqual(app.store.to, "2.0")
+        XCTAssertTrue(app.getsFromStore)
+        XCTAssertEqual(app.tweakUpdates.map(\.filename), ["a-tweak.deb"], "an unchecked tweak is not an update")
+        XCTAssertEqual(app.tweaks.first?.alsoAffects, ["bravo"])
+        XCTAssertEqual(app.readiness, CLIContract.Update.readinessLikely)
+        XCTAssertFalse(app.manualInstall)
+        XCTAssertNil(app.readinessNote)
+        XCTAssertTrue(app.actionable)
+        XCTAssertTrue(app.isActionable)
+        XCTAssertTrue(app.hasUpdate)
+    }
+
+    /// Each device the app is on, in the CLI's order (the default first).
+    func test_decode_update_plan_targets() throws {
+        guard case let .updatePlan(record) = try BuildEvent.decode(line: Self.planLine) else {
+            return XCTFail("expected .updatePlan")
+        }
+        let targets = try XCTUnwrap(record.apps.first?.targets)
+        XCTAssertEqual(targets.map(\.udid), ["00000000-0000000000000001", "00000000-0000000000000002"])
+        guard targets.count == 2 else { return }
+        XCTAssertEqual(targets[0].deviceName, "Example iPhone")
+        XCTAssertEqual(targets[0].delivery, DeliveryMode.livecontainer.rawValue)
+        XCTAssertEqual(targets[0].lcBundleId, "com.example.livecontainer")
+        XCTAssertTrue(targets[0].install)
+        XCTAssertTrue(targets[0].isReady)
+        XCTAssertTrue(targets[0].deliversToLiveContainer)
+        XCTAssertEqual(targets[0].readiness, CLIContract.Update.readinessChecked)
+        XCTAssertNil(targets[0].waiting)
+        XCTAssertEqual(targets[1].waiting, "Example iPad isn't connected: it'll update when it is")
+        XCTAssertFalse(targets[1].isReady)
+        XCTAssertNil(targets[1].lcBundleId)
+        XCTAssertNil(targets[1].blockedReason)
+        XCTAssertNil(targets[1].installSkippedReason)
+        XCTAssertFalse(targets[1].manualInstall)
+    }
+
+    func test_decode_the_run_events() throws {
+        guard case let .updateStep(step) = try BuildEvent.decode(
+            line: #"{"type":"update-step","app":null,"step":"tweaks","status":"start","detail":"1 tweak","udid":null,"device_name":null}"#
+        ) else { return XCTFail("expected .updateStep") }
+        XCTAssertNil(step.app)
+        XCTAssertEqual(step.step, CLIContract.Update.stepTweaks)
+        XCTAssertEqual(step.status, CLIContract.Update.statusStart)
+        XCTAssertNil(step.udid)
+        XCTAssertNil(step.deviceName)
+
+        guard case let .updateStep(install) = try BuildEvent.decode(
+            line: #"{"type":"update-step","app":"example","step":"install","status":"skipped","detail":"Example iPad isn't connected: it'll update when it is","udid":"00000000-0000000000000002","device_name":"Example iPad"}"#
+        ) else { return XCTFail("expected .updateStep") }
+        XCTAssertEqual(install.step, CLIContract.Update.stepInstall)
+        XCTAssertEqual(install.udid, "00000000-0000000000000002")
+        XCTAssertEqual(install.deviceName, "Example iPad")
+
+        guard case let .updateStopping(stopping) = try BuildEvent.decode(
+            line: #"{"type":"update-stopping","app":"example","step":"lc-push"}"#
+        ) else { return XCTFail("expected .updateStopping") }
+        XCTAssertEqual(stopping.step, CLIContract.Stage.liveContainerPush)
+
+        guard case let .updateAppEnd(end) = try BuildEvent.decode(
+            line: #"{"type":"update-app-end","app":"example","ok":false,"stopped":false,"done":["get"],"left":["build"],"error":"2.0 is downloaded; the build failed: cyan exited with code 1","targets":[{"udid":"00000000-0000000000000001","device_name":"Example iPhone","ok":false,"error":null,"left":["install"]}]}"#
+        ) else { return XCTFail("expected .updateAppEnd") }
+        XCTAssertEqual(end.done, [CLIContract.Update.stepGet])
+        XCTAssertEqual(end.left, [CLIContract.Update.stepBuild])
+        XCTAssertEqual(end.targets, [UpdateAppEndRecord.Target(udid: "00000000-0000000000000001",
+                                                               deviceName: "Example iPhone", ok: false,
+                                                               error: nil, left: [CLIContract.Update.stepInstall])])
+
+        guard case let .updateEnd(summary) = try BuildEvent.decode(
+            line: #"{"type":"update-end","ok":false,"stopped":true,"updated":["example"],"failed":[],"blocked":["bravo"],"not_started":["delta"],"waiting":2}"#
+        ) else { return XCTFail("expected .updateEnd") }
+        XCTAssertTrue(summary.stopped)
+        XCTAssertEqual(summary.notStarted, ["delta"])
+        XCTAssertEqual(summary.waiting, 2)
+    }
+
+    /// An `update-app-end` or `update-end` without the per-device fields
+    /// still decodes: a Stop's re-armed kill and a quit's wait key off
+    /// `update-app-end` (`RunStopper`), and must not hang on a list a CLI
+    /// left out.
+    func test_the_run_ends_decode_without_their_per_device_fields() throws {
+        guard case let .updateAppEnd(end) = try BuildEvent.decode(
+            line: #"{"type":"update-app-end","app":"example","ok":true,"stopped":false,"done":["build"],"left":[],"error":null}"#
+        ) else { return XCTFail("expected .updateAppEnd") }
+        XCTAssertEqual(end.targets, [])
+
+        guard case let .updateEnd(summary) = try BuildEvent.decode(
+            line: #"{"type":"update-end","ok":true,"stopped":false,"updated":[],"failed":[],"blocked":[],"not_started":[]}"#
+        ) else { return XCTFail("expected .updateEnd") }
+        XCTAssertEqual(summary.waiting, 0)
+    }
+
+    /// `waiting` (review part 2, #9): an install whose device went away
+    /// during the run, on its step's end and its device's result. Left out,
+    /// it reads as false, as an older CLI leaves it.
+    func test_decode_waiting_on_an_install_step_and_a_devices_result() throws {
+        guard case let .updateStep(step) = try BuildEvent.decode(
+            line: #"{"type":"update-step","app":"example","step":"install","status":"end","detail":"Example iPad isn't connected: it'll update when it is","udid":"00000000-0000000000000002","device_name":"Example iPad","waiting":true}"#
+        ) else { return XCTFail("expected .updateStep") }
+        XCTAssertTrue(step.waiting)
+
+        guard case let .updateStep(plain) = try BuildEvent.decode(
+            line: #"{"type":"update-step","app":"example","step":"install","status":"end","detail":null,"udid":"00000000-0000000000000001","device_name":"Example iPhone"}"#
+        ) else { return XCTFail("expected .updateStep") }
+        XCTAssertFalse(plain.waiting)
+
+        guard case let .updateAppEnd(end) = try BuildEvent.decode(
+            line: #"{"type":"update-app-end","app":"example","ok":true,"stopped":false,"done":["build"],"left":[],"error":null,"targets":[{"udid":"00000000-0000000000000001","device_name":"Example iPhone","ok":true,"error":null,"left":[]},{"udid":"00000000-0000000000000002","device_name":"Example iPad","ok":false,"error":"Example iPad isn't connected: it'll update when it is","left":["install"],"waiting":true}]}"#
+        ) else { return XCTFail("expected .updateAppEnd") }
+        XCTAssertEqual(end.targets.map(\.waiting), [false, true])
+    }
+
+    func test_update_events_are_not_part_of_the_build_stream() throws {
+        for line in [
+            Self.planLine,
+            #"{"type":"update-end","ok":true,"stopped":false,"updated":[],"failed":[],"blocked":[],"not_started":[],"waiting":0}"#,
+            #"{"type":"update-target-dropped","app":"example","udid":"00008130-FAKE00000000PHONE2","device_name":null}"#,
+        ] {
+            XCTAssertNil(try BuildEvent.decode(line: line).progress)
+        }
+    }
+
+    /// `--drop-update-target`'s one event (spec §11.3, "Devices that are
+    /// gone"): the app, the device, and its name when Graft knows it.
+    func test_decode_update_target_dropped() throws {
+        guard case let .updateTargetDropped(named) = try BuildEvent.decode(
+            line: #"{"type":"update-target-dropped","app":"example","udid":"00008130-FAKE00000000PHONE2","device_name":"Example iPad"}"#
+        ) else { return XCTFail("expected .updateTargetDropped") }
+        XCTAssertEqual(named, UpdateTargetDroppedRecord(
+            app: "example", udid: "00008130-FAKE00000000PHONE2", deviceName: "Example iPad"))
+
+        guard case let .updateTargetDropped(unnamed) = try BuildEvent.decode(
+            line: #"{"type":"update-target-dropped","app":"example","udid":"00008130-FAKE00000000PHONE2","device_name":null}"#
+        ) else { return XCTFail("expected .updateTargetDropped") }
+        XCTAssertNil(unnamed.deviceName)
     }
 }
 

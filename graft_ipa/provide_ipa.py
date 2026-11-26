@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import IPAInspectionError, IPAValidationError
+from .ipa_cache import staged_name
 from .ipa_inspect import account_data_in, clear_stripped, read_info_plist, strip_account_data
 
 
@@ -182,17 +183,20 @@ def provide(
     cache_dir: Path,
     expected_bundle_id: str,
     source_path: Path,
+    external_version_id: str | None = None,
 ) -> tuple[Path, ValidatedIPA]:
     """Validate `source_path` against `expected_bundle_id`, then copy it into
     `cache_dir` under the canonical `<bundle_id>_<version>.ipa` name the build
-    pipeline expects. Returns (destination path, validated IPA info).
+    pipeline expects, or, for a get of a chosen version, the name that build
+    keeps of its own (`ipa_cache.staged_name`). Returns (destination path,
+    validated IPA info).
 
     Through `stage`: owner-only, atomic, and without the buyer's metadata and
-    licenses. Replaces any existing file with the same version.
+    licenses. Replaces any existing file with the same name.
     """
     info = validate_ipa(source_path, expected_bundle_id)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    final = cache_dir / f"{info.bundle_id}_{info.version}.ipa"
+    final = cache_dir / staged_name(info.bundle_id, info.version, external_version_id)
     stage(source_path, final)
     # `stage` swaps the IPA at `final` but, as it does for
     # `_do_decrypt`, leaves any `.stripped.json` sitting beside the old one

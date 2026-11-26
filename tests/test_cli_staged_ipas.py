@@ -43,7 +43,7 @@ def _ipa(cache: Path, bundle_id: str, version: str, display_name: str = "Fake") 
 
 
 def _cfg(cache: Path) -> SimpleNamespace:
-    return SimpleNamespace(cache_dir=cache)
+    return SimpleNamespace(cache_dir=cache, apps={})
 
 
 def test_both_events_are_registered() -> None:

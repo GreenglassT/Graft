@@ -70,6 +70,9 @@ def tools(monkeypatch: pytest.MonkeyPatch) -> FakeTools:
     # (`own_flavor`), which a path to nowhere doesn't have. The tests of
     # `own_flavor` itself build a bundle that does.
     monkeypatch.setattr(app_update, "own_flavor", lambda app=None: fake.flavor)
+    # And this Mac's macOS, which an update's LSMinimumSystemVersion is
+    # checked against: the fake's, never the host's.
+    monkeypatch.setattr(app_update, "running_macos", lambda: fake.macos)
     return fake
 
 

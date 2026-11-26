@@ -74,3 +74,7 @@ Each step has its own page:
 3. [Give it a decrypted IPA](getting-an-ipa.md)
 4. [Attach tweaks](tweaks.md)
 5. [Build and install](building-and-delivery.md)
+
+After that, Graft checks your apps for updates at launch and once a day while
+it's open. An app with something to update shows an arrow mark in the
+sidebar; see [Updating your apps](building-and-delivery.md#updating-your-apps).

@@ -649,7 +649,7 @@ class TestTheEssentialExtensionRefusal:
     def test_an_essential_extension_refuses_rather_than_staging_a_shell(
         self, monkeypatch, dumped, tmp_path
     ):
-        cfg = SimpleNamespace(default_device_udid=None, cache_dir=tmp_path / "cache")
+        cfg = SimpleNamespace(default_device_udid=None, apps={}, cache_dir=tmp_path / "cache")
         with pytest.raises(decrypt_runner.StillEncryptedError) as e:
             cli._do_decrypt(
                 cfg, "com.example.vpn", device="U",
@@ -662,7 +662,7 @@ class TestTheEssentialExtensionRefusal:
     def test_the_same_dump_succeeds_when_the_user_forces_it(
         self, monkeypatch, dumped, tmp_path
     ):
-        cfg = SimpleNamespace(default_device_udid=None, cache_dir=tmp_path / "cache2")
+        cfg = SimpleNamespace(default_device_udid=None, apps={}, cache_dir=tmp_path / "cache2")
         cli._do_decrypt(
             cfg, "com.example.vpn", device="U",
             backend=decrypt_runner.FRIDA, strip_encrypted_extensions=True,
@@ -693,7 +693,7 @@ class TestTheEssentialExtensionRefusal:
         there — the one warning that exists to tell the truth about a partial
         app, lying, until someone deleted a file they were never told about.
         """
-        cfg = SimpleNamespace(default_device_udid=None, cache_dir=tmp_path / "cache3")
+        cfg = SimpleNamespace(default_device_udid=None, apps={}, cache_dir=tmp_path / "cache3")
         cli._do_decrypt(
             cfg, "com.example.vpn", device="U",
             backend=decrypt_runner.FRIDA, strip_encrypted_extensions=True,
@@ -770,7 +770,7 @@ class TestWhatTheSidecarRecords:
     def test_the_sidecar_names_the_capability_and_the_importance(
         self, dumped, tmp_path
     ):
-        cfg = SimpleNamespace(default_device_udid=None, cache_dir=tmp_path / "cache")
+        cfg = SimpleNamespace(default_device_udid=None, apps={}, cache_dir=tmp_path / "cache")
         cli._do_decrypt(
             cfg, "com.example.books", device="U",
             backend=decrypt_runner.FRIDA, strip_encrypted_extensions=True,

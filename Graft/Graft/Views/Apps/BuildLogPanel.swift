@@ -14,12 +14,15 @@ struct BuildLogPanel: View {
     /// because "No build yet" under a tile reading "21h ago" contradicted it.
     var emptyMessage: String = "No build yet for this app."
 
-    private static let scrollAnchorID = "build-log-tail"
-
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
+                // Lazy: the update sheet's transcript runs across every app it
+                // updates, thousands of lines, and a plain stack drew all of
+                // them again for each new one (review 23-2, §11). This draws
+                // the lines in view, as the dump's transcript does
+                // (`DumpTranscriptView`).
+                LazyVStack(alignment: .leading, spacing: 0) {
                     if lines.isEmpty {
                         Text(emptyMessage)
                             .font(AppFont.mono).foregroundStyle(Palette.textDim)
@@ -31,6 +34,7 @@ struct BuildLogPanel: View {
                                 .font(AppFont.mono)
                                 .foregroundStyle(color(for: line.kind))
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                                .id(line.id)
                         }
                     }
                 }
@@ -49,22 +53,35 @@ struct BuildLogPanel: View {
                 // empty and is never read back from disk, so this is the state
                 // every launch opens in.
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .id(Self.scrollAnchorID)
             }
             .background(Palette.surface2)
             .overlay(RoundedRectangle(cornerRadius: Metrics.radius).strokeBorder(Palette.line.opacity(0.4), lineWidth: 0.5))
             .clipShape(RoundedRectangle(cornerRadius: Metrics.radius))
-            .onChange(of: lines.count) { _ in
+            .onChange(of: lines.last?.id) { last in
                 // No animation — tail-follow during fast log bursts (50-200 lines/sec
                 // from zsign/cyan) would otherwise queue overlapping 100ms tweens and
                 // pin the main thread.
-                proxy.scrollTo(Self.scrollAnchorID, anchor: .bottom)
+                //
+                // To the last line, by its id: in a lazy stack the stack's own
+                // height is an estimate until its rows are drawn, so its
+                // bottom isn't where the last line is. The id is the one
+                // handed in: with `lines.last` read in here instead, the panel
+                // stayed at its first line (BuildLogPanelTests), as this
+                // closure has the view from before the change.
+                guard let last else { return }
+                proxy.scrollTo(last, anchor: .bottom)
             }
         }
     }
 
-    private func color(for kind: LogLine.Kind) -> Color {
-        switch kind {
+    private func color(for kind: LogLine.Kind) -> Color { kind.color }
+}
+
+extension LogLine.Kind {
+    /// The log's color for a line of this kind, wherever log lines are drawn
+    /// (this panel, `MacInstallStrip`).
+    var color: Color {
+        switch self {
         case .arrow: return Palette.accent
         case .ok: return Palette.success
         case .warn: return Palette.warn

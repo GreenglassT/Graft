@@ -135,14 +135,31 @@ struct AppStoreSourceRow: View {
     /// The line for a held app: the version its builds use, and the newest
     /// the App Store has. "(not staged)" when the held version's IPA isn't in
     /// the cache any more (deleted in the Cache pane): a build would stop.
+    ///
+    /// A hold by build whose number the App Store has more than once says
+    /// which build, in the Older Versions sheet's words
+    /// (`DuplicateBuild.suffix`): "Held at 2026.42.0 (build 1 of 2)". When the
+    /// App Store's current version is that same number, its newest build is
+    /// the last one, which build 1 isn't, so the line says so rather than
+    /// "the App Store's newest".
     static func heldLine(_ held: String, _ record: AppStoreVersionRecord) -> String {
+        let build = record.heldBuild.map {
+            " " + AppStoreVersionsStore.DuplicateBuild(version: held, number: $0.number, count: $0.count).suffix
+        } ?? ""
         let staged = record.cachedVersion == held ? "" : " (not staged)"
+        let shown = "\(held)\(build)\(staged)"
         guard let store = record.storeVersion else {
-            return "Held at \(held)\(staged) · couldn't check the App Store: \(record.error ?? "no answer")"
+            return "Held at \(shown) · couldn't check the App Store: \(record.error ?? "no answer")"
+        }
+        if store == held, let heldBuild = record.heldBuild, heldBuild.number < heldBuild.count {
+            let newest = AppStoreVersionsStore.DuplicateBuild(
+                version: store, number: heldBuild.count, count: heldBuild.count
+            )
+            return "Held at \(shown) · newest \(store) \(newest.suffix)"
         }
         return store == held
-            ? "Held at \(held)\(staged) · the App Store's newest"
-            : "Held at \(held)\(staged) · newest \(store)"
+            ? "Held at \(shown) · the App Store's newest"
+            : "Held at \(shown) · newest \(store)"
     }
 
     /// Whether Get an older version… is offered: not while a get or claim

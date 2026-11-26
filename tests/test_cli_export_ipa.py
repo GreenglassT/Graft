@@ -102,6 +102,7 @@ def _setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reached: list[str], 
     monkeypatch.setattr(cli_mod, "run_zsign", _forbid(reached, "zsign"))
     monkeypatch.setattr(cli_mod, "install", _forbid(reached, "a sideload install"))
     monkeypatch.setattr(cli_mod, "select_device", _forbid(reached, "select_device"))
+    monkeypatch.setattr(cli_mod, "resolve_target", _forbid(reached, "resolve_target"))
     monkeypatch.setattr(cli_mod, "_check_lc_target_early", _forbid(reached, "the LiveContainer check"))
     monkeypatch.setattr(lc_runner, "push_ipa_to_livecontainer", _forbid(reached, "a LiveContainer push"))
     monkeypatch.setattr(preflight, "list_connected_devices", _forbid(reached, "the device list"))

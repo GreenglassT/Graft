@@ -223,7 +223,9 @@ def test_the_update_check_record_decodes_what_the_cli_sends(worked: bool) -> Non
             "2.0", error=release_check.UpdateCheckError("offline", reason=release_check.OFFLINE)
         )
     swift = _decoded("UpdateCheckRecord", EVENTS_SWIFT)
-    assert set(swift) == set(payload)
+    # Every key the app decodes is sent, and every key sent is decoded.
+    assert set(swift) <= set(payload)
+    assert set(payload) == set(swift)
     for key, optional in swift.items():
         if not optional:
             assert payload[key] is not None, f"update-check.{key} is non-optional in Swift but null here"

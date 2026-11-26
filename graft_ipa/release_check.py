@@ -173,19 +173,26 @@ def release_page(url: object, tag: str) -> str:
 
 
 def event(
-    current: str, *, release: Release | None = None, error: UpdateCheckError | None = None
+    current: str, *, release: Release | None = None, error: UpdateCheckError | None = None,
+    needs_macos: str | None = None,
 ) -> dict[str, Any]:
     """The `update-check` event's fields: the same keys whether the check
-    worked or not, so the app decodes one shape."""
+    worked or not, so the app decodes one shape.
+
+    `needs_macos` is the macOS the latest release needs, when a download
+    found this Mac's older (`app_update.noted_refusal`): that release is no
+    update for this Mac, so `update_available` is false and the app's banner
+    offers nothing it would refuse. Null otherwise."""
     if error is not None:
         return {
             "ok": False, "current": current, "latest": None, "url": None,
-            "update_available": False,
+            "update_available": False, "needs_macos": None,
             "reason": error.reason, "status": error.status, "message": error.message,
         }
     assert release is not None
     return {
         "ok": True, "current": current, "latest": release.version, "url": release.url,
-        "update_available": is_newer(release.version, current),
+        "update_available": is_newer(release.version, current) and needs_macos is None,
+        "needs_macos": needs_macos,
         "reason": None, "status": None, "message": None,
     }

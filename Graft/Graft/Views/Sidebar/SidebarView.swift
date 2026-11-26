@@ -37,6 +37,9 @@ struct SidebarView: View {
     @ObservedObject var devices: DevicesStore
     /// Handed to Add App, which stages a chosen IPA through it.
     @PassedThrough var appStore: AppStoreStore
+    /// One-click Update: each row's mark, Update All, and Check for updates
+    /// now. Nil in a test of something else.
+    @ObservedOptionalObject var appUpdates: AppUpdatesStore? = nil
 
     @State private var showingAddSheet = false
     @State private var pendingRemove: AppRecord?
@@ -46,6 +49,27 @@ struct SidebarView: View {
         List(selection: $selection) {
             devicesSection
             Section {
+                if let appUpdates {
+                    let offered = AppUpdateText.offered(appUpdates.plans, order: store.apps.map(\.name))
+                    if Self.showsUpdateAll(count: offered.count) {
+                        Button(AppUpdateText.updateAllTitle(count: offered.count)) {
+                            appUpdates.openConfirmation(apps: offered)
+                        }
+                        .controlSize(.small)
+                        // And for what one of those apps is doing that the
+                        // slot doesn't hold (review part 2, #2).
+                        .disabled(store.busy != nil || appUpdates.isUpdating || appUpdates.waitsFor(offered) != nil)
+                        .help(appUpdates.waitsFor(offered)
+                              ?? "Update every app that has an update, after a look at what will change")
+                    }
+                    // With the switch off there's no daily check, but the
+                    // quick plan is still offered by hand (spec §11.4).
+                    if !appUpdates.checkApps {
+                        Button(AppUpdateText.checkNow) { Task { await appUpdates.checkNow() } }
+                            .controlSize(.small)
+                            .disabled(appUpdates.isChecking)
+                    }
+                }
                 ForEach(store.apps) { app in
                     AppSidebarRow(
                         app: app,
@@ -57,7 +81,8 @@ struct SidebarView: View {
                         // load repaints the list once. Handed the store, every
                         // row would observe it separately for an icon that
                         // cannot change without the list being rebuilt anyway.
-                        artwork: artwork.image(for: app.bundleId)
+                        artwork: artwork.image(for: app.bundleId),
+                        update: appUpdates?.plans[app.name]
                     )
                     .tag(SidebarItem.app(app.id))
                     .contextMenu {
@@ -67,7 +92,7 @@ struct SidebarView: View {
                         // IPA minutes later with no progress and nothing to stop it.
                         // Gate the entry and say why, rather than offering an action
                         // whose consequences the UI can't show.
-                        Button("Remove \(app.name)…", role: .destructive) {
+                        Button(Self.removeTitle(for: app), role: .destructive) {
                             pendingRemove = app
                         }
                         .disabled(store.buildingApp == app.name)
@@ -77,7 +102,7 @@ struct SidebarView: View {
                             // pane's Stop button goes away with the pane on any
                             // sidebar-section change, and "clicked away, then noticed
                             // it was wedged" is exactly the case a cancel exists for.
-                            Button("Stop building \(app.name)…") {
+                            Button(Self.stopTitle(for: app)) {
                                 pendingCancel = app
                             }
                         }
@@ -126,6 +151,7 @@ struct SidebarView: View {
                     Symbols.add.image
                 }
                 .help("Add a new app")
+                .accessibilityLabel("Add App")
             }
         }
         .sheet(isPresented: $showingAddSheet) {
@@ -154,16 +180,16 @@ struct SidebarView: View {
                 Task { await remove(app) }
             }
         } message: { app in
-            Text("\(app.name) will be removed from your config. Cached IPAs, "
-                 + "archived builds, and build history are kept.")
+            Text(Self.removeMessage(for: app))
         }
         // Same confirmation the detail pane shows, from the same place — the
         // sentence depends on the stage the build has reached, which only the
         // store knows, and the title must not depend on which control was used.
         .stopBuildConfirmation(
             presenting: $pendingCancel,
-            name: \.name,
-            consequence: { store.cancelConsequence }
+            name: \.shownName,
+            consequence: { store.cancelConsequence },
+            waitingForPlayCover: store.waitingForPlayCover != nil
         ) { app in store.cancelBuild(appName: app.name) }
         // `ConfigStore`'s one error channel, and now the app's: this column is
         // mounted in every section, where `AppsListView` was mounted only while
@@ -191,6 +217,22 @@ struct SidebarView: View {
         } message: {
             Text(store.lastError ?? "")
         }
+    }
+
+    /// The context menu's Remove, and its confirmation, by the name the row
+    /// shows.
+    static func removeTitle(for app: AppRecord) -> String { "Remove \(app.shownName)…" }
+
+    static func stopTitle(for app: AppRecord) -> String { "Stop building \(app.shownName)…" }
+
+    /// Remove's confirmation, answered once a build of the app had started.
+    static func stillBuilding(_ app: AppRecord) -> String {
+        "\(app.shownName) is building right now. Wait for the build to finish, then remove it."
+    }
+
+    static func removeMessage(for app: AppRecord) -> String {
+        "\(app.shownName) will be removed from your config. Cached IPAs, "
+            + "archived builds, and build history are kept."
     }
 
     /// The phones, live.
@@ -277,13 +319,15 @@ struct SidebarView: View {
             .tag(SidebarItem.section(section))
     }
 
+    /// Update All shows for two or more apps with an update (spec 4.2).
+    static func showsUpdateAll(count: Int) -> Bool { count >= 2 }
+
     private func remove(_ app: AppRecord) async {
         // Re-checked at the point of action, not just in the menu: the
         // confirmation alert can sit open across the start of a build, and the
         // menu's `.disabled` is only a snapshot of the moment it was drawn.
         guard store.buildingApp != app.name else {
-            store.lastError = "\(app.name) is building right now. "
-                + "Wait for the build to finish, then remove it."
+            store.lastError = Self.stillBuilding(app)
             return
         }
         do {

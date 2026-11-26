@@ -5,7 +5,8 @@ determines the artifact a build would produce. Two digests being equal means
 building now would produce the same IPA that was last pushed.
 
 Deliberately NOT hashed: the source IPA's bytes. It is identified by
-(bundle_id, version), which is what `find_in_cache` resolves on, because
+(bundle_id, version), and the held build when a hold names one, which is
+what `find_in_cache` resolves on, because
 hashing it costs ~128 MB of reads (Example) or ~400 MB (Delta) per check. The
 accepted gap is a cached IPA replaced in place under the same filename. Tweak
 contents ARE hashed — they are ~181 KB in total for a real app and hashing them
@@ -80,6 +81,13 @@ class InputsDigest:
     delivery: str
     tweaks: tuple[TweakFingerprint, ...]
     cyan: dict[str, object]
+    #: The App Store version id of the build the app is held at, when a hold
+    #: names one (`AppConfig.preferred_version_id`), else None. Two builds of
+    #: one number read the same `source_version`, and a build of a hold by
+    #: build starts from that build's own file (`ipa_cache.admits`), so moving
+    #: the hold between them changes the artifact. Hashed only when set, so a
+    #: digest for an app without one is what it always was.
+    held_version_id: str | None = None
 
     @property
     def missing(self) -> list[str]:
@@ -150,8 +158,12 @@ def compute_inputs_digest(cfg: Config, app: AppConfig, *, source_version: str) -
 
     cyan: dict[str, object] = {k: _freeze(getattr(app.cyan, k)) for k in CYAN_KEYS}
 
+    # A hold by build, as `appstore.held_version_id` reads it: `latest` names
+    # none, whatever an AppConfig built by hand carries.
+    held_version_id = app.preferred_version_id if app.preferred_version != "latest" else None
+
     # Order matters and is config order, because that is the order cyan injects.
-    payload = {
+    payload: dict[str, object] = {
         "v": FORMAT_VERSION,
         "bundle_id": app.bundle_id,
         "source_version": source_version,
@@ -159,6 +171,11 @@ def compute_inputs_digest(cfg: Config, app: AppConfig, *, source_version: str) -
         "tweaks": [[f.name, f.sha256] for f in fingerprints],
         "cyan": cyan,
     }
+    # Only when there is one: every digest recorded for an app with no hold by
+    # build (all of them, before 2.3) hashes the same bytes as before, so no
+    # FORMAT_VERSION bump and no row read as `unknown`.
+    if held_version_id is not None:
+        payload["held_version_id"] = held_version_id
     # ensure_ascii and the utf-8 encode are the other two knobs (besides
     # separators, pinned above) that change the hashed bytes. Both are
     # already the default; naming them makes that a choice, not an
@@ -176,6 +193,7 @@ def compute_inputs_digest(cfg: Config, app: AppConfig, *, source_version: str) -
         delivery=app.delivery,
         tweaks=tuple(fingerprints),
         cyan=cyan,
+        held_version_id=held_version_id,
     )
 
 
@@ -199,6 +217,9 @@ class DeliveredSnapshot:
     # about user-facing copy that nobody has made yet. Defaulted so a row
     # written before the column existed still constructs.
     cyan: dict | None = None
+    # `InputsDigest.held_version_id` as the row stored it; None for a row with
+    # no hold by build, and for one from before the column.
+    held_version_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -331,6 +352,11 @@ def diff_delivery(current: InputsDigest, delivered: DeliveredSnapshot | None) ->
         reasons.append(
             f"app version changed: {delivered.source_version} → {current.source_version}"
         )
+    elif current.held_version_id != delivered.held_version_id:
+        # Two builds of one number: the version reads the same, and the file
+        # a build starts from doesn't. `elif`, because a build of another
+        # version is already named by the line above.
+        reasons.append("the held build changed")
     if current.delivery != delivered.delivery:
         reasons.append(f"delivery mode changed: {delivered.delivery} → {current.delivery}")
 
@@ -398,7 +424,7 @@ def diff_delivery(current: InputsDigest, delivered: DeliveredSnapshot | None) ->
 
     if not reasons:
         # Every hashed input now has its own branch above — bundle id, source
-        # version, delivery mode, tweak set, tweak contents, tweak order,
+        # version, the held build, delivery mode, tweak set, tweak contents, tweak order,
         # duplicate entries, and each cyan option by name. So this is no longer
         # a fallback for "some build option": it is the legacy-row path, and
         # reachable only when `delivered.cyan is None`, i.e. a row written

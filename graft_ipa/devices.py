@@ -16,6 +16,10 @@ class DeviceInfo:
     ios_version: str
     connection_type: str  # "USB" | "Network"
     livecontainer_bundle_id: str | None
+    #: Whether the app listing could say: False when it failed or listed no
+    #: apps at all (how a locked phone answers). Only a known None is "no
+    #: LiveContainer", the one the app disables Build for (spec §5b).
+    livecontainer_known: bool = False
 
 
 @dataclass
@@ -145,14 +149,14 @@ async def _describe_device(mux_dev, udid: str) -> DeviceInfo:
     # function that fixed it.
     lockdown = await create_using_usbmux(serial=udid, pair_timeout=PAIR_TIMEOUT_SECONDS)
     async with closing_best_effort(lockdown):
-        name = _safe_attr(lockdown, "display_name") or _safe_attr(lockdown, "device_name") or udid
+        name = name_from_lockdown(lockdown, udid)
         model = _safe_attr(lockdown, "product_type") or "unknown"
         ios_version = _safe_attr(lockdown, "product_version") or "unknown"
 
         conn_type_raw = getattr(mux_dev, "connection_type", "USB")
         connection_type = "Network" if str(conn_type_raw).lower().startswith("network") else "USB"
 
-        lc_bundle = await _detect_livecontainer_async(lockdown)
+        lc_bundle, lc_known = await _livecontainer_on_device_async(lockdown)
         return DeviceInfo(
             udid=udid,
             name=str(name),
@@ -160,7 +164,59 @@ async def _describe_device(mux_dev, udid: str) -> DeviceInfo:
             ios_version=str(ios_version),
             connection_type=connection_type,
             livecontainer_bundle_id=lc_bundle,
+            livecontainer_known=lc_known,
         )
+
+
+#: A device's family by its product type's prefix (`iPad19,1`), for a device
+#: with no name of its own. Only the kinds Graft delivers to.
+_FAMILIES = (("iPhone", "iPhone"), ("iPad", "iPad"), ("iPod", "iPod touch"))
+
+
+def name_from_lockdown(lockdown, udid: str | None = None) -> str | None:
+    """What to call the device a lockdown session is open to: the one name
+    every place Graft names a connected device starts from.
+
+    The model's name when pymobiledevice3 knows the model (`display_name`,
+    "iPhone 15 Pro"), else the name the device gives itself (`DeviceName`),
+    else its family from the product type ("iPad"), else `udid` (None when
+    not given, for a caller with its own words for "don't know").
+
+    `display_name` comes from a table of models built into pymobiledevice3,
+    so a model newer than the table has none. Graft then called it by its
+    UDID everywhere, while the device was saying its name all along.
+
+    Only text counts, and nothing is called: a session's values are read
+    when it opens (`all_values`), and a stand-in's unset attribute, an async
+    function, is no answer. Never raises.
+    """
+    values = _safe_attr(lockdown, "all_values")
+    own_name = _text(values.get("DeviceName")) if isinstance(values, dict) else None
+    return _model_name(lockdown) or own_name or _family(lockdown) or udid
+
+
+def model_or_family_from_lockdown(lockdown) -> str | None:
+    """`name_from_lockdown` without the name the device gives itself: the
+    model's name, else the family, else None. For the Developer Mode hint,
+    "your iPad", which would read oddly as "your Sample's iPad"."""
+    return _model_name(lockdown) or _family(lockdown)
+
+
+def _model_name(lockdown) -> str | None:
+    return _text(_safe_attr(lockdown, "display_name"))
+
+
+def _family(lockdown) -> str | None:
+    product_type = _text(_safe_attr(lockdown, "product_type")) or ""
+    for prefix, family in _FAMILIES:
+        if product_type.startswith(prefix):
+            return family
+    return None
+
+
+def _text(value: object) -> str | None:
+    """`value` trimmed when it is text with something in it, else None."""
+    return (value.strip() or None) if isinstance(value, str) else None
 
 
 def _safe_attr(obj, attr: str):
@@ -171,7 +227,15 @@ def _safe_attr(obj, attr: str):
 
 
 async def _detect_livecontainer_async(lockdown) -> str | None:
-    """The LiveContainer a push to this device would use, or None for none.
+    """The LiveContainer a push to this device would use, or None for none
+    or for a listing that couldn't tell: `_livecontainer_on_device_async`'s
+    first half."""
+    return (await _livecontainer_on_device_async(lockdown))[0]
+
+
+async def _livecontainer_on_device_async(lockdown) -> tuple[str | None, bool]:
+    """The LiveContainer on the device, and whether the listing could tell.
+    The LiveContainer a push to this device would use, or None for none.
 
     Asked of `lc_discovery`, the one discovery the push, `--lc-status` and
     `--check` share: every application type (TrollStore and a jailbreak
@@ -186,8 +250,9 @@ async def _detect_livecontainer_async(lockdown) -> str | None:
     the sidebar's question is whether there is a LiveContainer, and the push
     says for itself which pin it needs.
 
-    Every failure, the listing's and the close's, reads as "not installed":
-    the device is described either way.
+    Every failure, the listing's and the close's, reads as no LiveContainer
+    that the listing couldn't tell (`None, False`), as does a listing with
+    no apps at all: the device is described either way.
     """
     from . import lc_discovery
     from .lc_runner import LiveContainerError
@@ -200,9 +265,12 @@ async def _detect_livecontainer_async(lockdown) -> str | None:
     try:
         installed = await lc_discovery.installed_bundle_ids(lockdown)
     except Exception:
-        return None
+        return None, False
+    if not installed:
+        # A locked phone lists no apps at all: no answer about LiveContainer.
+        return None, False
     try:
-        return lc_discovery.choose(installed)[0]
+        return lc_discovery.choose(installed)[0], True
     except LiveContainerError:
         roles = lc_discovery.livecontainers(installed)
         primaries = [
@@ -210,4 +278,4 @@ async def _detect_livecontainer_async(lockdown) -> str | None:
             if role == "primary" or b.lower() == lc_discovery.FAMILY_PREFIX
         ]
         candidates = primaries or list(roles)
-        return candidates[0] if candidates else None
+        return (candidates[0] if candidates else None), True

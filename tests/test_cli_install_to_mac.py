@@ -45,17 +45,23 @@ def _events(text: str) -> list[dict]:
     return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
-def _ipa(cache: Path, bundle_id: str = "com.example.app", version: str = "1.0") -> Path:
+def _ipa(
+    cache: Path, bundle_id: str = "com.example.app", version: str = "1.0", *,
+    build: str = "100", frameworks: dict[str, bytes] | None = None, name: str | None = None,
+) -> Path:
     cache.mkdir(parents=True, exist_ok=True)
-    path = cache / f"{bundle_id}_{version}.ipa"
+    path = cache / (name or f"{bundle_id.replace('/', '_')}_{version}.ipa")
     info = plistlib.dumps({
         "CFBundleIdentifier": bundle_id,
         "CFBundleShortVersionString": version,
+        "CFBundleVersion": build,
         "CFBundleDisplayName": "Fake",
         "CFBundleExecutable": "Fake",
     })
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr("Payload/Fake.app/Info.plist", info)
+        for member, data in (frameworks or {}).items():
+            zf.writestr(f"Payload/Fake.app/Frameworks/{member}", data)
     return path
 
 
@@ -63,23 +69,49 @@ def _cfg(cache: Path, built: Path | None = None) -> SimpleNamespace:
     # `built_dir` defaults beside the cache and is not created: the verb has to
     # cope with it being absent, which is the state on any machine that has
     # never run a build.
-    return SimpleNamespace(cache_dir=cache, built_dir=built or cache.parent / "built")
+    root = cache.parent
+    tweaks = root / "tweaks"
+    return SimpleNamespace(
+        cache_dir=cache, built_dir=built or root / "built", state_dir=root / "state",
+        tweaks_dir=tweaks, tweak_path=lambda name: tweaks / name,
+    )
 
 
-def test_the_event_is_registered() -> None:
-    assert "handed-to-playcover" in EVENT_TYPES
+@pytest.fixture(autouse=True)
+def _playcover_here(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """PlayCover's folders, as scratch ones, and no waiting: the install wait
+    and the settings wait each look once. A test that wants settings points
+    `PLAYCOVER_SETTINGS_DIR` at a folder it made; without one, the settings
+    step has nothing to do. Returns the Applications folder."""
+    from graft_ipa import playcover_handoff
+
+    apps = tmp_path / "PlayCover" / "Applications"
+    monkeypatch.setattr(cli_mod, "PLAYCOVER_APPS_DIR", apps)
+    monkeypatch.setattr(cli_mod, "PLAYCOVER_SETTINGS_DIR", tmp_path / "PlayCover" / "no-settings")
+    monkeypatch.setattr(playcover_handoff, "INSTALL_WAIT_S", 0)
+    monkeypatch.setattr(playcover_handoff, "SETTINGS_WAIT_S", 0)
+    return apps
+
+
+def _install(apps: Path, bundle_id: str = "com.example.app", version: str = "1.0",
+             build: str = "100") -> None:
+    """What PlayCover does once it has the file: its own copy of the app."""
+    info = apps / f"{bundle_id}.app" / "Info.plist"
+    info.parent.mkdir(parents=True, exist_ok=True)
+    info.write_bytes(plistlib.dumps({
+        "CFBundleIdentifier": bundle_id, "CFBundleShortVersionString": version,
+        "CFBundleVersion": build,
+    }))
+
+
+def test_the_events_are_registered() -> None:
+    assert {"handed-to-playcover", "playcover-installed",
+            "playcover-install-unconfirmed"} <= EVENT_TYPES
 
 
 def test_it_opens_the_file_with_playcovers_bundle_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Somewhere with no settings dir, so the PlayCover-settings step returns at
-    # once. Without this the case pays the full poll timeout waiting for a
-    # plist that a stubbed `open` never creates — 25s of the suite's runtime,
-    # measured, for no coverage.
-    monkeypatch.setattr(
-        cli_mod, "PLAYCOVER_SETTINGS_DIR", tmp_path / "no-playcover-here"
-    )
     cache = tmp_path / "cache"
     path = _ipa(cache)
     buf = StringIO()
@@ -96,6 +128,7 @@ def test_it_opens_the_file_with_playcovers_bundle_id(
     assert event["type"] == "handed-to-playcover"
     assert event["filename"] == path.name
     assert event["bundle_id"] == "com.example.app"
+    assert event["display_name"] == "Fake"
 
 
 def test_a_filename_not_in_the_cache_fails_without_opening_anything(
@@ -275,112 +308,379 @@ def test_in_the_intel_build_a_failed_handoff_says_which_download_to_get(
     assert "get PlayCover" not in (e.value.hint or "")
 
 
-def test_it_turns_off_the_two_settings_that_make_a_handed_over_app_unusable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Both default to True and both have to go.
+class TestTheInstallAndTheSettings:
+    """After `open`: the wait for PlayCover's install, then the app's two
+    PlayCover settings (spec 5d items 1, 2 and 5)."""
 
-    `playChain` crashes the app in PlayTools' keychain shim on its first
-    credential write; `keymapping` translates the mouse into mapped touch, so
-    every click on a non-game silently misses. Measured on a real handoff:
-    with only the first fixed the app ran fine and could not be clicked, which
-    is why this asserts on *both* rather than on "settings were touched".
+    def _hand_over(self, tmp_path: Path, *, during=None, path: Path | None = None,
+                   emitter: bool = True) -> list[dict]:
+        cache = tmp_path / "cache"
+        path = path or _ipa(cache)
 
-    Keys this does not know about must survive — PlayCover owns this file and
-    a round-trip that dropped its other settings would be worse than not
-    writing at all.
-    """
-    cache = tmp_path / "cache"
-    path = _ipa(cache)
-    settings = tmp_path / "App Settings"
-    settings.mkdir()
-    plist = settings / "com.example.app.plist"
-    with plist.open("wb") as fh:
-        plistlib.dump(
-            {"playChain": True, "keymapping": True, "windowWidth": 1470}, fh
+        def opened(argv, **_):
+            if during is not None:
+                during()
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        buf = StringIO()
+        with patch.object(cli_mod.subprocess, "run", side_effect=opened):
+            cli_mod._do_install_to_mac(
+                _cfg(cache), filename=path.name,
+                emitter=JsonEmitter(stream=buf) if emitter else None,
+            )
+        return _events(buf.getvalue())
+
+    def _settings(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        settings = tmp_path / "App Settings"
+        settings.mkdir()
+        monkeypatch.setattr(cli_mod, "PLAYCOVER_SETTINGS_DIR", settings)
+        return settings
+
+    def test_the_handoff_comes_at_once_and_then_the_install(
+        self, tmp_path: Path, _playcover_here: Path
+    ) -> None:
+        events = self._hand_over(tmp_path, during=lambda: _install(_playcover_here))
+
+        assert [e["type"] for e in events] == ["handed-to-playcover", "playcover-installed"]
+        assert events[1] == {
+            "type": "playcover-installed", "bundle_id": "com.example.app", "version": "1.0",
+            "display_name": "Fake", "settings_disabled": [], "settings_restored": [],
+        }
+
+    def test_an_install_that_doesnt_land_is_unconfirmed_not_a_failure(self, tmp_path: Path) -> None:
+        events = self._hand_over(tmp_path)
+        assert events[-1] == {
+            "type": "playcover-install-unconfirmed", "bundle_id": "com.example.app",
+            "waited_s": 0, "display_name": "Fake",
+            "settings_disabled": [], "settings_restored": [],
+        }
+
+    def test_an_earlier_install_of_the_same_build_is_not_this_one(
+        self, tmp_path: Path, _playcover_here: Path
+    ) -> None:
+        _install(_playcover_here)
+        old = _playcover_here / "com.example.app.app" / "Info.plist"
+        import os
+        import time
+        os.utime(old, (time.time() - 60, time.time() - 60))
+        events = self._hand_over(tmp_path)
+        assert events[-1]["type"] == "playcover-install-unconfirmed"
+
+    def test_the_first_handoff_turns_both_settings_off_and_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _playcover_here: Path
+    ) -> None:
+        """Both default to on, and on a non-game both break it: PlayChain
+        crashed apps the first time they saved a login, and keymapping makes
+        every click miss. Keys this doesn't know survive."""
+        settings = self._settings(tmp_path, monkeypatch)
+
+        def playcover_installs() -> None:
+            (settings / "com.example.app.plist").write_bytes(plistlib.dumps(
+                {"playChain": True, "keymapping": True, "windowWidth": 1470}))
+            _install(_playcover_here)
+
+        events = self._hand_over(tmp_path, during=playcover_installs)
+
+        after = plistlib.loads((settings / "com.example.app.plist").read_bytes())
+        assert after == {"playChain": False, "keymapping": False, "windowWidth": 1470}
+        assert events[-1]["settings_disabled"] == ["keymapping", "playChain"]
+        assert events[-1]["settings_restored"] == []
+
+    def test_the_persons_own_settings_are_kept(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _playcover_here: Path
+    ) -> None:
+        """Measured with PlayCover 3.1.0: a reinstall leaves the file alone,
+        so keymapping turned on for a game stays on."""
+        settings = self._settings(tmp_path, monkeypatch)
+        plist = settings / "com.example.app.plist"
+        plist.write_bytes(plistlib.dumps({"playChain": False, "keymapping": True}))
+
+        events = self._hand_over(tmp_path, during=lambda: _install(_playcover_here))
+
+        assert plistlib.loads(plist.read_bytes()) == {"playChain": False, "keymapping": True}
+        assert events[-1]["settings_disabled"] == []
+        assert events[-1]["settings_restored"] == []
+
+    def test_a_setting_playcover_rewrote_is_put_back(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _playcover_here: Path
+    ) -> None:
+        settings = self._settings(tmp_path, monkeypatch)
+        plist = settings / "com.example.app.plist"
+        plist.write_bytes(plistlib.dumps({"playChain": False, "keymapping": True}))
+
+        def rewrites() -> None:
+            plist.write_bytes(plistlib.dumps({"playChain": True, "keymapping": True}))
+            _install(_playcover_here)
+
+        events = self._hand_over(tmp_path, during=rewrites)
+
+        assert plistlib.loads(plist.read_bytes()) == {"playChain": False, "keymapping": True}
+        assert events[-1]["settings_restored"] == ["playChain"]
+
+    def test_a_settings_file_it_cannot_read_never_fails_the_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = self._settings(tmp_path, monkeypatch)
+        (settings / "com.example.app.plist").write_bytes(b"this is not a plist")
+
+        events = self._hand_over(tmp_path)
+
+        assert [e["type"] for e in events] == ["handed-to-playcover", "playcover-install-unconfirmed"]
+        assert events[-1]["settings_disabled"] == []
+
+    def test_the_console_says_each_step(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _playcover_here: Path
+    ) -> None:
+        settings = self._settings(tmp_path, monkeypatch)
+
+        def playcover_installs() -> None:
+            (settings / "com.example.app.plist").write_bytes(plistlib.dumps(
+                {"playChain": True, "keymapping": True}))
+            _install(_playcover_here)
+
+        with cli_mod.console.capture() as cap:
+            self._hand_over(tmp_path, during=playcover_installs, emitter=False)
+        out = " ".join(cap.get().split())
+
+        assert "✓ handed com.example.app_1.0.ipa to PlayCover" in out
+        assert "waiting for PlayCover to install Fake…" in out
+        assert "✓ PlayCover installed Fake 1.0. Open it from PlayCover." in out
+        assert ("Graft turned off PlayCover's keymapping and PlayChain for Fake. For a game, "
+                "turn keymapping back on in PlayCover; Graft keeps it from then on.") in out
+
+    def test_the_console_says_when_it_isnt_confirmed(self, tmp_path: Path) -> None:
+        with cli_mod.console.capture() as cap:
+            self._hand_over(tmp_path, emitter=False)
+        out = " ".join(cap.get().split())
+        assert ("PlayCover hasn't finished installing Fake. Check PlayCover's window; if the "
+                "install failed there, graft --install-to-mac com.example.app_1.0.ipa tries again."
+                ) in out
+
+    def test_a_stop_ends_the_wait_never_the_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_safety_net
+    ) -> None:
+        """The app's Stop is a SIGTERM. The handoff already happened and
+        stands; the wait ends, the settings step doesn't run, and the run
+        exits as stopped (143)."""
+        import os
+        import signal
+        import time
+
+        from graft_ipa import playcover_handoff
+        from graft_ipa.errors import Stopped
+
+        def waiting(*_a, **_k) -> bool:
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(2)
+            raise AssertionError("the Stop didn't end the wait")
+
+        monkeypatch.setattr(playcover_handoff, "await_install", waiting)
+        settled: list[float] = []
+
+        def settle(*_a, wait, **_k):
+            settled.append(wait)
+            return playcover_handoff.Settled()
+
+        monkeypatch.setattr(playcover_handoff, "settle", settle)
+
+        cache = tmp_path / "cache"
+        path = _ipa(cache)
+        buf = StringIO()
+        with patch.object(cli_mod.subprocess, "run") as run, pytest.raises(Stopped) as e:
+            run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+            cli_mod._do_install_to_mac(_cfg(cache), filename=path.name, emitter=JsonEmitter(stream=buf))
+        assert e.value.code == 143
+        assert [ev["type"] for ev in _events(buf.getvalue())] == ["handed-to-playcover"], \
+            "the handoff was said before the wait, and no ending after the Stop"
+        assert settled == [0], "only what's there already: no waiting after a Stop"
+
+    def _stopped(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, during=None) -> list[dict]:
+        import os
+        import signal
+        import time
+
+        from graft_ipa import playcover_handoff
+        from graft_ipa.errors import Stopped
+
+        def waiting(*_a, **_k) -> bool:
+            os.kill(os.getpid(), signal.SIGTERM)
+            time.sleep(2)
+            raise AssertionError("the Stop didn't end the wait")
+
+        monkeypatch.setattr(playcover_handoff, "await_install", waiting)
+        cache = tmp_path / "cache"
+        path = _ipa(cache)
+        buf = StringIO()
+
+        def opened(argv, **_):
+            if during is not None:
+                during()
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with patch.object(cli_mod.subprocess, "run", side_effect=opened), \
+                pytest.raises(Stopped) as e:
+            cli_mod._do_install_to_mac(_cfg(cache), filename=path.name, emitter=JsonEmitter(stream=buf))
+        assert e.value.code == 143
+        return _events(buf.getvalue())
+
+    def test_a_stop_still_turns_off_what_playcover_has_already_written(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_safety_net
+    ) -> None:
+        """A first handoff stopped during the wait: PlayCover has written the
+        app's settings, both on. Left so, PlayChain crashes the app's first
+        login; so the defaults go on now, and the notice with them."""
+        settings = self._settings(tmp_path, monkeypatch)
+        plist = settings / "com.example.app.plist"
+
+        events = self._stopped(tmp_path, monkeypatch, during=lambda: plist.write_bytes(
+            plistlib.dumps({"keymapping": True, "playChain": True})))
+
+        assert plistlib.loads(plist.read_bytes()) == {"keymapping": False, "playChain": False}
+        assert events[1:] == [{
+            "type": "log", "source": "playcover",
+            "line": "Graft turned off PlayCover's keymapping and PlayChain for Fake. For a game, "
+                    "turn keymapping back on in PlayCover; Graft keeps it from then on.",
+        }]
+
+    def test_a_settle_that_breaks_after_a_stop_never_hides_the_stop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_safety_net
+    ) -> None:
+        from graft_ipa import playcover_handoff
+
+        def broken(*_a, **_k):
+            raise RuntimeError("anything")
+
+        monkeypatch.setattr(playcover_handoff, "settle", broken)
+        events = self._stopped(tmp_path, monkeypatch)
+        assert [e["type"] for e in events] == ["handed-to-playcover"]
+
+    def test_a_bundle_id_no_path_may_be_built_from_is_handed_over_and_never_followed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dropped IPA's CFBundleIdentifier can be anything. The handoff
+        still happens (PlayCover decides what to make of it); Graft only
+        won't look for it, and says so."""
+        settings = self._settings(tmp_path, monkeypatch)
+        path = _ipa(tmp_path / "cache", bundle_id="../../escape", name="odd.ipa")
+
+        events = self._hand_over(tmp_path, path=path)
+
+        assert [e["type"] for e in events] == [
+            "handed-to-playcover", "log", "playcover-install-unconfirmed",
+        ]
+        assert events[1]["source"] == "playcover"
+        assert "can't follow" in events[1]["line"]
+        assert events[-1]["waited_s"] == 0
+        assert list(settings.iterdir()) == []
+        assert not [p for p in tmp_path.rglob("escape*")], "nothing was made where it pointed"
+
+
+class TestTheFrameworkCheck:
+    """`--install-to-mac` reads the archive's frameworks before the handoff
+    (spec 5d items 3 and 7), any archive, including one built before 2.3."""
+
+    SBS = "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices"
+
+    @pytest.fixture(autouse=True)
+    def _roots(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from graft_ipa import playcover
+
+        root = tmp_path / "roots"
+        (root / "System/Library/Frameworks/Foundation.framework").mkdir(parents=True)
+        monkeypatch.setattr(playcover, "FRAMEWORK_ROOTS", (root,))
+
+    def _needy(self) -> bytes:
+        from . import macho_builder as mb
+
+        return mb.thin([mb.dylib_cmd(self.SBS)], filetype=mb.MH_DYLIB)
+
+    def _tweak_deb(self, tweaks: Path) -> None:
+        from .test_deb_control import _ar, _control_tar, _data_tar
+
+        tweaks.mkdir(parents=True, exist_ok=True)
+        (tweaks / "example.deb").write_bytes(_ar([
+            ("debian-binary", b"2.0\n"),
+            ("control.tar.gz", _control_tar()),
+            ("data.tar.gz", _data_tar(["./Library/MobileSubstrate/DynamicLibraries/Example.dylib"])),
+        ]))
+
+    def _built(self, tmp_path: Path, *, recorded: bool) -> tuple[SimpleNamespace, Path]:
+        from graft_ipa.build_log import BuildLog
+
+        cfg = _cfg(tmp_path / "cache", tmp_path / "built")
+        (tmp_path / "cache").mkdir(parents=True, exist_ok=True)
+        archive = _ipa(cfg.built_dir, frameworks={"Example.dylib": self._needy()},
+                       name="com.example.app_1.0_20261125T000000.ipa")
+        self._tweak_deb(cfg.tweaks_dir)
+        if recorded:
+            BuildLog(cfg.state_dir / "log.sqlite").record(
+                app="example", bundle_id="com.example.app", version="1.0", tweaks=["example.deb"],
+                ipa_path=archive, signing_team=None, udid=None, success=True, target="mac",
+            )
+        return cfg, archive
+
+    def test_a_tweak_needing_a_framework_macos_lacks_is_refused_before_the_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from graft_ipa.errors import GraftError
+
+        monkeypatch.setattr(cli_mod, "_handoff_root", lambda: tmp_path)
+        cfg, archive = self._built(tmp_path, recorded=True)
+        with patch.object(cli_mod.subprocess, "run") as run:
+            with pytest.raises(GraftError) as e:
+                cli_mod._do_install_to_mac(cfg, filename=archive.name, emitter=None)
+        run.assert_not_called()
+        assert e.value.message.startswith(
+            "example.deb needs iOS's SpringBoardServices, which macOS doesn't have, so it "
+            "can't run under PlayCover."
         )
-    monkeypatch.setattr(cli_mod, "PLAYCOVER_SETTINGS_DIR", settings)
+        assert not list(tmp_path.glob("graft-playcover-*")), "the copy nobody was handed is gone"
 
-    buf = StringIO()
-    with patch.object(cli_mod.subprocess, "run") as run:
-        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
-        cli_mod._do_install_to_mac(
-            _cfg(cache), filename=path.name, emitter=JsonEmitter(stream=buf)
-        )
+    def test_a_check_that_breaks_is_grafts_own_error_and_leaves_no_copy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from xml.parsers.expat import ExpatError
 
-    with plist.open("rb") as fh:
-        after = plistlib.load(fh)
-    assert after["playChain"] is False
-    assert after["keymapping"] is False
-    assert after["windowWidth"] == 1470, "PlayCover's other settings survive"
+        from graft_ipa import playcover
+        from graft_ipa.errors import GraftError
 
-    event = _events(buf.getvalue())[0]
-    assert "playChain" in event["settings_disabled"]
-    assert "keymapping" in event["settings_disabled"]
+        monkeypatch.setattr(cli_mod, "_handoff_root", lambda: tmp_path)
+        monkeypatch.setattr(playcover, "check_ipa", lambda *_a: (_ for _ in ()).throw(ExpatError("no element found")))
+        cfg, archive = self._built(tmp_path, recorded=True)
+        with patch.object(cli_mod.subprocess, "run") as run:
+            with pytest.raises(GraftError) as e:
+                cli_mod._do_install_to_mac(cfg, filename=archive.name, emitter=None)
+        run.assert_not_called()
+        assert e.value.message.startswith(f"couldn't check {archive.name} for PlayCover")
+        assert not list(tmp_path.glob("graft-playcover-*")), "nobody was handed the copy"
 
+    def test_an_archive_whose_tweaks_cant_be_told_only_warns(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No build row names it, so which files a tweak added can't be told."""
+        monkeypatch.setattr(cli_mod, "_handoff_root", lambda: tmp_path)
+        cfg, archive = self._built(tmp_path, recorded=False)
+        buf = StringIO()
+        with patch.object(cli_mod.subprocess, "run") as run:
+            run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+            cli_mod._do_install_to_mac(cfg, filename=archive.name, emitter=JsonEmitter(stream=buf))
+        run.assert_called_once()
+        events = _events(buf.getvalue())
+        assert events[0] == {
+            "type": "log", "source": "warning",
+            "line": "Example.dylib in the app needs iOS's SpringBoardServices, which macOS "
+                    "doesn't have, so the app may not run under PlayCover.",
+        }
+        assert events[1]["type"] == "handed-to-playcover"
 
-def test_a_handoff_still_succeeds_when_playcover_never_writes_settings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The settings step is a courtesy, never a precondition.
-
-    PlayCover's container layout is undocumented and can move; the design doc's
-    §6 refused to depend on it at all. Depending on it *softly* is the reversal
-    recorded there, and this is the case that keeps it soft: a missing file
-    leaves the handoff true, because the handoff was true.
-    """
-    cache = tmp_path / "cache"
-    path = _ipa(cache)
-    settings = tmp_path / "App Settings"
-    settings.mkdir()  # exists, but PlayCover writes nothing into it
-    monkeypatch.setattr(cli_mod, "PLAYCOVER_SETTINGS_DIR", settings)
-    monkeypatch.setattr(cli_mod, "_tame_playcover_settings", lambda _bid, **_k: None)
-
-    buf = StringIO()
-    with patch.object(cli_mod.subprocess, "run") as run:
-        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
-        cli_mod._do_install_to_mac(
-            _cfg(cache), filename=path.name, emitter=JsonEmitter(stream=buf)
-        )
-    event = _events(buf.getvalue())[0]
-    assert event["type"] == "handed-to-playcover"
-    assert "settings_disabled" not in event, "absent, not empty or false"
-
-
-def test_a_settings_file_it_cannot_read_never_fails_the_handoff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The "never fatal" promise, which is the whole basis for depending on
-    PlayCover's container at all.
-
-    Pins it against a *corrupt* file rather than a missing one: the missing
-    case returns early and would pass with no exception handling whatsoever.
-    Found by mutation — deleting the handler entirely breaks this case and
-    nothing else.
-
-    Note the mutation that *looks* right here is not: narrowing the handler to
-    `except ValueError` changes nothing, because `plistlib.InvalidFile
-    Exception` subclasses `ValueError`. That reads as a surviving mutation and
-    is really a no-op, which is its own small trap — check what an exception
-    actually inherits before concluding a handler is untested.
-    """
-    cache = tmp_path / "cache"
-    path = _ipa(cache)
-    settings = tmp_path / "App Settings"
-    settings.mkdir()
-    (settings / "com.example.app.plist").write_bytes(b"this is not a plist")
-    monkeypatch.setattr(cli_mod, "PLAYCOVER_SETTINGS_DIR", settings)
-
-    buf = StringIO()
-    with patch.object(cli_mod.subprocess, "run") as run:
-        run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
-        cli_mod._do_install_to_mac(
-            _cfg(cache), filename=path.name, emitter=JsonEmitter(stream=buf)
-        )
-
-    event = _events(buf.getvalue())[0]
-    assert event["type"] == "handed-to-playcover", "the handoff still happened"
-    assert "settings_disabled" not in event, "and does not claim otherwise"
+    def test_a_staged_dump_only_warns(self, tmp_path: Path) -> None:
+        cache = tmp_path / "cache"
+        staged = _ipa(cache, frameworks={"libAppOwn.dylib": self._needy()})
+        buf = StringIO()
+        with patch.object(cli_mod.subprocess, "run") as run:
+            run.return_value = SimpleNamespace(returncode=0, stdout="", stderr="")
+            cli_mod._do_install_to_mac(_cfg(cache), filename=staged.name, emitter=JsonEmitter(stream=buf))
+        assert [e["type"] for e in _events(buf.getvalue())][:2] == ["log", "handed-to-playcover"]
 
 
 class TestReachingABuiltIPA:
@@ -407,8 +707,7 @@ class TestReachingABuiltIPA:
                 during(Path(argv[-1]))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-        with patch.object(cli_mod, "PLAYCOVER_SETTINGS_DIR", tmp_path / "no-playcover"), \
-                patch.object(cli_mod.subprocess, "run", side_effect=opened) as run:
+        with patch.object(cli_mod.subprocess, "run", side_effect=opened) as run:
             cli_mod._do_install_to_mac(
                 _cfg(cache, path.parent), filename=path.name, emitter=None
             )

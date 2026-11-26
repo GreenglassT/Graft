@@ -12,9 +12,27 @@ that guest apps keep their logins.
 
 A device's pane has a LiveContainer section. It lists what is installed and
 who manages it, on either account.
-- **Install / Update LiveContainer** and **Put certificate on device** are
-  paid only. With a free Apple ID they're disabled, and the section points you
-  at the store that installed LiveContainer.
+- **Set Up LiveContainer…** does the whole setup in one sheet. With a paid
+  account, its **Set Up** button checks the device against your developer
+  account (reading the registered devices again if the device is new to
+  them), installs LiveContainer from its own GitHub releases, and puts the
+  certificate on the device. It stops at a step that fails and says what's
+  left. After a failed certificate step, Set Up again puts the certificate on
+  without installing again. **Install / Update LiveContainer** and **Put
+  certificate on device** are in the sheet too, one step at a time. While a
+  step runs, the sheet stays open until it ends or you press **Stop**.
+- The sheet then lists the steps on the device, naming it: Import Certificate
+  in LiveContainer's Settings, JIT-Less Diagnose, import your apps, and
+  Convert to Shared App. LiveContainer asks for your .p12's password on the
+  device; Graft can't type it for you. Selecting **I imported the
+  certificate** takes the certificate off the device at once.
+- With a free Apple ID, the sheet has no Set Up button: it links to SideStore
+  and iloader, which install LiveContainer with your Apple ID, and lists the
+  same steps on the device.
+- Where SideStore or AltStore is on the device, Set Up is disabled, and the
+  sheet's first step is Import Certificate from SideStore.
+- While a certificate Graft put on the device is still there, the section
+  says so, with **Remove it**.
 - **Clean up** is there whenever the device has a LiveContainer, whoever
   installed it.
 
@@ -72,8 +90,9 @@ signed through them. Update through AltStore or SideStore instead.
 
 **Put certificate on device** is for a LiveContainer Graft installed: it has
 no AltStore to take a certificate from, and its JIT-less mode needs one.
-Import it in LiveContainer's Settings, then remove it with **Remove
-certificate**. Until then the certificate sits where guest apps can read it.
+Import it in LiveContainer's Settings, then select **I imported the
+certificate** in the sheet, or press **Remove it** on the device's pane.
+Until then the certificate sits where guest apps can read it.
 
 ## Files in LiveContainer's Documents
 

@@ -38,6 +38,12 @@ enum DateHelpers {
         return relative.localizedString(for: date, relativeTo: now)
     }
 
+    /// A CLI-emitted timestamp as a reader sees it: the local date and time
+    /// (`mediumDateShortTime`), or the text as it came when it won't parse.
+    static func readable(_ raw: String) -> String {
+        parseISO8601(raw).map(mediumDateShortTime.string(from:)) ?? raw
+    }
+
     /// Parse a CLI-emitted ISO 8601 timestamp. Tries the fractional-seconds
     /// variant first (what `datetime.now(timezone.utc).isoformat()` produces),
     /// then falls back to the default format for safety.

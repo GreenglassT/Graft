@@ -189,11 +189,13 @@ final class PaidOnlyGateTests: XCTestCase {
 
     /// The usual free setup — SideStore installed LiveContainer — got no
     /// Clean up and no checklist: both sat behind "not AltStore-managed".
-    func test_a_free_account_on_a_sidestore_phone_gets_the_checklist_and_clean_up() throws {
+    /// Its device steps are in the Set Up sheet now, which a free Apple ID is
+    /// offered there: they're the steps a SideStore phone takes anyway.
+    func test_a_free_account_on_a_sidestore_phone_gets_set_up_and_clean_up() throws {
         let blocks = DeviceLiveContainerSection.blocks(
             for: try lcStatus("altstore", roles: ["primary"]), account: .free
         )
-        XCTAssertEqual(blocks, [.altStoreNotice, .freeChecklist])
+        XCTAssertEqual(blocks, [.altStoreNotice, .setUp, .cleanUp])
     }
 
     /// Nor did a phone with only LiveContainer2, or only the bare upstream
@@ -203,12 +205,13 @@ final class PaidOnlyGateTests: XCTestCase {
             let blocks = DeviceLiveContainerSection.blocks(
                 for: try lcStatus("unknown", roles: roles), account: .free
             )
-            XCTAssertEqual(blocks, [.freeNotes, .installControls, .freeChecklist], "\(roles)")
+            XCTAssertEqual(blocks, [.freeNotes, .setUp, .cleanUp], "\(roles)")
         }
     }
 
     /// Clean up works on either account, so a paid account's phone with a
-    /// LiveContainer and no checklist still has it.
+    /// LiveContainer has it, AltStore's included. Set Up isn't offered over
+    /// AltStore's copies, which the CLI won't replace.
     func test_a_paid_account_gets_clean_up_wherever_a_livecontainer_is_installed() throws {
         XCTAssertEqual(
             DeviceLiveContainerSection.blocks(for: try lcStatus("altstore", roles: ["primary"]), account: .paid),
@@ -216,27 +219,33 @@ final class PaidOnlyGateTests: XCTestCase {
         )
         XCTAssertEqual(
             DeviceLiveContainerSection.blocks(for: try lcStatus("unknown", roles: ["2"]), account: .paid),
-            [.installControls, .cleanUp]
+            [.setUp, .cleanUp]
         )
         XCTAssertEqual(
             DeviceLiveContainerSection.blocks(for: try lcStatus("unknown", roles: ["primary"]), account: .paid),
-            [.installControls, .checklist], "the paid checklist carries its own Clean up"
+            [.setUp, .cleanUp]
         )
     }
 
-    /// Nothing to clean, nothing offered.
+    /// Nothing to clean, so nothing but the way to set it up. A paid
+    /// account's phone with SideStore and no LiveContainer gets no Set Up
+    /// either: `--lc-install` refuses wherever SideStore or AltStore is.
     func test_no_livecontainer_offers_no_clean_up() throws {
         XCTAssertEqual(
             DeviceLiveContainerSection.blocks(for: try lcStatus("altstore", roles: []), account: .free),
+            [.altStoreNotice, .setUp]
+        )
+        XCTAssertEqual(
+            DeviceLiveContainerSection.blocks(for: try lcStatus("altstore", roles: []), account: .paid),
             [.altStoreNotice]
         )
         XCTAssertEqual(
             DeviceLiveContainerSection.blocks(for: try lcStatus("unknown", roles: []), account: .free),
-            [.freeNotes, .installControls]
+            [.freeNotes, .setUp]
         )
         XCTAssertEqual(
             DeviceLiveContainerSection.blocks(for: try lcStatus("unknown", roles: []), account: .paid),
-            [.installControls]
+            [.setUp]
         )
     }
 }
@@ -400,7 +409,7 @@ final class FreeAccountViewTests: XCTestCase {
 
     private func lcSection(
         account: AccountMode, managedBy: String = "unknown",
-        instance: (id: String, role: String) = ("com.kdt.livecontainer.ABCDE12345", "primary")
+        instance: (id: String, role: String)? = ("com.kdt.livecontainer.ABCDE12345", "primary")
     ) async throws -> [AccessibilityTree.Node] {
         try AccessibilityTree.requireServed()
         let device = #"{"type":"device","udid":"\#(Self.udid)","name":"Example Phone","model":"iPhone16,1","ios_version":"26.1","connection_type":"USB","livecontainer_bundle_id":"com.kdt.livecontainer.ABCDE12345","is_default":true}"#
@@ -408,8 +417,12 @@ final class FreeAccountViewTests: XCTestCase {
             throw XCTSkip("device fixture did not decode")
         }
         // By default installed outside Graft, no store on the device: the case
-        // where a paid account gets Install / Update and the checklist.
-        let status = #"{"type":"lc-status","udid":"\#(Self.udid)","reachable":true,"instances":[{"bundle_id":"\#(instance.id)","version":"3.8.14","role":"\#(instance.role)","wildcard_signed":false}],"managed_by":"\#(managedBy)","latest":{"version":"3.8.14","channel":"nightly"},"update_available":false,"sources":{"nightly":"https://example.invalid/source.json"}}"#
+        // where a paid account gets Install / Update and the checklist. A nil
+        // `instance` is a device with no LiveContainer on it.
+        let instances = instance.map {
+            #"[{"bundle_id":"\#($0.id)","version":"3.8.14","role":"\#($0.role)","wildcard_signed":false}]"#
+        } ?? "[]"
+        let status = #"{"type":"lc-status","udid":"\#(Self.udid)","reachable":true,"instances":\#(instances),"managed_by":"\#(managedBy)","latest":{"version":"3.8.14","channel":"nightly"},"update_available":false,"sources":{"nightly":"https://example.invalid/source.json"}}"#
         let script = NSTemporaryDirectory() + "free_lc_status_\(UUID().uuidString).sh"
         try "#!/bin/sh\nprintf '%s\\n' '\(status)'\n"
             .write(toFile: script, atomically: true, encoding: .utf8)
@@ -425,19 +438,17 @@ final class FreeAccountViewTests: XCTestCase {
         return try AccessibilityTree.nodes(in: box.window)
     }
 
-    func test_the_livecontainer_section_is_read_only_on_a_free_account() async throws {
+    /// The install and certificate buttons are in the Set Up sheet now,
+    /// whose free variant has neither (`LiveContainerSetUpTests`).
+    func test_the_livecontainer_section_on_a_free_account_lists_and_offers_set_up() async throws {
         let nodes = try await lcSection(account: .free)
-        let install = try XCTUnwrap(button("Install / Update LiveContainer", in: nodes),
-                                    "shown, not hidden")
-        XCTAssertEqual(install.enabled, false)
-        XCTAssertEqual(install.help, PaidOnly.installLiveContainer)
-        let push = try XCTUnwrap(button("Put certificate on device", in: nodes))
-        XCTAssertEqual(push.enabled, false)
-        XCTAssertEqual(push.help, PaidOnly.pushCertificate)
+        XCTAssertNil(button("Install / Update LiveContainer", in: nodes), "it's in the Set Up sheet")
+        XCTAssertNil(button("Put certificate on device", in: nodes))
+        let setUp = try XCTUnwrap(button(DeviceLiveContainerSection.setUpLabel, in: nodes), "\(texts(nodes))")
+        XCTAssertNotEqual(setUp.enabled, false, "a free Apple ID's sheet is its steps")
         XCTAssertNotEqual(button("Clean up", in: nodes)?.enabled, false, "works on either account")
         let shown = texts(nodes)
         XCTAssertTrue(shown.contains("LiveContainer 3.8.14"), "what is installed is listed: \(shown)")
-        XCTAssertTrue(shown.contains(PaidOnly.installLiveContainer))
         XCTAssertTrue(shown.contains { $0.contains("Update LiveContainer in the one that installed it") })
     }
 
@@ -449,9 +460,30 @@ final class FreeAccountViewTests: XCTestCase {
         let clean = try XCTUnwrap(button("Clean up", in: nodes), "\(texts(nodes))")
         XCTAssertNotEqual(clean.enabled, false)
         let shown = texts(nodes)
-        XCTAssertTrue(shown.contains("Managed by SideStore or AltStore — update it there"), "\(shown)")
-        XCTAssertTrue(shown.contains { $0.hasPrefix("Settings › Import Certificate from SideStore") },
-                      "\(shown)")
+        XCTAssertTrue(shown.contains(Self.storeHeadline), "\(shown)")
+        XCTAssertNotNil(button(DeviceLiveContainerSection.setUpLabel, in: nodes),
+                        "its device steps, SideStore's certificate first, are in the sheet: \(shown)")
+    }
+
+    /// What the device section says where SideStore or AltStore is on the
+    /// device: the Set Up sheet's meaning (`SetUpLiveContainerSheet.altStoreNote`).
+    private static let storeHeadline =
+        "SideStore or AltStore is on this device: install or update LiveContainer with it."
+
+    /// `managed_by: altstore` means the store is on the device, LiveContainer
+    /// or not. With none installed, the notice said "Managed by SideStore or
+    /// AltStore — update it there": nothing was there to manage or update.
+    func test_a_store_phone_without_livecontainer_says_to_install_it_with_the_store() async throws {
+        for account in [AccountMode.paid, .free] {
+            let nodes = try await lcSection(account: account, managedBy: "altstore", instance: nil)
+            let shown = texts(nodes)
+            XCTAssertTrue(shown.contains("Not installed."), "\(account): \(shown)")
+            XCTAssertTrue(shown.contains(Self.storeHeadline), "\(account): \(shown)")
+            XCTAssertTrue(shown.contains("Add this source there, then install or update LiveContainer from it:"),
+                          "\(account): \(shown)")
+            XCTAssertFalse(shown.contains { $0.contains("Managed by") || $0.contains("update it there") },
+                           "\(account): \(shown)")
+        }
     }
 
     /// And a phone whose only LiveContainer is LiveContainer2.
@@ -462,11 +494,12 @@ final class FreeAccountViewTests: XCTestCase {
         XCTAssertNotEqual(try XCTUnwrap(button("Clean up", in: nodes)).enabled, false)
     }
 
-    func test_the_livecontainer_section_installs_on_a_paid_account() async throws {
+    func test_the_livecontainer_section_sets_up_on_a_paid_account() async throws {
         let nodes = try await lcSection(account: .paid)
-        XCTAssertNotEqual(button("Install / Update LiveContainer", in: nodes)?.enabled, false)
-        XCTAssertNotEqual(button("Put certificate on device", in: nodes)?.enabled, false)
-        XCTAssertNotNil(button("Put certificate on device", in: nodes))
+        let setUp = try XCTUnwrap(button(DeviceLiveContainerSection.setUpLabel, in: nodes), "\(texts(nodes))")
+        XCTAssertNotEqual(setUp.enabled, false)
+        XCTAssertNil(button("Install / Update LiveContainer", in: nodes), "it's in the Set Up sheet")
+        XCTAssertNil(button("Remove certificate", in: nodes), "the sheet's tick, or the reminder's Remove it")
         XCTAssertFalse(texts(nodes).contains(PaidOnly.installLiveContainer))
     }
 

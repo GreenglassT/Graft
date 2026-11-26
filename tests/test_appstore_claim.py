@@ -370,3 +370,37 @@ def test_the_account_changed_word_is_the_one_the_app_reads() -> None:
     )
     assert match, "CLIContract.AppStoreRefusal.accountChanged is gone"
     assert match.group(1) == appstore.REFUSED_ACCOUNT_CHANGED
+
+
+def test_a_successful_claim_forgets_a_version_the_apple_id_was_refused(
+    config: Path, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Apple ID has the app now: `--update` offers its gets again
+    (`update_refusals`), as after a successful get."""
+    from graft_ipa import update_refusals
+    from graft_ipa.config import load_config
+
+    _listing(monkeypatch, 0.0, "Free")
+    cfg = load_config(config)
+    update_refusals.remember(cfg.state_dir, cfg.get_app("example"), "2026.47.0")
+
+    result = _run(["--json", "--appstore-claim", "--app", "example"])
+
+    assert result.exit_code == 0, result.output
+    assert update_refusals.refused_version(cfg.state_dir, cfg.get_app("example")) is None
+
+
+def test_a_refused_claim_keeps_it(
+    config: Path, fakes: FakeTools, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from graft_ipa import update_refusals
+    from graft_ipa.config import load_config
+
+    _listing(monkeypatch, 2.99, "$2.99")
+    cfg = load_config(config)
+    update_refusals.remember(cfg.state_dir, cfg.get_app("example"), "2026.47.0")
+
+    result = _run(["--json", "--appstore-claim", "--app", "example"])
+
+    assert result.exit_code == 20
+    assert update_refusals.refused_version(cfg.state_dir, cfg.get_app("example")) == "2026.47.0"

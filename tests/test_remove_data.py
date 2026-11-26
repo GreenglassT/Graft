@@ -150,6 +150,18 @@ def test_graft_folders_are_listed_with_their_sizes(security: FakeSecurity) -> No
         assert item.present and item.default and item.removable
 
 
+def test_the_state_item_names_what_updates_and_playcover_remember(security: FakeSecurity) -> None:
+    """Final review 3 #6: the refusal memory, the dropped devices and the
+    PlayCover settings memory live in the state folder too
+    (`update_refusals`, `update_drops`, `playcover_handoff`)."""
+    detail = _item(_survey(), "state").detail
+
+    assert detail.endswith(
+        "the names of the iPhones and iPads Graft has seen, the PlayCover settings it keeps for "
+        "your apps, which devices you stopped updating an app on, and which App Store versions "
+        "your Apple ID was refused.")
+
+
 def test_the_rename_links_go_with_their_folders(security: FakeSecurity) -> None:
     folder = _write(data_dirs.cache_dir() / "f", 1).parent
     link = data_dirs.xdg_cache_home() / data_dirs.LEGACY_DIRNAME

@@ -88,8 +88,9 @@ with an app installed under the new one.
 
 On the app's pane, **Get latest from App Store** downloads, decrypts and
 stages the App Store's latest version. **Stop** cancels it and deletes the
-download. If that version is already staged, nothing is downloaded and the
-pane says "Already have <version>". The button then reads **Get Again**,
+download. If that version is already staged, by Get latest, a drop or a dump,
+nothing is downloaded and the pane says "Already have <version>" (a copy from
+Get an older version doesn't count). The button then reads **Get Again**,
 which asks first, then downloads, decrypts and stages it again.
 
 - If your Apple ID doesn't have the app yet and it's free, the button becomes
@@ -122,11 +123,26 @@ version set in Edit App is a hold too; Get latest sets it back to latest.
   number. Graft numbers them from the oldest, so "1.2.0 (build 1 of 2)" is the
   older and "1.2.0 (build 2 of 2)" the newer, and hovering over one says which
   it is. Show More renumbers them when it finds an older one.
+- Getting one of those builds holds the app at that build: the pane says
+  "Held at 1.2.0 (build 1 of 2)", and builds use that build even when the other
+  is staged too. A version typed in Edit App holds by number only: changing
+  the preferred version there lets go of the build, and saving Edit App with
+  it unchanged keeps it. In Terminal, `graft --set-app-options --app <name>
+  --preferred-version <version>` holds that version by number.
+- Dropping an IPA of the held version on the app, or decrypting it from a
+  jailbroken device, holds the app at that version by number, with a warning:
+  Graft can't tell which build an IPA it didn't download is, so builds use the
+  one you gave it.
 - If the connection stalls, the list stops, and Try Again picks up where it
   stopped. A version that stalls twice in a row is marked as unavailable, and
   the list goes on.
 - Some apps refuse to run once they're too old, and ask you to update.
-- A version that's already staged is held without downloading it again.
+- A version that's already staged is held without downloading it again,
+  unless another build shares its number: a staged copy could be either, so
+  Graft downloads the build you picked. Graft counts only the builds it has
+  read: one with the same number further down, past Show More, isn't counted
+  yet, and the staged copy is held by number. Show More first if you think
+  there's another.
 - An old version may be one UnfairPlay can't verify (see
   [Decrypts UnfairPlay can't verify](#decrypts-unfairplay-cant-verify)).
 

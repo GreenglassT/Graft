@@ -431,3 +431,24 @@ def test_a_database_from_before_lc_installs_gains_the_table(tmp_path: Path) -> N
     log.record_lc_install(udid="ipad", bundle_id="b", version="1", channel=None, ipa_sha256=None)
 
     assert log.lc_installed_bundle_ids("ipad") == {"b"}
+
+
+def test_tweaks_of_an_archive_are_its_newest_successful_rows(tmp_path):
+    """`--install-to-mac` tells a tweak's binaries from the app's own by
+    the tweaks the archive was built with (spec 5d item 7)."""
+    log = BuildLog(tmp_path / "log.sqlite")
+    archive = tmp_path / "built" / "example_1.0_20261125T000000.ipa"
+    common = dict(app="example", bundle_id="com.example.app", version="1.0",
+                  signing_team=None, udid=None, target="mac")
+    log.record(tweaks=["a.deb", "b.dylib"], ipa_path=archive, success=True, **common)
+    log.record(tweaks=[], ipa_path=tmp_path / "other.ipa", success=True, **common)
+    assert log.tweaks_of(archive) == ["a.deb", "b.dylib"]
+    assert log.tweaks_of(tmp_path / "nowhere.ipa") is None
+
+
+def test_an_archive_built_with_no_tweaks_has_an_empty_list_not_none(tmp_path):
+    log = BuildLog(tmp_path / "log.sqlite")
+    archive = tmp_path / "x.ipa"
+    log.record(app="example", bundle_id="b", version="1", tweaks=[], ipa_path=archive,
+               signing_team=None, udid=None, success=True)
+    assert log.tweaks_of(archive) == []

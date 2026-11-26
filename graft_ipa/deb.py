@@ -21,6 +21,7 @@ an exception.
 from __future__ import annotations
 
 import io
+import os
 import tarfile
 from pathlib import Path
 from typing import Any
@@ -173,3 +174,98 @@ def control_fields(path: Path) -> dict[str, Any]:
         "author": package.author,
     }
     return {key: value for key, value in fields.items() if value}
+
+
+#: More entries than any tweak installs: a few hundred at most. A data member
+#: past this is read as "can't tell", not listed in part.
+_MAX_DATA_ENTRIES = 100_000
+
+
+def _zstd():
+    """A zstd module with `open` and `compress`: the standard library's from
+    Python 3.14, else `backports.zstd` when installed, else None."""
+    try:
+        from compression import zstd  # type: ignore[import-not-found]
+        return zstd
+    except ImportError:
+        pass
+    try:
+        from backports import zstd  # type: ignore[import-not-found,no-redef]
+        return zstd
+    except ImportError:
+        return None
+
+
+class _Window(io.RawIOBase):
+    """`size` bytes of `handle` from where it stands, read without loading
+    them: a data member is the whole tweak."""
+
+    def __init__(self, handle, size: int) -> None:
+        self._handle = handle
+        self._left = size
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        if self._left <= 0:
+            return 0
+        chunk = self._handle.read(min(len(buffer), self._left))
+        buffer[: len(chunk)] = chunk
+        self._left -= len(chunk)
+        return len(chunk)
+
+
+def data_names(path: Path) -> list[str] | None:
+    """The files a .deb installs, from its `data.tar.*`, as relative paths
+    without `./`; directories and links are left out.
+
+    None when it can't be read: not a .deb, no data member, a truncated one,
+    or a compression this Python lacks (zstd before 3.14 without
+    `backports.zstd`). Never `[]` for those: an empty list says the .deb
+    brings no files, and PlayCover's framework check would then take a
+    tweak's binaries for the app's own.
+    """
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return None
+    with handle:
+        try:
+            end = os.fstat(handle.fileno()).st_size
+            if handle.read(len(_AR_MAGIC)) != _AR_MAGIC:
+                return None
+            while True:
+                header = handle.read(_AR_HEADER)
+                if len(header) < _AR_HEADER or header[58:60] != b"`\n":
+                    return None
+                name = header[0:16].decode("ascii", "replace").strip().rstrip("/")
+                size = int(header[48:58].decode("ascii", "replace").strip())
+                start = handle.tell()
+                if size < 0 or start + size > end:
+                    return None
+                if name.startswith("data.tar"):
+                    return _tar_names(_Window(handle, size), name)
+                handle.seek(start + size + (size % 2))
+        except Exception:
+            return None
+
+
+def _tar_names(raw: io.RawIOBase, member: str) -> list[str] | None:
+    stream = io.BufferedReader(raw)
+    if member.endswith(".zst"):
+        zstd = _zstd()
+        if zstd is None:
+            return None
+        stream = zstd.open(stream, "rb")
+        mode = "r|"
+    else:
+        mode = "r|*"
+    names: list[str] = []
+    with tarfile.open(fileobj=stream, mode=mode) as tar:
+        for count, entry in enumerate(tar):
+            if count >= _MAX_DATA_ENTRIES:
+                return None
+            if entry.isfile():
+                names.append(_strip_leading_dot_slash(entry.name))
+    return names

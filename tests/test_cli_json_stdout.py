@@ -91,7 +91,7 @@ def test_every_stdout_line_of_a_json_build_is_json(
          patch.object(cli_mod, "acquire_ipa") as acquire, \
          patch.object(cli_mod, "run_cyan", side_effect=cyan), \
          patch.object(cli_mod, "run_zsign", side_effect=zsign), \
-         patch.object(cli_mod, "select_device", return_value=("UDID1", "USB")), \
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("UDID1", None, "USB")), \
          patch.object(cli_mod, "install",
                       return_value=InstallResult(udid="UDID1", stdout="Install: Complete",
                                                  stderr="")), \
@@ -206,13 +206,18 @@ def test_every_stdout_line_of_a_json_install_to_mac_is_json(
         return real_run(argv, *args, **kwargs)
 
     monkeypatch.setattr(cli_mod.subprocess, "run", run)
-    monkeypatch.setattr(cli_mod, "_tame_playcover_settings", lambda *_a, **_k: None)
+    # No waiting for an install a stubbed `open` never starts.
+    from graft_ipa import playcover_handoff
+    monkeypatch.setattr(playcover_handoff, "INSTALL_WAIT_S", 0)
+    monkeypatch.setattr(playcover_handoff, "SETTINGS_WAIT_S", 0)
 
     result = CliRunner().invoke(cli_mod.app, ["--json", "--install-to-mac", ipa.name])
 
     assert result.exit_code == 0, result.output
     events = _assert_only_json(result.stdout)
-    assert events[-1]["type"] == "handed-to-playcover"
+    assert [e["type"] for e in events][-2:] == [
+        "handed-to-playcover", "playcover-install-unconfirmed",
+    ]
     # The narration is still said, where a person at a terminal reads it.
     assert "removing Apple ID data from" in result.stderr
 

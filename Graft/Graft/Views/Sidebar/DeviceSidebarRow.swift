@@ -185,5 +185,6 @@ struct UndescribableDeviceRow: View {
         .buttonStyle(.plain)
         .disabled(isRetrying)
         .help("Read this device again — unlock it and tap 'Trust this Computer' first.")
+        .accessibilityLabel("Read this device again")
     }
 }

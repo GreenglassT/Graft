@@ -744,3 +744,27 @@ def test_the_negated_table_covers_every_pair_main_declares() -> None:
         if "/" in decl
     }
     assert declared and declared == set(cli_mod._NEGATED_FLAGS)
+
+
+def test_update_is_a_verb_below_the_gate_that_takes_app_names() -> None:
+    gate = next(i for i, s in enumerate(_VERBS) if isinstance(s, _StrayFlagGate))
+    (index, verb), = [(i, v) for i, v in enumerate(_VERBS) if isinstance(v, _Verb) and v.flag == "--update"]
+
+    assert index > gate
+    assert verb.accepts == {"--all", "--plan", "--quick", "--with-affected"}
+    params = inspect.signature(verb.run).parameters
+    assert "apps" in params and "json_mode" in params
+    assert "device" not in params and "dry_run" not in params
+
+
+def test_drop_update_target_is_a_verb_below_the_gate_that_reads_the_device() -> None:
+    """`--device` is gated per verb (`_ModifierGate` reads the handler), so it
+    must be a parameter here, and app names must not be."""
+    gate = next(i for i, s in enumerate(_VERBS) if isinstance(s, _StrayFlagGate))
+    (index, verb), = [(i, v) for i, v in enumerate(_VERBS)
+                      if isinstance(v, _Verb) and v.flag == "--drop-update-target"]
+
+    assert index > gate
+    params = inspect.signature(verb.run).parameters
+    assert "device" in params and "json_mode" in params
+    assert "apps" not in params and "dry_run" not in params

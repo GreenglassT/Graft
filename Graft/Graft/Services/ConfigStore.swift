@@ -6,6 +6,9 @@ private typealias Flag = CLIContract.Flag
 @MainActor
 final class ConfigStore: ObservableObject, CLIStore {
     @Published private(set) var apps: [AppRecord] = []
+    /// The app list has been read at least once: before then an empty
+    /// `apps` says nothing about what is configured.
+    @Published private(set) var hasLoadedApps = false
 
     /// Which account config.yaml is for, as the last `--list` reported it, or
     /// nil before one has landed and against a CLI too old to say.
@@ -82,6 +85,87 @@ final class ConfigStore: ObservableObject, CLIStore {
     /// cancel. The store is the one object both views already hold.
     @Published private(set) var buildingApp: String?
 
+    /// The apps a running update covers (`AppUpdatesStore`), or nil.
+    ///
+    /// The same slot a build holds (`busy`), so a build and an update never
+    /// overlap, a device check doesn't start during one, and the daily update
+    /// check waits for both.
+    @Published private(set) var updatingApps: [String]?
+
+    /// Claim the busy slot for an update of `apps`. False when it's taken.
+    func beginUpdate(apps: [String]) -> Bool {
+        guard busy == nil else { return false }
+        updatingApps = apps
+        return true
+    }
+
+    /// The running update's own plan covers more apps than it was started
+    /// for (`--with-affected`'s): the slot covers them too. Nothing when no
+    /// update holds it.
+    func widenUpdate(to apps: [String]) {
+        guard updatingApps != nil else { return }
+        updatingApps = apps
+    }
+
+    /// Give the slot back once the update has ended.
+    func endUpdate() {
+        updatingApps = nil
+    }
+
+    /// `app` is in the running update.
+    func isUpdating(_ app: String) -> Bool {
+        updatingApps?.contains(app) == true
+    }
+
+    /// The device picked for one app's next Build & Install, by app name (spec
+    /// §5b): the build-target bar's Change menu and Build options' Device
+    /// picker both set it, and Build & Install carries it as `--device`.
+    ///
+    /// Used up only when it's used (spec §11.5): an install starts (`lc-push`
+    /// or `install`) or the build succeeds, and the build that carried it
+    /// ends (`launchBuild`). A build that fails or is stopped before
+    /// installing keeps it, for the retry. A pick changed while the build ran
+    /// is the next build's, and stays. An update takes no pick: it installs
+    /// on each device the app is on. An Install Update offered after a
+    /// Re-install (spec §11.1) is a Build & Install that picks its device.
+    /// Not saved: Settings' default device is the lasting choice.
+    @Published private(set) var devicePicks: [String: String] = [:]
+
+    /// What each pick's device was called when it was picked, so the bar can
+    /// name it once it's unplugged and nothing else remembers it.
+    /// Unpublished: it changes only with `devicePicks` (`pickDevice` sets
+    /// both), whose publishing redraws everything that reads either.
+    private(set) var devicePickNames: [String: String] = [:]
+
+    /// The apps whose running build has used its pick: an install started,
+    /// or it succeeded (`note(_:forBuildOf:)`). Reset when a build launches.
+    /// Unpublished: bookkeeping for `settlePick`, which no view reads.
+    private var spentPicks: Set<String> = []
+
+    /// `app`'s pick for its next Build & Install, or nil.
+    func devicePick(for app: String) -> String? { devicePicks[app] }
+
+    /// What `app`'s picked device was called when it was picked, or nil.
+    func devicePickName(for app: String) -> String? {
+        devicePicks[app] == nil ? nil : devicePickNames[app]
+    }
+
+    /// Pick `udid` for `app`'s next Build & Install; nil or "" clears the
+    /// pick. `name` is what the device is called, when the picker knows.
+    func pickDevice(_ udid: String?, for app: String, name: String? = nil) {
+        let value = udid.flatMap { $0.isEmpty ? nil : $0 }
+        devicePickNames[app] = value == nil ? nil : name
+        guard devicePicks[app] != value else { return }
+        devicePicks[app] = value
+    }
+
+    /// The end of a build that carried `launchedWith`: the pick goes if the
+    /// build used it and it's still the one the build launched with.
+    private func settlePick(of app: String, launchedWith: String?) {
+        let used = spentPicks.remove(app) != nil
+        if used, devicePicks[app] == launchedWith { pickDevice(nil, for: app) }
+    }
+
     /// The stage the running build last announced starting, or nil between
     /// builds.
     ///
@@ -115,6 +199,10 @@ final class ConfigStore: ObservableObject, CLIStore {
     /// Unpublished on purpose: nothing renders the Task itself, and
     /// `buildingApp` already publishes the state the UI reads.
     private var buildTask: Task<Void, Never>?
+    /// The running build's hold on the quit, which a Mac build's PlayCover
+    /// wait renames (`noteWaitingForPlayCover`).
+    /// Unpublished: nothing draws it.
+    private var buildTicket: TerminationHold.Ticket?
 
     /// The app whose build the user asked to stop, until the next build claims
     /// the slot.
@@ -125,6 +213,11 @@ final class ConfigStore: ObservableObject, CLIStore {
     /// reading of that is "the build failed" — a red Retry and a failure card
     /// for something the user deliberately did a second ago.
     @Published private(set) var cancellingApp: String?
+
+    /// The building app whose build has handed over to PlayCover and is only
+    /// waiting for the install (`AppDetailView.handOffToPlayCover`), or nil.
+    /// Its Stop ends the wait, and the confirmation says so (`StopWords`).
+    @Published private(set) var waitingForPlayCover: String?
 
     /// What the running build has done to the phone so far — the single value
     /// both the confirmation and the post-mortem read. See `DeviceExposure`.
@@ -272,6 +365,7 @@ final class ConfigStore: ObservableObject, CLIStore {
     func endBuild(appName: String) {
         guard buildingApp == appName else { return }
         buildingApp = nil
+        waitingForPlayCover = nil
         buildStage = nil
         buildTask = nil
     }
@@ -294,26 +388,43 @@ final class ConfigStore: ObservableObject, CLIStore {
     /// first Task's handle on the floor: two `graft` processes signing
     /// and pushing the same app concurrently, with Stop able to reach only one
     /// of them.
+    ///
+    /// With `clearingDevicePick`, the app's device pick goes when the build's Task ends.
+    /// `reason` is what the quit question says is running; nil is a build's,
+    /// by `delivery` (`TerminationHold.reason(forBuild:)`).
     @discardableResult
     func launchBuild(
         appName: String,
         delivery: EffectiveDelivery,
+        clearingDevicePick: Bool = false,
+        reason: String? = nil,
         _ work: @escaping @MainActor () async -> Void
     ) -> Bool {
         guard busy == nil else { return false }
         // Set before `beginBuild`, which derives the run's device exposure from it.
         effectiveDelivery = delivery
         beginBuild(appName: appName)
+        spentPicks.remove(appName)
+        let launchedPick = devicePicks[appName]
         // macOS mustn't kill the app under a build: the CLI would be left
         // signing or installing with nobody reading it (`TerminationHold`).
         // Quit Anyway stops it as Stop does, while it is still this build.
         let hold = self.hold
+        let reason = reason ?? TerminationHold.reason(forBuild: delivery)
         buildTask = Task { @MainActor [weak self] in
-            let ticket = hold.begin(TerminationHold.building) { [weak self] in
+            let ticket = hold.begin(reason) { [weak self] in
                 guard let self, self.buildingApp == appName else { return }
                 self.cancelBuild(appName: appName)
             }
-            defer { hold.end(ticket) }
+            self?.buildTicket = ticket
+            defer {
+                if self?.buildTicket == ticket { self?.buildTicket = nil }
+                // The pick was for this build, and goes once used: an install
+                // started, or the build succeeded (`settlePick`).
+                // `BuildOptions.usesDevicePick` says which runs carry one.
+                if clearingDevicePick { self?.settlePick(of: appName, launchedWith: launchedPick) }
+                hold.end(ticket)
+            }
             await work()
         }
         return true
@@ -346,8 +457,8 @@ final class ConfigStore: ObservableObject, CLIStore {
             return
         }
         guard appName == nil || appName == buildingApp else {
-            lastError = "\(appName ?? "That app") isn't building any more. "
-                + "\(buildingApp) is building now, and was left alone."
+            lastError = "\(appName.map(shownName(of:)) ?? "That app") isn't building any more. "
+                + "\(shownName(of: buildingApp)) is building now, and was left alone."
             return
         }
         cancellingApp = buildingApp
@@ -382,9 +493,33 @@ final class ConfigStore: ObservableObject, CLIStore {
     /// does all of the same damage with no warning at all, and before there was
     /// a Stop button that was the only way to end a build.
     var cancelConsequence: String {
-        deviceExposure.cancelWarning + " graft stops and removes its temp files; "
+        if let waitingForPlayCover, waitingForPlayCover == buildingApp {
+            return Self.waitingConsequence
+        }
+        return deviceExposure.cancelWarning + " graft stops and removes its temp files; "
             + "they are left behind only if that takes longer than the "
             + "\(Int(cliStopGrace)) seconds it is given before it is killed."
+    }
+
+    /// What stopping costs once a Mac build is only waiting for PlayCover.
+    static let waitingConsequence = "PlayCover keeps the build and goes on installing it. "
+        + "Graft only stops waiting, so it won't say when the install is done."
+
+    /// The building app's handoff has started waiting for PlayCover's
+    /// install, or (nil) has stopped. Only the building app can be waiting.
+    ///
+    /// The quit question says so meanwhile, as Install to Mac…'s does:
+    /// "Quit while Graft is waiting for PlayCover to install an app?", not
+    /// "building an app" (review part 2, COPY).
+    func noteWaitingForPlayCover(_ appName: String?) {
+        guard let appName else {
+            waitingForPlayCover = nil
+            if let buildTicket { hold.relabel(buildTicket, as: nil) }
+            return
+        }
+        guard appName == buildingApp else { return }
+        waitingForPlayCover = appName
+        if let buildTicket { hold.relabel(buildTicket, as: TerminationHold.waitingForPlayCover) }
     }
 
     /// Record a build the user stopped.
@@ -463,12 +598,18 @@ final class ConfigStore: ObservableObject, CLIStore {
             } else if status == "end", buildStage == name {
                 buildStage = nil
             }
+            // An install started: the device pick has been used (`settlePick`).
+            if status == "start",
+               name == CLIContract.Stage.liveContainerPush || name == CLIContract.Stage.sideloadInstall {
+                spentPicks.insert(appName)
+            }
             // `buildStage` is only ever the raw label for "Stopped during cyan."
             // Everything about the *device* lives in one folded value, so the
             // warning and the aftermath cannot read different flags.
             deviceExposure = deviceExposure.advanced(stage: name, status: status)
         case let .finished(ok, error, elapsed):
             buildFailures[appName] = ok ? nil : (error ?? "failed")
+            if ok { spentPicks.insert(appName) }
             notify(appName, outcome(ok: ok, error: error, elapsed: elapsed, of: appName))
         case .stopped:
             // C-STOP: the CLI was stopped, and says so. A stop, whoever sent
@@ -567,10 +708,19 @@ final class ConfigStore: ObservableObject, CLIStore {
     /// no test could express the invariant because it wasn't there. Both
     /// claims now go through this, and the views read it instead of
     /// re-deriving it.
+    /// Each by the name the sidebar shows (`shownName(of:)`), since it's
+    /// what `Busy.explanation` says.
     var busy: Busy? {
-        if let buildingApp { return .building(buildingApp) }
-        if let checkingApp { return .checking(checkingApp) }
+        if let buildingApp { return .building(shownName(of: buildingApp)) }
+        if let checkingApp { return .checking(shownName(of: checkingApp)) }
+        if let updatingApps { return .updating(updatingApps.map(shownName(of:))) }
         return nil
+    }
+
+    /// The app named `appName` (config.yaml's key) as the sidebar shows it
+    /// (`AppRecord.shownName`), or `appName` for one not in the list.
+    func shownName(of appName: String) -> String {
+        apps.first { $0.name == appName }?.shownName ?? appName
     }
 
     /// Which exclusive operation holds the store, and for which app.
@@ -583,11 +733,14 @@ final class ConfigStore: ObservableObject, CLIStore {
     enum Busy: Equatable {
         case building(String)
         case checking(String)
+        /// A one-click Update of these apps (`AppUpdatesStore`).
+        case updating([String])
 
         var explanation: String {
             switch self {
             case let .building(app): return "\(app) is building — wait for it to finish"
             case .checking: return "Checking the device — wait for it to finish"
+            case .updating: return "Updating apps — wait for it to finish"
             }
         }
     }
@@ -623,6 +776,7 @@ final class ConfigStore: ObservableObject, CLIStore {
             if case let .app(record) = event { return record }
             return nil
         }.sorted { $0.name < $1.name }
+        hasLoadedApps = true
 
         // The join is across two spellings: the `app` event calls the config
         // key `name`, `delivery-state` calls it `app`. Both are pinned by
@@ -668,6 +822,14 @@ final class ConfigStore: ObservableObject, CLIStore {
         encryptedBinaries = encryptedBinaries.filter { live.contains($0.key) }
         buildFailures = buildFailures.filter { live.contains($0.key) }
         encryptedReportedThisBuild.formIntersection(live)
+        // And the device pick for an app's next build: re-added under the
+        // same key, the app's bar named the old app's device, and its first
+        // Build & Install went there (review 23-2, §11). Only when one goes,
+        // so a reload with nothing to drop doesn't publish.
+        if devicePicks.keys.contains(where: { !live.contains($0) }) {
+            devicePicks = devicePicks.filter { live.contains($0.key) }
+            devicePickNames = devicePickNames.filter { live.contains($0.key) }
+        }
 
         return apps
     }

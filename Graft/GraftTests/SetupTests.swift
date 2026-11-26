@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import XCTest
 @testable import Graft
@@ -1119,5 +1120,173 @@ final class ReturnRefreshTests: XCTestCase {
         gate.end(at: start + .milliseconds(300))
         XCTAssertFalse(gate.begin(at: start + .seconds(2)), "under two seconds since it ran")
         XCTAssertTrue(gate.begin(at: start + .milliseconds(2400)))
+    }
+}
+
+/// What the window loads in the background, unasked: the device list at
+/// launch, frontmost or not, and the Builds list after a build.
+@MainActor
+final class WindowBackgroundLoadTests: XCTestCase {
+    /// `controlActiveState` injected, as `AccountChangeOnReturnTests` does.
+    private struct Harness: View {
+        @ObservedObject var store: ConfigStore
+        let active: ControlActiveState
+        var body: some View {
+            ContentView(store: store, adminShell: NoAdminShell()).environment(\.controlActiveState, active)
+        }
+    }
+
+    private static let fullListing = "--json --devices"
+    private static let poll = "--json --devices --brief"
+    private static let buildsList = "--json --builds --builds-limit 50"
+
+    /// A `graft` with one app, one phone and one build, that logs each argv.
+    /// With `slowListing`, a full `--devices` takes a second, and writes
+    /// "start" and "end" to `listingMarks` around it.
+    private func fakeGraft(slowListing: Bool = false) throws -> ScriptCLI {
+        let app = #"{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":[],"display_name":"Example","delivery":"livecontainer","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}"#
+        let device = #"{"type":"device","udid":"00008030-0000000000000003","name":"Example iPhone","model":"iPhone14,2","ios_version":"16.3.1","connection_type":"USB","livecontainer_bundle_id":null,"is_default":false}"#
+        let brief = #"{"type":"device-brief","udid":"00008030-0000000000000003","connection_type":"USB"}"#
+        let end = #"{"type":"devices-end","count":1,"failed":0}"#
+        let build = #"{"type":"build-record","id":7,"timestamp":"2026-08-18T12:00:00Z","app":"example","bundle_id":"com.example.app","version":"1.0","tweaks":[],"ipa_path":null,"ipa_sha256":null,"log_path":null,"signing_team":null,"udid":null,"target":"device","success":true,"error":null}"#
+        let cli = try ScriptCLI("""
+        case " $* " in
+          *" --list "*) printf '%s\\n' '\(app)' ;;
+          *" --devices --brief "*) printf '%s\\n' '\(brief)' '\(end)' ;;
+          *" --devices "*) \(slowListing ? "echo start >> '\(listingMarks.path)'; /bin/sleep 1; " : "")printf '%s\\n' '\(device)' '\(end)'\(slowListing ? "; echo end >> '\(listingMarks.path)'" : "") ;;
+          *" --builds "*) printf '%s\\n' '\(build)' ;;
+        esac
+        exit 0
+        """, test: self)
+        // `ScriptCLI` keeps its script beside its log.
+        let script = cli.log.deletingLastPathComponent().appending(path: "graft.sh")
+        try warmUpFreshExecutable(script.path, arguments: ["--warm-up"])
+        try? FileManager.default.removeItem(at: cli.log)
+        return cli
+    }
+
+    /// Where a slow listing marks its start and end.
+    private lazy var listingMarks: URL = {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "listing_marks_\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        return dir.appending(path: "marks")
+    }()
+
+    private var marks: [String] {
+        ((try? String(contentsOf: listingMarks, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    private func runs(_ cli: ScriptCLI, of argv: String) -> Int {
+        cli.argv().filter { $0 == argv }.count
+    }
+
+    private func launch(_ cli: ScriptCLI, active: ControlActiveState) async -> (NSHostingView<Harness>, NSWindow, ConfigStore) {
+        let store = ConfigStore(runner: cli.runner, notify: { _ in })
+        let host = NSHostingView(rootView: Harness(store: store, active: active))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false
+        )
+        window.contentView = host
+        host.frame = NSRect(x: 0, y: 0, width: 1100, height: 760)
+        host.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        await eventually({ !store.apps.isEmpty }, timeout: 10, "premise: the launch read the app list")
+        return (host, window, store)
+    }
+
+    /// Launched behind another app, the window lists the phones once, and
+    /// polls only once it's in front. It said "Looking for devices…" until
+    /// then.
+    func test_a_window_behind_another_app_lists_the_devices_once_and_polls_only_in_front() async throws {
+        let cli = try fakeGraft()
+        let (host, window, store) = await launch(cli, active: .inactive)
+
+        await eventually({ self.runs(cli, of: Self.fullListing) == 1 }, timeout: 10,
+                         "the first listing never ran while the window was behind another app")
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        XCTAssertEqual(runs(cli, of: Self.poll), 0, "nobody is looking: no poll")
+        XCTAssertEqual(runs(cli, of: Self.fullListing), 1, "one listing, not one per tick")
+
+        // In front: the poll starts at once, and the listing isn't run again.
+        host.rootView = Harness(store: store, active: .key)
+        await eventually({ self.runs(cli, of: Self.poll) >= 1 }, timeout: 10, "the poll never started in front")
+        XCTAssertEqual(runs(cli, of: Self.fullListing), 1, "\(cli.argv())")
+        withExtendedLifetime(window) {}
+    }
+
+    /// The window switching to the front and back while the first listing
+    /// runs: still one listing, never two at once. Each switch restarts the
+    /// poll's task, and that task used to run a listing of its own, canceled
+    /// at the next switch and started again beside the first.
+    func test_switching_mid_listing_runs_one_listing() async throws {
+        let cli = try fakeGraft(slowListing: true)
+        let (host, window, store) = await launch(cli, active: .inactive)
+        await eventually({ self.marks == ["start"] }, timeout: 10, "premise: the listing started")
+        for active in [ControlActiveState.key, .inactive, .key, .inactive, .key] {
+            host.rootView = Harness(store: store, active: active)
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        await eventually({ self.marks.count >= 2 }, timeout: 10, "the listing never ended")
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(marks, ["start", "end"], "one listing, and none beside it")
+        XCTAssertEqual(runs(cli, of: Self.fullListing), 1, "\(cli.argv())")
+        await eventually({ self.runs(cli, of: Self.poll) >= 1 }, timeout: 10, "in front, the poll starts after it")
+        withExtendedLifetime(window) {}
+    }
+
+    /// The same, on the two tasks' own code: the poll's, canceled and started
+    /// again across the listing, waits for it rather than running one, so
+    /// `isLoading` is true from the listing's start to its end, once; and no
+    /// poll runs before the listing has an answer.
+    func test_the_poll_waits_for_the_one_listing() async throws {
+        let cli = try fakeGraft(slowListing: true)
+        let devices = DevicesStore(runner: cli.runner)
+        let listing = FirstDeviceListing()
+        var loading: [Bool] = []
+        var pollsBeforeAnswer: Int?
+        let watch = devices.$isLoading.removeDuplicates().sink { loading.append($0) }
+        let answered = devices.$hasLoaded.sink { [unowned self] in
+            if $0, pollsBeforeAnswer == nil { pollsBeforeAnswer = self.runs(cli, of: Self.poll) }
+        }
+        defer { watch.cancel(); answered.cancel() }
+
+        let once = Task { await ContentView.listDevicesOnce(devices, listing) }
+        await eventually({ devices.isLoading }, "premise: the listing started")
+        var poll: Task<Void, Never>?
+        for active in [true, false, true, false, true] {
+            poll?.cancel()
+            poll = Task { await ContentView.pollDevices(devices, listing, active: active, interval: .milliseconds(200)) }
+            try await Task.sleep(nanoseconds: 80_000_000)
+        }
+        await eventually({ devices.hasLoaded }, timeout: 10, "the listing never ended")
+        await eventually({ self.runs(cli, of: Self.poll) >= 1 }, "the last poll task, in front, never polled")
+        poll?.cancel()
+        await once.value
+
+        XCTAssertEqual(loading, [false, true, false], "isLoading went false before the listing was done")
+        XCTAssertEqual(runs(cli, of: Self.fullListing), 1, "\(cli.argv())")
+        XCTAssertEqual(pollsBeforeAnswer, 0, "a poll ran before the listing had an answer")
+    }
+
+    /// A build started from an app pane ends: the Builds list is read again,
+    /// since the section loads only while its list is empty. Not when one
+    /// starts.
+    func test_the_builds_list_is_read_again_when_a_build_ends() async throws {
+        let cli = try fakeGraft()
+        let (_, window, store) = await launch(cli, active: .inactive)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(runs(cli, of: Self.buildsList), 0, "premise: nothing has read the list yet")
+
+        XCTAssertTrue(store.launchBuild(appName: "example", delivery: .unknown) {})
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(store.buildingApp, "example", "premise: the build is running")
+        XCTAssertEqual(runs(cli, of: Self.buildsList), 0, "a build starting adds no row")
+
+        store.endBuild(appName: "example")
+        await eventually({ self.runs(cli, of: Self.buildsList) == 1 }, timeout: 10,
+                         "the build ended and the Builds list wasn't read again: \(cli.argv())")
+        withExtendedLifetime(window) {}
     }
 }

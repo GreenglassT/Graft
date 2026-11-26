@@ -320,7 +320,7 @@ final class IntelGatingTests: XCTestCase {
                                 (Self.appleSilicon, true)] {
             try? FileManager.default.removeItem(at: log)
             let store = AppStoreVersionsStore(runner: CLIRunner(executable: file))
-            let sheet = AppStoreVersionsSheet(app: "example", displayName: "Example", store: store,
+            let sheet = AppStoreVersionsSheet(app: "example", heldId: nil, displayName: "Example", store: store,
                                               getBlockedReason: nil, onGet: { _ in })
             let box = hosted(sheet.environment(\.macSupport, support), size: NSSize(width: 520, height: 540))
             addTeardownBlock { takeDown(box) }

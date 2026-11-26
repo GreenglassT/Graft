@@ -98,11 +98,12 @@ struct ContentView: View {
     @ObservedObject var store: ConfigStore
     // The stores this view reads while drawing are `@StateObject`, which
     // observes them. Those it only hands to a pane, or uses inside a `Task`,
-    // are plain `@State`: kept for the window's life all the same, without
-    // the window redrawing for each of their changes (a phone's vitals, a
-    // dump's progress). `ObservableStoresTests` proves which is which.
+    // are `@KeptState`: kept for the window's life all the same, and made
+    // once, without the window redrawing for each of their changes (a
+    // phone's vitals, a dump's progress). `ObservableStoresTests` proves
+    // which is which.
     @StateObject private var tweaksStore: TweaksStore
-    @State private var canisterStore: CanisterStore
+    @KeptState private var canisterStore: CanisterStore
     @StateObject private var repoStore: RepoStore
     @StateObject private var buildsStore: BuildsStore
     @StateObject private var devicesStore: DevicesStore
@@ -111,7 +112,7 @@ struct ContentView: View {
     /// icons — the sidebar rows, the detail header, and the two builds sheets
     /// — and a store each would mean four `--artwork` runs resolving the same
     /// files. One store, and every view below reads the same cache.
-    @State private var artworkStore: ArtworkStore
+    @KeptState private var artworkStore: ArtworkStore
     /// Per-phone vitals, per-phone delivery states and per-phone installed-app
     /// listings, for `DeviceDetailView`.
     ///
@@ -128,13 +129,16 @@ struct ContentView: View {
     /// listing had to be thrown away on every switch (`.id(device.udid)`) and
     /// the decrypt card showed the previous phone's readiness under the new
     /// phone's name. See `DeviceAppsStore`.
-    @State private var deviceInfoStore: DeviceInfoStore
-    @State private var deviceDeliveryStore: DeviceDeliveryStore
-    @State private var deviceAppsStore: DeviceAppsStore
+    @KeptState private var deviceInfoStore: DeviceInfoStore
+    @KeptState private var deviceDeliveryStore: DeviceDeliveryStore
+    @KeptState private var deviceAppsStore: DeviceAppsStore
     /// LiveContainer per device. Owned here for `deviceAppsStore`'s reason:
     /// its status is keyed by udid, so switching phones and back shows the
     /// last answer at once instead of a fresh "Checking…".
-    @State private var liveContainerStore: LiveContainerStore
+    @KeptState private var liveContainerStore: LiveContainerStore
+    /// The window's first device listing, which its two device tasks share
+    /// (`listDevicesOnce`, `pollDevices`).
+    @KeptState private var firstListing: FirstDeviceListing
     /// What the IPA cache holds, keyed by bundle id.
     ///
     /// **Not owned here for the reason `deviceAppsStore` is above.** That
@@ -161,7 +165,7 @@ struct ContentView: View {
     /// The first-run screen's account setup, and Settings › Account's. Two, so
     /// a Settings flow's result never holds up the first-run screen.
     @StateObject private var accountSetupStore: AccountSetupStore
-    @State private var settingsAccountStore: AccountSetupStore
+    @KeptState private var settingsAccountStore: AccountSetupStore
     @State private var selection: SidebarItem?
     /// The Cache pane's "Add as app", mid-flight.
     ///
@@ -169,6 +173,11 @@ struct ContentView: View {
     /// `DeviceDetailView.addingApp` gives: the payload *is* the presentation,
     /// and a `Bool` beside a separately-held `Prefill` can disagree with it.
     @State private var addingApp: AddAppSheet.Prefill?
+    /// The phone whose Set Up LiveContainer sheet is open (spec §5c), from
+    /// its page's LiveContainer section or from the app pane's "LiveContainer
+    /// isn't on …". `.sheet(item:)`, for `addingApp`'s reason: the record is
+    /// the presentation.
+    @State private var liveContainerSetupFor: DeviceRecord?
     /// Whether this window is in the foreground.
     ///
     /// **The three-state description that stood here is stale on this
@@ -216,6 +225,12 @@ struct ContentView: View {
     /// menu reaches it too. Nil only in a test that hosts this window for
     /// something else: no check runs and no banner shows.
     @ObservedOptionalObject private var updates: UpdateStore?
+    /// One-click Update: the daily check, the rechecks after a change, and
+    /// the sheet. `GraftApp`'s, as `updates` is. Only handed on (review S1):
+    /// the views that draw it observe it (the sidebar, each pane, Settings,
+    /// the sheet's presenter), so its changes don't redraw the window. Nil
+    /// only in a test that hosts this window for something else.
+    @PassedThrough private var appUpdates: AppUpdatesStore?
     /// Handed to each app pane, for Build options' "This Mac" section. See
     /// `PlayCover`.
     private let playCover: PlayCover
@@ -258,28 +273,31 @@ struct ContentView: View {
     init(
         store: ConfigStore, selection: SidebarItem? = nil, adminShell: PrivilegedShell,
         updates: UpdateStore? = nil,
+        appUpdates: AppUpdatesStore? = nil,
         openApp: @escaping @MainActor (URL) -> Void = { _ in },
         playCover: PlayCover = .inert
     ) {
         self._store = ObservedObject(wrappedValue: store)
         self._selection = State(initialValue: selection)
         self._updates = ObservedOptionalObject(wrappedValue: updates)
+        self._appUpdates = PassedThrough(wrappedValue: appUpdates)
         self.playCover = playCover
         self._tweaksStore = StateObject(wrappedValue: TweaksStore(runner: store.runner))
-        self._canisterStore = State(initialValue: CanisterStore(runner: store.runner))
+        self._canisterStore = KeptState(wrappedValue: CanisterStore(runner: store.runner))
         self._repoStore = StateObject(wrappedValue: RepoStore(runner: store.runner))
         self._buildsStore = StateObject(wrappedValue: BuildsStore(runner: store.runner))
         self._devicesStore = StateObject(wrappedValue: DevicesStore(runner: store.runner))
         self._settingsStore = StateObject(wrappedValue: SettingsStore(runner: store.runner))
-        self._artworkStore = State(initialValue: ArtworkStore(runner: store.runner))
-        self._deviceInfoStore = State(initialValue: DeviceInfoStore(runner: store.runner))
-        self._deviceDeliveryStore = State(initialValue: DeviceDeliveryStore(runner: store.runner))
-        self._deviceAppsStore = State(initialValue: DeviceAppsStore(runner: store.runner))
-        self._liveContainerStore = State(initialValue: LiveContainerStore(runner: store.runner))
+        self._artworkStore = KeptState(wrappedValue: ArtworkStore(runner: store.runner))
+        self._deviceInfoStore = KeptState(wrappedValue: DeviceInfoStore(runner: store.runner))
+        self._deviceDeliveryStore = KeptState(wrappedValue: DeviceDeliveryStore(runner: store.runner))
+        self._deviceAppsStore = KeptState(wrappedValue: DeviceAppsStore(runner: store.runner))
+        self._liveContainerStore = KeptState(wrappedValue: LiveContainerStore(runner: store.runner))
+        self._firstListing = KeptState(wrappedValue: FirstDeviceListing())
         self._stagedIPAStore = StateObject(wrappedValue: StagedIPAStore(runner: store.runner))
         self._appStoreStore = StateObject(wrappedValue: AppStoreStore(runner: store.runner, shell: adminShell, openApp: openApp))
         self._accountSetupStore = StateObject(wrappedValue: AccountSetupStore(runner: store.runner))
-        self._settingsAccountStore = State(initialValue: AccountSetupStore(runner: store.runner))
+        self._settingsAccountStore = KeptState(wrappedValue: AccountSetupStore(runner: store.runner))
     }
 
     var body: some View {
@@ -289,7 +307,8 @@ struct ContentView: View {
                 artwork: artworkStore, devices: devicesStore,
                 // Add App stages a chosen IPA through it, as the app pane's
                 // drop zone does.
-                appStore: appStoreStore
+                appStore: appStoreStore,
+                appUpdates: appUpdates
             )
                 // Wider than the 200/220/260 this column used to get, because
                 // it now carries the app rows the second column used to: an
@@ -313,7 +332,8 @@ struct ContentView: View {
                             notice: notice,
                             onUpdate: { updates.update() },
                             onRestart: { updates.restartToUpdate() },
-                            onOpenPage: { updates.openNoticePage() }
+                            onOpenPage: { updates.openNoticePage() },
+                            onDismiss: { updates.dismissMacOSFloor() }
                         )
                     }
                 }
@@ -383,6 +403,11 @@ struct ContentView: View {
         // reading a diff, come back, and the row is there rather than up to
         // five seconds later.
         //
+        // The first listing is a task of its own, not gated: a Graft launched
+        // behind another app still lists the phones once, rather than saying
+        // "Looking for devices…" until it is brought to the front. The poll
+        // waits for it (`pollDevices`).
+        //
         // This is also the only thing that loads the device list at all now.
         // `--devices` used to be run by the Devices section's entry; with that
         // section gone the sidebar would have stayed empty forever without
@@ -390,30 +415,11 @@ struct ContentView: View {
         // rather than owning one apiece — see `SettingsView.devicesStore`'s
         // doc comment and `AppDetailView.devices`'s for what a private one
         // cost each of them before this.
+        .task {
+            await Self.listDevicesOnce(devicesStore, firstListing)
+        }
         .task(id: controlActiveState) {
-            guard controlActiveState != .inactive else { return }
-            // The first listing is the expensive one, and it is unconditional.
-            // The poll escalates only when the *set* of UDIDs on the bus
-            // changes, and with nothing plugged in that set never changes from
-            // empty — so `hasLoaded` would stay false forever and the sidebar
-            // could not tell "no phone is connected" from "we haven't looked
-            // yet". One `--devices` per launch buys that distinction; the flag
-            // is set on every exit path, so a failure costs one attempt rather
-            // than one per five seconds.
-            //
-            // Swallowed for the reason the poll's own failures are (see
-            // `pollAndEscalateIfChanged`): nobody asked for this, and
-            // `lastError` is a modal alert only its own OK button clears. A CLI
-            // that cannot run at all is already reported by `loadApps` above.
-            if !devicesStore.hasLoaded {
-                _ = try? await devicesStore.load()
-            }
-            while !Task.isCancelled {
-                await devicesStore.pollAndEscalateIfChanged()
-                // `try?` swallows the cancellation this throws on teardown; the
-                // loop condition above is what actually ends it.
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-            }
+            await Self.pollDevices(devicesStore, firstListing, active: controlActiveState != .inactive)
         }
         // Keyed on readiness as well as the selection. While the setup screen
         // is up no pane is on screen, and a section's load would only fail
@@ -564,9 +570,19 @@ struct ContentView: View {
         }
         // Fires when a build *ends* (the store clears `buildingApp`), not when
         // one starts — mid-build the IPA is exactly what it was.
+        //
+        // The Builds list too: the build is a new row in it, and the section
+        // loads only while the list is empty. Quiet, as the poll is: nobody
+        // asked for this read, and its failure is staleness the pane's next
+        // load fixes.
+        //
+        // And the update plan for that app (spec 4.1): the build may have
+        // been the install an update was offering.
         .onChangeWithPrevious(of: store.buildingApp) { previous, current in
-            guard previous != nil, current == nil else { return }
+            guard let previous, current == nil else { return }
             Task { await artworkStore.load() }
+            Task { _ = try? await buildsStore.load() }
+            Task { await appUpdates?.recheck(apps: [previous]) }
         }
         // A drop or App Store get staged a new IPA for one app. That file is
         // rung one of the artwork cascade (`icon_from_ipa`), and neither
@@ -577,9 +593,12 @@ struct ContentView: View {
         // `app:` takes the *config* name — see `ArtworkStore.load`, where the
         // bundle id is a silent no-op — and `refresh: true` because the input
         // genuinely moved.
+        //
+        // And the update plan for that app: its App Store step may be done.
         .onChange(of: appStoreStore.lastCompleted) { completed in
             guard let completed else { return }
             Task { await artworkStore.load(app: completed.app, refresh: true) }
+            Task { await appUpdates?.recheck(apps: [completed.app]) }
         }
         // A get held an app at a chosen version, or Get latest let go. The
         // hold is the app's `preferred_version` in config.yaml, which the
@@ -635,6 +654,73 @@ struct ContentView: View {
                 try? await Task.sleep(for: UpdateStore.pollInterval)
             }
         }
+        // The apps' daily update check (spec 4.1): at launch once setup is
+        // done and the app list is read, then hourly while Graft is open, each
+        // a no-op until a day has passed since the last success
+        // (`AppUpdatesStore.isDue`). Keyed on both, so a first launch checks
+        // as soon as setup finishes.
+        .task(id: store.setupNeed == nil && store.hasLoadedApps) {
+            guard store.setupNeed == nil, store.hasLoadedApps, let appUpdates else { return }
+            while !Task.isCancelled {
+                await appUpdates.checkIfDue()
+                try? await Task.sleep(for: AppUpdatesStore.pollInterval)
+            }
+        }
+        // A check that came due while a build or an update held the busy
+        // slot runs when it frees.
+        .onChange(of: store.busy == nil) { free in
+            guard free else { return }
+            Task { await appUpdates?.slotFreed() }
+        }
+        // After a tweak update, every app's plan: several may share it.
+        .onChangeWithPrevious(of: tweaksStore.updatingFilename) { previous, current in
+            guard previous != nil, current == nil else { return }
+            Task { await appUpdates?.recheck(apps: nil) }
+        }
+        // The list read again with an app's config changed: Edit…, a tweak
+        // attached or detached, a hold let go, or `graft --set-app-options`
+        // in Terminal. The plan of each app it changed, in one check
+        // (`AppUpdatesStore.configChanged`); a read that changes no app's
+        // config reads none. Not the first read, which the daily check
+        // covers.
+        .onChangeWithPrevious(of: store.hasLoadedApps ? store.apps : nil) { previous, current in
+            guard let previous, let current else { return }
+            Task { await appUpdates?.configChanged(from: previous, to: current) }
+        }
+        // What each app is doing that an update of it waits for, and the busy
+        // slot doesn't hold: its get or drop, an update of a tweak it uses.
+        // Update All and the confirmation's Update wait for it, as the pane's
+        // own button does (review part 2, #2).
+        .onChange(of: AppUpdatesStore.appWork(
+            apps: store.apps, staging: appStoreStore.activity, updatingTweak: tweaksStore.updatingFilename,
+            names: Self.displayNames(store.apps)
+        )) { work in
+            Task { appUpdates?.setAppWork(work) }
+        }
+        // A device connected or gone, once the first listing is in: an
+        // update waiting for that device can run now (spec §11.3). The store
+        // reads the plan again only then, and at most every 10 minutes.
+        .onChangeWithPrevious(of: devicesStore.hasLoaded ? Set(devicesStore.devices.map(\.udid)) : nil) { previous, current in
+            guard previous != nil, current != nil else { return }
+            Task { await appUpdates?.deviceSetChanged() }
+        }
+        // After an update (its slot let go): the list, its delivery states,
+        // the Builds list, artwork, the tweak library and each app's version
+        // line (spec 4.4), then the Cache pane, the device pages' delivery
+        // rows and LiveContainer (`afterUpdate`). The badges are read again
+        // by the store.
+        .onChangeWithPrevious(of: store.updatingApps) { previous, current in
+            guard let previous, current == nil else { return }
+            Task {
+                await Self.afterUpdate(previous, config: store, builds: buildsStore, artwork: artworkStore,
+                                       appStore: appStoreStore, tweaks: tweaksStore, staged: stagedIPAStore,
+                                       deviceDelivery: deviceDeliveryStore, liveContainer: liveContainerStore,
+                                       connected: devicesStore.devices.map(\.udid))
+            }
+        }
+        // The update's sheet, from a presenter that observes the store, so
+        // its changes redraw that and not the window (review S1).
+        .background(AppUpdatesPresenter(store: appUpdates, names: Self.displayNames(store.apps)))
     }
 
     /// The setup screen, or the panes with the tools notice under them.
@@ -681,6 +767,18 @@ struct ContentView: View {
                             onDismiss: { dismissedToolsNotice = missing }
                         )
                     }
+                }
+                // Set Up LiveContainer (spec §5c), from a device's page or
+                // from the app pane's "LiveContainer isn't on …". Here, so
+                // the bar's button opens it over the app pane and Build is
+                // one press away when it's done. When a run in it ends, the
+                // device list is read again, so the bar sees what Set Up
+                // installed; the sheet can't close while one runs.
+                .sheet(item: $liveContainerSetupFor) { device in
+                    SetUpLiveContainerSheet(
+                        device: device, store: liveContainerStore, account: store.account,
+                        onRunEnded: { Task { _ = try? await devicesStore.load() } }
+                    )
                 }
         }
     }
@@ -748,6 +846,54 @@ struct ContentView: View {
         }
     }
 
+    /// The window's first `--devices`, for the window's life (its `.task`):
+    /// frontmost or not, and canceled only with the window.
+    ///
+    /// It is the expensive listing, and it is unconditional. The poll
+    /// escalates only when the *set* of UDIDs on the bus changes, and with
+    /// nothing plugged in that set never changes from empty — so `hasLoaded`
+    /// would stay false forever and the sidebar could not tell "no phone is
+    /// connected" from "we haven't looked yet". One `--devices` per launch
+    /// buys that distinction; the flag is set on every exit path, so a
+    /// failure costs one attempt rather than one per five seconds.
+    ///
+    /// Swallowed for the reason the poll's own failures are (see
+    /// `pollAndEscalateIfChanged`): nobody asked for this, and `lastError` is
+    /// a modal alert only its own OK button clears. A CLI that cannot run at
+    /// all is already reported by `loadApps`.
+    static func listDevicesOnce(_ devices: DevicesStore, _ listing: FirstDeviceListing) async {
+        let started = listing.start(devices)
+        await withTaskCancellationHandler {
+            await started.value
+        } onCancel: {
+            started.cancel()
+        }
+    }
+
+    /// The window's `.task(id: controlActiveState)`: once the first listing
+    /// is done, the poll, while the window is `active` (frontmost).
+    ///
+    /// It waits on that listing's own task rather than running one: this task
+    /// is canceled and started again on every switch to the front and back,
+    /// and a listing of its own was canceled and started again with it, so
+    /// two `--devices` overlapped and the first one's end set `isLoading`
+    /// false in the middle of the second. Nor does it poll before the listing
+    /// has an answer: against an empty list every phone on the bus looks
+    /// new, and the poll would escalate to a second listing.
+    static func pollDevices(
+        _ devices: DevicesStore, _ listing: FirstDeviceListing, active: Bool,
+        interval: Duration = .seconds(5)
+    ) async {
+        await listing.start(devices).value
+        guard active, devices.hasLoaded else { return }
+        while !Task.isCancelled {
+            await devices.pollAndEscalateIfChanged()
+            // `try?` swallows the cancellation this throws on teardown; the
+            // loop condition above is what actually ends it.
+            try? await Task.sleep(for: interval)
+        }
+    }
+
     /// After Settings › Account changed the account. Re-read the list, which
     /// carries the account every pane gates on; the settings, where the signing
     /// fields unlock or lock; and the checks, since a paid account has .p12 rows
@@ -757,6 +903,38 @@ struct ContentView: View {
         try? await config.reload()
         _ = try? await settings.loadSettings()
         try? await settings.runChecks()
+    }
+
+    /// What an update changed, read again: the app list (its delivery
+    /// states, the sidebar's dot), the Builds list, artwork, the tweak
+    /// library (a tweak it updated has a new file), and each app's App Store
+    /// line. Then what an open pane would otherwise show from before it
+    /// (review 23-2, item 7): the Cache pane (a get staged a new IPA), each
+    /// device page's delivery rows, and LiveContainer on each `connected`
+    /// device whose page read it. Static, taking the stores, so a test
+    /// drives it without a window.
+    static func afterUpdate(
+        _ apps: [String], config: ConfigStore, builds: BuildsStore, artwork: ArtworkStore,
+        appStore: AppStoreStore, tweaks: TweaksStore, staged: StagedIPAStore,
+        deviceDelivery: DeviceDeliveryStore, liveContainer: LiveContainerStore, connected: [String]
+    ) async {
+        try? await config.reload()
+        _ = try? await builds.load()
+        await artwork.load()
+        _ = try? await tweaks.loadTweaks()
+        for app in apps {
+            await appStore.checkVersion(app: app, force: true)
+        }
+        await staged.load()
+        await deviceDelivery.reload()
+        // Last: each asks its device, where the others read this Mac.
+        await liveContainer.reload(connected: Set(connected))
+    }
+
+    /// Each app's name as the sidebar shows it, by config name, for the
+    /// update sheet.
+    static func displayNames(_ apps: [AppRecord]) -> [String: String] {
+        Dictionary(apps.map { ($0.name, $0.shownName) }, uniquingKeysWith: { first, _ in first })
     }
 
     /// What the detail area shows instead of the panes, if anything: the setup
@@ -856,7 +1034,12 @@ struct ContentView: View {
                     showSettings: { selection = .section(.settings) },
                     // Build options says when PlayCover isn't installed, and
                     // offers Get PlayCover.
-                    playCover: playCover
+                    playCover: playCover,
+                    // The update line under the header.
+                    appUpdates: appUpdates,
+                    // The bar's Set Up LiveContainer…, for a target with none:
+                    // the sheet presented below, over this pane.
+                    setUpLiveContainer: { setUpLiveContainer(udid: $0) }
                 )
             } else {
                 // A removal clears the selection, so this is the narrow window
@@ -885,7 +1068,10 @@ struct ContentView: View {
                     staged: stagedIPAStore,
                     liveContainer: liveContainerStore,
                     appStore: appStoreStore,
-                    onSelectApp: { selection = .app($0) }
+                    onSelectApp: { selection = .app($0) },
+                    // This phone's Set Up LiveContainer…; the sheet is
+                    // presented below, with the app pane's way in.
+                    onSetUpLiveContainer: { liveContainerSetupFor = device }
                 )
             } else {
                 // The phone went away — unplugged, or a Wi-Fi device that
@@ -914,7 +1100,8 @@ struct ContentView: View {
             // two inline closures.
             CachePaneView(
                 staged: stagedIPAStore,
-                onInstallToMac: { await stagedIPAStore.installToMac(filename: $0.filename) },
+                // Held, with a Stop: nothing else holds the quit for it.
+                onInstallToMac: { await stagedIPAStore.installToMac(filename: $0.filename, holdingQuit: true) },
                 // `installedVersion: nil` — no device listing is behind this
                 // add. That is not a shortcut: this pane can see staged files
                 // for apps no connected phone has installed at all (three of
@@ -946,7 +1133,8 @@ struct ContentView: View {
                 }, prefill: prefill)
             }
         case .section(.builds):
-            BuildsView(store: buildsStore, config: store, artwork: artworkStore, staged: stagedIPAStore)
+            BuildsView(store: buildsStore, config: store, artwork: artworkStore, staged: stagedIPAStore,
+                       devices: devicesStore, settings: settingsStore, appUpdates: appUpdates)
         case .section(.settings):
             SettingsView(
                 store: settingsStore, devicesStore: devicesStore, appStore: appStoreStore,
@@ -954,7 +1142,8 @@ struct ContentView: View {
                 accountSetup: settingsAccountStore,
                 onAccountChanged: { await Self.afterAccountChange(config: store, settings: settingsStore) },
                 isBuilding: store.buildingApp != nil,
-                updates: updates
+                updates: updates,
+                appUpdates: appUpdates
             )
         case .none:
             // Three ways to be here, and they are not interchangeable: before
@@ -983,6 +1172,12 @@ struct ContentView: View {
             .background(Palette.bg)
     }
 
+    /// Open Set Up LiveContainer for a connected device, by udid: the app
+    /// pane's bar names the device a build would go to, not its record.
+    private func setUpLiveContainer(udid: String) {
+        liveContainerSetupFor = devicesStore.devices.first { $0.udid == udid }
+    }
+
     /// The tools the window's notice is about, or nil when it should not
     /// show: none missing, the user closed it on this same list, or Settings
     /// — which lists them in full — is the pane on screen.
@@ -1002,6 +1197,25 @@ struct ContentView: View {
 /// flick, plus a `--check` per flick while tools were missing. Two seconds is
 /// shorter than anyone takes to switch to Terminal, run a command and come
 /// back, which is the change a return refresh exists to notice.
+/// A window's first `--devices`, started once by whichever of its two device
+/// tasks asks first, and awaited by both (`ContentView.listDevicesOnce`,
+/// `ContentView.pollDevices`).
+@MainActor
+final class FirstDeviceListing {
+    /// The listing, once it's started.
+    private var task: Task<Void, Never>?
+
+    /// The listing: started now if it hasn't been, else the one started.
+    func start(_ devices: DevicesStore) -> Task<Void, Never> {
+        if let task { return task }
+        let started = Task { @MainActor in
+            if !devices.hasLoaded { _ = try? await devices.load() }
+        }
+        task = started
+        return started
+    }
+}
+
 struct ReturnRefreshGate {
     static let quietPeriod: Duration = .seconds(2)
     private var running = false
@@ -1080,6 +1294,8 @@ struct UpdateNotice: View {
     let onUpdate: () -> Void
     let onRestart: () -> Void
     let onOpenPage: () -> Void
+    /// "Needs a newer macOS"'s close, the one notice that can be dismissed.
+    var onDismiss: () -> Void = {}
 
     static let buttonTitle = "Release Page"
     static let updateTitle = "Update"
@@ -1109,6 +1325,8 @@ struct UpdateNotice: View {
             return "Installing Graft \(version)…"
         case .failed:
             return "Graft couldn't update to \(version)"
+        case let .needsNewerMacOS(line):
+            return line
         }
     }
 
@@ -1148,6 +1366,9 @@ struct UpdateNotice: View {
             ProgressView().controlSize(.small)
         case .failed:
             Symbols.attention.image(size: 12).foregroundStyle(Palette.warn)
+        case .needsNewerMacOS:
+            // Information, not a warning: nothing went wrong.
+            Symbols.advisory.image(size: 12).foregroundStyle(Palette.textMuted)
         default:
             Symbols.updateAvailable.image(size: 12).foregroundStyle(Palette.accent)
         }
@@ -1173,6 +1394,15 @@ struct UpdateNotice: View {
                 .help("Quit Graft, put the new version in its place, and open it")
         case .failed:
             pageButton
+        case .needsNewerMacOS:
+            pageButton
+            Button(action: onDismiss) {
+                Symbols.dismiss.image(size: 10)
+                    .foregroundStyle(Palette.textMuted)
+            }
+            .buttonStyle(.plain)
+            .help("Don't show this again for Graft \(notice.version)")
+            .accessibilityLabel("Dismiss")
         case .downloading, .verifying, .installing:
             EmptyView()
         }

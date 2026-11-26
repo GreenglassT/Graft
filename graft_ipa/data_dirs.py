@@ -18,13 +18,16 @@ what keeps every one of them valid without rewriting the user's file.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import re
 import secrets
 import shutil
+import stat
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 APP_DIRNAME = "graft"
 
@@ -375,3 +378,37 @@ def private_write(data: bytes, dest: Path) -> None:
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+#: The most a small state file (`read_small_json`) may be: far above any
+#: Graft writes, so anything larger isn't one of its own.
+SMALL_STATE_FILE_BYTES = 256 * 1024
+
+
+def read_small_json(path: Path, *, limit: int = SMALL_STATE_FILE_BYTES) -> Any:
+    """What one of Graft's small JSON state files holds, or None when there's
+    nothing Graft could have written there: read only as a regular file, not
+    through a link, of at most `limit` bytes, and opened without blocking, so
+    a FIFO at the path can't hang the read. JSON nested too deep to parse is
+    None too. As `devices_seen` reads its own file; for the memories a reader
+    takes leniently (`update_refusals`, `update_drops`, `playcover_handoff`).
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            return None
+        data = os.read(fd, limit + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        return None
+    try:
+        return json.loads(data)
+    except (ValueError, RecursionError):
+        return None

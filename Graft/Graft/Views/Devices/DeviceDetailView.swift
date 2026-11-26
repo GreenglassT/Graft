@@ -117,6 +117,11 @@ struct DeviceDetailView: View {
     /// no-op instead, which says "no navigation to test here" at the call
     /// site rather than leaving it to a default declared 500 lines away.
     let onSelectApp: (String) -> Void
+    /// Open Set Up LiveContainer for this phone: its LiveContainer section's
+    /// Set Up LiveContainer…. Required for `onSelectApp`'s reason:
+    /// `ContentView` presents the sheet (the app pane's bar opens it too),
+    /// and a button wired to nothing would look alive and do nothing.
+    let onSetUpLiveContainer: () -> Void
 
     /// Bundle id → every config key that claims it, in `ConfigStore.apps`'
     /// own order — read by both `DeviceDecryptSection` and
@@ -275,6 +280,7 @@ struct DeviceDetailView: View {
         liveContainer: LiveContainerStore,
         appStore: AppStoreStore,
         onSelectApp: @escaping (String) -> Void,
+        onSetUpLiveContainer: @escaping () -> Void,
         vitalsPollInterval: UInt64 = DeviceDetailView.defaultVitalsPollInterval
     ) {
         self.device = device
@@ -288,6 +294,7 @@ struct DeviceDetailView: View {
         self.liveContainer = liveContainer
         self.appStore = appStore
         self.onSelectApp = onSelectApp
+        self.onSetUpLiveContainer = onSetUpLiveContainer
         self.vitalsPollInterval = vitalsPollInterval
     }
 
@@ -324,12 +331,19 @@ struct DeviceDetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Metrics.sectionGap) {
                     DeviceStatStrip(device: device, info: deviceInfo.info[device.udid])
+                    if let isOn = DeviceDeveloperModeRow.shown(
+                        developerMode: deviceInfo.info[device.udid]?.developerMode,
+                        apps: config.apps
+                    ) {
+                        DeviceDeveloperModeRow(isOn: isOn)
+                    }
                     DeviceAppsSection(
                         apps: config.apps,
                         // Read here rather than inside the section, so the
                         // dependency on this store lands on the pane that owns
                         // the `.task` refreshing it.
                         readout: delivery.readout(for: device.udid),
+                        kind: device.kindName,
                         artwork: artwork
                     )
                     // Under the apps, not above them: this is an action on the
@@ -383,7 +397,8 @@ struct DeviceDetailView: View {
                     // decrypted, then everything else on the phone — top-down
                     // from the narrowest question to the broadest one.
                     DeviceLiveContainerSection(
-                        device: device, store: liveContainer, account: config.account
+                        device: device, store: liveContainer, account: config.account,
+                        onSetUp: onSetUpLiveContainer
                     )
                     InstalledAppsSection(
                         device: device,
@@ -582,7 +597,9 @@ struct DeviceDetailView: View {
         // (a headless-window test observed `[true, false]` across a real
         // dump) and by precedent already shipping: `DeviceDecryptSection`'s
         // transcript auto-scroll keys an `.onChange` off
-        // `deviceApps.transcript.count`, the identical shape.
+        // `deviceApps.dumpLog.lines.count` (`DumpTranscriptView`'s
+        // `log.lines.count`), a value computed over a `@Published` property,
+        // the same shape.
         .onChange(of: deviceApps.isDumping) { nowDumping in
             if !nowDumping { Task { await staged.load() } }
         }
@@ -826,5 +843,17 @@ struct DeviceDetailView: View {
         catch { store.lastError = error.localizedDescription }
         await vitals
         await states
+    }
+}
+
+extension DeviceRecord {
+    /// How the device page names this device in a sentence ("Your apps on
+    /// this iPad"): "iPad", "iPhone" or "iPod" when the model says so, else
+    /// "device". Unlike `BuildTarget.deviceKind`, which reads an unknown
+    /// model as an iPhone, this never guesses: a page that said "phone" to
+    /// an iPad is what it replaces. One of four words, never the device's
+    /// name, so a sentence that carries it stays the length it was.
+    var kindName: String {
+        ["iPad", "iPhone", "iPod"].first { model.hasPrefix($0) } ?? "device"
     }
 }

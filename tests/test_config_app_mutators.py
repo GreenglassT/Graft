@@ -257,3 +257,40 @@ def test_set_app_options_empty_cyan_is_a_noop_even_for_unknown_app(
     before = temp_config_env.read_text()
     set_app_options(temp_config_env, "nosuchapp", cyan={})
     assert temp_config_env.read_text() == before
+
+
+def test_repointing_a_tweak_is_one_write_for_every_app_that_lists_it(temp_config_env) -> None:
+    from graft_ipa import config as config_mod
+    from graft_ipa.config import add_app, load_config, repoint_tweak, set_app_tweaks
+
+    add_app(temp_config_env, "bravo", {"bundle_id": "com.bravo.app", "tweaks": ["b.deb", "old.deb", "new.deb"]})
+    set_app_tweaks(temp_config_env, "example", ["old.deb", "c.deb"])
+    held: list[bool] = []
+
+    def key(entry: str) -> str:
+        held.append(config_mod._config_lock_held(temp_config_env))
+        return entry
+
+    writes: list[object] = []
+    real = config_mod._commit_apps
+    config_mod._commit_apps = lambda *a: (writes.append(a), real(*a))[1]
+    try:
+        changed = repoint_tweak(temp_config_env, key=key, old_key="old.deb", new_filename="new.deb")
+    finally:
+        config_mod._commit_apps = real
+
+    apps = load_config(temp_config_env).apps
+    assert changed == ["example", "bravo"]
+    assert apps["example"].tweaks == ["new.deb", "c.deb"], "where it stood"
+    assert apps["bravo"].tweaks == ["b.deb", "new.deb"], "a duplicate after it collapses"
+    assert len(writes) == 1, "one write, not one per app"
+    assert held and all(held), "read and written under config.yaml.lock"
+
+
+def test_repointing_a_tweak_no_app_lists_writes_nothing(temp_config_env) -> None:
+    from graft_ipa.config import repoint_tweak
+
+    before = temp_config_env.stat().st_mtime_ns
+
+    assert repoint_tweak(temp_config_env, key=lambda e: e, old_key="nope.deb", new_filename="x.deb") == []
+    assert temp_config_env.stat().st_mtime_ns == before

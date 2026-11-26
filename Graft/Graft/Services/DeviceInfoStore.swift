@@ -187,7 +187,24 @@ final class DeviceInfoStore: ObservableObject {
         for event in events {
             guard case let .deviceInfo(record) = event else { continue }
             if record.reachable {
-                info[record.udid] = record
+                if record.developerMode == nil, let known = info[record.udid]?.developerMode {
+                    // A phone that answered but couldn't say (locked, or too
+                    // slow on that one key) keeps the last Developer Mode
+                    // reading, as a blip keeps every field below: otherwise
+                    // the row comes and goes with the vitals poll. The rest
+                    // is the new reading.
+                    info[record.udid] = DeviceInfoRecord(
+                        udid: record.udid,
+                        reachable: true,
+                        totalBytes: record.totalBytes,
+                        freeBytes: record.freeBytes,
+                        batteryPercent: record.batteryPercent,
+                        batteryCharging: record.batteryCharging,
+                        developerMode: known
+                    )
+                } else {
+                    info[record.udid] = record
+                }
             } else if let previous = info[record.udid] {
                 // Keep every data field the last reachable read produced;
                 // only `reachable` itself moves, so the strip keeps showing
@@ -198,7 +215,8 @@ final class DeviceInfoStore: ObservableObject {
                     totalBytes: previous.totalBytes,
                     freeBytes: previous.freeBytes,
                     batteryPercent: previous.batteryPercent,
-                    batteryCharging: previous.batteryCharging
+                    batteryCharging: previous.batteryCharging,
+                    developerMode: previous.developerMode
                 )
             } else {
                 // No prior reading to preserve — this is the first thing

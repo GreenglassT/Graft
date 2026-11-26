@@ -242,10 +242,14 @@ def _snapshot(d) -> DeliveredSnapshot:
         tweaks=[[t.name, t.sha256] for t in d.tweaks],
         pushed_at="2026-06-02T01:44:29+00:00",
         cyan=d.cyan,
+        held_version_id=d.held_version_id,
     )
 
 
-def test_the_record_carries_every_input_the_digest_hashes(temp_config_env: Path) -> None:
+@pytest.mark.parametrize("held_id", [None, "800200"])
+def test_the_record_carries_every_input_the_digest_hashes(
+    temp_config_env: Path, held_id: str | None,
+) -> None:
     """The payload dict in `compute_inputs_digest` is the authority on what a
     change to the app means — not `InputsDigest`'s field list. An input that is
     hashed but not carried on the record can never get a reason branch in
@@ -261,7 +265,7 @@ def test_the_record_carries_every_input_the_digest_hashes(temp_config_env: Path)
     cfg = load_config(temp_config_env)
     _tweak(cfg, "a.deb", b"AAA")
     _tweak(cfg, "b.deb", b"BBB")
-    app = _app(cyan=CyanOptions(extra_args=["-k", "somelib.dylib"]))
+    app = _app(cyan=CyanOptions(extra_args=["-k", "somelib.dylib"]), preferred_version_id=held_id)
 
     d = compute_inputs_digest(cfg, app, source_version="21.16.2")
 
@@ -273,11 +277,66 @@ def test_the_record_carries_every_input_the_digest_hashes(temp_config_env: Path)
         "tweaks": [[t.name, t.sha256] for t in d.tweaks],
         "cyan": d.cyan,
     }
+    if d.held_version_id is not None:
+        payload["held_version_id"] = d.held_version_id
+    assert d.held_version_id == held_id
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
         "utf-8"
     )
 
     assert hashlib.sha256(blob).hexdigest() == d.digest
+
+
+def test_moving_a_hold_to_the_other_build_is_named(temp_config_env: Path) -> None:
+    """Two builds of 2026.42.0 read the same version: the version alone left
+    a hold moved from build 1 to build 2 `current`, though a build now starts
+    from the other file (`ipa_cache.admits`)."""
+    cfg = load_config(temp_config_env)
+    _tweak(cfg, "a.deb", b"AAA")
+    _tweak(cfg, "b.deb", b"BBB")
+    one = compute_inputs_digest(cfg, _app(preferred_version_id="800200"), source_version="21.16.2")
+    two = compute_inputs_digest(cfg, _app(preferred_version_id="800250"), source_version="21.16.2")
+    by_version = compute_inputs_digest(cfg, _app(), source_version="21.16.2")
+
+    assert len({one.digest, two.digest, by_version.digest}) == 3
+    for now, was in ((two, one), (by_version, one), (one, by_version)):
+        state = diff_delivery(now, _snapshot(was))
+        assert (state.kind, state.reasons) == ("stale", ["the held build changed"])
+    assert diff_delivery(one, _snapshot(one)).kind == "current"
+
+
+def test_an_app_held_by_no_build_hashes_as_before(temp_config_env: Path) -> None:
+    """The id is hashed only when there is one, so every digest recorded
+    before holds by build still compares equal (the pinned literal above is
+    the same app with no id)."""
+    cfg = load_config(temp_config_env)
+    _tweak(cfg, "a.deb", b"AAA")
+    _tweak(cfg, "b.deb", b"BBB")
+
+    d = compute_inputs_digest(cfg, _app(), source_version="21.16.2")
+    latest = compute_inputs_digest(cfg, _app(preferred_version="latest"), source_version="21.16.2")
+    stray = compute_inputs_digest(
+        cfg, _app(preferred_version="latest", preferred_version_id="800200"), source_version="21.16.2",
+    )
+
+    assert d.held_version_id is None
+    assert d.digest == "61c140d8261e350456056e1fbdf968a87627af60e659620382e97d1f19f50b91"
+    assert latest.digest == d.digest
+    assert stray.digest == d.digest and stray.held_version_id is None, "latest holds no build"
+
+
+def test_a_held_build_of_another_version_is_the_version_change(temp_config_env: Path) -> None:
+    """From a build of 1.2.0 to a build of 1.3.0: the version says it, and a
+    second reason for the same change would push a real one off the badge."""
+    cfg = load_config(temp_config_env)
+    _tweak(cfg, "a.deb", b"AAA")
+    _tweak(cfg, "b.deb", b"BBB")
+    was = compute_inputs_digest(cfg, _app(preferred_version_id="800200"), source_version="1.2.0")
+    now = compute_inputs_digest(cfg, _app(preferred_version_id="800300"), source_version="1.3.0")
+
+    state = diff_delivery(now, _snapshot(was))
+
+    assert state.reasons == ["app version changed: 1.2.0 → 1.3.0"]
 
 
 def test_a_bundle_id_change_is_named(temp_config_env: Path) -> None:

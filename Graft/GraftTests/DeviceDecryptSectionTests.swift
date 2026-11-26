@@ -316,4 +316,38 @@ final class DeviceDecryptSectionTests: XCTestCase {
             + "disappearing — expected roughly 30pt, not a rounding difference"
         )
     }
+
+    // MARK: - The transcript
+
+    /// The transcript opens on its newest line. The first batch of a dump is
+    /// what puts the transcript on screen, so its tail-following `onChange`
+    /// never saw that batch change anything, and the panel opened scrolled to
+    /// the top of a dump that had already moved on.
+    ///
+    /// In production order: an empty log first, which draws nothing, then a
+    /// batch longer than the panel's 140pt.
+    func test_the_transcript_opens_scrolled_to_its_last_line() throws {
+        let log = DumpLog()
+        let box = hosted(DumpTranscriptView(log: log).frame(width: 420, height: 200, alignment: .top),
+                         size: NSSize(width: 420, height: 200))
+        settle(box, seconds: 0.2)
+
+        for i in 1...60 { log.append(line: "line \(i) of a dump") }
+        log.flush()
+        settle(box, seconds: 0.5)
+
+        func scrollViews(under view: NSView) -> [NSScrollView] {
+            ((view as? NSScrollView).map { [$0] } ?? []) + view.subviews.flatMap(scrollViews(under:))
+        }
+        let root = try XCTUnwrap(box.window.contentView)
+        let scroll = try XCTUnwrap(scrollViews(under: root).first, "premise: the batch drew the transcript")
+        let document = try XCTUnwrap(scroll.documentView)
+        let visible = scroll.contentView.documentVisibleRect
+        XCTAssertGreaterThan(document.frame.height, visible.height + 100,
+                             "premise: sixty lines are taller than the panel")
+        // Within the list's own 6pt padding of the end: the last line's
+        // bottom is at the panel's bottom.
+        XCTAssertEqual(visible.maxY, document.frame.height, accuracy: 8,
+                       "the transcript opened at \(visible.minY) of \(document.frame.height), not at its last line")
+    }
 }

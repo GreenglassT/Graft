@@ -80,7 +80,8 @@ ENVELOPE_CLASS = "_BuildReport"
 # that looked for one. `test_no_envelope_is_opened_outside_a_declared_entry_point`
 # keeps the declaration honest in the other direction.
 _BUILD_ENTRY_POINTS: frozenset[str] = frozenset(
-    {"_build_one", "_do_reinstall_build", "_verb_build_apps", "_verb_export_ipa"}
+    {"_build_one", "_do_reinstall_build", "_do_update_install", "_verb_build_apps",
+     "_verb_export_ipa"}
 )
 
 # Calls that cannot raise for any argument, by their exact spelling. Matching on

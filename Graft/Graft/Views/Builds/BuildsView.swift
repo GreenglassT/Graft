@@ -2,9 +2,10 @@ import SwiftUI
 
 struct BuildsView: View {
     @ObservedObject var store: BuildsStore
-    /// Passed straight through to ReinstallSheet: a re-install pushes to the
-    /// phone, so it moves the delivery badges the Apps section renders off
-    /// this store. Read here only for `reinstallRefusal`.
+    /// Passed on to ReinstallSheet, which refreshes the delivery badges off
+    /// it: a re-install pushes to the phone. Read here for the apps (each
+    /// build's display name, `reinstallRefusal`) and the running build
+    /// ("Clean up old builds…").
     @ObservedObject var config: ConfigStore
     /// Also passed straight through, and to both sheets rather than one: the
     /// build-log and re-install headers each draw the app's icon. Nothing in
@@ -14,8 +15,23 @@ struct BuildsView: View {
     /// the Cache pane presses, so the two surfaces cannot drift on what
     /// "install here" means or on the PlayCover settings it fixes up.
     @PassedThrough var staged: StagedIPAStore
+    /// The phones, for the device Re-install's confirmation names.
+    @ObservedObject var devices: DevicesStore
+    /// config.yaml's default device (`default_device_udid`), where a build
+    /// with no phone of its own is re-installed. Read again each time
+    /// Re-install… is chosen, as the CLI reads it.
+    @ObservedObject var settings: SettingsStore
+    /// Handed to Re-install, which reads the app's update plan again once it
+    /// has installed. Nil in a test that hosts this pane for something else.
+    @PassedThrough var appUpdates: AppUpdatesStore?
     @State private var selected: BuildRecord.ID?
-    @State private var handoffComplaint: String?
+    /// Install to Mac…: the app being waited for, then what it did, until
+    /// dismissed (`MacInstallStrip`).
+    @State private var macInstall: MacInstallRun?
+    /// The run `macInstall` follows, which the strip's Stop cancels.
+    @State private var macInstallTask: Task<Void, Never>?
+    /// Re-install… asking first; `reinstallTarget` once it's confirmed.
+    @State private var pendingReinstall: BuildRecord?
     @State private var reinstallTarget: BuildRecord?
     @State private var logTarget: BuildRecord?
     /// The dry run's answer while "Clean up old builds…" asks to confirm it.
@@ -145,6 +161,118 @@ struct BuildsView: View {
         Self.reinstallRefusal(for: build, apps: config.apps, account: config.account)
     }
 
+    /// The build's app by the name the sidebar shows (`AppRecord.shownName`):
+    /// its short name only when it has no display name, or is no longer in
+    /// the config.
+    static func appName(for build: BuildRecord, apps: [AppRecord]) -> String {
+        apps.first { $0.name == build.app }?.shownName ?? build.app
+    }
+
+    static let reinstallButton = "Re-install"
+
+    /// Where `--reinstall-build` installs a build, by the CLI's own rule
+    /// (`_do_reinstall_build`, `installer.select_device`): the phone the build
+    /// went to, else config.yaml's default device, and that phone has to be
+    /// connected; with neither, the first phone connected.
+    enum ReinstallTarget: Equatable {
+        /// Connected, by its name.
+        case phone(String)
+        /// Connected, but `--devices` couldn't describe it (locked, or not
+        /// trusted), so its name isn't known: who it is, in words.
+        case unnamed(String)
+        /// No phone is named, and several are connected: the CLI takes the
+        /// first.
+        case firstConnected
+        /// config.yaml couldn't be read for its default device: the CLI's
+        /// choice, the default or the first one connected.
+        case defaultOrFirst
+        /// The phone it has to go to, in words, isn't connected.
+        case notConnected(String)
+        /// No phone is connected at all.
+        case noneConnected
+
+        /// Whether the CLI would install it there now.
+        var canInstall: Bool {
+            switch self {
+            case .notConnected, .noneConnected: return false
+            default: return true
+            }
+        }
+    }
+
+    /// `defaultDevice` is `default_device_udid`; `defaultKnown` says whether
+    /// it could be read. `unreadable` is the phones connected that
+    /// `--devices` couldn't describe (`DevicesStore.deviceErrors`).
+    static func reinstallTarget(
+        for build: BuildRecord, defaultDevice: String?, defaultKnown: Bool,
+        devices: [DeviceRecord], unreadable: [String]
+    ) -> ReinstallTarget {
+        func named(_ udid: String?) -> String? {
+            guard let udid = udid?.trimmingCharacters(in: .whitespaces), !udid.isEmpty else { return nil }
+            return udid
+        }
+        func connected(_ udid: String, who: String) -> ReinstallTarget {
+            if let device = devices.first(where: { $0.udid == udid }) { return .phone(device.name) }
+            return unreadable.contains(udid) ? .unnamed(who) : .notConnected(who)
+        }
+        let anyConnected = !devices.isEmpty || !unreadable.isEmpty
+        if let udid = named(build.udid) { return connected(udid, who: "the device this build went to") }
+        guard defaultKnown else { return anyConnected ? .defaultOrFirst : .noneConnected }
+        if let udid = named(defaultDevice) { return connected(udid, who: "your default device") }
+        guard anyConnected else { return .noneConnected }
+        if devices.count + unreadable.count == 1, let only = devices.first { return .phone(only.name) }
+        return .firstConnected
+    }
+
+    /// What Re-install… says before it installs on a phone: the app, the
+    /// build (its version and when it was made) and the device. When that
+    /// device isn't connected, it says so, and offers nothing to press but OK.
+    struct ReinstallWords: Equatable {
+        let title: String
+        let message: String
+        let canConfirm: Bool
+    }
+
+    static func reinstallConfirmation(
+        for build: BuildRecord, appName: String, target: ReinstallTarget
+    ) -> ReinstallWords {
+        let what = "the \(appName) \(build.version) build from \(DateHelpers.readable(build.timestamp))"
+        let title = "Re-install \(appName)?"
+        func on(_ place: String) -> ReinstallWords {
+            ReinstallWords(title: title, message: "This installs \(what) on \(place).", canConfirm: true)
+        }
+        switch target {
+        case let .phone(name): return on("“\(name)”")
+        case let .unnamed(who): return on(who)
+        case .firstConnected: return on("the first connected iPhone or iPad")
+        case .defaultOrFirst:
+            return on("your default device, or with none set, the first connected iPhone or iPad")
+        case let .notConnected(who):
+            return ReinstallWords(
+                title: who.prefix(1).uppercased() + who.dropFirst() + " isn't connected",
+                message: "Graft re-installs \(what) on \(who). Connect it, then choose Re-install… again.",
+                canConfirm: false
+            )
+        case .noneConnected:
+            return ReinstallWords(
+                title: "No iPhone or iPad is connected",
+                message: "Connect the one to install \(what) on, then choose Re-install… again.",
+                canConfirm: false
+            )
+        }
+    }
+
+    /// The confirmation for `build`, from what the stores hold now.
+    private func reinstallWords(for build: BuildRecord) -> ReinstallWords {
+        let target = Self.reinstallTarget(
+            for: build, defaultDevice: settings.settings?.defaultDeviceUDID,
+            defaultKnown: settings.settings != nil,
+            devices: devices.devices, unreadable: devices.deviceErrors.map(\.udid)
+        )
+        return Self.reinstallConfirmation(for: build, appName: Self.appName(for: build, apps: config.apps),
+                                          target: target)
+    }
+
     /// One item in a row's menu: what it says, and whether it can be chosen.
     ///
     /// **A disabled item carries its reason in its title.** A `.help` on a
@@ -154,6 +282,19 @@ struct BuildsView: View {
     struct MenuItem: Equatable {
         let title: String
         let enabled: Bool
+    }
+
+    /// Install to Mac… in Builds, while it runs and after: the app's name,
+    /// and the CLI's answer once it's back.
+    struct MacInstallRun: Equatable {
+        let app: String
+        var result: MacInstall?
+    }
+
+    /// The install item's tooltip: what to expect of any app under PlayCover,
+    /// on Install to Mac… only (spec 5d item 4).
+    static func installHelp(for build: BuildRecord) -> String? {
+        action(for: build) == .installToMac ? PlayCover.expectations : nil
     }
 
     /// The install item for a row, from the same `action(for:)` the row menu
@@ -201,7 +342,14 @@ struct BuildsView: View {
 
     private func install(_ record: BuildRecord) {
         switch Self.action(for: record) {
-        case .reinstall: reinstallTarget = record
+        case .reinstall:
+            // config.yaml's default device as it is now, which is what the
+            // CLI will read. A read that fails keeps the one read before; with
+            // none read yet, it's unknown, and the confirmation says so.
+            Task {
+                _ = try? await settings.loadSettings()
+                pendingReinstall = record
+            }
         case .installToMac: installToMac(record)
         case .none: break
         }
@@ -234,6 +382,23 @@ struct BuildsView: View {
                     onDismiss: { self.pruneCheckError = nil }
                 )
             }
+            if let macInstall {
+                if let complaint = macInstall.result?.complaint {
+                    ErrorBanner(
+                        message: complaint, title: "Install to Mac",
+                        fit: .fullBleed(gutter: Metrics.paneGutter),
+                        onDismiss: { self.macInstall = nil }
+                    )
+                } else {
+                    MacInstallStrip(
+                        app: macInstall.app,
+                        lines: macInstall.result?.summaryLines(app: macInstall.app, retry: .buildsRow),
+                        onStop: { macInstallTask?.cancel() },
+                        onDismiss: { self.macInstall = nil }
+                    )
+                    Divider().background(Palette.line)
+                }
+            }
             if store.builds.isEmpty {
                 Text("No builds yet.")
                     .font(AppFont.body)
@@ -245,14 +410,19 @@ struct BuildsView: View {
         }
         .background(Palette.bg)
         .navigationTitle("Builds")
+        .reinstallConfirmation(presenting: $pendingReinstall, words: reinstallWords(for:)) {
+            reinstallTarget = $0
+        }
         .sheet(item: $reinstallTarget) { target in
-            ReinstallSheet(build: target, runner: store.runner, config: config, artwork: artwork) {
+            ReinstallSheet(build: target, runner: store.runner, config: config, artwork: artwork,
+                           appUpdates: appUpdates) {
                 reinstallTarget = nil
                 Task { _ = try? await store.load() }
             }
         }
         .sheet(item: $logTarget) { target in
-            BuildLogView(build: target, runner: store.runner, artwork: artwork) {
+            BuildLogView(build: target, appName: Self.appName(for: target, apps: config.apps),
+                         runner: store.runner, artwork: artwork) {
                 logTarget = nil
             }
         }
@@ -279,7 +449,7 @@ struct BuildsView: View {
     /// The title row, with "Clean up old builds…".
     private var header: some View {
         let availability = Self.cleanUpAvailability(
-            buildingApp: config.buildingApp, working: checkingPrune || store.isPruning
+            buildingApp: config.buildingApp.map(config.shownName(of:)), working: checkingPrune || store.isPruning
         )
         return HStack {
             SectionTitle(text: "Builds")
@@ -318,7 +488,7 @@ struct BuildsView: View {
     private var table: some View {
         Table(store.builds, selection: $selected) {
             TableColumn("When") { record in
-                Text(humanTimestamp(record.timestamp))
+                Text(DateHelpers.readable(record.timestamp))
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.textMuted)
             }
@@ -326,7 +496,8 @@ struct BuildsView: View {
             TableColumn("App") { record in
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text(record.app).font(AppFont.bodyMedium).foregroundStyle(Palette.text)
+                        Text(Self.appName(for: record, apps: config.apps))
+                            .font(AppFont.bodyMedium).foregroundStyle(Palette.text)
                         // Only Mac rows are marked. A tag on every row would
                         // say nothing — the same reason the Cache pane's
                         // "BUILD USES THIS" chip is gated on having a sibling.
@@ -348,7 +519,9 @@ struct BuildsView: View {
                 statusView(for: record)
             }
             .width(180)
-            TableColumn("") { record in
+            // Titled, though narrow: an empty header is a sort button VoiceOver
+            // can't name.
+            TableColumn("Actions") { record in
                 Menu {
                     let log = Self.logItem(for: record)
                     Button(log.title) { logTarget = record }
@@ -359,6 +532,7 @@ struct BuildsView: View {
                                                     unavailable: mac.unavailableLine)
                     Button(install.title) { self.install(record) }
                         .disabled(!install.enabled)
+                        .help(Self.installHelp(for: record) ?? "")
                     let reveal = Self.revealItem(for: record)
                     Button(reveal.title) {
                         Task { await store.reveal(record.id) }
@@ -368,13 +542,17 @@ struct BuildsView: View {
                         Pasteboard.copy("graft \(record.app)")
                     }
                 } label: {
-                    Symbols.rowMenu.image
+                    // A Label, not the glyph with `.accessibilityLabel`: a
+                    // Menu's name comes from its label, and VoiceOver read
+                    // the glyph's ("More") whatever the modifier said.
+                    Label { Text("Build actions") } icon: { Symbols.rowMenu.image }
+                        .labelStyle(.iconOnly)
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
             }
-            .width(40)
+            .width(64)
         }
         .tableStyle(.inset(alternatesRowBackgrounds: false))
         .scrollContentBackground(.hidden)
@@ -391,6 +569,7 @@ struct BuildsView: View {
                                                     unavailable: mac.unavailableLine)
                     Button(install.title) { self.install(record) }
                         .disabled(!install.enabled)
+                        .help(Self.installHelp(for: record) ?? "")
                 }
             }
         } primaryAction: { ids in
@@ -421,31 +600,65 @@ struct BuildsView: View {
         }
     }
 
-    private func humanTimestamp(_ raw: String) -> String {
-        guard let date = DateHelpers.parseISO8601(raw) else { return raw }
-        return DateHelpers.mediumDateShortTime.string(from: date)
-    }
-
     private func tweaksSummary(_ tweaks: [String]) -> String {
         if tweaks.isEmpty { return "—" }
         if tweaks.count <= 2 { return tweaks.joined(separator: ", ") }
         return "\(tweaks[0]), \(tweaks[1]) +\(tweaks.count - 2)"
     }
 
-    /// Hand a Mac build's archive to PlayCover.
+    /// Hand a Mac build's archive to PlayCover, and say how it went (spec 5d
+    /// items 2 and 5): "Waiting for PlayCover to install …" while the CLI
+    /// waits for the install, then the install or the wait running out, and
+    /// what Graft did to the app's PlayCover settings. A refusal is a banner.
     ///
     /// Takes the filename, not the path: `--install-to-mac` resolves names in
     /// `cache_dir` and `built_dir` and refuses anything with a separator in it.
     ///
-    /// Reports only a *failure*. There is no success message because there is
-    /// no observable success — `open -b` returns once LaunchServices has
-    /// delivered the event, so neither this app nor the CLI can see whether
-    /// PlayCover finished. Announcing one would be the claim `handed-to-
-    /// playcover` is named to avoid.
+    /// The wait holds the quit, and the strip's Stop ends it (review 23-2,
+    /// §11): nothing else here holds for it, as the app pane's build does.
     private func installToMac(_ record: BuildRecord) {
         guard let path = record.ipaPath else { return }
         let filename = (path as NSString).lastPathComponent
-        Task { handoffComplaint = await staged.installToMac(filename: filename) }
+        let app = Self.appName(for: record, apps: config.apps)
+        macInstall = MacInstallRun(app: app)
+        macInstallTask = Task {
+            let result = await staged.installToMac(filename: filename, holdingQuit: true)
+            // Only if this is still the run on screen: a second press since
+            // started its own.
+            if macInstall == MacInstallRun(app: app) {
+                macInstall = MacInstallRun(app: result.appName(or: app), result: result)
+            }
+        }
     }
 
+}
+
+extension View {
+    /// Re-install…'s confirmation, while `item` holds the build. Return is
+    /// Re-install, as in any macOS confirmation, and Escape and Command-period
+    /// are Cancel: what keeps a Return from going to the wrong phone is the
+    /// alert naming it. Re-install hands `onConfirm` the build it was asked
+    /// about. A device that isn't connected gets OK alone.
+    func reinstallConfirmation(
+        presenting item: Binding<BuildRecord?>,
+        words: @escaping (BuildRecord) -> BuildsView.ReinstallWords,
+        onConfirm: @escaping (BuildRecord) -> Void
+    ) -> some View {
+        alert(
+            item.wrappedValue.map { words($0).title } ?? "",
+            isPresented: item.isPresent(),
+            presenting: item.wrappedValue
+        ) { build in
+            if words(build).canConfirm {
+                Button("Cancel", role: .cancel) {}
+                // Passed the value rather than re-read: dismissing clears the
+                // binding (`stopBuildConfirmation`'s trap).
+                Button(BuildsView.reinstallButton) { onConfirm(build) }
+            } else {
+                Button("OK", role: .cancel) {}
+            }
+        } message: { build in
+            Text(words(build).message)
+        }
+    }
 }

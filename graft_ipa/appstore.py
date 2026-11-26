@@ -49,13 +49,14 @@ import zipfile
 import zlib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 from . import appstore_account, host, install_hints, ipatool, itunes, keychain, unfairplay
 from .config import AppConfig, AppStoreToolsConfig, Config, swap_preferred_version
 from .errors import AppStoreError, IPAInspectionError, ITunesError
-from .ipa_cache import CachedIPA, find_in_cache
+from .ipa_cache import CachedIPA, find_in_cache, staged_name
 from .ipa_inspect import (
     account_data_in,
     check_cryptid,
@@ -463,7 +464,9 @@ def check(
     `held_version` is the version the app is held at (`held_version`), or
     null. A held app is never told of an update: holding it is how the user
     said they don't want the newer one yet. Get latest lets go
-    (`release_hold`).
+    (`release_hold`). `held_version_id` is the build held, when a get by id
+    set the hold, and `held_build` which of that version's builds it is
+    (`held_build`), when the App Store has more than one.
     """
     for name in app_names:
         app = cfg.get_app(name)
@@ -480,6 +483,7 @@ def check(
         cached = find_in_cache(cfg, app)
         cached_version = cached.version if cached else None
         held = held_version(app)
+        build = held_build(cfg, app)
         update = held is None and store_version is not None and (
             cached_version is None or version_key(store_version) > version_key(cached_version)
         )
@@ -492,14 +496,19 @@ def check(
                 cached_version=cached_version,
                 update_available=update,
                 held_version=held,
+                # The build held, when a get by id set the hold; and which of
+                # its version's builds that is, when there are several.
+                held_version_id=held_version_id(app),
+                held_build=asdict(build) if build is not None else None,
                 error=error,
             )
             continue
         if error:
             say(f"{name}: couldn't check the App Store — {error}")
         elif held is not None:
+            label = f" (build {build.number} of {build.count})" if build is not None else ""
             say(
-                f"{name}: held at {held} (cached {cached_version or 'nothing'}), "
+                f"{name}: held at {held}{label} (cached {cached_version or 'nothing'}), "
                 f"{store_version} on the App Store"
             )
         elif update:
@@ -552,6 +561,12 @@ def private_workdir(cache_dir: Path) -> Iterator[Path]:
 
 class _Stopped(AppStoreError):
     pass
+
+
+#: What a get raises when it is stopped (`_stop_cleans_up`), for a caller that
+#: runs one inside a larger job (`update_run`) and must tell a Stop from a
+#: failure.
+GetStopped = _Stopped
 
 
 @contextmanager
@@ -1175,24 +1190,62 @@ def already_staged(cfg: Config, app: AppConfig) -> CachedIPA | None:
 
 def already_staged_version(cfg: Config, app: AppConfig, external_id: str) -> CachedIPA | None:
     """The staged IPA a get of version `external_id` would only download
-    again, or None: the version a listing read for that id
-    (`list_versions`), staged as a get stages it (`_staged_as_get`).
+    again, or None.
+
+    That build's own file (`ipa_cache.staged_name` with the id), as a get of
+    it leaves one. Or the plain `<bundle id>_<version>.ipa`, but only while no
+    other version read for this app has the same number (`same_version_ids`):
+    with two builds of 2026.42.0, a plain file can be either, and a get of
+    build 1 must not hold the app at what may be build 2. The plain file comes
+    back with no id, so the hold it leads to is by display version, as before.
 
     **Fails open**, as `already_staged` does: an id no listing has read, or
     whose file can't be read to say, downloads.
+
+    **Known limit:** "no other version read" is only what has been read. A
+    twin just past the page listed (the 11th row of the sheet's ten, or the
+    next row after `--limit 1`) isn't in `known`, so the plain file is taken
+    for this build and the hold is by display version, which is what every
+    hold was before 2.3, on a file that may be the other build. Reading a row
+    past each page's edge would catch the usual case (twins are listed side by
+    side) for a request per page, and still miss a twin further off; the
+    README's Get an older version notes say to Show More first instead.
     """
     if apples_own(app.bundle_id):
         return None
-    known = _VersionCache.load(cfg.cache_dir).known(app.bundle_id).get(external_id)
-    return _staged_as_get(cfg, app, known.version if known is not None else None)
+    known = _VersionCache.load(cfg.cache_dir).known(app.bundle_id)
+    meta = known.get(external_id)
+    if meta is None:
+        return None
+    own = _staged_as_get(cfg, app, meta.version, external_id=external_id)
+    if own is not None:
+        return own
+    if len(same_version_ids(known, meta.version)) > 1:
+        return None
+    return _staged_as_get(cfg, app, meta.version)
 
 
-def _staged_as_get(cfg: Config, app: AppConfig, version: str | None) -> CachedIPA | None:
-    """`<bundle id>_<version>.ipa`, when it is there as a get leaves one (see
+def same_version_ids(known: dict[str, ipatool.VersionMetadata], version: str) -> list[str]:
+    """Every version id read for an app (`_VersionCache.known`) whose version
+    is `version`, trimmed as the Older Versions sheet compares them, oldest
+    (lowest) first. Two or more are builds that share a number, counted as
+    `AppStoreVersionsStore.duplicateBuilds` counts them."""
+    shown = version.strip()
+    return sorted(
+        (i for i, m in known.items() if ipatool.is_external_version_id(i) and m.version.strip() == shown),
+        key=int,
+    )
+
+
+def _staged_as_get(
+    cfg: Config, app: AppConfig, version: str | None, *, external_id: str | None = None,
+) -> CachedIPA | None:
+    """The file a get of `version` stages (`ipa_cache.staged_name`, with the
+    build's id for a get by id), when it is there as a get leaves one (see
     `already_staged`), else None."""
     if not isinstance(version, str) or not version or _unsafe_in_filename(version):
         return None
-    path = cfg.cache_dir / f"{app.bundle_id}_{version}.ipa"
+    path = cfg.cache_dir / staged_name(app.bundle_id, version, external_id)
     if not path.is_file() or stripped_note(path) is not None:
         return None
     try:
@@ -1206,7 +1259,18 @@ def _staged_as_get(cfg: Config, app: AppConfig, version: str | None) -> CachedIP
         # plist, a damaged member, a read error), "can't say" downloads, as
         # `IPAInfoMemo.info_for` reads it as "skip this candidate".
         return None
-    return CachedIPA(path=path, bundle_id=info.bundle_id, version=info.version)
+    return CachedIPA(
+        path=path, bundle_id=info.bundle_id, version=info.version, external_version_id=external_id,
+    )
+
+
+def staged_as_get(cfg: Config, app: AppConfig, version: str | None) -> CachedIPA | None:
+    """`version` of `app`, staged as a get stages it, or None: for a caller
+    that already knows the App Store's version and must not look it up again
+    (`update_run`, after the plan's batched lookup). Apple's own apps: None."""
+    if apples_own(app.bundle_id):
+        return None
+    return _staged_as_get(cfg, app, version)
 
 
 def report_already_staged(
@@ -1391,6 +1455,39 @@ def held_version(app: AppConfig) -> str | None:
     return None if app.preferred_version == LATEST else app.preferred_version
 
 
+def held_version_id(app: AppConfig) -> str | None:
+    """The App Store version id of the build `app` is held at
+    (`preferred_version_id`), or None: not held, held by hand, or held before
+    2.3. With it, builds use that build's own file (`ipa_cache.admits`)."""
+    return None if app.preferred_version == LATEST else app.preferred_version_id
+
+
+@dataclass(frozen=True)
+class HeldBuild:
+    """Which of a version's builds a hold names: build `number` of `count`,
+    from the oldest."""
+
+    number: int
+    count: int
+
+
+def held_build(cfg: Config, app: AppConfig) -> HeldBuild | None:
+    """For an app held by build whose version the App Store has more than one
+    build of (as far as `--appstore-versions` has read), which one. None for
+    every other app, and when no listing has read the held build."""
+    held_id = held_version_id(app)
+    if held_id is None:
+        return None
+    known = _VersionCache.load(cfg.cache_dir).known(app.bundle_id)
+    meta = known.get(held_id)
+    if meta is None:
+        return None
+    same = same_version_ids(known, meta.version)
+    if len(same) < 2 or held_id not in same:
+        return None
+    return HeldBuild(number=same.index(held_id) + 1, count=len(same))
+
+
 def list_versions(
     cfg: Config,
     app_name: str,
@@ -1436,6 +1533,7 @@ def list_versions(
     cache = _VersionCache.load(cfg.cache_dir)
     known = cache.known(app.bundle_id)
     held = held_version(app)
+    held_id = held_version_id(app)
     if not emitter:
         say(f"{app_name} ({app.bundle_id}): {len(ids)} version(s) on the App Store for this Apple ID, newest first")
     for index, external_id in enumerate(ids):
@@ -1460,7 +1558,9 @@ def list_versions(
                 error = f"Timed out twice in a row, so the list went on without it: {e.message}"
             else:
                 cache.remember(app.bundle_id, external_id, meta)
-        staged = meta is not None and _staged_file(cfg, app, meta.version) is not None
+                # So a later row's `staged` counts this one's number too.
+                known[external_id] = meta
+        staged = meta is not None and _is_staged(cfg, app, meta.version, external_id, known)
         if emitter:
             emitter.emit(
                 "appstore-release",
@@ -1475,8 +1575,10 @@ def list_versions(
                 error=error,
             )
             continue
-        notes = [n for n, on in (("newest", index == 0), ("staged", staged),
-                                 ("held", meta is not None and meta.version == held)) if on]
+        is_held = meta is not None and (
+            external_id == held_id if held_id is not None else meta.version == held
+        )
+        notes = [n for n, on in (("newest", index == 0), ("staged", staged), ("held", is_held)) if on]
         shown = f"{meta.version:<12} {(meta.release_date or '')[:10]:<10}" if meta else f"{'?':<12} {'':<10}"
         say(f"  {shown}  {external_id}" + (f"  ({', '.join(notes)})" if notes else "")
             + (f"  — {error}" if error else ""))
@@ -1485,6 +1587,7 @@ def list_versions(
         emitter.emit(
             "appstore-releases-end", app=app_name, bundle_id=app.bundle_id,
             count=len(ids), offset=offset, limit=limit, held_version=held,
+            held_version_id=held_id,
         )
         return
     quoted = shlex.quote(app_name)
@@ -1494,64 +1597,144 @@ def list_versions(
         say(f"get one: graft --appstore-get --app {quoted} --version-id <id>")
 
 
-def _staged_file(cfg: Config, app: AppConfig, version: str) -> Path | None:
-    """`<bundle id>_<version>.ipa`, when there is such a file. Its name
-    only, for a listing's `staged`: a get still checks the file itself
-    (`_staged_as_get`)."""
+def _is_staged(
+    cfg: Config, app: AppConfig, version: str, external_id: str,
+    known: dict[str, ipatool.VersionMetadata],
+) -> bool:
+    """Whether a listing calls `external_id`'s row staged: its build's own
+    file is in the cache, or the plain file for its version is and no other
+    row read so far has the same number. Names only, for a listing: a get
+    still checks the file itself (`_staged_as_get`).
+
+    "So far" is the known limit `already_staged_version` describes: a twin
+    not yet read, past this page or further down this one on a first listing,
+    isn't counted, and the plain file is called this row's."""
     if _unsafe_in_filename(version):
-        return None
-    path = cfg.cache_dir / f"{app.bundle_id}_{version}.ipa"
-    return path if path.is_file() else None
+        return False
+    if (cfg.cache_dir / staged_name(app.bundle_id, version, external_id)).is_file():
+        return True
+    plain = cfg.cache_dir / staged_name(app.bundle_id, version)
+    return plain.is_file() and len(same_version_ids(known, version)) <= 1
 
 
 def hold(
-    cfg: Config, app_name: str, version: str, *, emitter: JsonEmitter | None, say: Say,
-    warn: Say = _say_nothing,
+    cfg: Config, app_name: str, version: str, *, version_id: str | None = None,
+    emitter: JsonEmitter | None, say: Say, warn: Say = _say_nothing,
 ) -> None:
     """Hold `app_name` at `version`: pin its `preferred_version`, so its
     builds use that version's IPA (`find_in_cache`) and `--appstore-check`
-    doesn't call a newer one an update. After a get of a chosen version."""
-    _set_hold(cfg, app_name, version, emitter=emitter, say=say, warn=warn)
+    doesn't call a newer one an update. After a get of a chosen version.
+
+    `version_id` is the build, when the get staged that build's own file
+    (`preferred_version_id`): its builds then use exactly that build. None
+    when the get found the plain file of a version with one build."""
+    _set_hold(cfg, app_name, version, version_id, emitter=emitter, say=say, warn=warn)
 
 
 def release_hold(
     cfg: Config, app_name: str, *, emitter: JsonEmitter | None, say: Say, warn: Say = _say_nothing,
 ) -> None:
-    """Let go of `app_name`'s hold, if it has one: back to `latest`. After a
-    get of the latest, which is what the user asked for by pressing it."""
-    _set_hold(cfg, app_name, None, emitter=emitter, say=say, warn=warn)
+    """Let go of `app_name`'s hold, if it has one: back to `latest`, and no
+    build. After a get of the latest, which is what the user asked for by
+    pressing it."""
+    _set_hold(cfg, app_name, None, None, emitter=emitter, say=say, warn=warn)
+
+
+def _hold_changed_warning(
+    app_name: str, found: tuple[str, str | None], target: tuple[str, str | None],
+) -> str:
+    """Why a get left the hold as it found it: `found` is what the config
+    said by then, `target` what the get would have written.
+
+    When the version is what changed, that is all it says. When it is the
+    same version held another way (by version, or another build of it),
+    naming the version twice said nothing: the build is what differs."""
+    (found_version, found_id), (version, version_id) = found, target
+    if found_version != version or version == LATEST:
+        instead = f"holding it at {version}" if version != LATEST else f"setting it back to {LATEST}"
+        return (
+            f"{app_name}'s preferred version changed to {found_version} while this get ran, "
+            f"so Graft kept {found_version} instead of {instead}"
+        )
+    now = (
+        f"a build of {version} (App Store version id {found_id})" if found_id is not None
+        else f"{version} by version"
+    )
+    instead = (
+        f"the build this get asked for (App Store version id {version_id})" if version_id is not None
+        else f"{version} by version"
+    )
+    return f"{app_name}'s hold changed to {now} while this get ran, so Graft kept it instead of holding {instead}"
+
+
+def let_go_of_the_build(
+    cfg: Config, app_name: str, version: str, *, emitter: JsonEmitter | None, warn: Say,
+) -> None:
+    """After a drop, `--provide-ipa` or `--decrypt` staged `version` of
+    `app_name` under its plain name: when the app is held by build at that
+    version, hold it there by version instead, so builds use the IPA just
+    given (`ipa_cache.admits` takes only the held build's own file, and
+    nothing says the plain one is that build).
+
+    Said with `appstore-hold` (`version_id` null, `previous` the same
+    version) and a warning, so the person knows the build is no longer
+    named. An app not held by build, or held at another version, is left
+    as it is. `cfg` was read before the IPA was staged, which can take
+    minutes for a decrypt: the hold is swapped against it, and one changed
+    since (another get) is left alone, without a word.
+    """
+    app = cfg.get_app(app_name)
+    held_id = held_version_id(app)
+    if held_id is None or app.preferred_version != version:
+        return
+    expected = (version, held_id)
+    if swap_preferred_version(cfg.path, app_name, expected=expected, new=(version, None)) != expected:
+        return
+    if emitter:
+        emitter.emit(
+            "appstore-hold", app=app_name, bundle_id=app.bundle_id,
+            version=version, version_id=None, previous=version,
+        )
+    warn(
+        f"{app_name}: this IPA may not be the build of {version} it was held at "
+        f"(App Store version id {held_id}), so Graft now holds it at {version} by version, "
+        f"and builds use this IPA"
+    )
 
 
 def _set_hold(
-    cfg: Config, app_name: str, version: str | None, *, emitter: JsonEmitter | None, say: Say,
-    warn: Say,
+    cfg: Config, app_name: str, version: str | None, version_id: str | None, *,
+    emitter: JsonEmitter | None, say: Say, warn: Say,
 ) -> None:
     """Write the hold, and say so with `appstore-hold`, only when it changes:
-    `version` is the new one (null when let go), `previous` the old one.
+    `version` and `version_id` are the new ones (null when let go),
+    `previous` the old version.
 
     `cfg` was read before the get started, and a download can take minutes.
     The config is read again as the hold is written (`swap_preferred_version`),
-    and only `preferred_version` is written. When it was changed meanwhile
-    (Edit App), that later choice stays: the get warns and holds nothing.
+    and only the two hold keys are written. When they were changed meanwhile
+    (Edit App, another get), that later choice stays: the get warns and holds
+    nothing.
     """
     app = cfg.get_app(app_name)
-    target = version or LATEST
-    found = swap_preferred_version(cfg.path, app_name, expected=app.preferred_version, new=target)
+    expected = (app.preferred_version, held_version_id(app))
+    target = (version, version_id) if version is not None else (LATEST, None)
+    found = swap_preferred_version(cfg.path, app_name, expected=expected, new=target)
     if found == target:
         return
-    if found != app.preferred_version:
-        instead = f"holding it at {version}" if version is not None else f"setting it back to {LATEST}"
-        warn(
-            f"{app_name}'s preferred version changed to {found} while this get ran, so Graft "
-            f"left it there instead of {instead}"
-        )
+    if found != expected:
+        warn(_hold_changed_warning(app_name, found, target))
         return
     previous = held_version(app)
     if emitter:
-        emitter.emit("appstore-hold", app=app_name, bundle_id=app.bundle_id, version=version, previous=previous)
+        emitter.emit(
+            "appstore-hold", app=app_name, bundle_id=app.bundle_id,
+            version=version, version_id=version_id, previous=previous,
+        )
     elif version is not None:
+        build = f" (App Store version id {version_id})" if version_id else ""
         say(
-            f"{app_name}: held at {version}. Builds use it, and Graft won't call a newer "
+            f"{app_name}: held at {version}{build}. Builds use it, and Graft won't call a newer "
             f"version an update, until a get of the latest (graft --appstore-get --app {shlex.quote(app_name)})"
         )
     else:

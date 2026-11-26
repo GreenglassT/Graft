@@ -158,7 +158,9 @@ struct ReposView: View {
                     TagChip(label: pkg.section.isEmpty ? "—" : pkg.section)
                 }
                 .width(110)
-                TableColumn("") { pkg in
+                // Titled, as Canister's Fetch is: an empty header is a sort
+                // button VoiceOver can't name.
+                TableColumn("Download") { pkg in
                     Button("Download") {
                         Task { await download(pkg) }
                     }

@@ -85,6 +85,14 @@ struct AppDetailView: View {
     /// Build options' "This Mac" section (`MacBuildSection`). `ContentView`
     /// passes `GraftApp`'s, which asks LaunchServices and opens the browser.
     let playCover: PlayCover
+    /// One-click Update: the pane's update line and its button, and Check
+    /// for updates now. Nil in a test of something else.
+    @ObservedOptionalObject var appUpdates: AppUpdatesStore?
+    /// Open Set Up LiveContainer for a device (spec §5c): the build-target
+    /// bar's button when the target has no LiveContainer. `ContentView`
+    /// presents the sheet over this pane, so Build is one press away once
+    /// it's done. Nil, the default, offers no button.
+    let setUpLiveContainer: ((String) -> Void)?
 
     @State private var buildState: BuildState = .idle
     @State private var logLines: [LogLine] = []
@@ -94,6 +102,10 @@ struct AppDetailView: View {
     @State private var showingAttachSheet: Bool = false
     @State private var tweakError: String?
     @State private var buildOptions = BuildOptions()
+    /// The options the running build launched with (`runBuild`): what the
+    /// header's pills show while it runs, so a pick changed meanwhile, for
+    /// the next Build & Install, doesn't relabel the build in flight.
+    @State private var launchedOptions: BuildOptions?
     @State private var showingOptions = false
     @State private var showingEditSheet = false
     /// Get an older version…'s sheet (`AppStoreVersionsSheet`).
@@ -141,7 +153,9 @@ struct AppDetailView: View {
         liveContainer: LiveContainerStore,
         settings: SettingsStore,
         showSettings: @escaping () -> Void,
-        playCover: PlayCover
+        playCover: PlayCover,
+        appUpdates: AppUpdatesStore? = nil,
+        setUpLiveContainer: ((String) -> Void)? = nil
     ) {
         self.app = app
         self.runner = runner
@@ -155,12 +169,15 @@ struct AppDetailView: View {
         self.settings = settings
         self.showSettings = showSettings
         self.playCover = playCover
+        self._appUpdates = ObservedOptionalObject(wrappedValue: appUpdates)
+        self.setUpLiveContainer = setUpLiveContainer
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             head
                 .padding(.horizontal, Metrics.paneGutter).padding(.vertical, Metrics.sectionGap)
+            updateLine
             Divider().background(Palette.line)
 
             // Above the ScrollView, not inside it, so it stays beside the
@@ -189,7 +206,7 @@ struct AppDetailView: View {
             }
         }
         .background(Palette.bg)
-        .navigationTitle(app.displayName ?? app.name)
+        .navigationTitle(app.shownName)
         .task(id: app.id) {
             await refreshLastBuild()
         }
@@ -257,6 +274,15 @@ struct AppDetailView: View {
         // an icon refreshes even when its pane is not the one open.
         .onChange(of: appStore.completions[app.name]) { _ in
             Task { await refreshCachedIPA() }
+        }
+        // An update of this app staged a new IPA and built it, without going
+        // through `appStore`: the cached-IPA card and the last build are stale.
+        .onChange(of: appUpdates?.lastFinished) { finished in
+            guard let finished, finished.apps.contains(app.name) else { return }
+            Task {
+                await refreshCachedIPA()
+                await refreshLastBuild()
+            }
         }
         // The tweak library, which is where the attached rows get a name and a
         // version instead of a filename.
@@ -353,8 +379,9 @@ struct AppDetailView: View {
         // button. Shared with the sidebar's copy so the two cannot drift.
         .stopBuildConfirmation(
             presenting: $pendingCancel,
-            name: \.name,
-            consequence: { store.cancelConsequence }
+            name: \.shownName,
+            consequence: { store.cancelConsequence },
+            waitingForPlayCover: store.waitingForPlayCover != nil
         ) { store.cancelBuild(appName: $0.name) }
     }
 
@@ -370,7 +397,7 @@ struct AppDetailView: View {
                 // and a Stop button appears beside it. Unlimited, "Example+"
                 // wrapped to "YouT / ube+" for the whole build and the header
                 // grew a line while it ran.
-                Text(app.displayName ?? app.name)
+                Text(app.shownName)
                     .tightTitle()
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -403,7 +430,7 @@ struct AppDetailView: View {
                 Button("Edit…") { showingEditSheet = true }
                     .controlSize(.small)
 
-                ForEach(buildOptions.activeOptions, id: \.self) { option in
+                ForEach(headerOptions.activeOptions, id: \.self) { option in
                     Button {
                         clear(option)
                     } label: {
@@ -444,12 +471,7 @@ struct AppDetailView: View {
                 // after the user clicks away used to be unstoppable short of
                 // quitting the app. See `ConfigStore.launchBuild`.
                 BuildButton(title: "Build & Install", state: buildState) {
-                    // The store claims the slot synchronously and refuses a
-                    // second launch, so a double-click cannot start two builds.
-                    store.launchBuild(
-                        appName: app.name,
-                        delivery: buildOptions.effectiveDelivery(for: app.delivery)
-                    ) { await runBuild(options: buildOptions) }
+                    startBuild()
                 }
                 // Gated on the build slot only, not `isBusy`. A device check
                 // has no Stop button, no cancellation handle and no timeout,
@@ -462,8 +484,12 @@ struct AppDetailView: View {
                 // Nor while this app's source IPA is being replaced: a build
                 // started mid-get would read whichever file happened to sit at
                 // the canonical name.
-                .disabled(store.buildingApp != nil || appStore.isBusy(app.name)
-                          || buildRefusal != nil)
+                // Nor while an update runs, for any app: the slot is one
+                // (spec 4.5), and its tooltip says so (`Busy.updating`).
+                // And while the bar waits for a pick, or the target has no
+                // LiveContainer (spec §5b): the build could only fail.
+                .disabled(store.buildingApp != nil || store.updatingApps != nil || appStore.isBusy(app.name)
+                          || buildRefusal != nil || barTarget.blocksBuild)
                 .help(buildButtonHelp)
 
                 if store.buildingApp == app.name {
@@ -555,13 +581,15 @@ struct AppDetailView: View {
     /// undigested. The bar's own resolver makes every decision about what they
     /// mean together, so its tests can see all of them.
     ///
-    /// `buildOptions.deviceUDID` is passed in because it is what the build
-    /// actually does: it goes onto the invocation as `--device <udid>` (see
-    /// `BuildOptions.Option.cliArgs`), and `cli.py` resolves the target as
-    /// `select_device(device or cfg.default_device_udid)` — the picker
-    /// *replaces* the default. Without it this bar named the default phone
-    /// while the header showed a `device: <other phone>` pill forty points
-    /// away, and one of the two was lying on every build with the picker set.
+    /// The app's device pick (`ConfigStore.devicePick(for:)`, set by the bar's
+    /// Change menu and by Build options' Device picker) is passed in because
+    /// it is what Build & Install actually does: it goes onto the invocation
+    /// as `--device <udid>` (see `BuildOptions.Option.cliArgs`), and
+    /// `installer.resolve_target` then installs there and nowhere else — the
+    /// pick *replaces* the default. Without it this bar named the default
+    /// phone while the header showed a `device: <other phone>` pill forty
+    /// points away, and one of the two was lying on every build with a pick.
+    /// `remembered` names an unplugged default (`device-seen`).
     ///
     /// `deviceErrors` and `hasLoaded` are the two facts that decide whether an
     /// empty `devices` array means anything. Both are already read elsewhere in
@@ -569,7 +597,7 @@ struct AppDetailView: View {
     /// `SidebarView` gates its empty state on the pair — and the bar was the
     /// one surface that took `devices.isEmpty` at face value.
     ///
-    /// `notDelivering` is `buildOptions.deliverySuppressor`, the typed half of
+    /// `notDelivering` is `runOptions.deliverySuppressor`, the typed half of
     /// the same question `launchBuild` asks with these options a few hundred
     /// lines down via `effectiveDelivery(for:)`. Reading `app.delivery` raw here
     /// is what made this bar promise an install for a run with Dry run ticked.
@@ -581,21 +609,150 @@ struct AppDetailView: View {
     /// one it is holding. See `BuildOptions.Option.stillResolvesDevice`.
     private var buildTargetBar: some View {
         BuildTargetBar(
-            target: BuildTargetBar.target(
-                devices: devices.devices,
-                delivery: app.delivery,
-                overrideUDID: buildOptions.deviceUDID,
-                deviceErrors: devices.deviceErrors,
-                hasLoaded: devices.hasLoaded,
-                notDelivering: buildOptions.deliverySuppressor,
-                account: store.account
-            ),
+            target: barTarget,
+            devices: devices.devices,
+            delivery: app.delivery,
+            pick: store.devicePick(for: app.name),
+            onPick: { udid in store.pickDevice(udid, for: app.name, name: deviceName(udid)) },
+            onMakeDefault: { udid in Task { await makeDefault(udid) } },
+            onSetUpLiveContainer: setUpLiveContainer,
             onChange: showSettings
         )
     }
 
+    /// Build & Install's press, and through `installOffered` the offered
+    /// Install Update's (spec §11.1). The store claims the slot
+    /// synchronously and refuses a second launch, so a double-click cannot
+    /// start two builds.
+    private func startBuild() {
+        let options = runOptions
+        store.launchBuild(
+            appName: app.name,
+            delivery: options.effectiveDelivery(for: app.delivery),
+            // The pick was for this build: it goes when it ends.
+            clearingDevicePick: options.usesDevicePick
+        ) { await runBuild(options: options) }
+    }
+
+    /// The update line under the header (spec 4.2), or, with the switch off
+    /// and nothing checked yet, Check for updates now (spec §11.4).
+    @ViewBuilder
+    private var updateLine: some View {
+        if let appUpdates, let plan = appUpdates.plans[app.name],
+           let line = AppUpdateText.paneLine(plan, title: app.shownName) {
+            AppUpdateLine(
+                line: line, isBusy: updateIsBusy, help: AppUpdateText.buttonHelp(plan),
+                failure: appUpdates.dropFailure.flatMap { $0.app == app.name ? $0.message : nil },
+                stopUpdatingDisabled: appUpdates.isUpdating || appUpdates.dropping != nil,
+                onStopUpdating: { udid in Task { await appUpdates.dropTarget(app: app.name, udid: udid) } },
+                offeredBlock: { udid in
+                    offeredInstallBlock(udid, name: line.offered.first { $0.udid == udid }?.deviceName)
+                },
+                onInstallOffered: installOffered
+            ) {
+                appUpdates.openConfirmation(apps: [app.name])
+            }
+            .padding(.horizontal, Metrics.paneGutter).padding(.bottom, Metrics.innerPadding)
+        } else if let appUpdates, !appUpdates.checkApps {
+            HStack {
+                Spacer()
+                Button(AppUpdateText.checkNow) { Task { await appUpdates.checkNow(apps: [app.name]) } }
+                    .controlSize(.small)
+                    .disabled(appUpdates.isChecking)
+            }
+            .padding(.horizontal, Metrics.paneGutter).padding(.bottom, Metrics.innerPadding)
+        }
+    }
+
+    /// An offered install's press (spec §11.1): pick its device for the
+    /// next Build & Install, then start it, so it installs on the device its
+    /// line names rather than the bar's. The pick lasts as any pick does
+    /// (spec §11.5).
+    private func installOffered(_ offered: AppUpdateText.PaneLine.Offered) {
+        store.pickDevice(offered.udid, for: app.name, name: deviceName(offered.udid) ?? offered.deviceName)
+        startBuild()
+    }
+
+    /// Why an offered install on `udid` can't run now, or nil: a Build &
+    /// Install picked for that device, as the bar would read it, waits. One
+    /// not connected waits rather than going to another device (review
+    /// part 2, 3B): a pick never falls back.
+    private func offeredInstallBlock(_ udid: String, name: String?) -> String? {
+        let target = BuildTargetBar.target(
+            devices: devices.devices,
+            delivery: app.delivery,
+            overrideUDID: udid,
+            deviceErrors: devices.deviceErrors,
+            hasLoaded: devices.hasLoaded,
+            notDelivering: runOptions.deliverySuppressor,
+            account: store.account,
+            remembered: devices.remembered,
+            overrideName: name
+        )
+        return Self.offeredBlock(target, device: name)
+    }
+
+    /// `offeredInstallBlock`'s words: a device that isn't connected says so;
+    /// anything else that stops a build says what the bar would.
+    static func offeredBlock(_ target: BuildTarget, device: String?) -> String? {
+        guard target.blocksBuild else { return nil }
+        if case .overrideMissing = target {
+            return "\(device ?? "That device") isn't connected. Connect it to install the update there."
+        }
+        return BuildTargetBar.explanation(for: target)
+    }
+
+    /// The update line's button waits (review S9): for the busy slot (a
+    /// build, a device check, an update), and for what stands in this app's
+    /// own way: its Get, an update of a tweak it uses, and a build refusal.
+    private var updateIsBusy: Bool {
+        Self.updateIsBusy(
+            busy: store.busy != nil || appUpdates?.isUpdating == true,
+            getting: appStore.isBusy(app.name),
+            updatingTweak: tweaksStore.updatingFilename.map { app.tweaks.contains($0) } ?? false,
+            refused: buildRefusal != nil
+        )
+    }
+
+    static func updateIsBusy(busy: Bool, getting: Bool, updatingTweak: Bool, refused: Bool) -> Bool {
+        busy || getting || updatingTweak || refused
+    }
+
+    /// Where the next Build & Install goes, from the facts the CLI's table
+    /// reads. Read by the bar and by Build & Install, which waits while it
+    /// `blocksBuild`.
+    private var barTarget: BuildTarget {
+        BuildTargetBar.target(
+            devices: devices.devices,
+            delivery: app.delivery,
+            overrideUDID: store.devicePick(for: app.name),
+            deviceErrors: devices.deviceErrors,
+            hasLoaded: devices.hasLoaded,
+            notDelivering: runOptions.deliverySuppressor,
+            account: store.account,
+            remembered: devices.remembered,
+            overrideName: store.devicePickName(for: app.name)
+        )
+    }
+
+    /// "Make … the default": write it, drop a pick of that device (it is now
+    /// just the default), and rescan so every `is_default` reads the new one.
+    @MainActor
+    private func makeDefault(_ udid: String) async {
+        do {
+            try await settings.makeDefaultDevice(udid)
+        } catch {
+            store.lastError = error.localizedDescription
+            return
+        }
+        if store.devicePick(for: app.name) == udid { store.pickDevice(nil, for: app.name) }
+        _ = try? await devices.load()
+    }
+
     private var buildButtonHelp: String {
-        buildRefusal ?? store.busy?.explanation ?? "Build and install \(app.name)"
+        buildRefusal ?? store.busy?.explanation
+            ?? (barTarget.blocksBuild ? BuildTargetBar.explanation(for: barTarget) : nil)
+            ?? "Build and install \(app.shownName)"
     }
 
     /// Why no build of this app can run on this account, or nil when one can.
@@ -623,6 +780,25 @@ struct AppDetailView: View {
         return false
     }
 
+    /// The pane's options with this app's device pick, which lives on the
+    /// store so it outlives this view and goes when its build ends
+    /// (`ConfigStore.devicePicks`). Everything that builds an argv or
+    /// describes the next build reads this, not `buildOptions`.
+    private var runOptions: BuildOptions {
+        buildOptions.picking(store.devicePick(for: app.name))
+    }
+
+    /// What the header's pills describe: the running build's options while
+    /// it runs, else the next one's.
+    private var headerOptions: BuildOptions {
+        isBuilding ? (launchedOptions ?? runOptions) : runOptions
+    }
+
+    /// What a connected device is called, for a pick of it.
+    private func deviceName(_ udid: String?) -> String? {
+        devices.devices.first(where: { $0.udid == udid })?.name
+    }
+
     private var buildOptionsPopover: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Build options")
@@ -642,7 +818,12 @@ struct AppDetailView: View {
 
             Divider().background(Palette.line)
 
-            Picker("Device", selection: $buildOptions.deviceUDID) {
+            // The same pick the bar's Change menu sets, for the next Build &
+            // Install (spec §5b).
+            Picker("Device", selection: Binding(
+                get: { store.devicePick(for: app.name) },
+                set: { store.pickDevice($0, for: app.name, name: deviceName($0)) }
+            )) {
                 Text("Auto").tag(String?.none)
                 ForEach(devices.devices) { device in
                     Text(device.name).tag(String?.some(device.udid))
@@ -716,9 +897,12 @@ struct AppDetailView: View {
 
             HStack {
                 Spacer()
-                Button("Reset") { buildOptions = BuildOptions() }
-                    .controlSize(.small)
-                    .disabled(buildOptions.isDefault)
+                Button("Reset") {
+                    buildOptions = BuildOptions()
+                    store.pickDevice(nil, for: app.name)
+                }
+                .controlSize(.small)
+                .disabled(runOptions.isDefault)
             }
 
             Divider().background(Palette.line)
@@ -756,10 +940,7 @@ struct AppDetailView: View {
                     || buildRefusal != nil,
                 // A Mac build of a sideload app is refused too: the
                 // refusal is the build's first step, whatever its target.
-                buildHelp: buildRefusal ?? ("Build with the stub framework PlayCover needs, then "
-                    + "hand it to PlayCover to install here. Nothing is "
-                    + "sent to the phone, and the artifact is not one a "
-                    + "phone can use."),
+                buildHelp: buildRefusal ?? Self.macBuildHelp,
                 onBuild: { startMacBuild() }
             )
 
@@ -793,6 +974,12 @@ struct AppDetailView: View {
         .frame(width: 300)
     }
 
+    /// Build for this Mac's tooltip: what it does, and what to expect of any
+    /// app under PlayCover (spec 5d item 4).
+    static let macBuildHelp = "Build with the stub framework PlayCover needs, then hand it to "
+        + "PlayCover to install here. Nothing is sent to the phone, and the artifact is not "
+        + "one a phone can use. " + PlayCover.expectations
+
     /// The staged line to show, or nil once a build has started since it
     /// landed — whichever button started it. See `ConfigStore.buildStartedAt`.
     static func stagedConfirmation(
@@ -822,7 +1009,7 @@ struct AppDetailView: View {
     /// remember all three.
     private func startMacBuild() {
         showingOptions = false
-        var options = buildOptions
+        var options = runOptions
         options.forPlaycover = true
         store.launchBuild(
             appName: app.name,
@@ -857,7 +1044,7 @@ struct AppDetailView: View {
             Task { _ = try? await settings.loadSettings() }
         }
         let filename = Self.exportFilename(
-            name: app.displayName ?? app.name,
+            name: app.shownName,
             version: cachedIPA.flatMap { $0.exists ? $0.version : nil }
         )
         DispatchQueue.main.async {
@@ -1040,7 +1227,7 @@ struct AppDetailView: View {
         case .forPlaycover: buildOptions.forPlaycover = false
         case .skipInstall: buildOptions.skipInstall = false
         case .skipDecryptCheck: buildOptions.skipDecryptCheck = false
-        case .device: buildOptions.deviceUDID = nil
+        case .device: store.pickDevice(nil, for: app.name)
         // Never drawn either: `startExport` sets it on a copy.
         case .exportIPA: buildOptions.exportPath = nil
         }
@@ -1500,25 +1687,15 @@ struct AppDetailView: View {
         // succeeding, which a user who walks away carries off as the verdict.
         deviceCheck = nil
         do {
-            // Resolve a target before asking. With no `--device` the CLI takes
-            // the *first* connected phone, and `_reconcile_app` then bails
-            // silently on a udid mismatch — by design, since another phone is
-            // not evidence — so the run exits 0 with no warnings and the pane
-            // prints "the record still stands" about hardware it never
-            // consulted. `reconcile`'s own doc names this exact failure.
-            let target = buildOptions.deviceUDID.flatMap { $0.isEmpty ? nil : $0 }
-                ?? (devices.devices.count == 1 ? devices.devices.first?.udid : nil)
-            let outcome = try await store.reconcile(appName: owner, deviceUDID: target)
+            // No `--device`: the CLI checks the device this app was last
+            // delivered to, and says so when it can't (not connected, or a
+            // delivery that recorded none). Not the pick, which is the next
+            // Build & Install's: a check aimed at another device skipped the
+            // row and said "the record still stands" about hardware it never
+            // asked.
+            let outcome = try await store.reconcile(appName: owner)
             guard canApplyCheck(owner) else { return }
-            // A clean run that could not have been aimed anywhere is not a
-            // clean bill of health.
-            var warnings = outcome.warnings
-            if warnings.isEmpty && target == nil && devices.devices.count != 1 {
-                warnings = ["Couldn't tell which device to check — "
-                            + (devices.devices.isEmpty
-                               ? "none is connected."
-                               : "pick one under Build options.")]
-            }
+            let warnings = outcome.warnings
             deviceCheck = warnings.isEmpty ? .clean : .warned(warnings)
         } catch {
             // A non-zero exit, or a subprocess that never launched. Same
@@ -1576,7 +1753,7 @@ struct AppDetailView: View {
                 isGetting: appStore.isGetting(app.name),
                 stage: appStore.stages[app.name],
                 isBlocked: appStore.activity[app.name] == .providing
-                    || store.buildingApp == app.name,
+                    || store.buildingApp == app.name || store.isUpdating(app.name),
                 onGet: { appStore.startGet(app: app.name) },
                 onStop: { appStore.stopGet(app: app.name) },
                 onRefresh: {
@@ -1601,7 +1778,7 @@ struct AppDetailView: View {
                         MacAppStore.open()
                     }
                 },
-                appName: app.displayName ?? app.name,
+                appName: app.shownName,
                 claimBlockedReason: appStore.claimBlockedReason,
                 getBlockedReason: appStore.getBlockedReason,
                 onOlderVersions: { showingOlderVersions = true }
@@ -1660,7 +1837,8 @@ struct AppDetailView: View {
             AppStoreVersionsSheet(
                 app: app.name,
                 held: appStore.versions[app.name]?.heldVersion,
-                displayName: app.displayName ?? app.name,
+                heldId: appStore.versions[app.name]?.heldVersionId,
+                displayName: app.shownName,
                 store: appStore.olderVersions,
                 getBlockedReason: Self.olderVersionBlockedReason(
                     accountBusy: appStore.getBlockedReason,
@@ -1914,6 +2092,7 @@ struct AppDetailView: View {
                             // its filename on screen instead
                             // (`AttachedTweak.filenameLine`).
                             .help("Detach \(tweak.filename)")
+                            .accessibilityLabel("Detach \(tweak.displayName)")
                         }
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(Palette.surface.opacity(0.5))
@@ -1965,6 +2144,7 @@ struct AppDetailView: View {
     ///   (`finishExport`).
     @MainActor
     private func runBuild(options: BuildOptions, placing: ExportStaging? = nil) async {
+        launchedOptions = options
         // Captured once: `self` is a value copy, so `app` inside the event
         // callback would still name the app that started the build even after
         // the user selects a different one. That's what we want for `owner`,
@@ -1976,7 +2156,13 @@ struct AppDetailView: View {
         // Remove — before the two refreshes below go out. Neither of them is
         // part of the build, and neither should extend how long the app looks
         // like one is running.
-        let events = await runBuildProcess(owner: owner, options: options, placing: placing)
+        // A Mac build keeps the slot through the handoff and the CLI's wait for
+        // PlayCover's install, so the pane shows "Waiting for PlayCover to
+        // install …" with Stop available (spec 5d item 7); released below.
+        let holding = Self.holdsSlotThroughHandoff(options)
+        let events = await runBuildProcess(
+            owner: owner, options: options, placing: placing, keepingSlot: holding
+        )
         let built = events != nil
         // An export's confirmation, only once it finished cleanly: a stop or a
         // failure after the file went down says so in the pane instead.
@@ -2015,6 +2201,9 @@ struct AppDetailView: View {
         if handingOver {
             await handOffToPlayCover(record: finished, owner: owner)
         }
+        if holding {
+            store.endBuild(appName: owner)
+        }
         // Not guarded by `logOwner`, unlike everything above: `deliveryStates`
         // is the store's, read by the sidebar badge and by this pane's warning
         // card for whichever app is showing. A build the user navigated away
@@ -2036,6 +2225,13 @@ struct AppDetailView: View {
         }
     }
 
+    /// Whether the build slot stays claimed after the CLI's build ends, for
+    /// the handoff to PlayCover and its wait: a Mac build's. Pure, so the rule
+    /// is checkable without hosting the pane.
+    static func holdsSlotThroughHandoff(_ options: BuildOptions) -> Bool {
+        options.forPlaycover
+    }
+
     /// - Returns: the stream's events when the CLI finished this build
     ///   cleanly — not canceled, no throw, exit 0 — and nil otherwise. The
     ///   three `return nil` sites below are exactly the three that already
@@ -2051,7 +2247,8 @@ struct AppDetailView: View {
     @MainActor
     @discardableResult
     private func runBuildProcess(
-        owner: String, options: BuildOptions, placing: ExportStaging? = nil
+        owner: String, options: BuildOptions, placing: ExportStaging? = nil,
+        keepingSlot: Bool = false
     ) async -> [BuildEvent]? {
         logLines = []
         exported = nil
@@ -2063,8 +2260,9 @@ struct AppDetailView: View {
         deviceCheck = nil
         // `store.launchBuild` already claimed the slot, synchronously, before
         // this Task existed — that is what makes a double-click unable to
-        // start a second build. This only has to release it.
-        defer { store.endBuild(appName: owner) }
+        // start a second build. This only has to release it, unless the
+        // caller keeps it for the handoff (`holdsSlotThroughHandoff`).
+        defer { if !keepingSlot { store.endBuild(appName: owner) } }
         do {
             // Options MUST precede the positional app name. The CLI is a Click
             // Group, so option parsing stops at the first positional and every
@@ -2184,19 +2382,20 @@ struct AppDetailView: View {
     /// `store.noteBuildFailure` — the only two things that paint one — are out
     /// of reach from here by construction rather than by care.
     ///
-    /// That matters because PlayCover crashes on roughly three of eight
-    /// installs on any IPA, tweaked or not, and by the time it is asked the
-    /// archive has been built, signed, prepared and written to the build log. A
-    /// row marked failed is one the user rebuilds for nothing; the retry is
-    /// that row's own Install to Mac, against the file already on disk.
+    /// That matters because PlayCover can't run every app, tweaked or not, and
+    /// by the time it is asked the archive has been built, signed, prepared
+    /// and written to the build log. A row marked failed is one the user
+    /// rebuilds for nothing; the retry is that row's own Install to Mac,
+    /// against the file already on disk.
     ///
-    /// The transcript rather than a banner of its own: it is the channel
-    /// `noteCancelled` already uses for news that arrives after a build has
-    /// ended, and it sits directly under the lines this continues.
+    /// The handoff and the wait it starts are streamed into the log as they
+    /// happen (`MacInstall.streamLines`); this is how it ended.
     enum Handoff: Equatable {
         /// The build finished, but the log has no Mac archive to hand over.
         case noArchive
-        case handedOver(filename: String)
+        /// The CLI's wait ended: installed, not confirmed, or stopped. `app`
+        /// names the app when the archive didn't.
+        case ended(MacInstall, app: String)
         /// PlayCover would not take it. `complaint` is the CLI's own sentence,
         /// carried rather than composed — the same rule
         /// `StagedIPAStore.DeleteAnswer.inUse` follows.
@@ -2208,14 +2407,8 @@ struct AppDetailView: View {
                 return [LogLine(kind: .warn, text:
                     "The build finished, but graft recorded no Mac archive to "
                     + "hand over — check the Builds pane.")]
-            case let .handedOver(filename):
-                // The CLI's own wording for this verb, and it stops short of
-                // claiming an install for the reason
-                // `StagedIPAStore.installToMac` gives: `open -b` returns as
-                // soon as LaunchServices has delivered the event, so there is
-                // no finished install for either side to see.
-                return [LogLine(kind: .ok, text:
-                    "  ✓ handed \(filename) to PlayCover — it reports its own progress")]
+            case let .ended(install, app):
+                return install.endingLines(app: app, retry: .buildsRow)
             case let .refused(filename, complaint):
                 return [
                     LogLine(kind: .warn, text: "  ✗ \(complaint)"),
@@ -2228,9 +2421,20 @@ struct AppDetailView: View {
                 ]
             }
         }
+
+        /// How `install` ended, as a `Handoff`.
+        static func of(_ install: MacInstall, filename: String, app: String) -> Handoff {
+            install.complaint.map { .refused(filename: filename, complaint: $0) }
+                ?? .ended(install, app: app)
+        }
     }
 
     /// Hand the archive a Mac build just produced to PlayCover. See `Handoff`.
+    ///
+    /// Runs while the build slot is still claimed (`holdsSlotThroughHandoff`):
+    /// the CLI waits up to two minutes for PlayCover's install, the log says
+    /// "Waiting for PlayCover to install …", and Stop ends the wait — never
+    /// the handoff, which PlayCover already has.
     ///
     /// **Two things here are not covered by a test, and both were measured
     /// rather than assumed** — each mutated on its own and the whole suite
@@ -2257,9 +2461,15 @@ struct AppDetailView: View {
         // Shaped like the CLI's own stage lines because it is one more step in
         // the same list, even though no `stage` event carries it.
         appendLog(.arrow, "→ playcover", owner: owner)
-        let complaint = await staged.installToMac(filename: filename)
-        append(complaint.map { .refused(filename: filename, complaint: $0) }
-               ?? .handedOver(filename: filename), owner: owner)
+        let app = store.shownName(of: owner)
+        let install = await staged.installToMac(filename: filename) { event in
+            if case .handedToPlayCover = event { store.noteWaitingForPlayCover(owner) }
+            for line in MacInstall.streamLines(for: event, app: app) {
+                appendLog(line.kind, line.text, owner: owner)
+            }
+        }
+        store.noteWaitingForPlayCover(nil)
+        append(.of(install, filename: filename, app: app), owner: owner)
     }
 
     @MainActor

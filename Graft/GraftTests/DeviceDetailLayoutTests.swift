@@ -276,7 +276,7 @@ final class DeviceDetailLayoutTests: XCTestCase {
         guard case let .ready(states) = delivery.readout(for: Self.udid) else {
             XCTFail(
                 "the per-device delivery fixture never loaded, so every row measured "
-                + "reads 'Reading this phone's delivery log…' instead of a CLI summary",
+                + "reads 'Reading this iPhone's delivery log…' instead of a CLI summary",
                 file: file, line: line
             )
             return (config, delivery)
@@ -560,7 +560,8 @@ final class DeviceDetailLayoutTests: XCTestCase {
                     // No sidebar to navigate in this harness — this file
                     // measures layout, not the `.configured` row's click,
                     // which `InstalledAppsSectionTests` already pins.
-                    onSelectApp: { _ in }
+                    onSelectApp: { _ in },
+                    onSetUpLiveContainer: {}
                 )
             }
         }

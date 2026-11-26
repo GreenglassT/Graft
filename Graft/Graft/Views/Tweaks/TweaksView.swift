@@ -6,6 +6,13 @@ struct TweaksView: View {
     /// apps list has to reflect it. Passed in for the one action this pane
     /// offers that isn't about the file — same shape as `BuildsView(store:config:)`.
     @ObservedObject var config: ConfigStore
+
+    /// A tweak an app in a running update uses waits for it (spec 4.5): the
+    /// update is swapping that tweak in, or building with it.
+    static func inRunningUpdate(_ tweak: TweakRecord, updating: [String]?) -> Bool {
+        guard let updating else { return false }
+        return !Set(tweak.usedBy).isDisjoint(with: updating)
+    }
     /// Where this config keeps its tweaks, as the CLI resolved it
     /// (`--settings`' `paths.tweaks_dir`), or nil before that has been read.
     /// Named by the empty state, which used to say `~/.config/graft/tweaks/`
@@ -102,6 +109,8 @@ struct TweaksView: View {
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(Palette.textDim)
+                    // A glyph alone, VoiceOver reads by its symbol's name.
+                    .accessibilityLabel("Dismiss")
                 }
                 .font(AppFont.monoSmall)
                 .foregroundStyle(Palette.accent)
@@ -142,12 +151,26 @@ struct TweaksView: View {
         }
     }
 
+    /// What VoiceOver calls the pane's glyph-only buttons.
+    static let reloadLabel = "Reload tweaks"
+    static let checkUpdatesLabel = "Check for tweak updates"
+    static func updateLabel(_ tweak: TweakRecord) -> String { "Update \(tweak.displayName)" }
+    static func deleteLabel(_ tweak: TweakRecord) -> String { "Delete \(tweak.displayName)" }
+
+    static let filterPlaceholder = "Filter tweaks"
+    static let filterHelp = "Filter by name, version, section, author or filename"
+
     private func toolbar(_ rows: [TweakRecord]) -> some View {
         HStack {
-            SearchField(placeholder: "Filter by name, version, section, author or filename", text: $query)
+            // Short, so it isn't cut off where the pane is narrowest; what it
+            // matches is its tooltip.
+            SearchField(placeholder: Self.filterPlaceholder, text: $query)
+                .help(Self.filterHelp)
             Toggle("Orphans only", isOn: $orphansOnly)
                 .toggleStyle(.switch)
                 .font(AppFont.body)
+                // The switch style leaves the switch itself unnamed.
+                .accessibilityLabel("Orphans only")
             Spacer()
             Text("\(rows.count) of \(tweaks.count)")
                 .font(AppFont.monoSmall)
@@ -173,6 +196,7 @@ struct TweaksView: View {
             .disabled(reloading)
             .keyboardShortcut("r", modifiers: .command)
             .help("Reload tweaks from disk")
+            .accessibilityLabel(Self.reloadLabel)
         }
     }
 
@@ -218,6 +242,8 @@ struct TweaksView: View {
         .contentShape(Rectangle())
         .disabled(store.isCheckingUpdates)
         .help("Check canister and your repos for newer versions")
+        // Its glyph's name is "Arrow Up Circle", which VoiceOver read.
+        .accessibilityLabel(Self.checkUpdatesLabel)
     }
 
     /// The row line for a lookup the CLI could not make (`tweak-update`'s
@@ -337,10 +363,14 @@ struct TweaksView: View {
                                 Task { await runUpdate(tweak) }
                             }
                             .controlSize(.small)
+                            // Which tweak, for a list of rows each with its own.
+                            .accessibilityLabel(Self.updateLabel(tweak))
                             // One at a time: each one rewrites config.yaml's
                             // tweak lists, and two concurrent writers would
-                            // race on the same file.
-                            .disabled(store.updatingFilename != nil)
+                            // race on the same file. Nor while an update of
+                            // an app that uses it runs (spec 4.5).
+                            .disabled(store.updatingFilename != nil
+                                      || Self.inRunningUpdate(tweak, updating: config.updatingApps))
                         }
                     }
                     .font(AppFont.monoSmall)
@@ -408,6 +438,8 @@ struct TweaksView: View {
             .frame(width: 22, height: 22)
             .contentShape(Rectangle())
             .help(attachedNote(tweak) ?? "Move to Trash")
+            // Its glyph's name is "Trash", the same on every row.
+            .accessibilityLabel(Self.deleteLabel(tweak))
         }
         .padding(Metrics.cardPadding)
         .cardStyle()

@@ -145,7 +145,7 @@ def _run_build(
     with patch.object(cli_mod, "run_all_checks", return_value=[]), \
          patch.object(cli_mod, "acquire_ipa") as acquire, \
          cyan_patch as cyan, \
-         patch.object(cli_mod, "select_device", return_value=("UDID1", "usb")), \
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("UDID1", None, "usb")), \
          patch.object(cli_mod, "lc_runner") as lc, \
          patch.object(cli_mod, "run_zsign", side_effect=_fake_zsign), \
          install_patch:
@@ -423,7 +423,7 @@ def test_a_dry_run_records_no_delivery_over_the_real_flag_path(
     with patch.object(cli_mod, "run_all_checks", return_value=[]), \
          patch.object(cli_mod, "acquire_ipa") as acquire, \
          patch.object(cli_mod, "run_cyan") as cyan, \
-         patch.object(cli_mod, "select_device", return_value=("UDID1", "usb")), \
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("UDID1", None, "usb")), \
          patch.object(cli_mod, "run_zsign") as zsign, \
          patch.object(cli_mod, "install") as installer:
         acquire.return_value.path = source
@@ -1515,6 +1515,84 @@ def test_the_reconcile_verb_rejects_an_unknown_app_before_touching_a_device(
     assert "resolved a device" not in str(result.exception)
 
 
+def test_the_reconcile_verb_checks_the_device_the_app_went_to(temp_config_env: Path) -> None:
+    """With no --device, the check goes to the app's last delivery's device,
+    not to whichever is connected first or picked for the next build: that
+    one would be skipped as "another phone" and the record left unchecked."""
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    _lc_deliver(cfg, log, udid="00008130-ipad")
+    asked: list = []
+
+    def select(udid):
+        asked.append(udid)
+        return udid, "usb"
+
+    with patch.object(cli_mod, "select_device", side_effect=select), \
+         patch.object(cli_mod, "list_livecontainer_documents", return_value=[]):
+        result = CliRunner().invoke(cli_mod.app, ["--json", "--reconcile"])
+
+    assert result.exit_code == 0, result.output
+    assert asked == ["00008130-ipad"]
+    assert log.latest_delivery("example")["reconcile_ok"] == 0
+
+
+def test_the_reconcile_verb_says_when_the_app_s_device_is_not_connected(
+    temp_config_env: Path,
+) -> None:
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.errors import DeviceNotConnectedError
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    _lc_deliver(cfg, log, udid="00008130-ipad")
+
+    with patch.object(cli_mod, "select_device",
+                      side_effect=DeviceNotConnectedError("00008130-ipad")):
+        result = CliRunner().invoke(cli_mod.app, ["--json", "--reconcile"])
+
+    events = _events(result.stdout)
+    (warning,) = [e for e in events if e["type"] == "log"]
+    assert "no device checked for example" in warning["line"]
+    assert "00008130-ipad" in warning["line"]
+    assert log.latest_delivery("example")["reconcile_ok"] is None
+
+
+def test_the_reconcile_verb_says_when_the_named_device_isn_t_the_app_s(
+    temp_config_env: Path,
+) -> None:
+    """An explicit --device that the app wasn't last delivered to is not
+    evidence either way: said, not skipped in silence."""
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    _lc_deliver(cfg, log, udid="00008130-ipad")
+
+    with patch.object(cli_mod, "select_device", return_value=("00008130-phone", "usb")), \
+         patch.object(cli_mod, "list_livecontainer_documents",
+                      side_effect=AssertionError("listed the wrong device")):
+        result = CliRunner().invoke(
+            cli_mod.app, ["--json", "--reconcile", "--device", "00008130-phone"]
+        )
+
+    assert result.exit_code == 0, result.output
+    (warning,) = [e for e in _events(result.stdout) if e["type"] == "log"]
+    assert "example was last delivered to 00008130-ipad" in warning["line"]
+    assert log.latest_delivery("example")["reconcile_ok"] is None
+
+
 # --- a reinstall is a third push ---------------------------------------------
 
 
@@ -1665,3 +1743,20 @@ def test_a_reinstall_row_never_lends_its_absence_of_inputs_onward(
     _reinstall(cfg, archive)
 
     assert log.latest_delivery("example")["origin"] == "reinstall"
+
+
+def test_the_reconcile_verb_looks_for_no_device_for_a_sideload(temp_config_env: Path) -> None:
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    _lc_deliver(cfg, log, delivery="sideload", udid="00008130-ipad")
+
+    with patch.object(cli_mod, "select_device", side_effect=AssertionError("looked for a device")):
+        result = CliRunner().invoke(cli_mod.app, ["--json", "--reconcile"])
+
+    assert result.exit_code == 0, result.output
+    assert [e["type"] for e in _events(result.stdout)] == ["delivery-state"]

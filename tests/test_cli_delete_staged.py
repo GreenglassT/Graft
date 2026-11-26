@@ -62,7 +62,7 @@ def _cfg(cache: Path, apps: dict[str, str] | None = None) -> SimpleNamespace:
     "latest" — the default a real `AppConfig` carries when nothing else is
     configured. Tests that need a real pin build their own app entry."""
     entries = {
-        name: SimpleNamespace(bundle_id=bid, preferred_version="latest")
+        name: SimpleNamespace(bundle_id=bid, preferred_version="latest", preferred_version_id=None)
         for name, bid in (apps or {}).items()
     }
     return SimpleNamespace(cache_dir=cache, apps=entries)
@@ -194,10 +194,10 @@ def test_a_refusal_names_only_the_apps_it_actually_blocks(tmp_path: Path) -> Non
         cache_dir=cache,
         apps={
             "example": SimpleNamespace(
-                bundle_id="com.example.app", preferred_version="latest",
+                bundle_id="com.example.app", preferred_version="latest", preferred_version_id=None,
             ),
             "example_locked": SimpleNamespace(
-                bundle_id="com.example.app", preferred_version="21.9.1",
+                bundle_id="com.example.app", preferred_version="21.9.1", preferred_version_id=None,
             ),
         },
     )
@@ -206,7 +206,7 @@ def test_a_refusal_names_only_the_apps_it_actually_blocks(tmp_path: Path) -> Non
         cli_mod._do_delete_staged(
             cfg, filename=old.name, force=False, emitter=JsonEmitter(stream=buf),
         )
-    assert e.value.message == f"{old.name} is the only staged IPA for: example_locked", (
+    assert e.value.message == f"{old.name} is the only staged IPA that example_locked can build from", (
         "naming claimed_by instead of broken would also list example here"
     )
     event = _events(buf.getvalue())[0]
@@ -251,7 +251,7 @@ def test_it_refuses_when_a_pinned_app_would_lose_its_only_buildable_version(
         cache_dir=cache,
         apps={
             "example": SimpleNamespace(
-                bundle_id="com.example.app", preferred_version="21.9.1",
+                bundle_id="com.example.app", preferred_version="21.9.1", preferred_version_id=None,
             ),
         },
     )
@@ -275,7 +275,7 @@ def test_a_pinned_app_is_not_refused_when_its_own_version_remains(
         cache_dir=cache,
         apps={
             "example": SimpleNamespace(
-                bundle_id="com.example.app", preferred_version="21.9.1",
+                bundle_id="com.example.app", preferred_version="21.9.1", preferred_version_id=None,
             ),
         },
     )
@@ -303,7 +303,7 @@ def test_it_does_not_refuse_a_file_a_claiming_apps_pin_could_never_use(
         cache_dir=cache,
         apps={
             "example": SimpleNamespace(
-                bundle_id="com.example.app", preferred_version="22.0.0",
+                bundle_id="com.example.app", preferred_version="22.0.0", preferred_version_id=None,
             ),
         },
     )

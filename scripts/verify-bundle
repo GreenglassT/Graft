@@ -1243,7 +1243,8 @@ def check_preflight(report: Report, label: str, r: subprocess.CompletedProcess, 
                      f"{row.get('source')}: {row.get('detail')}", output=json.dumps(row))
     unwanted = [n for n in rows if n in ("otool", "ideviceinstaller")]
     report.check(f"--check ({label}): no otool or ideviceinstaller row", not unwanted, ", ".join(unwanted))
-    # The sandbox has no device, so the device rows fail; nothing else may.
+    # The sandbox has no device, so the device row is information ("not
+    # connected"), or a failure when usbmuxd doesn't answer; nothing else may fail.
     failing = [n for n, o in rows.items() if not o.get("ok") and "device" not in n]
     report.check(f"--check ({label}): every non-device row passes", not failing, ", ".join(failing),
                  output="\n".join(json.dumps(rows[n]) for n in failing))

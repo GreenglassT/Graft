@@ -127,6 +127,35 @@ final class AppStoreRecordsTests: XCTestCase {
         }
         XCTAssertNil(gone.version)
         XCTAssertEqual(gone.previous, "1.2.0")
+
+        let byBuild = #"{"type":"appstore-hold","app":"example","bundle_id":"com.example.app","version":"1.2.0","version_id":"800200","previous":null}"#
+        guard case let .appStoreHold(build) = try BuildEvent.decode(line: byBuild) else {
+            return XCTFail("expected .appStoreHold")
+        }
+        XCTAssertEqual(build.versionId, "800200")
+    }
+
+    /// A hold by build (spec §6): which build, and which of its version's
+    /// builds. An older CLI sends neither.
+    func test_a_hold_by_build_comes_through() throws {
+        let line = #"{"type":"appstore-version","app":"example","bundle_id":"com.example.app","store_version":"1.4.0","cached_version":"1.2.0","update_available":false,"held_version":"1.2.0","held_version_id":"800200","held_build":{"number":1,"count":2},"error":null}"#
+        guard case let .appStoreVersion(record) = try BuildEvent.decode(line: line) else {
+            return XCTFail("expected .appStoreVersion")
+        }
+        XCTAssertEqual(record.heldVersionId, "800200")
+        XCTAssertEqual(record.heldBuild, AppStoreVersionRecord.HeldBuild(number: 1, count: 2))
+
+        let unique = #"{"type":"appstore-version","app":"example","bundle_id":"com.example.app","store_version":"1.4.0","cached_version":"1.2.0","update_available":false,"held_version":"1.2.0","held_version_id":"800200","held_build":null,"error":null}"#
+        guard case let .appStoreVersion(one) = try BuildEvent.decode(line: unique) else {
+            return XCTFail("expected .appStoreVersion")
+        }
+        XCTAssertNil(one.heldBuild)
+
+        let end = #"{"type":"appstore-releases-end","app":"example","bundle_id":"com.example.app","count":3,"offset":0,"limit":10,"held_version":"1.2.0","held_version_id":"800200"}"#
+        guard case let .appStoreReleasesEnd(sentinel) = try BuildEvent.decode(line: end) else {
+            return XCTFail("expected .appStoreReleasesEnd")
+        }
+        XCTAssertEqual(sentinel.heldVersionId, "800200")
     }
 
     func test_a_failed_lookup_decodes_rather_than_vanishing() throws {

@@ -23,6 +23,13 @@ final class DevicesStore: ObservableObject {
     /// `--devices` ever sees: `checkExit` throws only on a non-zero exit.
     @Published private(set) var deviceErrors: [DeviceErrorRecord] = []
 
+    /// Devices Graft has seen before that the last full listing didn't
+    /// describe (`device-seen`): unplugged, or connected and locked. The
+    /// configured default is always among them when it is set and not
+    /// described. How the build-target bar and Settings name an unplugged
+    /// default (spec §5b). Replaced with `devices` on every completed listing.
+    @Published private(set) var remembered: [SeenDeviceRecord] = []
+
     @Published private(set) var isLoading: Bool = false
 
     /// Whether a `load()` has *completed* — success or failure, devices or not.
@@ -212,6 +219,10 @@ final class DevicesStore: ObservableObject {
         })
         setIfChanged(\.deviceErrors, events.compactMap { event in
             if case let .deviceError(record) = event { return record }
+            return nil
+        })
+        setIfChanged(\.remembered, events.compactMap { event in
+            if case let .deviceSeen(record) = event { return record }
             return nil
         })
         // Keeps a poll that immediately follows this load from mistaking "the

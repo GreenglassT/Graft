@@ -429,7 +429,7 @@ def test_a_stored_blank_password_counts_as_found_where_builds_read_it(
         handed = {}
         monkeypatch.setattr(lc_manage, "install", lambda **kw: handed.update(kw) or [])
         monkeypatch.setattr(lc_manage, "_target", lambda cfg, udid: "u1")
-        monkeypatch.setattr(lc_manage, "AscProfiles", lambda cfg, password: None)
+        monkeypatch.setattr(lc_manage, "AscProfiles", lambda cfg, password, *, target=None, note=None: None)
         lc_manage.run_install(cfg, udid="u1", instances=None, channel=None, force=False,
                               events=lc_manage.LcEvents(None, warn=lambda line: None))
         assert handed["p12_password"] == ""

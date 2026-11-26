@@ -117,6 +117,17 @@ enum CLIContract {
         static let tweaks = "--tweaks"
         static let tweakUpdates = "--tweak-updates"
         static let updateTweak = "--update-tweak"
+        // AppUpdatesStore: `graft --update` (Plan D). `updateAll` because
+        // `all` is this enum's own set.
+        static let update = "--update"
+        static let updateAll = "--all"
+        static let plan = "--plan"
+        static let quick = "--quick"
+        static let withAffected = "--with-affected"
+        /// `--drop-update-target APP --device UDID`: Update stops installing
+        /// APP on that device until it's delivered there again (a device
+        /// that's gone). Emits `update-target-dropped`.
+        static let dropUpdateTarget = "--drop-update-target"
         static let deviceApps = "--device-apps"
         static let decrypt = "--decrypt"
         static let decryptFrontmost = "--decrypt-frontmost"
@@ -447,7 +458,8 @@ enum CLIContract {
             keepBundleId, noKeepBundleId, stripExtensions, noStripExtensions,
             stripSupportedDevices, noStripSupportedDevices, compressionLevel,
             lcBundleId, noLcBundleId, autoProfile, noAutoProfile,
-            tweaks, tweakUpdates, updateTweak, deviceApps, decrypt, decryptFrontmost,
+            tweaks, tweakUpdates, updateTweak, update, updateAll, plan, quick, withAffected, dropUpdateTarget,
+            deviceApps, decrypt, decryptFrontmost,
             stripEncryptedExtensions, keepEncryptedExtensions, decryptBackend,
             decryptCheck, verbose,
             deleteTweak,
@@ -747,6 +759,35 @@ enum CLIContract {
         }
     }
 
+    /// `graft --update`'s vocabulary (`update_plan` and `update_run` in the
+    /// CLI): the steps `update-step` and `update-app-end` name, a step's
+    /// status, a plan's readiness, and the skip reasons the app words a line
+    /// of its own for. Pinned against the Python constants by
+    /// tests/test_update_plan.py. The deferred steps `update-stopping` names
+    /// are `Stage.liveContainerPush`, `Stage.sideloadInstall` and
+    /// `stepTweaks`.
+    enum Update {
+        static let stepTweaks = "tweaks"
+        static let stepGet = "get"
+        static let stepBuild = "build"
+        /// One device's install, once per target (`update_plan.STEP_INSTALL`,
+        /// spec §11.3): `start` then `end`, or `skipped` with why. The first
+        /// runs inside the build.
+        static let stepInstall = "install"
+        static let statusStart = "start"
+        static let statusEnd = "end"
+        static let statusSkipped = "skipped"
+        static let readinessChecked = "checked"
+        static let readinessLikely = "likely"
+        static let needsAppleSilicon = "needs Apple silicon"
+        static let notInstalledYet = "not installed yet"
+        /// `update-app-end`'s `error` for an app a Stop kept from starting
+        /// (`update_run.NOT_STARTED`).
+        static let notStarted = "not started"
+        /// How the reason for a version the Apple ID was refused begins.
+        static let refusedPrefix = "Your Apple ID doesn't have "
+    }
+
     /// Exit statuses the GUI reacts to specifically, rather than as "the CLI
     /// failed". `CLIError.exitCode` is how a caller reads one back.
     enum Exit {
@@ -845,6 +886,7 @@ enum CLIContract {
         "device",
         "device-brief",
         "device-error",
+        "device-seen",
         "device-info",
         "lc-status",
         "lc-install-progress",
@@ -878,6 +920,8 @@ enum CLIContract {
         "staged-ipa-deleted",
         "staged-ipa-in-use",
         "handed-to-playcover",
+        "playcover-installed",
+        "playcover-install-unconfirmed",
         "ipa-exported",
         "tweak-attached",
         "tweak-detached",
@@ -916,6 +960,12 @@ enum CLIContract {
         "update-progress",
         "update-download-end",
         "update-install",
+        "update-plan",
+        "update-step",
+        "update-stopping",
+        "update-app-end",
+        "update-end",
+        "update-target-dropped",
     ]
 
     /// Events the CLI emits that the GUI deliberately does *not* decode, each

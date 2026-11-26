@@ -57,7 +57,7 @@ struct AttachTweaksSheet: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Attach Tweaks").font(AppFont.title).foregroundStyle(Palette.text)
-            Text("Pick tweaks from your library to attach to \(app.displayName ?? app.name).")
+            Text("Pick tweaks from your library to attach to \(app.shownName).")
                 .font(AppFont.monoSmall).foregroundStyle(Palette.textDim)
         }
         .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 14)
@@ -84,9 +84,9 @@ struct AttachTweaksSheet: View {
         }
     }
 
-    /// Whether a tweak is ticked, as a binding a `Toggle` can own.
+    /// Whether a tweak is checked, as a binding a `Toggle` can own.
     ///
-    /// An already-attached tweak cannot be unticked here — the per-row detach
+    /// An already-attached tweak cannot be unchecked here — the per-row detach
     /// on the app pane is where that happens — so the setter ignores it as
     /// well as the control being disabled.
     private func isSelected(_ tweak: TweakRecord) -> Binding<Bool> {

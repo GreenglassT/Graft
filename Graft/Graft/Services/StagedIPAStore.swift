@@ -87,13 +87,17 @@ final class StagedIPAStore: ObservableObject {
     @Published private(set) var hasLoaded = false
 
     private let runner: CLIRunner
+    /// Holds the quit while Install to Mac… from Builds or the Cache waits
+    /// for PlayCover (`installToMac`'s `holdingQuit`); a test passes its own.
+    private let hold: TerminationHold
 
     /// Bumped on every `load()` call so a stale one can tell it lost a race.
     /// Unpublished: bookkeeping, which nothing draws.
     private var loadGeneration = 0
 
-    init(runner: CLIRunner) {
+    init(runner: CLIRunner, hold: TerminationHold = .shared) {
         self.runner = runner
+        self.hold = hold
     }
 
     /// The argv, as a static pure function so a test can assert on it without
@@ -296,33 +300,275 @@ final class StagedIPAStore: ObservableObject {
         return .deleted
     }
 
-    /// Hand one staged IPA to PlayCover. nil when it was handed over, and the
-    /// CLI's own sentence when it could not be.
+    /// Hand one staged IPA or Mac build to PlayCover, and follow it to the
+    /// end of the CLI's wait for the install (spec 5d items 2 and 5).
     ///
-    /// **Nothing to report on success, deliberately.** `open -b` returns as
-    /// soon as LaunchServices has delivered the event, so there is no finished
-    /// install to announce — the CLI's event is named `handed-to-playcover`
-    /// for exactly that reason, and inventing a confirmation here would claim
-    /// more than either side can see. PlayCover shows its own progress.
+    /// Streamed, not run once: `handed-to-playcover` comes the moment the file
+    /// is handed over, and `onEvent` hears it then, so the pane can say
+    /// "Waiting for PlayCover to install …" for the up to two minutes the CLI
+    /// waits. What comes back is read off the whole run (`MacInstall`).
     ///
-    /// The failure is not optional to report, though, and that is why this
-    /// answers at all rather than being a discarded `Task`: with PlayCover
-    /// absent, `--install-to-mac` fails, and a button that then did nothing
-    /// visible would be indistinguishable from a dead one — the hazard
+    /// **A Stop ends the wait, never the handoff.** Canceling the Task stops
+    /// the CLI (SIGTERM), which exits 143 with the handoff already said; that
+    /// is `.stopped`, never a failure.
+    ///
+    /// The failure is not optional to report, though: with PlayCover absent,
+    /// `--install-to-mac` fails, and a button that then did nothing visible
+    /// would be indistinguishable from a dead one — the hazard
     /// `CachePaneView`'s required callbacks were written against.
     ///
     /// The listing is not re-read: installing changes the Mac, not the cache.
-    func installToMac(filename: String, argsOverride: [String]? = nil) async -> String? {
+    ///
+    /// With `holdingQuit`, the quit is held until it ends
+    /// (`TerminationHold.waitingForPlayCover`), and Quit Anyway stops it as
+    /// Stop does: Builds' and the Cache's Install to Mac…, which nothing
+    /// else holds for, so ⌘Q during the wait quit without asking (review
+    /// 23-2, §11). The app pane's handoff runs inside its Mac build, whose
+    /// hold already covers it (`ConfigStore.launchBuild`).
+    func installToMac(
+        filename: String, argsOverride: [String]? = nil, holdingQuit: Bool = false,
+        onEvent: @escaping @MainActor (BuildEvent) -> Void = { _ in }
+    ) async -> MacInstall {
+        let args = argsOverride ?? Self.installArgs(filename: filename)
+        guard holdingQuit else { return await handOver(args, onEvent: onEvent) }
+        // In a task of its own, which Quit Anyway cancels; canceling the
+        // caller's task, its Stop, cancels it too (`TerminationHold.holding`).
+        // The work throws nothing, so neither does this.
+        return (try? await hold.holding(TerminationHold.waitingForPlayCover) {
+            await self.handOver(args, onEvent: onEvent)
+        }) ?? MacInstall(handed: nil, ending: .stoppedBeforeHandoff)
+    }
+
+    /// `--install-to-mac` with `args`, read off as `MacInstall`.
+    private func handOver(
+        _ args: [String], onEvent: @escaping @MainActor (BuildEvent) -> Void
+    ) async -> MacInstall {
+        let result: CLIRunner.RunResult
         do {
-            let result = try await runner.runOnce(
-                arguments: argsOverride ?? Self.installArgs(filename: filename)
-            )
-            guard result.exitCode != 0 else { return nil }
-            return CLIError.exited(
-                doing: "Install to Mac", code: result.exitCode, stderr: result.stderr
-            ).localizedDescription
+            result = try await runner.stream(arguments: args, onEvent: onEvent)
         } catch {
-            return error.localizedDescription
+            // Stopped before the CLI started: nothing was handed over, and
+            // nothing refused it.
+            if Task.isCancelled { return MacInstall(handed: nil, ending: .stoppedBeforeHandoff) }
+            return MacInstall(handed: nil, ending: .refused(error.localizedDescription))
         }
+        return MacInstall(
+            events: result.events, exitCode: result.exitCode, stderr: result.stderr,
+            stopped: Task.isCancelled
+        )
+    }
+}
+
+/// What one `--install-to-mac` did, read off its events and its exit (spec 5d
+/// items 2 and 5). The pane's log, Builds and the Cache all say it the same
+/// way, through `streamLines` and `endingLines`.
+struct MacInstall: Equatable {
+    enum Ending: Equatable {
+        /// PlayCover's copy of the app carries the handed version.
+        case installed(PlayCoverInstalledRecord)
+        /// The CLI's wait ran out: PlayCover still installing, or failed.
+        case unconfirmed(PlayCoverInstallUnconfirmedRecord)
+        /// The person stopped the wait. The handoff stands.
+        case stopped
+        /// Handed over, and nothing more said, with a clean exit: a CLI from
+        /// before 2.3.
+        case handedOnly
+        /// The person stopped it before anything was handed over: Builds'
+        /// and the Cache's Stop show from the press, while the CLI still
+        /// gets the file ready. Not a refusal.
+        case stoppedBeforeHandoff
+        /// Handed over, then the CLI failed before saying how the install
+        /// went: the reason, from its stderr. The handoff stands.
+        case died(String)
+        /// Nothing was handed over: the CLI's own sentence.
+        case refused(String)
+    }
+
+    /// Where Install to Mac… is tried again, which the unconfirmed line names.
+    enum Retry {
+        /// A Mac build, from Builds or the app's pane.
+        case buildsRow
+        /// A staged IPA, from the Cache pane.
+        case cacheRow
+    }
+
+    var handed: HandedToPlayCoverRecord?
+    var ending: Ending
+    /// The CLI's warnings before the handoff: an app's own binary needing an
+    /// iOS framework macOS lacks.
+    var warnings: [String] = []
+    /// Its notes after it: a bundle id it couldn't follow the install of,
+    /// or what a Stop's settings step did.
+    var notes: [String] = []
+
+    init(handed: HandedToPlayCoverRecord?, ending: Ending,
+         warnings: [String] = [], notes: [String] = []) {
+        self.handed = handed
+        self.ending = ending
+        self.warnings = warnings
+        self.notes = notes
+    }
+
+    /// Read off a finished run. `stopped` is the caller's own cancel.
+    init(events: [BuildEvent], exitCode: Int32, stderr: String, stopped: Bool) {
+        var handed: HandedToPlayCoverRecord?
+        var ending: Ending?
+        var warnings: [String] = []
+        var notes: [String] = []
+        for event in events {
+            switch event {
+            case let .handedToPlayCover(record): handed = record
+            case let .playCoverInstalled(record): ending = .installed(record)
+            case let .playCoverInstallUnconfirmed(record): ending = .unconfirmed(record)
+            case let .log(source, line) where source == "warning": warnings.append(line)
+            case let .log(source, line) where source == "playcover": notes.append(line)
+            default: break
+            }
+        }
+        if ending == nil {
+            if handed == nil, stopped, exitCode != 0 {
+                ending = .stoppedBeforeHandoff
+            } else if handed == nil {
+                ending = exitCode == 0
+                    ? .handedOnly
+                    : .refused(CLIError.exited(
+                        doing: "Install to Mac", code: exitCode, stderr: stderr
+                    ).localizedDescription)
+            } else if stopped || [129, 130, 143].contains(exitCode) {
+                // 143 is a SIGTERM, 129 a hang-up, 130 Ctrl-C: all a Stop.
+                ending = .stopped
+            } else if exitCode == 0 {
+                ending = .handedOnly
+            } else {
+                ending = .died(Self.reason(stderr: stderr, exitCode: exitCode))
+            }
+        }
+        self.init(handed: handed, ending: ending ?? .handedOnly, warnings: warnings, notes: notes)
+    }
+
+    /// Why a CLI died after the handoff: its `error:` line when it wrote one,
+    /// else its stderr's last line (a traceback's names the exception), else
+    /// its exit status.
+    static func reason(stderr: String, exitCode: Int32) -> String {
+        let lines = stderr.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if let error = lines.first(where: { $0.hasPrefix("error: ") }) {
+            return String(error.dropFirst("error: ".count))
+        }
+        return lines.last ?? "exit status \(exitCode)"
+    }
+
+    /// The CLI's sentence when nothing was handed over, else nil.
+    var complaint: String? {
+        if case let .refused(sentence) = ending { return sentence }
+        return nil
+    }
+
+    /// The app's name for the lines: the archive's own, as the handoff or
+    /// the event that ended the wait said it, else `fallback`.
+    func appName(or fallback: String) -> String {
+        let said: String?
+        switch ending {
+        case let .installed(record): said = record.displayName
+        case let .unconfirmed(record): said = record.displayName
+        default: said = nil
+        }
+        return [handed?.displayName, said].compactMap { $0 }.first { !$0.isEmpty } ?? fallback
+    }
+
+    static func waitingLine(app: String) -> String {
+        "Waiting for PlayCover to install \(app)…"
+    }
+
+    /// What one streamed event adds to the pane's log as it arrives: the
+    /// handoff and the wait it starts, a warning, a note.
+    static func streamLines(for event: BuildEvent, app fallback: String) -> [LogLine] {
+        switch event {
+        case let .handedToPlayCover(record):
+            let app = record.displayName.flatMap { $0.isEmpty ? nil : $0 } ?? fallback
+            return [
+                LogLine(kind: .ok, text: "  ✓ handed \(record.filename) to PlayCover"),
+                LogLine(kind: .plain, text: waitingLine(app: app)),
+            ]
+        case let .log(source, line) where source == "warning":
+            return [LogLine(kind: .warn, text: line)]
+        case let .log(source, line) where source == "playcover":
+            // Plain, not dim: after a Stop it carries the first-handoff notice.
+            return [LogLine(kind: .plain, text: line)]
+        default:
+            return []
+        }
+    }
+
+    /// How it ended, once the CLI is done: the install or the wait running
+    /// out, then what Graft did to the app's PlayCover settings.
+    func endingLines(app fallback: String, retry: Retry) -> [LogLine] {
+        let app = appName(or: fallback)
+        switch ending {
+        case let .installed(record):
+            return [LogLine(kind: .ok, text: "  ✓ PlayCover installed \(app) \(record.version). "
+                            + "Open it from PlayCover.")]
+                + record.settings.lines(app: app)
+        case let .unconfirmed(record):
+            let whereTo = retry == .buildsRow ? "on the build's row in Builds" : "on its row"
+            return [LogLine(kind: .warn, text: "PlayCover hasn't finished installing \(app). Check "
+                            + "PlayCover's window; if the install failed there, Install to Mac… "
+                            + "\(whereTo) tries again.")]
+                + record.settings.lines(app: app)
+        case .stopped:
+            return [LogLine(kind: .dim, text: "Stopped waiting. PlayCover may still be installing \(app).")]
+        case .stoppedBeforeHandoff:
+            return [LogLine(kind: .dim, text: "Stopped before Graft handed \(app) to PlayCover.")]
+        case .handedOnly:
+            return []
+        case let .died(reason):
+            return [LogLine(kind: .warn, text: "Graft stopped following PlayCover's install: \(reason)")]
+        case let .refused(complaint):
+            return [LogLine(kind: .warn, text: "  ✗ \(complaint)")]
+        }
+    }
+
+    /// Everything after the press, for a surface that shows it all at once
+    /// (Builds, the Cache): the warnings, the notes, then how it ended.
+    func summaryLines(app fallback: String, retry: Retry) -> [LogLine] {
+        warnings.map { LogLine(kind: .warn, text: $0) }
+            + notes.map { LogLine(kind: .plain, text: $0) }
+            + endingLines(app: fallback, retry: retry)
+    }
+}
+
+extension PlayCoverSettingsChange {
+    /// How PlayCover's own window names each key, in the order the
+    /// sentences name them.
+    private static let named: [(key: String, name: String)] = [
+        ("keymapping", "keymapping"), ("playChain", "PlayChain"),
+    ]
+
+    private static func names(_ keys: [String]) -> String {
+        named.filter { keys.contains($0.key) }.map(\.name).joined(separator: " and ")
+    }
+
+    /// The first-handoff notice, naming only the keys turned off; the CLI's
+    /// console says the same (`playcover_handoff.disabled_notice`).
+    func disabledNotice(app: String) -> String? {
+        guard !disabled.isEmpty else { return nil }
+        var line = "Graft turned off PlayCover's \(Self.names(disabled)) for \(app)."
+        if disabled.contains("keymapping") {
+            line += " For a game, turn keymapping back on in PlayCover; Graft keeps it from then on."
+        }
+        return line
+    }
+
+    /// A put-back setting: a dim line, not a notice.
+    func restoredLine(app: String) -> String? {
+        guard !restored.isEmpty else { return nil }
+        let noun = restored.count > 1 ? "settings" : "setting"
+        return "Graft put back your PlayCover \(Self.names(restored)) \(noun) for \(app)."
+    }
+
+    func lines(app: String) -> [LogLine] {
+        [disabledNotice(app: app).map { LogLine(kind: .plain, text: $0) },
+         restoredLine(app: app).map { LogLine(kind: .dim, text: $0) }].compactMap { $0 }
     }
 }

@@ -13,6 +13,10 @@ Graft.
 - Each download updates from its own zip: `Graft.zip` for Apple silicon,
   `Graft-Intel.zip` for the Intel build. A release without yours has no
   update for your Mac yet, and Graft never installs the other one.
+- A release that needs a newer macOS than your Mac has is no update for your
+  Mac either: Graft downloads it once, finds it needs a newer macOS, deletes
+  it and stays on the version you have. It doesn't download that release
+  again until your Mac has that macOS.
 - Before it calls a download ready, Graft checks it: the SHA-256 GitHub lists
   for it, then that the app inside is Graft, newer than yours, the same build
   as yours, signed with the same developer's Developer ID as yours and
@@ -31,12 +35,20 @@ Graft.
 
 ## Settings › Updates
 
-Settings › Updates has two switches, both on to start with:
+Settings › Updates has three switches, all on to start with:
 - **Check for updates automatically** is the daily check. With it off, Help ›
   Check for Updates… still asks when you choose it.
 - **Download and install updates automatically** is the background download.
   With it off, the banner offers **Update**, which downloads, checks and
   restarts when you choose it.
+- **Check my apps for updates** is the daily check of your apps and their
+  tweaks, not of Graft. Its line says what it sends: "Once a day, and after
+  each get, build, tweak update, update or change to an app's options or tweaks,
+  and when a device connects or disconnects while an update waits for one (at most every 10 minutes). Sends
+  your apps' bundle IDs to Apple's App Store lookup and your tweaks' package
+  IDs to canister.me. No Apple ID or Mac identifier." With it off, Graft checks
+  only when you press **Check for updates now**, below it. See
+  [Updating your apps](building-and-delivery.md#updating-your-apps).
 
 ## When Graft can't update itself
 
@@ -56,6 +68,11 @@ next time it opens, and writes what happened to
 `graft --check-update` asks GitHub whether a newer Graft is out, and downloads
 nothing. `graft --download-update` downloads it into Graft's cache and checks
 it, and installs nothing.
+
+With `--json`, `--check-update` prints one `update-check` event. If a download
+has found that the latest release needs a newer macOS than your Mac has, its
+`update_available` is false and `needs_macos` names that macOS ("15.0");
+otherwise `needs_macos` is null.
 
 ## What's new
 

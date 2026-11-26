@@ -46,6 +46,11 @@ final class LiveContainerStore: ObservableObject {
         /// Ended by Stop rather than by the CLI.
         var stopped = false
         var progress: [LCInstallProgressRecord] = []
+        /// `--lc-install` reported at least one step, so it got past its
+        /// checks (Set Up's first step) to the download. Set from the run's
+        /// own event list when it ends, which holds every event however late
+        /// its callback lands, and live from `apply`.
+        var progressed = false
         /// Set while the CLI says the install is blocked behind a running
         /// LiveContainer; cleared as soon as anything else happens.
         var waitingMessage: String?
@@ -68,15 +73,105 @@ final class LiveContainerStore: ObservableObject {
     /// Unpublished: bookkeeping, which nothing draws.
     private var actionTask: Task<Void, Never>?
 
+    /// Set Up LiveContainer's run on one device (spec §5c): three steps, two
+    /// CLI runs. `--lc-install` is the first two, its checks and then the
+    /// download, signing and install; `--lc-push-cert` is the third. Kept
+    /// after it ends so the sheet can say what's left; replaced by the next,
+    /// and ended by a one-step Install, Put certificate or Clean up.
+    struct SetUp: Equatable {
+        enum Step: CaseIterable, Hashable {
+            /// `--lc-install` up to its first progress event: the .p12, App
+            /// Store Connect and the registered devices (read again when this
+            /// device is new to them, Plan E), the device's apps, AltStore.
+            case check
+            /// The rest of `--lc-install`: download, sign, install.
+            case install
+            /// `--lc-push-cert`.
+            case pushCert
+        }
+
+        enum State: Equatable {
+            case waiting, running, done
+            /// The CLI's message.
+            case failed(String)
+            /// Stop, while this step ran or was next.
+            case stopped
+            /// After a step that failed or stopped.
+            case notRun
+        }
+
+        let udid: String
+        /// What it installed, and from which channel: Set Up again with other
+        /// choices has something new to install, so it runs in full.
+        let instances: Set<Int>
+        let channel: String?
+        /// It put the certificate on and nothing more, after an earlier Set
+        /// Up's push failed (`resumesAtCertificate`).
+        var resumed = false
+        var states: [Step: State] = [.check: .waiting, .install: .waiting, .pushCert: .waiting]
+        var finished = false
+
+        /// The steps not done, in order.
+        var left: [Step] { Step.allCases.filter { states[$0] != .done } }
+
+        var stopped: Bool { states.values.contains(.stopped) }
+
+        /// It installed and then didn't put the certificate on: Set Up again
+        /// can put the certificate on and nothing more
+        /// (`LiveContainerStore.resumesAtCertificate`, which checks the rest).
+        /// Not once a resumed push has failed too: the install may be what's
+        /// wrong, so the next one starts over rather than skip it every time.
+        var resumesAtCertificate: Bool {
+            guard finished, !resumed, states[.install] == .done else { return false }
+            switch states[.pushCert] {
+            case .failed?, .stopped?: return true
+            default: return false
+            }
+        }
+    }
+
+    @Published private(set) var setUp: SetUp?
+
+    /// Each device's name, from the views that show its LiveContainer
+    /// (`remember`), so "Busy with LiveContainer on …" names the device
+    /// rather than its UDID. A run only starts from one of those views.
+    @Published private(set) var names: [String: String] = [:]
+
+    func remember(_ device: DeviceRecord) {
+        if names[device.udid] != device.name { names[device.udid] = device.name }
+    }
+
+    /// `udid`'s name, or the UDID itself when no view has shown that device.
+    func name(of udid: String) -> String { names[udid] ?? udid }
+
     /// The current or last run, if it was for `udid`.
     func run(for udid: String) -> Run? { run?.udid == udid ? run : nil }
 
     var isRunning: Bool { run.map { !$0.finished } ?? false }
 
-    /// The device a run is in progress on, if it is not `udid`.
+    /// A run in progress, or Set Up between two of its runs: the buttons
+    /// that start one wait.
+    var isBusy: Bool { isRunning || setUp.map { !$0.finished } ?? false }
+
+    /// The device a run, or a Set Up between its runs, is in progress on, if
+    /// it is not `udid`.
     func busyElsewhere(than udid: String) -> String? {
-        guard let run, !run.finished, run.udid != udid else { return nil }
-        return run.udid
+        if let run, !run.finished, run.udid != udid { return run.udid }
+        if let setUp, !setUp.finished, setUp.udid != udid { return setUp.udid }
+        return nil
+    }
+
+    /// Whether Set Up on `udid` with these choices puts the certificate on
+    /// and nothing more: the last run was this device's Set Up's push, which
+    /// failed or was stopped after it installed (`SetUp.resumesAtCertificate`),
+    /// with the same LiveContainers and channel, and the primary it installed
+    /// is still there to take the certificate. Anything else runs in full.
+    func resumesAtCertificate(udid: String, instances: Set<Int>, channel: String?) -> Bool {
+        guard let setUp, setUp.udid == udid, setUp.resumesAtCertificate,
+              setUp.instances == instances, setUp.channel == channel,
+              let run, run.udid == udid, run.action == .pushCert, run.error != nil
+        else { return false }
+        return status[udid]?.hasPrimary == true
     }
 
     let runner: CLIRunner
@@ -160,15 +255,48 @@ final class LiveContainerStore: ObservableObject {
         }
     }
 
-    // MARK: actions — started and stopped from the view
-
-    func startInstall(udid: String, instances: Set<Int>, channel: String?) {
-        launch { await $0.install(udid: udid, instances: instances, channel: channel) }
+    /// Read LiveContainer again on each device a load has finished for that
+    /// is in `connected`: after an update, which may have pushed to it
+    /// (review 23-2, item 7). Each asks the device, so one that isn't
+    /// connected is left as it was read, not marked unreachable; its page
+    /// reads it again when it's back. One at a time, in UDID order.
+    func reload(connected: Set<String>) async {
+        for udid in hasLoaded.intersection(connected).sorted() {
+            await load(udid: udid)
+        }
     }
 
-    func startPushCert(udid: String) { launch { await $0.pushCert(udid: udid) } }
+    // MARK: actions — started and stopped from the view
+
+    // Install, Put certificate and Clean up, one step at a time, end Set Up:
+    // what it says is left is no longer so. A removal (the sheet's tick, the
+    // page's Remove it) is the step after Set Up's, and leaves it.
+    func startInstall(udid: String, instances: Set<Int>, channel: String?) {
+        launch {
+            $0.setUp = nil
+            await $0.install(udid: udid, instances: instances, channel: channel)
+        }
+    }
+
+    func startPushCert(udid: String) {
+        launch {
+            $0.setUp = nil
+            await $0.pushCert(udid: udid)
+        }
+    }
+
     func startRemoveCert(udid: String) { launch { await $0.removeCert(udid: udid) } }
-    func startClean(udid: String) { launch { await $0.clean(udid: udid) } }
+
+    func startClean(udid: String) {
+        launch {
+            $0.setUp = nil
+            await $0.clean(udid: udid)
+        }
+    }
+
+    func startSetUp(udid: String, instances: Set<Int>, channel: String?) {
+        launch { await $0.runSetUp(udid: udid, instances: instances, channel: channel) }
+    }
 
     /// Cancel the running action. CLIRunner SIGTERMs the CLI, which the
     /// `--lc-*` verbs turn into a clean exit — the throwaway keychain comes
@@ -207,28 +335,99 @@ final class LiveContainerStore: ObservableObject {
             args: argsOverride ?? Self.installArgs(udid: udid, instances: instances, channel: channel),
             failing: "Install LiveContainer"
         )
-        // After every run, success or not: a partial install (instance 1 in,
-        // instance 2 failed or stopped) changed the device too. In its own
-        // task so a Stop's cancellation does not cancel the re-read with it.
-        await Task { await self.load(udid: udid) }.value
+        await reread(udid)
     }
 
     func pushCert(udid: String, argsOverride: [String]? = nil) async {
         await perform(.pushCert, udid: udid,
                       args: argsOverride ?? Self.pushCertArgs(udid: udid),
                       failing: "Put the certificate on the device")
+        await reread(udid)
     }
 
     func removeCert(udid: String, argsOverride: [String]? = nil) async {
         await perform(.removeCert, udid: udid,
                       args: argsOverride ?? Self.removeCertArgs(udid: udid),
                       failing: "Remove the certificate from the device")
+        await reread(udid)
     }
 
     func clean(udid: String, argsOverride: [String]? = nil) async {
         await perform(.clean, udid: udid,
                       args: argsOverride ?? Self.cleanArgs(udid: udid),
                       failing: "Clean up LiveContainer")
+        await reread(udid)
+    }
+
+    /// After every run, success or not, the device's status again. A partial
+    /// install (instance 1 in, instance 2 failed or stopped) changed the
+    /// device too, and the certificate's reminder (`certificatePushed`)
+    /// follows a push, a removal or a clean up at once. In its own task so a
+    /// Stop's cancellation does not cancel the re-read with it.
+    private func reread(_ udid: String) async {
+        await Task { await self.load(udid: udid) }.value
+    }
+
+    /// Set Up (spec §5c) for one device: `--lc-install`, whose checks come
+    /// first (Plan E: it reads the registered devices again when this one is
+    /// new to them, and stops when it isn't registered), then `--lc-push-cert`.
+    /// A failure stops there: the step that ran takes the error, the rest are
+    /// not run. A Stop between the two runs stops the push before it starts:
+    /// a canceled task never launches the CLI (`CLIRunner.launch`).
+    ///
+    /// After a Set Up that installed and then didn't put the certificate on,
+    /// the next one on that device, with the same choices, puts the
+    /// certificate on only (`resumesAtCertificate`).
+    ///
+    /// The quit is held from start to end, not only while each run goes
+    /// (`perform`): ⌘Q during the status read between them quit without
+    /// asking, and left LiveContainer with no certificate (review 23-2,
+    /// §11). Quit Anyway there stops Set Up before its push, as Stop does.
+    func runSetUp(udid: String, instances: Set<Int>, channel: String?) async {
+        let ticket = hold.begin(TerminationHold.liveContainer) { [weak self] in self?.stop() }
+        defer { hold.end(ticket) }
+        let resume = resumesAtCertificate(udid: udid, instances: instances, channel: channel)
+        var fresh = SetUp(udid: udid, instances: instances, channel: channel)
+        fresh.resumed = resume
+        setUp = fresh
+        if resume {
+            setUp?.states[.check] = .done
+            setUp?.states[.install] = .done
+        } else {
+            setUp?.states[.check] = .running
+            await install(udid: udid, instances: instances, channel: channel)
+            // Got to the download, or stopped before it: from the run's own
+            // events (`Run.progressed`), not from callbacks still in flight.
+            if endSetUpIfFailed(at: run?.progressed == true ? .install : .check) { return }
+            setUp?.states[.check] = .done
+            setUp?.states[.install] = .done
+        }
+        setUp?.states[.pushCert] = .running
+        await pushCert(udid: udid)
+        if endSetUpIfFailed(at: .pushCert) { return }
+        setUp?.states[.pushCert] = .done
+        setUp?.finished = true
+    }
+
+    /// After one of Set Up's runs: if it failed or was stopped, the steps
+    /// before `step` are done, `step` failed (or stopped), the rest are not
+    /// run, and Set Up ends. True when it ended.
+    private func endSetUpIfFailed(at step: SetUp.Step) -> Bool {
+        guard let error = run?.error, var current = setUp else { return false }
+        let order = SetUp.Step.allCases
+        let at = order.firstIndex(of: step) ?? 0
+        for (index, each) in order.enumerated() {
+            if index < at {
+                current.states[each] = .done
+            } else if index > at {
+                current.states[each] = .notRun
+            } else {
+                current.states[each] = run?.stopped == true ? .stopped : .failed(error)
+            }
+        }
+        current.finished = true
+        setUp = current
+        return true
     }
 
     private func perform(_ action: Action, udid: String, args: [String], failing: String) async {
@@ -239,6 +438,15 @@ final class LiveContainerStore: ObservableObject {
         do {
             let result = try await runner.stream(arguments: args) { [weak self] event in
                 self?.apply(event)
+            }
+            // From the run's own list, which holds every event however late
+            // its callback lands (`CLIRunner.RunResult.events`): Set Up reads
+            // it to tell its check from its install (`runSetUp`).
+            if result.events.contains(where: { event -> Bool in
+                if case .lcInstallProgress = event { return true }
+                return false
+            }) {
+                run?.progressed = true
             }
             if result.exitCode != 0 {
                 throw CLIError.exited(
@@ -270,6 +478,15 @@ final class LiveContainerStore: ObservableObject {
         case let .lcInstallProgress(r):
             run?.waitingMessage = nil
             run?.progress.append(r)
+            run?.progressed = true
+            // `--lc-install`'s first step event is its download: what it
+            // checks before that (Set Up's first step) is done. Shown live;
+            // `runSetUp` settles it from the run's own events when it ends.
+            if var s = setUp, !s.finished, s.udid == current.udid, s.states[.check] == .running {
+                s.states[.check] = .done
+                s.states[.install] = .running
+                setUp = s
+            }
         case let .lcInstallWaiting(r):
             run?.waitingMessage = r.message
         case let .lcInstalled(r):

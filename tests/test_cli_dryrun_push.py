@@ -51,7 +51,7 @@ def _build(tmp_path: Path, *, dry_run: bool, pin: str | None = None) -> dict:
     with patch.object(cli_mod, "run_all_checks", return_value=[]), \
          patch.object(cli_mod, "acquire_ipa") as acquire, \
          patch.object(cli_mod, "run_cyan", side_effect=cyan), \
-         patch.object(cli_mod, "select_device", return_value=("UDID1", "USB")):
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("UDID1", None, "USB")):
         acquire.return_value.path = tmp_path / "in.ipa"
         acquire.return_value.version = "1.0"
         cli_mod._build_one(cfg=cfg, log=BuildLog(tmp_path / "log.sqlite"), app_name="example",
@@ -148,7 +148,7 @@ def test_a_dry_run_whose_ipa_was_never_made_sends_no_size(tmp_path, monkeypatch,
     with patch.object(cli_mod, "run_all_checks", return_value=[]), \
          patch.object(cli_mod, "acquire_ipa") as acquire, \
          patch.object(cli_mod, "run_cyan", side_effect=cyan_dry), \
-         patch.object(cli_mod, "select_device", return_value=("UDID1", "USB")):
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("UDID1", None, "USB")):
         acquire.return_value.path = tmp_path / "in.ipa"
         acquire.return_value.version = "1.0"
         cli_mod._build_one(cfg=cfg, log=BuildLog(tmp_path / "log.sqlite"), app_name="example",

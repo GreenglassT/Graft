@@ -749,6 +749,35 @@ final class ConfigStoreTests: XCTestCase {
         )
     }
 
+    /// A device pick is for one app's next Build & Install (spec §5b). Removed
+    /// and added again under the same key, the app opened with the old
+    /// app's pick on its build-target bar, and its first build went there
+    /// (review 23-2, §11). A listed app keeps its pick through a reload.
+    @MainActor
+    func test_a_removed_app_takes_its_device_pick_with_it() async throws {
+        let counter = Self.counterFile()
+        defer { try? FileManager.default.removeItem(at: counter) }
+        let store = ConfigStore(
+            runner: shRunner(),
+            cliArgs: listings(
+                [["example", "delta"], ["delta"], ["example", "delta"]], counter: counter
+            ), notify: { _ in })
+        _ = try await store.loadApps()
+        store.pickDevice("00008030-0000000000000002", for: "example", name: "Example iPad")
+        store.pickDevice("00008030-0000000000000001", for: "delta", name: "Example iPhone")
+
+        _ = try await store.loadApps()          // example removed
+        XCTAssertNil(store.devicePick(for: "example"), "a pick for an app that isn't there")
+        XCTAssertNil(store.devicePickName(for: "example"))
+        XCTAssertEqual(store.devicePick(for: "delta"), "00008030-0000000000000001",
+                       "a reload took a listed app's pick")
+        XCTAssertEqual(store.devicePickName(for: "delta"), "Example iPhone")
+
+        _ = try await store.loadApps()          // …and re-added under the same key
+        XCTAssertEqual(store.apps.map(\.name), ["delta", "example"], "premise: it is back")
+        XCTAssertNil(store.devicePick(for: "example"), "the re-added app got the old app's pick back")
+    }
+
     /// Records for apps that are still listed must survive a reload, or the
     /// purge becomes "any `--list` clears every card" — worse than the bug,
     /// since every build ends with an unconditional `refreshDeliveryStates()`.
@@ -1718,5 +1747,69 @@ extension ConfigStoreTests {
 
         XCTAssertFalse(store.wasCancelled("example"))
         XCTAssertFalse(store.wasCancelled("delta"))
+    }
+}
+
+// MARK: - An update's slot (2.3, `AppUpdatesStore`)
+
+extension ConfigStoreTests {
+    @MainActor
+    func test_an_update_holds_the_slot_a_build_and_a_device_check_need() {
+        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true")),
+                                notify: { _ in })
+
+        XCTAssertTrue(store.beginUpdate(apps: ["example"]))
+
+        XCTAssertEqual(store.busy, .updating(["example"]))
+        XCTAssertEqual(store.busy?.explanation, "Updating apps — wait for it to finish")
+        XCTAssertFalse(store.launchBuild(appName: "bravo", delivery: .unknown) {}, "never a build beside an update")
+        XCTAssertFalse(store.beginDeviceCheck(appName: "bravo"))
+        XCTAssertFalse(store.beginUpdate(apps: ["bravo"]), "one update at a time")
+        XCTAssertTrue(store.isUpdating("example"))
+        XCTAssertFalse(store.isUpdating("bravo"))
+
+        store.endUpdate()
+
+        XCTAssertNil(store.busy)
+        XCTAssertNil(store.updatingApps)
+    }
+
+    @MainActor
+    func test_a_build_holds_the_slot_an_update_needs() async {
+        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true")),
+                                notify: { _ in })
+        let gate = UpdateSlotGate()
+        XCTAssertTrue(store.launchBuild(appName: "example", delivery: .unknown) {
+            while !gate.open, !Task.isCancelled { try? await Task.sleep(nanoseconds: 10_000_000) }
+            store.endBuild(appName: "example")
+        })
+
+        XCTAssertFalse(store.beginUpdate(apps: ["bravo"]))
+
+        gate.open = true
+        await eventually { store.buildingApp == nil }
+        XCTAssertTrue(store.beginUpdate(apps: ["bravo"]))
+        store.endUpdate()
+    }
+
+    private final class UpdateSlotGate: @unchecked Sendable {
+        var open = false
+    }
+
+    /// The run's own plan adds `--with-affected`'s apps: the slot covers
+    /// them too, and only while an update holds it.
+    @MainActor
+    func test_an_update_covers_the_apps_its_run_adds() {
+        let store = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true")),
+                                notify: { _ in })
+        store.widenUpdate(to: ["bravo"])
+        XCTAssertNil(store.updatingApps, "no update holds the slot")
+
+        XCTAssertTrue(store.beginUpdate(apps: ["example"]))
+        store.widenUpdate(to: ["example", "bravo"])
+
+        XCTAssertEqual(store.busy, .updating(["example", "bravo"]))
+        XCTAssertTrue(store.isUpdating("bravo"))
+        store.endUpdate()
     }
 }

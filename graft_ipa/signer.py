@@ -8,14 +8,23 @@ import re
 import shlex
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import apple_portal, install_hints, keychain, mobileprovision, p12, signing_cert, tools
+from . import (
+    apple_portal,
+    devices_seen,
+    install_hints,
+    keychain,
+    mobileprovision,
+    p12,
+    signing_cert,
+    tools,
+)
 from .child_env import BUNDLED_OPENSSL_CONF, child_env
 from .config import AppConfig, Config
-from .errors import SigningError
+from .errors import DeviceNotRegisteredError, SigningError
 
 
 def _signing_for(cfg: Config, app: AppConfig | None) -> None:
@@ -88,6 +97,10 @@ class SignResult:
     # is worth saying on a build that refreshed nothing. Two fields would have
     # invited a third; the build loops.
     profile_notes: tuple[str, ...] = ()
+    # The devices the profile doesn't cover because App Store Connect has no
+    # enabled device for them (`ResolvedProfile.unregistered_devices`):
+    # `graft --update` refuses its install on such a device before pushing.
+    unregistered_devices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -99,6 +112,11 @@ class ResolvedProfile:
     # Configured UDIDs ASC has no enabled device for. The profile does not
     # cover them and no refresh can make it; see `ensure_profile_for_bundle`.
     unregistered_devices: tuple[str, ...] = ()
+    # The install target's name when Graft re-read the registered devices
+    # first, because the saved list predated it (`target_profile_udids`), and
+    # the config file the new list was saved in.
+    refreshed_for: str | None = None
+    refreshed_into: Path | None = None
 
 
 # zsign's team line, for a certificate with no OU: the subject and expiry
@@ -206,34 +224,117 @@ def _plan_profile(cfg: Config, app: AppConfig | None) -> ProfilePlan:
     )
 
 
-def _auto_profile_device_udids(cfg: Config, asc_cfg) -> list[str]:
-    """`device_udids`, plus the default phone when it isn't one of them.
+def _auto_profile_device_udids(
+    cfg: Config, asc_cfg, target: str | None = None, also: Sequence[str] = (),
+) -> list[str]:
+    """`device_udids`, plus the default phone, the install `target`, and the
+    other devices the same build is installed on (`also`: `graft --update`'s
+    later targets, spec §11.3) when they aren't among them.
 
     `device_udids` is a snapshot, refreshed only by Save and test (or
     `--set-portal` / `--setup-portal`). The default phone counted only when
     the list was empty, so a phone bought and made the default after the last
     save was left out of every profile and failed pre-flight on every build.
-    It is the phone builds go to, so it is always in.
+    It is the phone builds go to, so it is always in. So is the device this
+    install goes to (spec §5b): an iPad picked for one build, or
+    `--lc-install`'s `--device`, was left out the same way.
     """
     udids = list(asc_cfg.device_udids)
-    default = cfg.default_device_udid
-    if default and default.lower() not in {u.lower() for u in udids}:
-        udids.append(default)
+    for extra in (cfg.default_device_udid, target, *also):
+        if extra and extra.lower() not in {u.lower() for u in udids}:
+            udids.append(extra)
     return udids
 
 
-def auto_profile_device_udids(cfg: Config) -> list[str]:
+def auto_profile_device_udids(
+    cfg: Config, *, target: str | None = None, also: Sequence[str] = (),
+) -> list[str]:
     """The UDIDs an auto-provisioned profile will be created for. Touches nothing.
 
     Public because pre-flight needs the same answer: it downgrades "connected
     phone isn't in the cached profile" from a failure to a note *only* for a
     phone stage 4 is actually going to register, and this is the one rule
-    saying which those are. Empty when the app can't auto-provision at all.
+    saying which those are. `target` is the build's device, which stage 4
+    adds, and `also` the other devices an update installs the same build on.
+    Empty when the app can't auto-provision at all.
     """
     asc_cfg = cfg.app_store_connect
     if asc_cfg is None:
         return []
-    return _auto_profile_device_udids(cfg, asc_cfg)
+    return _auto_profile_device_udids(cfg, asc_cfg, target, also)
+
+
+def _needs_device_refresh(cfg: Config, target: str | None) -> bool:
+    """Whether `target` sends Graft back to App Store Connect first: it isn't
+    in the saved `device_udids`, and that list isn't pinned."""
+    asc = cfg.app_store_connect
+    return bool(
+        target and asc is not None and not asc.device_udids_pinned
+        and target.lower() not in {u.lower() for u in asc.device_udids}
+    )
+
+
+def refreshed_note(label: str, cfg_path: Path) -> str:
+    """What a build or `--lc-install` says after re-reading the registered
+    devices for `label`: a round trip to Apple, and a write to the person's
+    config.yaml, neither of which may happen in silence."""
+    return (
+        "re-read your registered devices from App Store Connect first: "
+        f"{label} wasn't in the list saved at the last Save and test, so the new list "
+        f"is saved in {cfg_path.name}"
+    )
+
+
+def target_profile_udids(
+    cfg: Config, target: str | None, *, note: Callable[[str], None] | None = None,
+    also: Sequence[str] = (),
+) -> list[str]:
+    """The UDIDs an auto-provisioned profile is made for when it installs on
+    `target` (a build's device, or `--lc-install`'s): `device_udids`, the
+    default device and `target` (`_auto_profile_device_udids`).
+
+    `device_udids` is the snapshot from the last Save and test. A `target`
+    not in it re-reads the registered devices first
+    (`setup_portal.refresh_registered_devices`, the `--set-portal` listing),
+    which saves them, so a device registered since is in this profile and in
+    every later one. A `target` App Store Connect doesn't have enabled stops
+    here with what to do (`DeviceNotRegisteredError`), instead of a profile
+    without it and an install that fails with ApplicationVerificationFailed.
+    Graft never registers a device.
+
+    With `device_udids_pinned: true` the list is the person's and isn't
+    re-read; `target` is still added, and `ensure_profile_for_bundle` leaves
+    it out if App Store Connect doesn't have it, as for any configured device.
+
+    `note` is told when the list was re-read and saved (`refreshed_note`).
+    The build doesn't pass one: its profile notes say it (`refreshed_for`).
+
+    `also` is the other devices `graft --update` installs the same build on
+    (spec §11.3), so one profile covers every one of them. They're re-read
+    for as `target` is, once, but one App Store Connect doesn't have doesn't
+    stop the build: it's left to `ensure_profile_for_bundle`, which leaves
+    it out and says so (`unregistered_devices`), and that device's install
+    is refused on its own.
+    """
+    asc = cfg.app_store_connect
+    others = [u for u in also if u]
+    if asc is None:
+        return [u for u in (target, *others) if u]
+    stale = [u for u in (target, *others) if _needs_device_refresh(cfg, u)]
+    if stale:
+        from . import setup_portal
+
+        asc.device_udids = setup_portal.refresh_registered_devices(cfg.path)
+        if note is not None:
+            note(refreshed_note(devices_seen.label(cfg.state_dir, stale[0]), cfg.path))
+        if target in stale and target.lower() not in {u.lower() for u in asc.device_udids}:
+            raise DeviceNotRegisteredError(
+                f"{devices_seen.label(cfg.state_dir, target)} isn't registered in your developer "
+                "account: add it at developer.apple.com, then try again",
+                hint=f"its UDID is {target}. Add it under Certificates, Identifiers & Profiles "
+                "› Devices; Graft doesn't register devices itself",
+            )
+    return _auto_profile_device_udids(cfg, asc, target, others)
 
 
 def resolve_profile_for_app(
@@ -241,6 +342,8 @@ def resolve_profile_for_app(
     app: AppConfig | None,
     *,
     password: str | None,
+    target: str | None = None,
+    also: Sequence[str] = (),
 ) -> ResolvedProfile:
     """Return the .mobileprovision to use when signing `app`.
 
@@ -251,17 +354,20 @@ def resolve_profile_for_app(
     `plan_profile_for_app` instead.
     """
     _signing_for(cfg, app)
-    return _resolve_profile(cfg, app, password=password)
+    return _resolve_profile(cfg, app, password=password, target=target, also=also)
 
 
 def _resolve_profile(
-    cfg: Config, app: AppConfig | None, *, password: str | None
+    cfg: Config, app: AppConfig | None, *, password: str | None, target: str | None = None,
+    also: Sequence[str] = (),
 ) -> ResolvedProfile:
-    """`resolve_profile_for_app` past its guard."""
+    """`resolve_profile_for_app` past its guard. `target` is the device the
+    build installs on, which an auto-provisioned profile must include, and
+    `also` the other devices an update installs the same build on."""
     plan = _plan_profile(cfg, app)
     if plan.source == PROFILE_SOURCE_AUTO:
         # Only reachable through `app.auto_profile`, so `app` is not None here.
-        return _provision_via_portal(cfg, app, password=password)
+        return _provision_via_portal(cfg, app, password=password, target=target, also=also)
     return ResolvedProfile(path=plan.require_local())
 
 
@@ -270,6 +376,8 @@ def _provision_via_portal(
     app: AppConfig,
     *,
     password: str | None,
+    target: str | None = None,
+    also: Sequence[str] = (),
 ) -> ResolvedProfile:
     asc_cfg = cfg.app_store_connect
     if password is None:
@@ -284,12 +392,17 @@ def _provision_via_portal(
         key_path=asc_cfg.key_file,
     )
     client = apple_portal.ASCClient(creds)
+    # Asked before `target_profile_udids` re-reads the list, which changes the answer.
+    refreshing_for = next((u for u in (target, *also) if u and _needs_device_refresh(cfg, u)), None)
     try:
         result = apple_portal.ensure_profile_for_bundle(
             client,
             bundle_id=app.bundle_id,
             cert_serial=cert_serial,
-            device_udids=_auto_profile_device_udids(cfg, asc_cfg),
+            # The install target too, after re-reading the registered devices
+            # when the saved list predates it (spec §5b). Inside the `try`, so
+            # App Store Connect refusing that read is this step failing.
+            device_udids=target_profile_udids(cfg, target, also=also),
             cache_dir=asc_cfg.profile_cache_dir,
             exact=app.exact_app_id,
             team_id=cfg.team_id,
@@ -306,6 +419,8 @@ def _provision_via_portal(
         path=result.profile_path,
         refresh_reason=result.refresh_reason,
         unregistered_devices=result.unregistered_devices,
+        refreshed_for=devices_seen.label(cfg.state_dir, refreshing_for) if refreshing_for else None,
+        refreshed_into=cfg.path if refreshing_for else None,
     )
 
 
@@ -317,10 +432,15 @@ def run_zsign(
     app: AppConfig | None = None,
     dry_run: bool = False,
     before_signing: Callable[[Path], None] | None = None,
+    target: str | None = None,
+    also: Sequence[str] = (),
 ) -> SignResult:
     """`before_signing` is handed the profile zsign will sign with, once it
     is known and before zsign runs: the planned one on a dry run (which may
-    not exist yet, for an auto_profile app), the resolved one otherwise."""
+    not exist yet, for an auto_profile app), the resolved one otherwise.
+    `target` is the build's device and `also` the other devices
+    `graft --update` installs the same build on: an auto-provisioned profile
+    covers them all."""
     _signing_for(cfg, app)
     pw = _p12_password(cfg)
     if pw is None:
@@ -370,7 +490,7 @@ def run_zsign(
         raise SigningError("zsign not found in PATH", hint=_zsign_install_hint())
     zsign = str(z.path)
 
-    resolved = _resolve_profile(cfg, app, password=pw)
+    resolved = _resolve_profile(cfg, app, password=pw, target=target, also=also)
     if before_signing is not None:
         before_signing(resolved.path)
     output_ipa.parent.mkdir(parents=True, exist_ok=True)
@@ -410,6 +530,7 @@ def run_zsign(
         stdout=proc.stdout,
         stderr=proc.stderr,
         profile_notes=_provisioning_notes(resolved),
+        unregistered_devices=tuple(resolved.unregistered_devices),
     )
 
 
@@ -444,6 +565,12 @@ def _provisioning_notes(resolved: ResolvedProfile) -> tuple[str, ...]:
     they are being read by a person mid-build.
     """
     notes: list[str] = []
+    if resolved.refreshed_for:
+        # A round trip to Apple and a write to config.yaml, said like the
+        # profile refresh below it.
+        notes.append(refreshed_note(
+            resolved.refreshed_for, resolved.refreshed_into or Path("config.yaml"),
+        ))
     if resolved.refresh_reason:
         notes.append(
             "re-provisioned the signing profile via App Store Connect: "

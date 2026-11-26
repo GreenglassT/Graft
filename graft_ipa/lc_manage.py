@@ -45,7 +45,7 @@ from typing import Any, Protocol
 
 from . import USER_AGENT, device_install, lc_discovery, lc_instance, lc_sign, mobileprovision
 from .apple_portal import AppIdNotRegistered
-from .config import FREE_INSTALLERS
+from .config import FREE_DEVICE_STEPS, FREE_INSTALLERS
 from .errors import ConfigError, InstallError, Stopped
 from .json_output import JsonEmitter
 from .lc_runner import LiveContainerError, is_abandoned_partial
@@ -67,7 +67,8 @@ CERT_NAME = "AppleDevelopment.p12"
 CERT_STAYS_NOTE = (
     "The certificate stays in LiveContainer's Documents, readable by its guest "
     "apps, until you remove it: import it, then run --lc-clean --cert-only "
-    "(Remove certificate in the app)."
+    "(in the app: select I imported the certificate in Set Up LiveContainer, or "
+    "press Remove it on the device's pane)."
 )
 #: AltStore's and SideStore's own bundle ids, matched on dot boundaries
 #: *anywhere* in an installed id. Not a prefix: on the iPhone AltStore is
@@ -455,7 +456,7 @@ def _instances(apps: dict[str, dict], team: str | None) -> list[dict]:
 
 def status_payload(
     *, udid: str, apps: dict[str, dict], team: str | None, ours: set[str],
-    latest: Release | None,
+    latest: Release | None, certs: Mapping[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """One `lc-status` event.
 
@@ -463,6 +464,17 @@ def status_payload(
     even over our own record, since AltStore will refresh its copy back over
     ours; else `graft` if we recorded installing one of the instances
     present; else `unknown` (installed by hand, or nothing installed).
+
+    `certificate_pushed`: `certs` (`BuildLog.cert_pushes`) records a
+    certificate `--lc-push-cert` put in a LiveContainer that is still
+    installed, and `--lc-clean` hasn't taken it off. The app's reminder to
+    remove it reads this (spec §5c), so it outlives a restart and covers a
+    push from Terminal, without opening the device's Documents. A
+    LiveContainer deleted since took its Documents with it.
+
+    `free_setup_steps`: what a free Apple ID sets up on the device
+    (`config.FREE_DEVICE_STEPS`), for the app's Set Up LiveContainer sheet,
+    which shows them with their links. The same on every event.
     """
     instances = _instances(apps, team)
     if altstore_present(apps):
@@ -475,6 +487,7 @@ def status_payload(
         version_key(i["version"]) < version_key(latest.version)
         for i in instances if i["role"] != "legacy"
     )
+    pushed = any(bool(names) and bundle_id in apps for bundle_id, names in (certs or {}).items())
     return {
         "udid": udid,
         "reachable": True,
@@ -483,11 +496,16 @@ def status_payload(
         "latest": {"version": latest.version, "channel": latest.channel} if latest else None,
         "update_available": update,
         "sources": dict(SOURCES),
+        "certificate_pushed": pushed,
+        "free_setup_steps": list(FREE_DEVICE_STEPS),
     }
 
 
 def unreachable_payload(udid: str, error: str, latest: Release | None = None) -> dict[str, Any]:
-    """`lc-status` for a device that did not answer — said, not skipped."""
+    """`lc-status` for a device that did not answer — said, not skipped.
+
+    `certificate_pushed` is false: which LiveContainers are there is unknown,
+    so the reminder waits for an answer that can say."""
     return {
         "udid": udid,
         "reachable": False,
@@ -497,6 +515,8 @@ def unreachable_payload(udid: str, error: str, latest: Release | None = None) ->
         "latest": {"version": latest.version, "channel": latest.channel} if latest else None,
         "update_available": False,
         "sources": dict(SOURCES),
+        "certificate_pushed": False,
+        "free_setup_steps": list(FREE_DEVICE_STEPS),
     }
 
 
@@ -542,9 +562,24 @@ class UsbmuxDevice:
         return self._run(udid, self._sandbox(udid, bundle_id, go))
 
     def push_document(self, udid: str, bundle_id: str, name: str, data: bytes) -> None:
-        async def go(ha):
-            await ha.set_file_contents(f"Documents/{_plain(name)}", data)
-        self._run(udid, self._sandbox(udid, bundle_id, go))
+        """Put `data` at `Documents/<name>`, whole or not at all.
+
+        As an IPA push is (`lc_runner._write_into_place`): written under a
+        hidden partial name and renamed in once whole, the earlier file moved
+        aside first. `set_file_contents` wrote at the real name, so a push
+        cut off half-way left a truncated `AppleDevelopment.p12` that no
+        record covers, which the next push refused as someone else's.
+        """
+        from .lc_runner import _write_into_place
+
+        path = f"Documents/{_plain(name)}"
+        with tempfile.TemporaryDirectory(prefix="lcdoc-") as tmp:
+            local = Path(tmp) / _plain(name)
+            local.write_bytes(data)
+
+            async def go(ha):
+                await _write_into_place(ha, local, path)
+            self._run(udid, self._sandbox(udid, bundle_id, go))
 
     def remove_document(self, udid: str, bundle_id: str, name: str) -> None:
         async def go(ha):
@@ -651,6 +686,7 @@ def _plain(name: str) -> str:
 class ProfileSource(Protocol):
     def exact(self, bundle_id: str) -> Path: ...
     def wildcard(self, bundle_id: str) -> Path: ...
+    def check_devices(self) -> None: ...
 
 
 class AscProfiles:
@@ -661,8 +697,11 @@ class AscProfiles:
     auto-profile path, for the one extension that has no App ID of its own.
     """
 
-    def __init__(self, cfg: Any, password: str) -> None:
-        from . import apple_portal, signer
+    def __init__(
+        self, cfg: Any, password: str, *, target: str | None = None,
+        note: Callable[[str], None] | None = None,
+    ) -> None:
+        from . import apple_portal
 
         asc = cfg.app_store_connect
         if asc is None:
@@ -675,8 +714,24 @@ class AscProfiles:
             key_id=asc.key_id, issuer_id=asc.issuer_id, key_path=asc.key_file,
         ))
         self._serial = apple_portal.read_p12_cert_serial(cfg.signing.cert, password)
-        self._udids = signer.auto_profile_device_udids(cfg)
+        self._cfg, self._target, self._note = cfg, target, note
+        self._resolved_udids: list[str] | None = None
         self._cache = asc.profile_cache_dir
+
+    @property
+    def _udids(self) -> list[str]:
+        """The devices every profile is made for, worked out when a profile
+        is first needed, so `install` has checked the device before any round
+        trip to Apple. `target`, the device being installed on, is among them,
+        after re-reading the registered devices if the saved list predates it
+        (`signer.target_profile_udids`, which says so through `note`)."""
+        if self._resolved_udids is None:
+            from . import signer
+
+            self._resolved_udids = signer.target_profile_udids(
+                self._cfg, self._target, note=self._note
+            )
+        return self._resolved_udids
 
     def _ensure(self, bundle_id: str, *, exact: bool) -> Path:
         return self._portal.ensure_profile_for_bundle(
@@ -690,6 +745,13 @@ class AscProfiles:
 
     def wildcard(self, bundle_id: str) -> Path:
         return self._ensure(bundle_id, exact=False)
+
+    def check_devices(self) -> None:
+        """Work out the devices now (`_udids`): re-read the registered
+        devices if the target is new to the saved list, and refuse a target
+        that isn't registered. `install` calls this once it has asked the
+        device, and before anything downloads."""
+        self._udids
 
 
 #: Extensions that may be signed on the `com.kdt.*` wildcard when they have no
@@ -859,6 +921,12 @@ def install(
         )
     if altstore_present(apps) and not force:
         raise altstore_refusal(udid)
+    # The devices every profile will be made for, before anything downloads:
+    # the registered devices are read again if this one is new to them, and a
+    # device that isn't registered stops here, not after the download. Set Up
+    # LiveContainer's first step, checking the device and the developer
+    # account, ends at the first progress event (spec §5c).
+    profiles.check_devices()
 
     events.progress(udid, None, "fetch", f"LiveContainer ({channel})")
     release, ipa = fetch_ipa(channel)
@@ -908,6 +976,12 @@ def install(
             log.record_lc_install(udid=udid, bundle_id=prepared.bundle_id,
                                   version=release.version, channel=release.channel,
                                   ipa_sha256=sha)
+            if prepared.bundle_id.lower() not in on_device:
+                # A fresh install: the copy a certificate was recorded going
+                # into was deleted, Documents and all, so the record is stale.
+                # Kept, it would remind of a certificate that isn't there and
+                # vouch for a file Graft never pushed into this copy.
+                log.forget_cert_push(udid=udid, bundle_id=prepared.bundle_id)
             result = {"udid": udid, "bundle_id": prepared.bundle_id, "instance": n,
                       "version": release.version, "channel": release.channel}
             events.installed(**result)
@@ -1168,7 +1242,8 @@ def run_status(
             payload = unreachable_payload(u, e.message, latest)
         else:
             payload = status_payload(udid=u, apps=apps, team=team,
-                                     ours=log.lc_installed_bundle_ids(u), latest=latest)
+                                     ours=log.lc_installed_bundle_ids(u), latest=latest,
+                                     certs=log.cert_pushes(u))
         events.status(**payload)
         out.append(payload)
     return out
@@ -1193,7 +1268,8 @@ def run_install(
         )
     return install(
         udid=target, team=team, instances=picked, channel=channel, force=force,
-        p12=cfg.signing.cert, p12_password=password, profiles=AscProfiles(cfg, password),
+        p12=cfg.signing.cert, p12_password=password,
+        profiles=AscProfiles(cfg, password, target=target, note=events.note),
         device_ops=UsbmuxDevice(), runner=lc_sign.Runner(),
         log=BuildLog(cfg.state_dir / "log.sqlite"), events=events,
         fetch_ipa=lambda ch: fetch_ipa(ch, cfg.cache_dir, note=events.note,
@@ -1253,7 +1329,11 @@ def human_line(event_type: str, fields: dict[str, Any]) -> str:
         latest = f["latest"]
         tail = f"; latest {latest['channel']} {latest['version']}" if latest else ""
         update = " — update available" if f["update_available"] else ""
-        return f"{f['udid']}: {found} (managed by {f['managed_by']}){tail}{update}"
+        cert = (
+            "; the certificate Graft put there is still there: --lc-clean --cert-only removes it"
+            if f.get("certificate_pushed") else ""
+        )
+        return f"{f['udid']}: {found} (managed by {f['managed_by']}){tail}{update}{cert}"
     if event_type == "lc-install-progress":
         who = f"LiveContainer {f['instance']}" if f["instance"] else "LiveContainer"
         return f"→ {who}: {f['step']} — {f['detail']}"

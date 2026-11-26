@@ -18,6 +18,9 @@ delivers the result to your iPhone or iPad over USB or Wi-Fi.
   TrollStore on your own devices.
 - Finds tweaks on canister.me and in APT repositories, and checks them for
   updates.
+- Checks your apps and their tweaks for updates once a day, and brings an app
+  up to date in one step: the newer App Store version, newer tweaks, one
+  build, installed on each device it's on.
 - Keeps a build history and archived builds for rollback, and tells you when
   a device is behind your config.
 - Installs, updates and signs LiveContainer itself, including side-by-side
@@ -282,11 +285,26 @@ version set in Edit App is a hold too; Get latest sets it back to latest.
   number. Graft numbers them from the oldest, so "1.2.0 (build 1 of 2)" is
   the older and "1.2.0 (build 2 of 2)" the newer, and hovering over one says
   which it is. Show More renumbers them when it finds an older one.
+- Getting one of those builds holds the app at that build: the pane says
+  "Held at 1.2.0 (build 1 of 2)", and builds use that build even when the other
+  is staged too. A version typed in Edit App holds by number only: changing
+  the preferred version there lets go of the build, and saving Edit App with
+  it unchanged keeps it. In Terminal, `graft --set-app-options --app <name>
+  --preferred-version <version>` holds that version by number.
+- Dropping an IPA of the held version on the app, or decrypting it from a
+  jailbroken device, holds the app at that version by number, with a warning:
+  Graft can't tell which build an IPA it didn't download is, so builds use the
+  one you gave it.
 - If the connection stalls, the list stops, and Try Again picks up where it
   stopped. A version that stalls twice in a row is marked as unavailable, and
   the list goes on.
 - Some apps refuse to run once they're too old, and ask you to update.
-- A version that's already staged is held without downloading it again.
+- A version that's already staged is held without downloading it again,
+  unless another build shares its number: a staged copy could be either, so
+  Graft downloads the build you picked. Graft counts only the builds it has
+  read: one with the same number further down, past Show More, isn't counted
+  yet, and the staged copy is held by number. Show More first if you think
+  there's another.
 - An old version may be one UnfairPlay can't verify (see
   [Decrypts UnfairPlay can't verify](#decrypts-unfairplay-cant-verify)).
 
@@ -320,19 +338,21 @@ crashes at launch, the decrypt is the likely cause.
 
 Graft has no telemetry, analytics or crash reporting. Graft.app makes no
 connections of its own: its CLI does, for something you asked for or a pane
-you opened, to look up the icon of an app that has none yet, at launch and
-when the app list changes, once a day to ask GitHub whether a newer Graft is
-out, and to download that newer Graft (Settings › Updates turns either off).
-Device UDIDs never leave your Mac.
+you opened; to look up the icon of an app that has none yet; once a day to
+ask GitHub whether a newer Graft is out, and to download it; and once a day to
+check whether your apps and tweaks have updates. Settings › Updates turns
+off the daily checks and the download. Device names and UDIDs never leave
+your Mac.
 
 | When | Who it contacts | What for |
 |---|---|---|
-| You search the App Store, add an app, or open an app's pane; for an app with no icon yet, at launch, when the app list changes, and after a build or App Store get | Apple's iTunes lookup and search, and its artwork CDN | The app's version, price and icon |
-| You search, fetch or update tweaks | canister.me, and the repos you add | Tweak listings and downloads |
-| A device's pane opens, Edit App opens for a LiveContainer app, or you install LiveContainer | GitHub | LiveContainer's releases |
+| You search the App Store, add an app, open an app's pane, or plan or run an update; for an app with no icon yet, at launch, when the app list changes, and after a build or App Store get | Apple's iTunes lookup and search, and its artwork CDN | The app's version, price and icon |
+| You search, fetch or update tweaks, or update an app | canister.me, and the repos you add | Tweak listings and downloads |
+| A device's pane or its Set Up LiveContainer… sheet opens, Edit App opens for a LiveContainer app, or a LiveContainer install, certificate or clean-up on a device ends | GitHub | LiveContainer's releases |
 | Once a day while Graft is open, unless Settings › Updates turns it off, and when you choose Help › Check for Updates… | GitHub (`api.github.com`), with nothing that identifies you or your Mac | Whether a newer Graft is out |
+| At launch and once a day while Graft is open, and after a get, build, tweak update, update or change to an app's options or tweaks, or when a device connects or disconnects while an update waits for one (at most every 10 minutes), unless Settings › Updates › Check my apps for updates is off; and when you press Check for updates now | Apple's public iTunes lookup (one request per App Store country), and canister.me for attached tweaks with no recently cached repo index | Your apps' bundle IDs and your attached tweaks' package IDs, to see whether newer versions are out. No Apple ID. |
 | A newer Graft is out, unless Settings › Updates turns automatic updates off (then when you choose Update) | GitHub's release files (`github.com`), with nothing that identifies you or your Mac | The new `Graft.zip` (`Graft-Intel.zip` for the Intel build), about 150 MB, once |
-| A paid account with an App Store Connect key makes a profile | Apple's App Store Connect API | Provisioning profiles |
+| A paid account with an App Store Connect key makes a profile, or a build signed with a profile Graft makes, or a LiveContainer install, targets a device missing from the saved list (Graft lists your registered devices; it never registers one) | Apple's App Store Connect API | Provisioning profiles |
 | You sign in, get an app or an older version of one, list an app's older versions, or get a free one | Apple's App Store, through the bundled ipatool | Your sign-in, the license, the IPA, the versions' numbers and dates |
 | The first App Store action on a Mac (usually the first sign-in) | PyPI (`files.pythonhosted.org`), and Apple's software CDN | ipatool's Unicorn emulator (a few MB) and its App Store components (about 320 MB, skipped if a 1.x ipatool already downloaded them), once |
 
@@ -350,7 +370,61 @@ UnfairPlay has no network code, and talking to your iPhone or iPad stays on
 your Mac and your local network. [What Graft connects to](docs/network.md)
 lists every host, when, and what is sent.
 
-## Updating
+## Updating your apps
+
+Graft checks your apps for updates at launch and once a day while it's open:
+a newer version on the App Store, a newer build of a tweak an app uses, or a
+build that changed since it was last installed. An app with something to
+update shows an arrow mark in the sidebar, and its pane says what: "Update
+available: App Store 1.2.0 · 1 tweak".
+- **Update & Install** (or **Update Tweaks & Install**, or **Install
+  Update**) shows what will change, app by app, and each device it installs
+  on, then does it when you choose **Update**: the tweaks, the App Store
+  download, one build, and an install on each device.
+- **Update All**, above the apps when two or more apps have an update, does
+  the same for each of them.
+- An update installs on every device the app is on: each iPhone or iPad
+  you've delivered it to, and only the ones that need it. It never adds a
+  device, and the device picked for the next Build & Install doesn't apply.
+- A device that isn't connected, even one unplugged during the update,
+  waits: the app's pane says so ("iPad mini isn't connected: it'll update
+  when it is"), and the app's other devices still update. When you connect
+  it, Graft checks again within 10 minutes and offers its install. An update
+  that only waits for a device doesn't mark the app in the sidebar or count
+  in Update All.
+- For a device you no longer use (sold, reset, or retired), **Stop
+  updating** ("Stop updating Example on iPad mini"), in the menu beside its
+  line on the pane or in the confirmation, stops updating that app there. It
+  changes nothing on the device, and lasts until you install that app on that
+  device again.
+- Graft never buys or claims an app, and never moves an app off a version
+  you're holding it at: that app still gets its tweak updates and install.
+- After you re-install an older build on a device, or when the last install
+  can't be found there, the pane says so and offers **Install Update** for
+  that device (one for each, when there are several), for you to press. It's
+  a Build & Install to that device; Graft doesn't install it on its own.
+- When a tweak is shared, its other apps need an install too: the
+  confirmation says which, and **Also install … now** adds them.
+- **Stop** stops at once, except during an install or while a tweak is being
+  swapped in, which finish first. **Stop Now** cancels that install, and
+  after three minutes **Force Stop** ends it outright. The progress shows
+  each device's install under its app, and how it went. **Try Again**, for
+  every app or for one device, picks up where it stopped.
+- LiveContainer apps end up in LiveContainer's Documents on each device, to
+  import there.
+- On an Intel Mac, a newer App Store version shows, and can't be downloaded.
+
+Settings › Updates › **Check my apps for updates** turns the daily check off,
+and the checks after a get, build, tweak update, update, change to an app's
+options or tweaks, or device change.
+With it off, Graft checks only when you press **Check for updates now**,
+there, in the sidebar or on an app's pane, and the Update buttons show what
+that check found. The check sends your apps' bundle IDs to Apple's App
+Store lookup and your tweaks' package IDs to canister.me, and nothing that
+identifies you or your Mac. It opens no connection to your iPhone or iPad and
+reads nothing from the keychain.
+
+## Updating Graft
 
 Graft updates itself. Once a day while it's open (or when you choose Help ›
 Check for Updates…), it asks GitHub whether a newer version is out. If one is,
@@ -360,6 +434,10 @@ when you quit Graft.
 - Each download updates from its own zip: `Graft.zip` for Apple silicon,
   `Graft-Intel.zip` for the Intel build. A release without yours has no
   update for your Mac yet, and Graft never installs the other one.
+- A release that needs a newer macOS than your Mac has is no update for your
+  Mac either: Graft downloads it once, finds it needs a newer macOS, deletes
+  it and stays on the version you have. It doesn't download that release
+  again until your Mac has that macOS.
 - Before it calls a download ready, Graft checks it: the SHA-256 GitHub lists
   for it, then that the app inside is Graft, newer than yours, the same build
   as yours, signed with the same developer's Developer ID as yours and
@@ -370,10 +448,11 @@ when you quit Graft.
 - The old Graft.app goes to the Trash, so you can put it back.
 - Graft never installs while it's working (a build, an install, an App Store
   download and so on). It waits until that's done, or until you quit.
-- Settings › Updates has two switches: **Check for updates automatically**
-  and **Download and install updates automatically**. With the second off,
-  the banner offers **Update**, which downloads, checks and restarts when you
-  choose it.
+- Settings › Updates has two switches for Graft: **Check for updates
+  automatically** and **Download and install updates automatically**. With
+  the second off, the banner offers **Update**, which downloads, checks and
+  restarts when you choose it. Its third, **Check my apps for updates**, is
+  for your apps (see [Updating your apps](#updating-your-apps)).
 - Your config, apps and builds carry over, and so does your App Store
   sign-in from 2.0 on. From 1.x, you sign in once.
 - The Terminal command points into the app, so it updates too.
@@ -468,6 +547,14 @@ in the profile. Use this for apps that don't care about their bundle id or
 signing team. On a free Apple ID, building, re-installing or adding a sideload
 app is refused.
 
+On iOS 16 and later, an app signed with a development profile opens only with
+Developer Mode on. Graft checks before building one and stops if it's off. A
+real build first makes the switch appear in Settings › Privacy & Security ›
+Developer Mode, which iOS hides until a development app is installed: turn it
+on there, and confirm after the device restarts. The device's page shows
+whether it's on. Ad hoc and enterprise profiles, and LiveContainer delivery,
+don't need it.
+
 ## LiveContainer
 
 If LiveContainer is already on the device through SideStore, AltStore,
@@ -477,9 +564,27 @@ that guest apps keep their logins.
 
 A device's pane has a LiveContainer section. It lists what is installed and
 who manages it, on either account.
-- **Install / Update LiveContainer** and **Put certificate on device** are
-  paid only. With a free Apple ID they're disabled, and the section points you
-  at the store that installed LiveContainer.
+- **Set Up LiveContainer…** does the whole setup in one sheet. With a paid
+  account, its **Set Up** button checks the device against your developer
+  account (reading the registered devices again if the device is new to
+  them), installs LiveContainer from its own GitHub releases, and puts the
+  certificate on the device. It stops at a step that fails and says what's
+  left. After a failed certificate step, Set Up again puts the certificate on
+  without installing again. **Install / Update LiveContainer** and **Put
+  certificate on device** are in the sheet too, one step at a time. While a
+  step runs, the sheet stays open until it ends or you press **Stop**.
+- The sheet then lists the steps on the device, naming it: Import Certificate
+  in LiveContainer's Settings, JIT-Less Diagnose, import your apps, and
+  Convert to Shared App. LiveContainer asks for your .p12's password on the
+  device; Graft can't type it for you. Selecting **I imported the
+  certificate** takes the certificate off the device at once.
+- With a free Apple ID, the sheet has no Set Up button: it links to SideStore
+  and iloader, which install LiveContainer with your Apple ID, and lists the
+  same steps on the device.
+- Where SideStore or AltStore is on the device, Set Up is disabled, and the
+  sheet's first step is Import Certificate from SideStore.
+- While a certificate Graft put on the device is still there, the section
+  says so, with **Remove it**.
 - **Clean up** is there whenever the device has a LiveContainer, whoever
   installed it.
 
@@ -525,8 +630,9 @@ Notes:
   signed through them. Update through AltStore or SideStore instead.
 - **Put certificate on device** is for a LiveContainer Graft installed: it has
   no AltStore to take a certificate from, and its JIT-less mode needs one.
-  Import it in LiveContainer's Settings, then remove it with **Remove
-  certificate**. Until then the certificate sits where guest apps can read it.
+  Import it in LiveContainer's Settings, then select **I imported the
+  certificate** in the sheet, or press **Remove it** on the device's pane.
+  Until then the certificate sits where guest apps can read it.
 - Graft never deletes or replaces a file in LiveContainer's Documents unless
   it knows the file is its own: a delivery record for that device and that
   LiveContainer, or, with no record (after a state reset, say), the file's
@@ -627,7 +733,10 @@ device and can build without installing. It can also export the IPA unsigned
 instead (see [Exporting an IPA](#exporting-an-ipa)).
 
 1. **Pre-flight.** Tools, signing files, password, device, and that the device
-   is in the profile. Only what the delivery mode needs is checked.
+   is in the profile. Only what the delivery mode needs is checked. Settings ›
+   Preflight, and `graft --check` in Terminal, check the same without
+   building. There, no device connected is information ("not connected"), not
+   a failure; a build that installs still needs one.
 2. **Source IPA.** The decrypted IPA staged in `~/.cache/graft/ipas/`.
 3. **Decryption check.** The load commands of every Mach-O. Any that is still
    encrypted is reported as a warning naming the binary, and the build carries
@@ -647,11 +756,43 @@ instead (see [Exporting an IPA](#exporting-an-ipa)).
 **Stop** ends the build where it is. A stopped build shows as Stopped, not as
 a failure, and adds no row to Builds.
 
+### Which device a build goes to
+
+With nothing picked, a build goes to the default device when it's connected,
+else to the only other device connected. With several connected and none of
+them the default, the app pane's bar asks you to pick one, and Build & Install
+waits until you do. **Change** on the bar lists the connected devices, with
+their iOS version and, for a LiveContainer app, whether LiveContainer is on
+them. Picking one sends the next Build & Install there only ("Next Build &
+Install: iPad Air via LiveContainer · then back to iPhone 15 Pro"); the ✕
+clears it, and it clears itself once that build starts installing or succeeds.
+A build that fails or is stopped before installing keeps it for the retry. A
+picked device that's unplugged stops Build & Install too, until you plug it in
+or clear the pick. Build options' Device picker sets the same pick. Updates
+don't use it: an update installs on every device the app is on. The
+menu also makes a device the default. In Terminal, `--device <UDID>` does the
+same for one build, and that device must be connected. When a build goes
+somewhere other than the default, its log says where and why.
+
+For a LiveContainer app, a device without LiveContainer can't take the build:
+the bar says so and offers **Set Up LiveContainer…** for that device, over the
+app pane. When a Sideload build signed with a profile Graft makes, or
+installing LiveContainer, goes to a device added to your developer account
+since you last saved App Store Connect in Settings, Graft reads the account's
+devices again first and saves the new list. A profile you made yourself isn't
+changed. Graft never registers a device.
+
 ## Build history and retention
 
 **Builds** lists every build, with its saved log (View log…). A build's
 archive can be delivered again without rebuilding (Re-install…), or shown in
 Finder (Reveal in Finder).
+
+Re-install… asks first. It names the app, the build (its version and when it
+was made) and the iPhone or iPad it installs on: the one the build went to,
+else your default device, else the first one connected. When that device isn't
+connected, it says so and installs nothing. Return re-installs, and Escape
+cancels.
 
 A re-install goes out the way the archive was built: an unsigned LiveContainer
 archive is never installed as a top-level app, and a zsign-signed one is never
@@ -728,6 +869,28 @@ a minimal stand-in instead. Phone builds are never changed this way.
 Graft.app carries that stand-in prebuilt, so a Mac build needs no Xcode. A
 `graft` installed with pipx builds it on demand and needs full Xcode for that;
 see [The CLI without the app](#the-cli-without-the-app-pipx).
+
+Some tweaks need an iOS framework that macOS doesn't have at all. Graft won't
+build such a tweak for this Mac, or hand over a build that has one, and says
+which tweak and which framework. Phone builds can still use it. A framework the
+app itself links only gets a warning.
+
+After handing a build over, Graft waits up to two minutes for PlayCover to
+finish installing it, and says when it has. If it hasn't by then, check
+PlayCover's window; if the install failed there, Install to Mac… on the build's
+row in Builds tries again. Stop ends the wait, not the install.
+
+PlayCover has two settings per app that matter here: keymapping, which turns
+clicks into touches for games, and PlayChain. On an app's first handoff Graft
+turns both off and says so, because keymapping makes a non-game's clicks miss
+and PlayChain crashed apps the first time they saved a login. After that Graft
+keeps whatever you set in PlayCover: turn keymapping back on for a game, and it
+stays on when you rebuild.
+
+Not every iPhone or iPad app runs under PlayCover, even without tweaks: some
+open to a blank window, can't open their data, or have buttons that don't
+respond. If an app doesn't work, try it without tweaks first (Install to Mac…
+on its IPA in the Cache pane); if that fails too, PlayCover can't run that app.
 
 Graft doesn't include PlayCover, and doesn't download or install it. When
 PlayCover isn't installed, Build options says so above Build for this Mac, and
@@ -905,6 +1068,7 @@ Graft](#removing-graft) lists everything.
 | `ApplicationVerificationFailed` | The `.p12` and profile are from different teams, or the device's UDID isn't in the profile. |
 | `MismatchedApplicationIdentifierEntitlement` | The profile doesn't allow this bundle id; use a wildcard profile. Installing LiveContainer: delete an old zsign-signed copy on the device first. |
 | `DeviceLocked` | Unlock the device. |
+| `Developer Mode is off on <device>` | The device runs iOS 16 or later with Developer Mode off, and the app is signed with a development profile, so it wouldn't open. Turn it on in Settings › Privacy & Security › Developer Mode (a real build has made the switch appear), then confirm after the device restarts. |
 | An app, such as an emulator, says it needs JIT | Graft doesn't turn on JIT. [StikDebug](https://github.com/StikDebug/StikDebug), an app on the iPhone, does. On iOS 26 and recent iPhones, only apps built to support it can get JIT, whatever tool you use. |
 | `wrong password` from zsign | The `.p12` password is wrong. |
 | `Library not loaded: @rpath/libexample.dylib` | Add a copy of that library to the app's tweaks; see [Shared libraries](#shared-libraries). |
@@ -915,7 +1079,10 @@ Graft](#removing-graft) lists everything.
 | `the device listed no apps at all, which is how a locked phone answers` | The phone is locked, or hasn't been unlocked since it restarted. Unlock it, stay on the home screen, and try again. |
 | `... already has a Documents/<app>.ipa that Graft did not push` | LiveContainer's Documents already holds a file with the name the push uses, and neither a record nor its bytes say Graft put it there (it may be your own copy). Rename or remove it in the Files app (On My iPhone > LiveContainer), then build again. |
 | `lc_bundle_id ... is not installed` | The app is pinned to a LiveContainer that isn't on the device. Pick one in the LiveContainer picker in the app's Edit sheet, or Automatic to drop the pin. |
+| Settings › Preflight, or `graft --check`, says the device is "not connected" | No iPhone or iPad is connected. That's information, not a failure: a check installs nothing, so it needs no device. A build that installs still needs one: plug it in with a USB cable and trust this Mac. |
 | `couldn't reach usbmuxd` | macOS's service for talking to iPhones didn't answer. Reconnect the phone; if it persists, restart the Mac. |
+| `several devices are connected: pick one` | More than one iPhone or iPad is connected and none is the default device. Pick one with Change on the app's bar (it's for the next Build & Install only), pass `--device <UDID>` in Terminal, or set a default in Settings. |
+| `... isn't registered in your developer account` | The device isn't one of your Apple Developer account's devices, so no profile can include it. Add it at developer.apple.com (Certificates, Identifiers & Profiles › Devices), then build again. Graft never registers a device for you. |
 | `N LiveContainers are installed and Graft will not guess which to use` | There is no single primary: two LiveContainers installed by two Apple IDs, say, or a jailbreak's plain `com.kdt.livecontainer` next to an installer's `com.kdt.livecontainer.<TEAMID>`. Pin the app to one of the ids the error lists, in the LiveContainer picker in its Edit sheet. |
 | `... needs a paid Apple Developer Program membership` | The config has no `signing:` section, so it is set up for a free Apple ID, and the action needs a paid one. Use LiveContainer delivery, or, with a paid membership, Settings › Add a paid account…; it keeps your apps. |
 | Settings › App Store says "signed in by another ipatool (Graft 1's?): sign in again", or, with your own ipatool set in `config.yaml`, "a sign-in this ipatool can't read (another ipatool's?): sign in again" | Your sign-in was made by an ipatool this one can't read: with Graft's own, such as yours under Graft 1; with your own, Graft.app's or another. Press Sign In…; see [Upgrading from Graft 1.x](docs/upgrading.md#your-app-store-sign-in). |
@@ -952,7 +1119,7 @@ This is the whole list, by the name `--items` takes:
 |---|---|---|
 | `config` | Your setup: `config.yaml`, the `.p12` and profile Graft copied in when you set it up, your App Store Connect key and the profiles made with it, and your tweaks. The files you picked during setup stay where they were. | `~/.config/graft` |
 | `cache` | Staged IPAs, archived builds and app icons, often several GB | `~/.cache/graft` |
-| `state` | Build history and logs, repository indexes, earlier versions of tweaks you updated, and Graft's record of its App Store sign-in | `~/.local/state/graft` |
+| `state` | Build history and logs, repository indexes, earlier versions of tweaks you updated, Graft's record of its App Store sign-in, the names of the iPhones and iPads Graft has seen, the PlayCover settings it keeps for your apps, which devices you stopped updating an app on, and which App Store versions your Apple ID was refused | `~/.local/state/graft` |
 | `data` | frida-ios-dump, and tools a pipx install of Graft uses | `~/.local/share/graft` |
 | `legacy` | `tweak-build` folders from before the rename that Graft left beside its own, because both held files. Only when you name it. | `~/.config/tweak-build` and the like |
 | `appstore-signin` | Your App Store sign-in: three items in your login keychain (service `ipatool-auth.service`, accounts `account`, `anisette-v4` and `kbsync-v1`) and ipatool's session cookies. Off when another ipatool made the sign-in. | the keychain, and `~/.ipatool` (or `$XDG_STATE_HOME/ipatool`) |
@@ -1180,7 +1347,7 @@ graft --appstore-status                     # ipatool installed and signed in? U
 graft --appstore-login                      # asks for the Apple ID, the password, then the code if Apple asks
 graft --appstore-logout
 graft --appstore-check                      # App Store version vs. your staged IPA, per app
-graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if it's already staged)
+graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if <bundle id>_<version>.ipa is staged)
 graft --appstore-versions --app example     # the versions the App Store has for your Apple ID, newest first, with their ids
 graft --appstore-get --app example --version-id <id>   # get that version, and hold the app at it
 graft --appstore-claim --app example        # Get (free): only for an app the App Store lists at 0
@@ -1195,12 +1362,17 @@ graft --appstore-claim --app example        # Get (free): only for an app the Ap
   UnfairPlay couldn't verify, with a warning.
 - `--again` with `--appstore-get` downloads even when that version is already
   staged.
+- A get downloads nothing when what it would get is staged already: for the
+  latest, `<bundle id>_<version>.ipa`, as a get, `--provide-ipa` or `--decrypt`
+  names it. A `--version-id` get stages `<bundle id>_<version>_<version id>.ipa`
+  instead, which a plain get doesn't count, and counts the plain file only
+  while no other build of that number has been listed.
 - `--appstore-versions` reads the number and date of ten versions at a time,
   starting at `--offset` (`--limit` reads up to 50), and remembers them. The
   rest are listed by id.
 - `--version-id` holds the app at the version it gets: `preferred_version` pins
-  it, and `--appstore-check` doesn't call a newer one an update. A plain
-  `--appstore-get` lets go of the hold.
+  it, `preferred_build` names that build, and `--appstore-check` doesn't
+  call a newer one an update. A plain `--appstore-get` lets go of the hold.
 
 To set up decryption in Terminal, list the apps that can do it, save the
 script, run it as root, then finish as yourself:
@@ -1263,11 +1435,15 @@ graft example                       # build and deliver
 graft example other                 # several apps in turn
 graft example --dry-run             # show what would happen without doing it
 graft example --skip-install        # build (and sign, for sideload) only
-graft example --device <UDID>       # a specific device instead of the default
+graft example --device <UDID>       # this build to that device (it must be connected)
 graft example --for-playcover       # also make the build loadable on this Mac under PlayCover
 graft --install-to-mac <filename>   # hand a staged IPA or an archived build to PlayCover
 graft example --export-ipa ~/Desktop/Example.ipa   # inject the tweaks, save the IPA unsigned
 graft example -v                    # verbose, and keep the temp directory
+graft --update example              # newer tweaks, newer App Store version, then build once and install on each device it's on
+graft --update --all --plan         # what an update of every app would change; changes nothing
+graft --update example --with-affected   # also install the apps that share an updated tweak
+graft --drop-update-target example --device <UDID>   # stop updating it on a device that's gone
 ```
 
 `--export-ipa` signs nothing and touches no device (see
@@ -1302,6 +1478,25 @@ build.
 build where it is: nothing is recorded as a failure, and under `--json` the
 last event is `{"type": "build-end", "ok": false, "stopped": true, "error":
 null, ...}`.
+
+`--update` updates the app's tweaks that have a newer build (each one once,
+for every app that uses it), gets the App Store's newer version (never buying
+or claiming one, and never for an app held at a version), then, one app at a
+time, builds once and installs on every device the app was installed on: the
+build's own install on the first (the default device first, then by name),
+and the same build on each of the others. It also installs a change staged
+since a device's last install, on that device. A device that isn't connected
+waits while the others install, a device that fails doesn't stop the others,
+and an app never installed is left to a build. `--plan` says what it would do,
+device by device, and changes nothing; it reads no keychain. Run it again to
+pick up where a failed or stopped update left off: it installs only where the
+app isn't up to date. A Stop during an install, or while a tweak is being
+swapped in, lets that finish first, and the devices after it aren't started;
+a second Stop ends the install too.
+
+`--drop-update-target APP --device UDID` stops updating an app on a device
+it was installed on, for a device that's gone (sold, retired or reset), until
+the app is installed there again. It changes nothing on any device.
 
 **Build history and delivery state**
 
@@ -1341,7 +1536,7 @@ LiveContainer a push would use.
 
 ```bash
 graft --devices                     # connected devices over USB and Wi-Fi
-graft --device-info [--device <UDID>]
+graft --device-info [--device <UDID>]   # storage, battery, Developer Mode
 graft --device-apps [--with-icons]  # user apps on the device
 ```
 

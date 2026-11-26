@@ -157,6 +157,8 @@ final class TerminationHoldTests: XCTestCase {
         private(set) var takeDowns = 0
         private(set) var replies: [Bool] = []
         private(set) var repliedAt: TimeInterval?
+        /// What the wait after Quit Anyway said, in order; nil when it came down.
+        private(set) var notices: [String?] = []
         private(set) var quitGuard: QuitGuard!
 
         @MainActor
@@ -176,7 +178,8 @@ final class TerminationHoldTests: XCTestCase {
                     self.replies.append(quit)
                     self.repliedAt = self.now
                 },
-                schedule: { [unowned self] delay, block in self.after(delay, block) }
+                schedule: { [unowned self] delay, block in self.after(delay, block) },
+                notice: { [unowned self] note in self.notices.append(note) }
             )
         }
 
@@ -298,7 +301,8 @@ final class TerminationHoldTests: XCTestCase {
                     try? await Task.sleep(for: .seconds(delay))
                     block()
                 }
-            }
+            },
+            notice: { _ in }
         )
         let asked = Date()
         XCTAssertEqual(quitGuard.shouldTerminate(), .terminateLater)
@@ -396,6 +400,82 @@ final class TerminationHoldTests: XCTestCase {
         XCTAssertEqual(h.replies, [true])
         XCTAssertEqual(try XCTUnwrap(h.repliedAt), 0.3, accuracy: QuitGuard.checkEvery + 0.001, "not the whole grace")
         XCTAssertTrue(h.control.isBalanced)
+    }
+
+    // MARK: A step the work is finishing (2.3, spec 4.5)
+
+    /// Work says it is finishing a step its stop waits for, and when it's
+    /// done; only while it holds.
+    func test_work_can_say_it_is_finishing_a_step_until_it_is_done() {
+        let control = FakeControl()
+        let hold = TerminationHold(control: control)
+        let update = hold.begin(TerminationHold.updatingApps) {}
+        let build = hold.begin(TerminationHold.building) {}
+        XCTAssertEqual(hold.finishingNotes, [])
+
+        hold.finishing(update, note: "Finishing the install, then quitting…")
+        XCTAssertEqual(hold.finishingNotes, ["Finishing the install, then quitting…"])
+        hold.finishing(update, note: nil)
+        XCTAssertEqual(hold.finishingNotes, [], "done")
+
+        hold.finishing(update, note: "again")
+        hold.end(update)
+        XCTAssertEqual(hold.finishingNotes, [], "an ended ticket finishes nothing")
+        hold.finishing(update, note: "late")
+        XCTAssertEqual(hold.finishingNotes, [], "nor does a note for a ticket already ended")
+        hold.end(build)
+        XCTAssertTrue(control.isBalanced)
+    }
+
+    /// An update finishes an install it has begun before it stops
+    /// (`update-stopping`), which can outlast `stopGrace`. Quit Anyway waits
+    /// for it, past the grace, saying so, and quits once the update has
+    /// ended, so a quit never leaves a half-done install either.
+    func test_quit_anyway_waits_through_an_install_the_update_is_finishing() throws {
+        let h = QuitHarness()
+        let note = "Finishing the install on Example iPhone, then quitting…"
+        var ticket: TerminationHold.Ticket?
+        // The CLI defers its Stop for the install, finishes it 30 s later
+        // (`update-app-end`), then exits.
+        ticket = h.hold.begin(TerminationHold.updatingApps) { [unowned h] in
+            h.after(0.2) { if let ticket { h.hold.finishing(ticket, note: note) } }
+            h.after(30) {
+                guard let ticket else { return }
+                h.hold.finishing(ticket, note: nil)
+                h.after(0.3) { h.hold.end(ticket) }
+            }
+        }
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.answer?(.quitAnyway)
+
+        while h.now < QuitGuard.stopGrace + 1 { XCTAssertTrue(h.step(), "still waiting") }
+        XCTAssertEqual(h.replies, [], "past the usual grace: the install is still finishing")
+        XCTAssertEqual(h.notices, [note], "the wait says what it waits for")
+
+        h.runDown()
+        XCTAssertEqual(h.replies, [true])
+        XCTAssertEqual(try XCTUnwrap(h.repliedAt), 30.3, accuracy: QuitGuard.checkEvery + 0.001,
+                       "once the update has ended")
+        XCTAssertEqual(h.notices, [note, nil], "and the notice comes down")
+        XCTAssertTrue(h.control.isBalanced)
+    }
+
+    /// An install that never ends: Graft gives up at `finishGrace`, as it
+    /// does on stopped work at `stopGrace`.
+    func test_quit_anyway_gives_up_on_a_finishing_step_at_the_bound() throws {
+        let h = QuitHarness()
+        var ticket: TerminationHold.Ticket?
+        ticket = h.hold.begin(TerminationHold.updatingApps) { [unowned h] in
+            if let ticket { h.hold.finishing(ticket, note: "Finishing the install, then quitting…") }
+        }
+        XCTAssertEqual(h.quitGuard.shouldTerminate(), .terminateLater)
+        h.answer?(.quitAnyway)
+        h.runDown()
+
+        XCTAssertEqual(QuitGuard.finishGrace, 60, "spec 4.5")
+        XCTAssertEqual(h.replies, [true])
+        XCTAssertEqual(try XCTUnwrap(h.repliedAt), QuitGuard.finishGrace, accuracy: QuitGuard.checkEvery + 0.001)
+        XCTAssertEqual(h.notices, ["Finishing the install, then quitting…", nil], "taken down on the way out")
     }
 
     /// Work that ends by itself while the question is up: the question comes
@@ -539,6 +619,8 @@ final class TerminationHoldTests: XCTestCase {
     func test_the_question_names_what_runs_in_plain_words() {
         let words: [(String, String)] = [
             (TerminationHold.building, "building and installing an app"),
+            (TerminationHold.buildingOnly, "building an app"),
+            (TerminationHold.exporting, "exporting an IPA"),
             (TerminationHold.gettingFromAppStore, "getting an app from the App Store"),
             (TerminationHold.staging, "staging an IPA for a build"),
             (TerminationHold.claiming, "getting a free app for your Apple ID"),
@@ -571,6 +653,57 @@ final class TerminationHoldTests: XCTestCase {
         )
         let detail = QuitQuestion(reasons: [TerminationHold.building]).detail
         XCTAssertTrue(detail.contains(QuitQuestion.keepWorking) && detail.contains(QuitQuestion.quitAnyway), detail)
+    }
+
+    func test_the_question_names_an_update_of_apps() {
+        XCTAssertEqual(
+            QuitQuestion(reasons: [TerminationHold.updatingApps]).title,
+            "Quit while Graft is updating your apps?"
+        )
+    }
+
+    /// A Mac build that has handed its app to PlayCover and waits for the
+    /// install is named for that in the quit question, not "building an
+    /// app" (review part 2, COPY), and goes back once the wait ends.
+    func test_a_mac_builds_playcover_wait_is_named_in_the_quit_question() async {
+        let control = FakeControl()
+        let hold = TerminationHold(control: control)
+        let config = ConfigStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/bin/sh")), notify: { _ in },
+                                 hold: hold)
+        var release: CheckedContinuation<Void, Never>?
+        config.launchBuild(appName: "example", delivery: .notDelivered(reason: "Build for this Mac")) {
+            await withCheckedContinuation { release = $0 }
+        }
+        await eventually({ release != nil }, "the build never started")
+        XCTAssertEqual(hold.reasons, [TerminationHold.buildingOnly])
+
+        config.noteWaitingForPlayCover("example")
+
+        XCTAssertEqual(hold.reasons, [TerminationHold.waitingForPlayCover], "the reason Install to Mac… holds for")
+        XCTAssertEqual(QuitQuestion(reasons: hold.reasons).title,
+                       "Quit while Graft is waiting for PlayCover to install an app?")
+        config.noteWaitingForPlayCover(nil)
+        XCTAssertEqual(hold.reasons, [TerminationHold.buildingOnly])
+        release?.resume()
+        await eventually({ !hold.isHolding }, "the build's hold never ended")
+        XCTAssertTrue(control.isBalanced, "begun and ended under its first reason")
+    }
+
+    /// An update's Stop lets an install it has begun finish, and Quit
+    /// Anyway waits for that (spec 4.5): the question says so rather than
+    /// that everything is left unfinished (review part 2, COPY).
+    func test_the_question_says_an_updates_install_finishes_first() {
+        XCTAssertEqual(
+            QuitQuestion(reasons: [TerminationHold.updatingApps]).detail,
+            "Quit Anyway stops what Graft is doing and leaves it unfinished. An install the update has begun "
+                + "finishes first, for up to a minute. Keep Working cancels the quit, and any logout or "
+                + "restart, so it can finish. If it finishes while this message is open, Graft quits then."
+        )
+        XCTAssertTrue(QuitQuestion(reasons: [TerminationHold.updatingApps, TerminationHold.removingData],
+                                   withoutStop: [TerminationHold.removingData]).detail
+            .hasSuffix(QuitQuestion.updateFinishes))
+        XCTAssertFalse(QuitQuestion(reasons: [TerminationHold.building]).detail.contains("finishes first"))
+        XCTAssertEqual(QuitGuard.finishGrace, 60, "\"up to a minute\"")
     }
 
     /// Work with no stop: the question says Quit Anyway can't stop it and
@@ -646,6 +779,54 @@ final class TerminationHoldTests: XCTestCase {
             await eventually({ gate.finished }, ending)
             await eventually({ control.isLetGo(TerminationHold.building) && control.isBalanced }, ending)
             XCTAssertEqual(store.wasCancelled("example"), ending != "finishes", ending)
+        }
+    }
+
+    /// The build slot holds for what it runs, and the quit question says
+    /// that: an export isn't "building and installing an app", nor is a
+    /// build that installs nothing.
+    func test_a_build_holds_for_what_it_runs() async throws {
+        let kinds: [(name: String, reason: String, title: String)] = [
+            ("export", TerminationHold.exporting, "Quit while Graft is exporting an IPA?"),
+            ("build", TerminationHold.building, "Quit while Graft is building and installing an app?"),
+            ("sideload", TerminationHold.building, "Quit while Graft is building and installing an app?"),
+            ("dry run", TerminationHold.buildingOnly, "Quit while Graft is building an app?"),
+            ("this Mac", TerminationHold.buildingOnly, "Quit while Graft is building an app?"),
+        ]
+        for kind in kinds {
+            let control = FakeControl()
+            let hold = TerminationHold(control: control)
+            let store = ConfigStore(
+                runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/true")),
+                notify: { _ in }, hold: hold
+            )
+            let gate = Gate()
+            let work: @MainActor () async -> Void = {
+                while !gate.open, !Task.isCancelled { try? await Task.sleep(nanoseconds: 10_000_000) }
+                gate.finished = true
+            }
+            let started: Bool
+            switch kind.name {
+            case "export":
+                started = store.launchExport(
+                    appName: "example", delivery: .notDelivered(reason: "Exported to a file"),
+                    staging: nil, work
+                )
+            case "build": started = store.launchBuild(appName: "example", delivery: .livecontainer, work)
+            case "sideload": started = store.launchBuild(appName: "example", delivery: .sideload, work)
+            case "dry run":
+                started = store.launchBuild(appName: "example", delivery: .notDelivered(reason: "Dry run"), work)
+            default:
+                started = store.launchBuild(
+                    appName: "example", delivery: .notDelivered(reason: "Built for this Mac"), work
+                )
+            }
+            XCTAssertTrue(started, kind.name)
+            await eventually({ control.isHeld(kind.reason) }, kind.name)
+            XCTAssertEqual(hold.reasons, [kind.reason], kind.name)
+            XCTAssertEqual(QuitQuestion(reasons: hold.reasons).title, kind.title, kind.name)
+            gate.open = true
+            await eventually({ gate.finished && control.isBalanced }, kind.name)
         }
     }
 
@@ -897,6 +1078,43 @@ final class TerminationHoldTests: XCTestCase {
         }
     }
 
+    /// Set Up LiveContainer is two runs, `--lc-install` then
+    /// `--lc-push-cert`, with a status read between them. Each run held the
+    /// quit on its own, so ⌘Q during that read quit without asking, and
+    /// LiveContainer was left with no certificate (review 23-2, §11). The
+    /// whole Set Up holds; Quit Anyway there stops it before the push.
+    func test_set_up_livecontainer_holds_from_the_install_through_the_certificate() async throws {
+        for ending in ["works", "quit"] {
+            for marker in ["go", "reading", "pushed"] {
+                try? FileManager.default.removeItem(at: dir.appending(path: marker))
+            }
+            let control = FakeControl()
+            let runner = try cli("""
+                case "$*" in
+                  *--lc-status*)
+                    touch '\(dir.path)/reading'
+                    \(wait) ;;
+                  *--lc-push-cert*) touch '\(dir.path)/pushed' ;;
+                esac
+                """)
+            let hold = TerminationHold(control: control)
+            let store = LiveContainerStore(runner: runner, hold: hold)
+            store.startSetUp(udid: "U", instances: [1], channel: nil)
+            await eventually({ FileManager.default.fileExists(atPath: self.dir.appending(path: "reading").path) },
+                             "the install never ended: \(ending)")
+            XCTAssertEqual(store.setUp?.states[.pushCert], .waiting, "premise: between the two runs: \(ending)")
+            XCTAssertTrue(control.isHeld(TerminationHold.liveContainer),
+                          "nothing held the quit between --lc-install and --lc-push-cert: \(ending)")
+            if ending == "quit" { hold.stopAll() }
+            try go()
+            await store.currentAction?.value
+            await eventually({ control.isLetGo(TerminationHold.liveContainer) && control.isBalanced }, ending)
+            let pushed = FileManager.default.fileExists(atPath: dir.appending(path: "pushed").path)
+            XCTAssertEqual(pushed, ending == "works", "Quit Anyway stops Set Up before its push: \(ending)")
+            XCTAssertEqual(store.setUp?.states[.pushCert], ending == "works" ? .done : .stopped, ending)
+        }
+    }
+
     // MARK: Re-install (the try14 delta audit, D14-APP-2)
 
     private static let reinstallEnd = #"{"type":"build-end","app":"example","ok":true,"stopped":false,"error":null}"#
@@ -967,7 +1185,7 @@ final class TerminationHoldTests: XCTestCase {
         let sheet = ReinstallSheet(
             build: build, runner: runner,
             config: ConfigStore(runner: sh, cliArgs: ["-c", "true"], notify: { _ in }),
-            artwork: ArtworkStore(runner: sh), hold: TerminationHold(control: control), onClose: {}
+            artwork: ArtworkStore(runner: sh), appUpdates: nil, hold: TerminationHold(control: control), onClose: {}
         )
         let box = hosted(sheet, size: NSSize(width: 640, height: 460))
         await eventually { control.isHeld(TerminationHold.reinstalling) }
@@ -1015,5 +1233,76 @@ final class TerminationHoldTests: XCTestCase {
             XCTAssertEqual(record != nil, ending == "stages" || ending == "frontmost", ending)
             XCTAssertFalse(store.isDumping, ending)
         }
+    }
+
+    // MARK: Install to Mac (review 23-2, §11)
+
+    private static let handedLine = #"{"type":"handed-to-playcover","filename":"com.example.app_2.0.ipa","path":"/c/com.example.app_2.0.ipa","bundle_id":"com.example.app","display_name":"Example"}"#
+    private static let installedLine = #"{"type":"playcover-installed","bundle_id":"com.example.app","version":"2.0","display_name":"Example","settings_disabled":[],"settings_restored":[]}"#
+
+    /// Install to Mac… from Builds or the Cache: after the handoff the CLI
+    /// waits up to two minutes for PlayCover's install, and nothing held the
+    /// quit, so ⌘Q quit without asking. It holds now until the wait ends:
+    /// the install lands, the strip's Stop, or Quit Anyway, which stops it
+    /// as Stop does. Each is ended after the handoff: one before it is
+    /// `test_a_stop_before_the_handoff_is_not_a_refusal`'s.
+    func test_install_to_mac_holds_while_it_waits_for_playcover_however_it_ends() async throws {
+        for ending in ["installs", "stopped", "quit"] {
+            for marker in ["go", "handed"] {
+                try? FileManager.default.removeItem(at: dir.appending(path: marker))
+            }
+            let control = FakeControl()
+            let runner = try cli("""
+                case "$*" in
+                  *--install-to-mac*)
+                    printf '%s\\n' '\(Self.handedLine)'
+                    touch '\(dir.path)/handed'
+                    \(wait)
+                    printf '%s\\n' '\(Self.installedLine)' ;;
+                esac
+                """)
+            let hold = TerminationHold(control: control)
+            let store = StagedIPAStore(runner: runner, hold: hold)
+            let run = Task { @MainActor in
+                await store.installToMac(filename: "com.example.app_2.0.ipa", holdingQuit: true)
+            }
+            await eventually({ control.isHeld(TerminationHold.waitingForPlayCover) }, ending)
+            await eventually({ FileManager.default.fileExists(atPath: self.dir.appending(path: "handed").path) },
+                             "premise: the stand-in handed it over: \(ending)")
+            switch ending {
+            case "stopped": run.cancel()
+            case "quit": hold.stopAll()
+            default: try go()
+            }
+            let install = await run.value
+            await eventually({ control.isLetGo(TerminationHold.waitingForPlayCover) && control.isBalanced }, ending)
+            if ending == "installs" {
+                guard case .installed = install.ending else { return XCTFail("\(install.ending)") }
+            } else {
+                XCTAssertEqual(install.ending, .stopped, "a Stop ends the wait, never the handoff: \(ending)")
+            }
+        }
+    }
+
+    /// The app pane's handoff runs inside its Mac build, whose hold already
+    /// covers the wait (`ConfigStore.launchBuild`): the store holds nothing
+    /// of its own for it.
+    func test_the_app_panes_handoff_holds_nothing_of_its_own() async throws {
+        let control = FakeControl()
+        let runner = try cli("""
+            printf '%s\\n' '\(Self.handedLine)' '\(Self.installedLine)'
+            """)
+        let store = StagedIPAStore(runner: runner, hold: TerminationHold(control: control))
+        let install = await store.installToMac(filename: "com.example.app_2.0.ipa")
+        guard case .installed = install.ending else { return XCTFail("\(install.ending)") }
+        XCTAssertFalse(control.isLetGo(TerminationHold.waitingForPlayCover), "it held the quit")
+        XCTAssertTrue(control.isBalanced)
+    }
+
+    func test_the_question_names_a_wait_for_playcover() {
+        XCTAssertEqual(
+            QuitQuestion(reasons: [TerminationHold.waitingForPlayCover]).title,
+            "Quit while Graft is waiting for PlayCover to install an app?"
+        )
     }
 }

@@ -365,7 +365,7 @@ def test_a_foreign_file_stops_the_build_before_cyan(tmp_path, monkeypatch) -> No
 
     with patch.object(cli_mod, "run_all_checks", return_value=[]), \
          patch.object(cli_mod, "acquire_ipa") as acquire, \
-         patch.object(cli_mod, "select_device", return_value=("u1", "USB")), \
+         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("u1", None, "USB")), \
          patch.object(cli_mod, "run_cyan", side_effect=AssertionError("cyan ran")):
         acquire.return_value.path = tmp_path / "in.ipa"
         acquire.return_value.version = "1.0"

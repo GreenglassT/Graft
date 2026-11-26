@@ -258,7 +258,7 @@ struct DeviceDecryptSection: View {
                     // — an errand the dump now runs itself. Not said on a
                     // phone that cannot be dumped at all; there it is untrue.
                     if !unavailable {
-                        Text("One click. The app is launched on the phone, dumped, and verified.")
+                        Text("One click. The app is launched on the \(device.kindName), dumped, and verified.")
                             .font(AppFont.monoSmall)
                             .foregroundStyle(Palette.textDim)
                             .lineLimit(2)
@@ -281,7 +281,7 @@ struct DeviceDecryptSection: View {
                     Button("Set root password…", action: onSetSSHPassword)
                         .controlSize(.small)
                         .fixedSize()
-                        .help("Stored in your login Keychain for this phone. "
+                        .help("Stored in your login Keychain for this \(device.kindName). "
                               + "frida-ios-dump pulls the app bundle off over SSH.")
                 }
                 Button {
@@ -732,7 +732,10 @@ private struct DumpNotesView: View {
 ///
 /// Observes the dump's `DumpLog` alone, so the lines, published a batch at
 /// a time, redraw only this.
-private struct DumpTranscriptView: View {
+///
+/// Internal rather than private so `DeviceDecryptSectionTests` can host it
+/// on its own and read where its scroll view ends up.
+struct DumpTranscriptView: View {
     @ObservedObject var log: DumpLog
 
     @ViewBuilder
@@ -758,6 +761,12 @@ private struct DumpTranscriptView: View {
                 .background(Palette.surface2)
                 .clipShape(RoundedRectangle(cornerRadius: Metrics.radiusInner))
                 // Follow the tail, which is where a live dump's progress is.
+                // From the first batch too: that batch is what puts this view
+                // on screen, so `onChange` never sees it change, and the
+                // transcript opened scrolled to the top.
+                .onAppear {
+                    proxy.scrollTo(log.lines.count - 1, anchor: .bottom)
+                }
                 .onChange(of: log.lines.count) { count in
                     proxy.scrollTo(count - 1, anchor: .bottom)
                 }

@@ -27,6 +27,9 @@ enum AccessibilityTree {
         let enabled: Bool?
         /// `AXHelp`: what AppKit shows as the tooltip, set by `.help(_:)`.
         let help: String?
+        /// `AXIdentifier`. A SwiftUI control labeled with an image alone
+        /// carries its SF Symbol's name here ("trash"), whatever its label.
+        let identifier: String?
         let element: AXUIElement
 
         var name: String {
@@ -250,6 +253,7 @@ enum AccessibilityTree {
                     value: Self.attribute(element, kAXValueAttribute),
                     enabled: (Self.attribute(element, kAXEnabledAttribute) as? NSNumber)?.boolValue,
                     help: Self.attribute(element, kAXHelpAttribute) as? String,
+                    identifier: Self.attribute(element, kAXIdentifierAttribute) as? String,
                     element: element
                 ))
                 for child in (Self.attribute(element, kAXChildrenAttribute) as? [AXUIElement]) ?? [] {

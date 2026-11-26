@@ -195,7 +195,7 @@ struct InstalledAppsSection: View {
                 // A static, code-owned sentence — not the CLI's words — so
                 // its length is ours to keep short rather than something this
                 // pane's own history says must be `lineLimit`-ed against.
-                Text(emptyStateMessage)
+                Text(Self.emptyStateMessage(isLoading: isLoading, kind: device.kindName))
                     .font(AppFont.body)
                     .foregroundStyle(Palette.textMuted)
                     .lineLimit(1)
@@ -213,7 +213,8 @@ struct InstalledAppsSection: View {
                             isBusy: isDumping,
                             onDump: { onDump(app) },
                             onAdd: { record in onAdd(app, record) },
-                            onSelectApp: onSelectApp
+                            onSelectApp: onSelectApp,
+                            deviceKind: device.kindName
                         )
                     }
                 }
@@ -222,9 +223,11 @@ struct InstalledAppsSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var emptyStateMessage: String {
+    /// The line in place of the list: a listing under way, or none yet.
+    /// `kind`: `DeviceRecord.kindName`.
+    static func emptyStateMessage(isLoading: Bool, kind: String) -> String {
         isLoading
-            ? "Reading everything installed on this phone…"
+            ? "Reading everything installed on this \(kind)…"
             : "Not read yet — this listing resolves real icons, so it's slower and manual."
     }
 
@@ -238,7 +241,7 @@ struct InstalledAppsSection: View {
     /// now per phone rather than for whichever one asked last.
     private var header: some View {
         HStack {
-            SectionTitle(text: "Everything on this phone")
+            SectionTitle(text: "Everything on this \(device.kindName)")
             if let lastLoad = deviceApps.lastLoad[device.udid] {
                 Text("\(lastLoad.count) installed")
                     .font(AppFont.monoSmall)
@@ -313,6 +316,8 @@ struct DeviceAppTile: View {
     var onAdd: (StagedIPARecord) -> Void = { _ in }
     /// Select the app that already claims this bundle id, by config key.
     var onSelectApp: (String) -> Void = { _ in }
+    /// What Dump's tooltip calls the device (`DeviceRecord.kindName`).
+    var deviceKind = "device"
 
     /// **No whole-row `Button` any more.** Every state, `.configured`
     /// included, draws `row` bare below — this is Finding 3's fix, and the
@@ -548,7 +553,7 @@ struct DeviceAppTile: View {
         .controlSize(.small)
         .disabled(isBusy)
         .fixedSize()
-        .help("Launch \(app.name) on the phone, dump it, and stage it for a build. "
+        .help("Launch \(app.name) on the \(deviceKind), dump it, and stage it for a build. "
               + "Progress and the result appear in the decrypt card above.")
     }
 
