@@ -85,6 +85,10 @@ Graft.</p>
 <li>Each download updates from its own zip: <code>Graft.zip</code> for Apple silicon,
 <code>Graft-Intel.zip</code> for the Intel build. A release without yours has no
 update for your Mac yet, and Graft never installs the other one.</li>
+<li>A release that needs a newer macOS than your Mac has is no update for your
+Mac either: Graft downloads it once, finds it needs a newer macOS, deletes
+it and stays on the version you have. It doesn't download that release
+again until your Mac has that macOS.</li>
 <li>Before it calls a download ready, Graft checks it: the SHA-256 GitHub lists
 for it, then that the app inside is Graft, newer than yours, the same build
 as yours, signed with the same developer's Developer ID as yours and
@@ -102,13 +106,21 @@ sign-in.</li>
 <a href="/wiki/network/">What Graft connects to</a> shows what they send.</li>
 </ul>
 <h2 id="settings--updates">Settings › Updates</h2>
-<p>Settings › Updates has two switches, both on to start with:</p>
+<p>Settings › Updates has three switches, all on to start with:</p>
 <ul>
 <li><strong>Check for updates automatically</strong> is the daily check. With it off, Help ›
 Check for Updates… still asks when you choose it.</li>
 <li><strong>Download and install updates automatically</strong> is the background download.
 With it off, the banner offers <strong>Update</strong>, which downloads, checks and
 restarts when you choose it.</li>
+<li><strong>Check my apps for updates</strong> is the daily check of your apps and their
+tweaks, not of Graft. Its line says what it sends: &quot;Once a day, and after
+each get, build, tweak update or update, and when a device connects or
+disconnects while an update waits for one (at most every 10 minutes). Sends
+your apps' bundle IDs to Apple's App Store lookup and your tweaks' package
+IDs to canister.me. No Apple ID or Mac identifier.&quot; With it off, Graft checks
+only when you press <strong>Check for updates now</strong>, below it. See
+<a href="/wiki/building-and-delivery/#updating-your-apps">Updating your apps</a>.</li>
 </ul>
 <h2 id="when-graft-cant-update-itself">When Graft can't update itself</h2>
 <p>Graft can't update itself when it runs straight from Downloads (macOS runs a
@@ -124,6 +136,10 @@ next time it opens, and writes what happened to
 <p><code>graft --check-update</code> asks GitHub whether a newer Graft is out, and downloads
 nothing. <code>graft --download-update</code> downloads it into Graft's cache and checks
 it, and installs nothing.</p>
+<p>With <code>--json</code>, <code>--check-update</code> prints one <code>update-check</code> event. If a download
+has found that the latest release needs a newer macOS than your Mac has, its
+<code>update_available</code> is false and <code>needs_macos</code> names that macOS (&quot;15.0&quot;);
+otherwise <code>needs_macos</code> is null.</p>
 <h2 id="whats-new">What's new</h2>
 <p>Help › What's New… shows what changed in each release. It also opens by
 itself once, the first time a new version of Graft starts. The

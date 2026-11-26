@@ -75,8 +75,150 @@
 <h1>Changelog</h1>
 <p>What changed in each release of Graft, newest first. Each release's download
 is on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>.</p>
-<h2 id="221-2026-11-25">2.2.1 (2026-11-25)</h2>
+<h2 id="23-2026-11-26">2.3 (2026-11-26)</h2>
 <h3 id="new">New</h3>
+<ul>
+<li><strong>One-click Update.</strong> Graft now says when an app has something to update:
+a newer version on the App Store, a newer build of a tweak it uses, or a
+build that changed since it was last installed. The app shows an arrow
+mark in the sidebar, and its pane says what (&quot;Update available: App Store
+1.2.0 · 1 tweak&quot;). Update &amp; Install shows what will change and where it
+installs, then updates the tweaks, gets the App Store version, builds and
+installs, showing its progress as it goes. Update All, when two or more
+apps have an update, does the same for each of them.</li>
+<li>An update installs on every device the app is on: one build, then the same
+build on each. The confirmation lists each device, and the progress shows
+each install with its own result and Try Again. A device that isn't
+connected waits (&quot;iPad mini isn't connected: it'll update when it is&quot;)
+while the others install, and its install is offered again once it's
+connected. A device that can't take the build, with Developer Mode off
+say, doesn't stop the others. An update that only waits for a device doesn't mark the app in
+the sidebar, and Stop updating (&quot;Stop updating Example on iPad mini&quot;) stops
+waiting for a device you no longer use. Graft never buys or claims an app,
+and never moves an app off a version you're holding it at. When an updated
+tweak is shared, the confirmation names the other apps that use it, and
+Also install … now installs them too. After you re-install an older build
+on a device, the pane offers Install Update for that device instead of
+installing on its own.</li>
+<li>Stop during an update stops at once, except during an install or while a
+tweak is being swapped in, which finish first. Stop Now cancels that
+install, and after three minutes Force Stop ends it. Try Again picks up
+where it stopped. Quitting during an install waits for it to finish.</li>
+<li><strong>A daily check of your apps.</strong> At launch, once a day while it's open, and
+after a get, build, tweak update or update, Graft checks your apps and
+their tweaks for updates. It sends your apps' bundle IDs to Apple's App
+Store lookup and your tweaks' package IDs to canister.me, and nothing that
+identifies you or your Mac. Settings › Updates › Check my apps for updates
+turns these checks off, and Check for updates now still checks when you
+want.</li>
+<li><strong>Pick the device for a build.</strong> The app's bar says where the next Build &amp;
+Install goes, and why. Change sends the next Build &amp; Install to another
+connected device, then goes back to the default; a build that fails or is
+stopped before installing keeps the pick for the retry. With the default
+device unplugged, a build goes to the only other device connected, and
+with several connected, the bar asks you to pick one. Settings names a
+default device that isn't connected.</li>
+<li>A build signed with a profile Graft makes, or a LiveContainer install, to
+a device added to your developer account since you saved App Store
+Connect, reads the account's devices again first, so the profile includes
+it. A device that isn't registered is named in the error; Graft never
+registers one.</li>
+<li><strong>Set Up LiveContainer.</strong> A device's pane sets up LiveContainer in one
+sheet. With a paid account, Set Up checks the device against your
+developer account, installs LiveContainer and puts the certificate on the
+device. The sheet then lists the steps to do on the device: importing the
+certificate, JIT-Less Diagnose, importing your apps, and Convert to Shared
+App. LiveContainer asks for your <code>.p12</code>'s password on the device; Graft
+can't type it for you. With a free Apple ID, it links to SideStore and
+iloader instead. While a certificate Graft put on the device is still
+there, the device's pane says so, with Remove it. For a LiveContainer app,
+the bar offers Set Up LiveContainer… when the device it's building for has
+none.</li>
+<li><strong>Developer Mode.</strong> On iOS 16 and later, an app signed with a development
+profile opens only with Developer Mode on. Graft now checks before it
+builds one. If it's off, the build stops, after making the switch appear
+on the device in Settings › Privacy &amp; Security › Developer Mode, which iOS
+hides until then. The device's page shows whether it's on. In Terminal,
+<code>--device-info</code> reports <code>developer_mode</code>, and <code>--list</code> reports
+<code>needs_developer_mode</code>.</li>
+<li><strong>Holds by build.</strong> When the App Store has two builds of one version,
+getting one holds the app at that build: the pane says &quot;Held at 1.2.0
+(build 1 of 2)&quot;, and builds use that build even when the other is staged
+too. Moving between those builds marks the app out of date, and the Cache
+pane marks the file the build uses. Dropping an IPA of the held version,
+or decrypting it from a jailbroken device, holds the app at that version
+by number, with a warning.</li>
+<li><strong>Updates in Terminal.</strong> <code>graft --update &lt;app&gt;</code>, or <code>--all</code>, updates the
+app's tweaks, gets the App Store's newer version, then builds once and
+installs on every device the app was installed on. <code>--plan</code> says what it
+would do, device by device, and changes nothing. It never buys or claims
+an app or lets go of a hold, and installs only what changed: after you
+re-install an older build, it leaves that install to you. Run it again to
+pick up where a failed or stopped update left off; it installs only where
+the app isn't up to date. A Stop during an install lets the install
+finish, and a second Stop ends it. <code>graft --drop-update-target &lt;app&gt; --device &lt;UDID&gt;</code> stops updating an app on a device that's gone.
+<a href="https://github.com/GreenglassT/Graft/blob/main/AGENTS.md">AGENTS.md</a> tells an AI agent how to use it.</li>
+<li><strong>PlayCover keeps your settings.</strong> Graft turns off PlayCover's keymapping
+and PlayChain only on an app's first handoff, and says so. After that it
+keeps what you set in PlayCover: turn keymapping on for a game and it
+stays on when you rebuild. If PlayCover changes either one anyway, Graft
+puts yours back.</li>
+<li><strong>Graft waits for PlayCover's install.</strong> After handing a build over, Graft
+waits up to two minutes and says &quot;PlayCover installed Example 1.2.0&quot;.
+Build for this Mac, and Install to Mac… in Builds and the Cache, show
+&quot;Waiting for PlayCover to install Example…&quot; with Stop, which ends the
+wait, not the install.</li>
+<li><strong>A tweak that can't run on macOS is refused.</strong> Build for this Mac and
+Install to Mac… refuse a tweak that needs an iOS framework macOS doesn't
+have, naming the tweak and the framework. A framework the app itself links
+only gets a warning. A tweak's own frameworks now get the stand-in
+Preferences framework too, as its libraries already did. The tooltips say
+that not every iPhone or iPad app runs under PlayCover, even without
+tweaks, and how to tell.</li>
+</ul>
+<h3 id="fixes">Fixes</h3>
+<ul>
+<li>Check device on a LiveContainer app's pane looks on the device the app was
+last delivered to. It used to ask whichever device was connected and say
+the record still stood.</li>
+<li>Install to Mac… in Builds says why when the handover fails; it used to say
+nothing.</li>
+<li>Re-install… asks before it installs on a phone. The confirmation names the
+app, the build and the iPhone or iPad it goes to, and says so when that
+device isn't connected. Return re-installs, and Escape cancels.</li>
+<li>Graft no longer installs an update that needs a newer macOS than this Mac
+has. It says which macOS the update needs, offers no Try Again, and
+doesn't download it again at every launch; once the Mac is upgraded, the
+update goes ahead.</li>
+<li>When an update can't install itself, its message names the right
+download: <code>Graft-Intel.zip</code> on an Intel Mac, or on an Apple silicon Mac
+with macOS 13.</li>
+<li>The Builds list shows a build as soon as it ends, without relaunching
+Graft.</li>
+<li>A window opened behind another app lists the connected devices right away,
+instead of saying &quot;Looking for devices…&quot; until you switch to it.</li>
+<li>Settings › Preflight shows &quot;not connected&quot; as information when no iPhone
+or iPad is plugged in, not as a failure. A build that installs still
+needs one.</li>
+<li>Edit, Remove, Stop building, Re-install, the Builds list and the build log
+use an app's display name, not its short name.</li>
+<li>The quit question names what's running: exporting an IPA, building an
+app, or building and installing one.</li>
+<li>The build log's header and the Builds list show a local date and time.</li>
+<li>A device's LiveContainer section no longer says it's managed by SideStore
+or AltStore when LiveContainer isn't installed. It says SideStore or
+AltStore is on the device, and to install or update LiveContainer with it.</li>
+<li>A get by version id downloads the build you picked when another build
+shares its version number. It used to take a staged copy of that number,
+which could be the other build.</li>
+<li>Every icon-only button has a VoiceOver name, such as &quot;Update&quot; or &quot;Delete&quot;
+plus the tweak's name. The Tweaks filter's placeholder fits its field.</li>
+<li>A device dump's output opens on its newest line.</li>
+<li>For people building Graft: the release check that the Intel build reads
+<code>GraftBundleArch</code> now reads Swift the way a Release build compiles it.</li>
+</ul>
+<h2 id="221-2026-11-25">2.2.1 (2026-11-25)</h2>
+<h3 id="new-1">New</h3>
 <ul>
 <li><strong>macOS 13 on Intel Macs.</strong> <code>Graft-Intel.zip</code> now runs on macOS 13
 Ventura, as well as macOS 14 and later. It's still a test build.
@@ -86,7 +228,7 @@ silicon on macOS 13 can run <code>Graft-Intel.zip</code> too, and its banner say
 don't move through Add App's search results: click a result, or press
 Return to pick the first.</li>
 </ul>
-<h3 id="fixes">Fixes</h3>
+<h3 id="fixes-1">Fixes</h3>
 <ul>
 <li>Get an older version… tells apart builds the App Store has under the same
 version number. They used to look like the same row twice. Now they read
@@ -106,7 +248,7 @@ run on, and a test build of the app keeps its settings apart from the
 Graft you use.</li>
 </ul>
 <h2 id="22-2026-11-25">2.2 (2026-11-25)</h2>
-<h3 id="new-1">New</h3>
+<h3 id="new-2">New</h3>
 <ul>
 <li><strong>Intel Macs, as a test build.</strong> <code>Graft-Intel.zip</code>, beside <code>Graft.zip</code> on
 the release page, runs on an Intel Mac with macOS 14 or later. It stays a
@@ -126,7 +268,7 @@ Mac runs, with a banner saying to download <code>Graft.zip</code> for everything
 <li>Help › Join the Graft Discord, the same button in Settings › Version, and a
 link in Graft › About Graft open the Graft Discord, for questions and help.</li>
 </ul>
-<h3 id="fixes-1">Fixes</h3>
+<h3 id="fixes-2">Fixes</h3>
 <ul>
 <li>Get an older version… stops when the connection stalls. It used to wait
 about a minute on the version it was reading, mark that version as
@@ -147,7 +289,7 @@ says so.</li>
 temporary folder Graft built it in.</li>
 </ul>
 <h2 id="21-2026-11-24">2.1 (2026-11-24)</h2>
-<h3 id="new-2">New</h3>
+<h3 id="new-3">New</h3>
 <ul>
 <li>
 <p><strong>Get an older version.</strong> When a new version of an app breaks a tweak, Get
@@ -187,7 +329,7 @@ pages in your browser. The same two buttons are in Settings › Version, and
 Graft › About Graft links them too.</p>
 </li>
 </ul>
-<h3 id="fixes-2">Fixes</h3>
+<h3 id="fixes-3">Fixes</h3>
 <ul>
 <li>Help › Check for Updates… no longer offers Update for an update Graft is
 already downloading. It used to, and still said the update was available
@@ -240,7 +382,7 @@ Graft and move it to the Trash. In Terminal, <code>graft --remove-data</code> li
 the same, and <code>--items</code> removes what you name.
 <a href="/wiki/removing/">Removing Graft</a> has the whole list.</li>
 </ul>
-<h3 id="fixes-3">Fixes</h3>
+<h3 id="fixes-4">Fixes</h3>
 <ul>
 <li><strong>If Apple stops serving the macOS restore image</strong> that the bundled ipatool
 takes the App Store's frameworks from, the first sign-in or App Store action
@@ -331,7 +473,7 @@ Get latest from App Store downloads nothing and says &quot;Already have
 &lt;version&gt;&quot;. Get Again, or <code>--again</code> with <code>--appstore-get</code>, downloads it
 anyway.</li>
 </ul>
-<h3 id="fixes-4">Fixes</h3>
+<h3 id="fixes-5">Fixes</h3>
 <ul>
 <li><strong>Set Up Decryption</strong> suggests opening the app you picked first, with a
 button that does it: macOS sometimes clears the App Store state that step
@@ -409,7 +551,7 @@ waits a minute for it, instead of failing.</li>
 lists every bundled component, and each release page carries the source
 archive.</li>
 </ul>
-<h3 id="fixes-5">Fixes</h3>
+<h3 id="fixes-6">Fixes</h3>
 <ul>
 <li>Re-saving a password no longer asks for your keychain password. In 1.1,
 storing a <code>.p12</code> or SSH password over one already there asked for your login

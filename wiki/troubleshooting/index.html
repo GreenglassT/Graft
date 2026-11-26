@@ -95,6 +95,10 @@
 <td>Unlock the device.</td>
 </tr>
 <tr>
+<td><code>Developer Mode is off on &lt;device&gt;</code></td>
+<td>The device runs iOS 16 or later with Developer Mode off, and the app is signed with a development profile, so it wouldn't open. Turn it on in Settings › Privacy &amp; Security › Developer Mode (a real build has made the switch appear), then confirm after the device restarts.</td>
+</tr>
+<tr>
 <td>An app, such as an emulator, says it needs JIT</td>
 <td>Graft doesn't turn on JIT. <a href="https://github.com/StikDebug/StikDebug">StikDebug</a>, an app on the iPhone, does. On iOS 26 and recent iPhones, only apps built to support it can get JIT, whatever tool you use.</td>
 </tr>
@@ -135,8 +139,20 @@
 <td>The app is pinned to a LiveContainer that isn't on the device. Pick one in the LiveContainer picker in the app's Edit sheet, or Automatic to drop the pin.</td>
 </tr>
 <tr>
+<td>Settings › Preflight, or <code>graft --check</code>, says the device is &quot;not connected&quot;</td>
+<td>No iPhone or iPad is connected. That's information, not a failure: a check installs nothing, so it needs no device. A build that installs still needs one: plug it in with a USB cable and trust this Mac.</td>
+</tr>
+<tr>
 <td><code>couldn't reach usbmuxd</code></td>
 <td>macOS's service for talking to iPhones didn't answer. Reconnect the phone; if it persists, restart the Mac.</td>
+</tr>
+<tr>
+<td><code>several devices are connected: pick one</code></td>
+<td>More than one iPhone or iPad is connected and none is the default device. Pick one with Change on the app's bar (it's for the next Build &amp; Install only), pass <code>--device &lt;UDID&gt;</code> in Terminal, or set a default in Settings.</td>
+</tr>
+<tr>
+<td><code>... isn't registered in your developer account</code></td>
+<td>The device isn't one of your Apple Developer account's devices, so no profile can include it. Add it at developer.apple.com (Certificates, Identifiers &amp; Profiles › Devices), then build again. Graft never registers a device for you.</td>
 </tr>
 <tr>
 <td><code>N LiveContainers are installed and Graft will not guess which to use</code></td>

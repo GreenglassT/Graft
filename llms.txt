@@ -8,6 +8,10 @@ Graft is fully scriptable. Every action in the app is a `graft` command, almost 
 
 `graft --appstore-versions --app <name>` lists the versions the App Store still has for an app, newest first, with their ids, and `graft --appstore-get --app <name> --version-id <id>` gets one and holds the app at it until a plain `--appstore-get`. `graft <name> --export-ipa <file>.ipa` saves the app's IPA with its tweaks injected, unsigned; it signs nothing, touches no device, and won't replace a file without `--overwrite`.
 
+`graft --update <name>` (or `--all`) brings an app up to date in one step: it updates the app's tweaks, gets the App Store's newer version, builds once and installs on every device the app was installed on; a device that isn't connected waits. `--plan` reports what it would do and changes nothing. It never buys or claims an app and never releases a version hold.
+
+Graft has no telemetry, analytics or crash reporting. Once a day it checks GitHub for a newer Graft, and checks Apple's public App Store lookup and canister.me for updates to your apps and tweaks (bundle IDs and tweak package IDs only, no Apple ID); both are switches in Settings › Updates.
+
 Graft is for personal use: your own Apple ID, apps you own or get for free, on your own devices. Graft's own source code is MIT-licensed. Graft is not affiliated with Apple.
 
 ## Docs

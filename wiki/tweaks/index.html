@@ -92,6 +92,11 @@ newer published versions when you ask, and updates a tweak, re-pointing the
 apps that use it. Deleting one an app still uses asks first, and offers
 Detach and Delete. Deleted tweaks go to the Trash.</li>
 </ul>
+<p>Updating an app (<strong>Update &amp; Install</strong> on its pane, or <code>graft --update</code>) also
+updates every tweak it uses that has a newer build, once for all the apps that
+share it. While an update of an app runs, the <strong>Update</strong> button in Tweaks for
+the tweaks that app uses waits until it's done. See
+<a href="/wiki/building-and-delivery/#updating-your-apps">Updating your apps</a>.</p>
 <figure class="wiki-shot"><img src="/wiki/img/tweaks-pane.png" alt="The Tweaks pane listing three example tweaks with their file names and sizes." width="1600" height="1040" loading="lazy"><figcaption>The Tweaks pane, listing the library.</figcaption></figure>
 <h2 id="shared-libraries">Shared libraries</h2>
 <p>cyan bundles ElleKit as CydiaSubstrate and adds a few common frameworks when a

@@ -117,6 +117,13 @@ in the profile. Use this for apps that don't care about their bundle id or
 signing team.</p>
 <p>On a free Apple ID, building, re-installing or adding a sideload app is
 refused.</p>
+<p>On iOS 16 and later, an app signed with a development profile opens only with
+Developer Mode on. Graft checks before building one and stops if it's off. A
+real build first makes the switch appear in Settings › Privacy &amp; Security ›
+Developer Mode, which iOS hides until a development app is installed: turn it
+on there, and confirm after the device restarts. The device's page shows
+whether it's on. Ad hoc and enterprise profiles, and LiveContainer delivery,
+don't need it.</p>
 <h2 id="building">Building</h2>
 <p>Build &amp; Install runs this pipeline. Build options (beside it) picks the
 device and can build without installing. It can also export the IPA unsigned
@@ -124,7 +131,10 @@ instead (see <a href="#exporting-an-ipa">Exporting an IPA</a>).</p>
 <figure class="wiki-shot"><img src="/wiki/img/app-ready.png" alt="An app pane with two tweaks attached and the Build &amp; Install button shown, under a yellow bar saying no device is connected." width="1600" height="1040" loading="lazy"><figcaption>An app with two tweaks attached. The yellow bar says no device is connected.</figcaption></figure>
 <ol>
 <li><strong>Pre-flight.</strong> Tools, signing files, password, device, and that the device
-is in the profile. Only what the delivery mode needs is checked.</li>
+is in the profile. Only what the delivery mode needs is checked. Settings ›
+Preflight, and <code>graft --check</code> in Terminal, check the same without
+building. There, no device connected is information (&quot;not connected&quot;), not
+a failure; a build that installs still needs one.</li>
 <li><strong>Source IPA.</strong> The decrypted IPA staged in <code>~/.cache/graft/ipas/</code>.</li>
 <li><strong>Decryption check.</strong> The load commands of every Mach-O. Any that is still
 encrypted is reported as a warning naming the binary, and the build carries
@@ -143,10 +153,38 @@ archive retention.</li>
 </ol>
 <p><strong>Stop</strong> ends the build where it is. A stopped build shows as Stopped, not as
 a failure, and adds no row to Builds.</p>
+<h3 id="which-device-a-build-goes-to">Which device a build goes to</h3>
+<p>With nothing picked, a build goes to the default device when it's connected,
+else to the only other device connected. With several connected and none of
+them the default, the app pane's bar asks you to pick one, and Build &amp; Install
+waits until you do. <strong>Change</strong> on the bar lists the connected devices, with
+their iOS version and, for a LiveContainer app, whether LiveContainer is on
+them. Picking one sends the next Build &amp; Install there only (&quot;Next Build &amp;
+Install: iPad Air via LiveContainer · then back to iPhone 15 Pro&quot;); the ✕
+clears it, and it clears itself once that build starts installing or succeeds.
+A build that fails or is stopped before installing keeps it for the retry. A
+picked device that's unplugged stops Build &amp; Install too, until you plug it in
+or clear the pick. Build options' Device picker sets the same pick. Updates
+don't use it: an update installs on every device the app is on. The
+menu also makes a device the default. In Terminal, <code>--device &lt;UDID&gt;</code> does the
+same for one build, and that device must be connected. When a build goes
+somewhere other than the default, its log says where and why.</p>
+<p>For a LiveContainer app, a device without LiveContainer can't take the build:
+the bar says so and offers <strong>Set Up LiveContainer…</strong> for that device, over the
+app pane. When a Sideload build signed with a profile Graft makes, or
+installing LiveContainer, goes to a device added to your developer account
+since you last saved App Store Connect in Settings, Graft reads the account's
+devices again first and saves the new list. A profile you made yourself isn't
+changed. Graft never registers a device.</p>
 <h2 id="build-history-and-retention">Build history and retention</h2>
 <p><strong>Builds</strong> lists every build, with its saved log (View log…). A build's
 archive can be delivered again without rebuilding (Re-install…), or shown in
 Finder (Reveal in Finder).</p>
+<p>Re-install… asks first. It names the app, the build (its version and when it
+was made) and the iPhone or iPad it installs on: the one the build went to,
+else your default device, else the first one connected. When that device isn't
+connected, it says so and installs nothing. Return re-installs, and Escape
+cancels.</p>
 <p>A re-install goes out the way the archive was built: an unsigned LiveContainer
 archive is never installed as a top-level app, and a zsign-signed one is never
 pushed into LiveContainer. If the app's delivery mode has changed since,
@@ -225,6 +263,60 @@ re-installed archive reads <code>stale</code>, because what went into it wasn't
 recorded.</li>
 </ul>
 <p>None of this blocks a build.</p>
+<h2 id="updating-your-apps">Updating your apps</h2>
+<p>Graft checks your apps for updates at launch and once a day while it's open:
+a newer version on the App Store, a newer build of a tweak an app uses, or a
+build that changed since it was last installed. An app with something to
+update shows an arrow mark in the sidebar, and its pane says what: &quot;Update
+available: App Store 1.2.0 · 1 tweak&quot;.</p>
+<ul>
+<li><strong>Update &amp; Install</strong> (or <strong>Update Tweaks &amp; Install</strong>, or <strong>Install
+Update</strong>) shows what will change, app by app, and each device it installs
+on, then does it when you choose <strong>Update</strong>: the tweaks, the App Store
+download, one build, and an install on each device.</li>
+<li><strong>Update All</strong>, above the apps when two or more apps have an update, does
+the same for each of them.</li>
+<li>An update installs on every device the app is on: each iPhone or iPad
+you've delivered it to, and only the ones that need it. It never adds a
+device, and the device picked for the next Build &amp; Install doesn't apply.</li>
+<li>A device that isn't connected, even one unplugged during the update,
+waits: the app's pane says so (&quot;iPad mini isn't connected: it'll update
+when it is&quot;), and the app's other devices still update. When you connect
+it, Graft checks again within 10 minutes and offers its install. An update
+that only waits for a device doesn't mark the app in the sidebar or count
+in Update All.</li>
+<li>For a device you no longer use (sold, reset, or retired), <strong>Stop
+updating</strong> (&quot;Stop updating Example on iPad mini&quot;), in the menu beside its
+line on the pane or in the confirmation, stops updating that app there. It
+changes nothing on the device, and lasts until you install that app on that
+device again.</li>
+<li>Graft never buys or claims an app, and never moves an app off a version
+you're holding it at: that app still gets its tweak updates and install.</li>
+<li>After you re-install an older build on a device, or when the last install
+can't be found there, the pane says so and offers <strong>Install Update</strong> for
+that device (one for each, when there are several), for you to press. It's
+a Build &amp; Install to that device; Graft doesn't install it on its own.</li>
+<li>When a tweak is shared, its other apps need an install too: the
+confirmation says which, and <strong>Also install … now</strong> adds them.</li>
+<li><strong>Stop</strong> stops at once, except during an install or while a tweak is being
+swapped in, which finish first. <strong>Stop Now</strong> cancels that install, and
+after three minutes <strong>Force Stop</strong> ends it outright. The progress shows
+each device's install under its app, and how it went. <strong>Try Again</strong>, for
+every app or for one device, picks up where it stopped.</li>
+<li>LiveContainer apps end up in LiveContainer's Documents on each device, to
+import there.</li>
+<li>On an Intel Mac, a newer App Store version shows, and can't be downloaded.</li>
+</ul>
+<p>Settings › Updates › <strong>Check my apps for updates</strong> turns the daily check off,
+and the checks after a get, build, tweak update, update or device change.
+With it off, Graft checks only when you press <strong>Check for updates now</strong>,
+there, in the sidebar or on an app's pane, and the Update buttons show what
+that check found. The check sends your apps' bundle IDs to Apple's App
+Store lookup and your tweaks' package IDs to canister.me, and nothing that
+identifies you or your Mac. It opens no connection to your iPhone or iPad and
+reads nothing from the keychain.</p>
+<p>In Terminal, <code>graft --update</code> does the same; see
+<a href="/wiki/cli-reference/#building">Building</a> in the CLI Reference.</p>
 <h2 id="running-builds-on-this-mac">Running builds on this Mac</h2>
 <p>On an Apple silicon Mac, an app's pane has <strong>Build for this Mac</strong>, which makes
 the build loadable under PlayCover and hands it to PlayCover. (On an Intel
@@ -236,6 +328,24 @@ are never changed this way.</p>
 <p>Graft.app carries that stand-in prebuilt, so a Mac build needs no Xcode. A
 <code>graft</code> installed with pipx builds it on demand and needs full Xcode for that;
 see <a href="/wiki/cli-install/#the-cli-without-the-app-pipx">The CLI without the app</a>.</p>
+<p>Some tweaks need an iOS framework that macOS doesn't have at all. Graft won't
+build such a tweak for this Mac, or hand over a build that has one, and says
+which tweak and which framework. Phone builds can still use it. A framework the
+app itself links only gets a warning.</p>
+<p>After handing a build over, Graft waits up to two minutes for PlayCover to
+finish installing it, and says when it has. If it hasn't by then, check
+PlayCover's window; if the install failed there, Install to Mac… on the build's
+row in Builds tries again. Stop ends the wait, not the install.</p>
+<p>PlayCover has two settings per app that matter here: keymapping, which turns
+clicks into touches for games, and PlayChain. On an app's first handoff Graft
+turns both off and says so, because keymapping makes a non-game's clicks miss
+and PlayChain crashed apps the first time they saved a login. After that Graft
+keeps whatever you set in PlayCover: turn keymapping back on for a game, and it
+stays on when you rebuild.</p>
+<p>Not every iPhone or iPad app runs under PlayCover, even without tweaks: some
+open to a blank window, can't open their data, or have buttons that don't
+respond. If an app doesn't work, try it without tweaks first (Install to Mac…
+on its IPA in the Cache pane); if that fails too, PlayCover can't run that app.</p>
 <p>Graft doesn't include PlayCover, and doesn't download or install it. When
 PlayCover isn't installed, Build options says so above Build for this Mac, and
 <strong>Get PlayCover</strong> opens

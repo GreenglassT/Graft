@@ -86,6 +86,8 @@ or stage an IPA you give it;</li>
 <li>search Canister or your repos for tweaks, download them and attach them;</li>
 <li>build the app and deliver it to your iPhone or iPad, or export its IPA
 unsigned, for a signer on your phone;</li>
+<li>update your apps: a newer App Store version and newer tweaks, then the
+build and the install;</li>
 <li>check what's out of date, what was last delivered, and why a build failed.</li>
 </ul>
 <p>It reads Graft's results and its hints as it goes, so it can tell you what
@@ -115,7 +117,8 @@ from Canister, and install it to my iPhone through LiveContainer.&quot;</li>
 <li>&quot;Search Canister for tweaks for Example App, show me what you find, and
 attach the one I pick.&quot;</li>
 <li>&quot;Check whether any of my apps has a newer version on the App Store, or any
-of my tweaks a newer release, and tell me what you'd rebuild.&quot;</li>
+of my tweaks a newer release, tell me what you'd update, and update the ones
+I pick.&quot;</li>
 <li>&quot;My last build of Example App failed. Find out why and tell me what to do.&quot;</li>
 <li>&quot;The new version of Example App broke my tweak. Get the version before it
 from the App Store, and rebuild it once I say yes.&quot;</li>
@@ -129,8 +132,8 @@ sends the file anywhere. It asks before it replaces a file that's already
 there.</p>
 <p>It tells the agent to ask you first before:</p>
 <ul>
-<li>anything that changes your iPhone or iPad: a build that delivers to it,
-installing or cleaning up LiveContainer, or a re-install;</li>
+<li>anything that changes your iPhone or iPad: a build that delivers to it, an
+update, installing or cleaning up LiveContainer, or a re-install;</li>
 <li>getting a free app your Apple ID doesn't have yet. Graft never buys
 anything: the agent asks before it adds a free app to your Apple ID's
 purchases, and a paid app is yours to buy in the App Store;</li>
@@ -152,11 +155,19 @@ agent works, it says which command caused it.</li>
 <li>install a Graft update, or remove Graft's data, unless you ask for that
 yourself. Graft.app updates itself.</li>
 </ul>
+<p>Before an update (<code>graft --update</code>), the agent tells you what will change for
+each app and each device it installs on: every device that app was installed
+on, and no other. A device that isn't connected waits. The agent asks before
+<code>--drop-update-target</code>, which stops updating an app on a device that's gone.
+An update never buys or claims an app, and never lets go of a hold.</p>
 <p>An agent can still get things wrong. Read what it's about to do to your
 device before you say yes.</p>
 <p>LiveContainer delivery puts the IPA in LiveContainer's Documents on your
 device. Opening LiveContainer and importing it is still your step, as it is
 when you build from the app.</p>
+<p>On iOS 16 and later, a Sideload build signed with a development profile stops
+when Developer Mode is off on the device. Turning it on is yours to do, on the
+device (see <a href="/wiki/building-and-delivery/#sideload-paid-only">Sideload</a>).</p>
 <p>Graft is for personal use, whoever runs it: your own Apple ID, apps you own
 or get for free, on your own devices. Don't redistribute decrypted or
 modified IPAs.</p>

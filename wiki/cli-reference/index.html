@@ -115,7 +115,7 @@ has no effect until the app is delivered by sideload.</p>
 graft --appstore-login                      # asks for the Apple ID, the password, then the code if Apple asks
 graft --appstore-logout
 graft --appstore-check                      # App Store version vs. your staged IPA, per app
-graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if it's already staged)
+graft --appstore-get --app example          # download, decrypt and stage the latest version (nothing if &lt;bundle id&gt;_&lt;version&gt;.ipa is staged)
 graft --appstore-versions --app example     # the versions the App Store has for your Apple ID, newest first, with their ids
 graft --appstore-get --app example --version-id &lt;id&gt;   # get that version, and hold the app at it
 graft --appstore-claim --app example        # Get (free): only for an app the App Store lists at 0
@@ -130,12 +130,17 @@ ever an argument.</li>
 UnfairPlay couldn't verify, with a warning.</li>
 <li><code>--again</code> with <code>--appstore-get</code> downloads even when that version is already
 staged.</li>
+<li>A get downloads nothing when what it would get is staged already: for the
+latest, <code>&lt;bundle id&gt;_&lt;version&gt;.ipa</code>, as a get, <code>--provide-ipa</code> or <code>--decrypt</code>
+names it. A <code>--version-id</code> get stages <code>&lt;bundle id&gt;_&lt;version&gt;_&lt;version id&gt;.ipa</code>
+instead, which a plain get doesn't count, and counts the plain file only
+while no other build of that number has been listed.</li>
 <li><code>--appstore-versions</code> reads the number and date of ten versions at a time,
 starting at <code>--offset</code> (<code>--limit</code> reads up to 50), and remembers them. The
 rest are listed by id.</li>
 <li><code>--version-id</code> holds the app at the version it gets: <code>preferred_version</code> pins
-it, and <code>--appstore-check</code> doesn't call a newer one an update. A plain
-<code>--appstore-get</code> lets go of the hold. See
+it, <code>preferred_build</code> names that build, and <code>--appstore-check</code> doesn't
+call a newer one an update. A plain <code>--appstore-get</code> lets go of the hold. See
 <a href="/wiki/app-store/#get-an-older-version">Get an older version</a>.</li>
 </ul>
 <p>To set up decryption in Terminal, list the apps that can do it, save the
@@ -185,11 +190,15 @@ Canister has one. A URL is checked only if you pass <code>--fetch-sha</code>.</p
 graft example other                 # several apps in turn
 graft example --dry-run             # show what would happen without doing it
 graft example --skip-install        # build (and sign, for sideload) only
-graft example --device &lt;UDID&gt;       # a specific device instead of the default
+graft example --device &lt;UDID&gt;       # this build to that device (it must be connected)
 graft example --for-playcover       # also make the build loadable on this Mac under PlayCover
 graft --install-to-mac &lt;filename&gt;   # hand a staged IPA or an archived build to PlayCover
 graft example --export-ipa ~/Desktop/Example.ipa   # inject the tweaks, save the IPA unsigned
 graft example -v                    # verbose, and keep the temp directory
+graft --update example              # newer tweaks, newer App Store version, then build once and install on each device it's on
+graft --update --all --plan         # what an update of every app would change; changes nothing
+graft --update example --with-affected   # also install the apps that share an updated tweak
+graft --drop-update-target example --device &lt;UDID&gt;   # stop updating it on a device that's gone
 </code></pre>
 <p><code>--export-ipa</code> signs nothing and touches no device (see
 <a href="/wiki/building-and-delivery/#exporting-an-ipa">Exporting an IPA</a>). It takes one
@@ -258,6 +267,24 @@ build.</p>
 build where it is: nothing is recorded as a failure, and under <code>--json</code> the
 last event is
 <code>{&quot;type&quot;: &quot;build-end&quot;, &quot;ok&quot;: false, &quot;stopped&quot;: true, &quot;error&quot;: null, ...}</code>.</p>
+<p><code>--update</code> updates the app's tweaks that have a newer build (each one once,
+for every app that uses it), gets the App Store's newer version (never buying
+or claiming one, and never for an app held at a version), then, one app at a
+time, builds once and installs on every device the app was installed on: the
+build's own install on the first (the default device first, then by name),
+and the same build on each of the others. It also installs a change staged
+since a device's last install, on that device. A device that isn't connected
+waits while the others install, a device that fails doesn't stop the others,
+and an app never installed is left to a build. <code>--plan</code> says what it would do,
+device by device, and changes nothing; it reads no keychain. Run it again to
+pick up where a failed or stopped update left off: it installs only where the
+app isn't up to date. A Stop during an install, or while a tweak is being
+swapped in, lets that finish first, and the devices after it aren't started;
+a second Stop ends the install too. See
+<a href="/wiki/building-and-delivery/#updating-your-apps">Updating your apps</a>.</p>
+<p><code>--drop-update-target APP --device UDID</code> stops updating an app on a device
+it was installed on, for a device that's gone (sold, retired or reset), until
+the app is installed there again. It changes nothing on any device.</p>
 <h2 id="build-history-and-delivery-state">Build history and delivery state</h2>
 <pre><code class="language-bash">graft --builds [--builds-app example] [--builds-limit 20]
 graft --build-log 42                # the saved log of build 42 (builds run with --json, as the app does)
@@ -286,7 +313,7 @@ graft --lc-clean                      # remove the certificate and the IPAs Graf
 LiveContainer a push would use.</p>
 <h2 id="devices">Devices</h2>
 <pre><code class="language-bash">graft --devices                     # connected devices over USB and Wi-Fi
-graft --device-info [--device &lt;UDID&gt;]
+graft --device-info [--device &lt;UDID&gt;]   # storage, battery, Developer Mode
 graft --device-apps [--with-icons]  # user apps on the device
 </code></pre>
 <h2 id="settings-and-account">Settings and account</h2>

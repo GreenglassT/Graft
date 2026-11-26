@@ -78,6 +78,7 @@
 <ul>
 <li>Graft has no telemetry, analytics or crash reporting.</li>
 <li>It checks for updates: once a day while the app is open, the CLI asks GitHub for Graft's latest release, sending nothing that identifies you or your Mac (<code>api.github.com</code>, below). When there's a newer one, the CLI downloads its zip of your build (<code>Graft.zip</code>, or <code>Graft-Intel.zip</code> for the Intel build) from GitHub (<code>github.com</code>, below), checks it, and installs it when you quit Graft. Settings › Updates turns either off.</li>
+<li>It checks your apps for updates: at launch and once a day while the app is open, after a get, a build, a tweak update or an update, and when a device connects or disconnects while an update waits for one (at most every 10 minutes), the CLI looks up your apps' <strong>bundle ids</strong> in Apple's public App Store lookup (one request per App Store country) and your attached tweaks' <strong>package ids</strong> at canister.me, only for tweaks no repo index cached in the last 24 hours, with no Apple ID and nothing that identifies your Mac (below). The check opens no connection to your iPhone or iPad and reads nothing from the keychain. Settings › Updates › Check my apps for updates turns all of these off; Check for updates now still checks, whether it's on or off.</li>
 <li>The app makes no connections of its own. Everything goes through the CLI and the tools it runs.</li>
 <li>Your Apple ID, your password and the 2FA code, if Apple asks for one, go only to Apple, through the bundled ipatool. You type them into Graft's sign-in sheet (Settings › App Store › Sign In…), or <code>graft --appstore-login</code> asks for them in Terminal. Graft passes them over stdin to ipatool's own prompts and never stores them. ipatool keeps the sign-in, including the password, in your login keychain.</li>
 <li>The first App Store action on a Mac (usually the first sign-in) downloads ipatool's Unicorn emulator from PyPI and about 320 MB of App Store components from Apple, once.</li>
@@ -99,8 +100,8 @@
 <tbody>
 <tr>
 <td><code>itunes.apple.com</code> (<code>/lookup</code>)</td>
-<td>CLI: <code>--add-app</code>, <code>--appstore-check</code>, <code>--artwork</code>, the free-price check before <code>--appstore-claim</code>, and the version check before <code>--appstore-get</code></td>
-<td><code>--add-app</code>: when you add an app. The app also runs the other two <strong>on its own</strong>: <code>--appstore-check</code> when an app's detail pane opens; <code>--artwork</code> at launch, when the app list changes, and after a build or App Store get, but only for apps with no icon cached or in a cached IPA. The price check: when a get is refused for want of a license, and before Get (free). The version check: before Get latest from App Store, only when the app has an IPA staged (not with <code>--again</code>, or Get Again).</td>
+<td>CLI: <code>--add-app</code>, <code>--appstore-check</code>, <code>--update</code> (and <code>--update --plan</code>), <code>--artwork</code>, the free-price check before <code>--appstore-claim</code>, and the version check before <code>--appstore-get</code></td>
+<td><code>--add-app</code>: when you add an app. The app also runs the other two <strong>on its own</strong>: <code>--appstore-check</code> when an app's detail pane opens; <code>--artwork</code> at launch, when the app list changes, and after a build or App Store get, but only for apps with no icon cached or in a cached IPA. The price check: when a get is refused for want of a license, and before Get (free). The version check: before Get latest from App Store, only when the app has an IPA staged (not with <code>--again</code>, or Get Again). <code>--update</code> asks once per store country, naming every app of that store in one request (<code>bundleId=a,b,c</code>).</td>
 <td>The App Store id from the URL you gave, or the app's <strong>bundle id</strong>, and the two-letter store the app came from (the one Search asked, or the one its URL names; else this Mac's region's store, then the US store if that one doesn't sell it). No account.</td>
 </tr>
 <tr>
@@ -117,20 +118,20 @@
 </tr>
 <tr>
 <td><code>api.canister.me</code></td>
-<td>CLI: <code>--search</code> (Canister), <code>--fetch &lt;package id&gt;</code>, <code>--tweak-updates</code> (the Tweaks update check), <code>--update-tweak</code></td>
-<td>When you search, fetch or check for tweak updates. The app never checks for tweak updates on its own.</td>
-<td><strong>Search terms</strong>; the <strong>package ids of tweaks in your library</strong> that the cached repo indexes don't cover</td>
+<td>CLI: <code>--search</code> (Canister), <code>--fetch &lt;package id&gt;</code>, <code>--tweak-updates</code> (the Tweaks update check), <code>--update-tweak</code>, <code>--update</code> (and <code>--update --plan</code>)</td>
+<td>When you search, fetch or check for tweak updates. On its own, only in the daily check for app updates (below).</td>
+<td><strong>Search terms</strong>; the <strong>package ids of tweaks in your library</strong> that the cached repo indexes don't cover (for <code>--update</code>, only those attached to the apps it covers)</td>
 </tr>
 <tr>
 <td>APT repository hosts (whichever repos you add, or the one Canister names for a package)</td>
-<td>CLI: <code>--add-repo</code> (<code>Release</code>, <code>Packages.*</code>), <code>--repo-packages</code> (on a cache miss or <code>--refresh</code>), <code>--fetch &lt;URL&gt;</code>, <code>--update-tweak</code>, and the <code>.deb</code> download after a Canister result</td>
+<td>CLI: <code>--add-repo</code> (<code>Release</code>, <code>Packages.*</code>), <code>--repo-packages</code> (on a cache miss or <code>--refresh</code>), <code>--fetch &lt;URL&gt;</code>, <code>--update-tweak</code>, <code>--update</code>, and the <code>.deb</code> download after a Canister result</td>
 <td>When you add or refresh a repo, or fetch or update a tweak. Redirects are followed.</td>
 <td>The request only</td>
 </tr>
 <tr>
 <td><code>api.appstoreconnect.apple.com</code></td>
 <td>CLI, paid accounts only: Settings › App Store Connect (<code>--set-portal</code>), <code>--setup-portal</code>, a sideload build with automatic provisioning, paid <code>--lc-install</code></td>
-<td>During setup, and when a build has to create or refresh a provisioning profile</td>
+<td>During setup, and when a build has to create or refresh a provisioning profile, or a build signed with a profile Graft makes, or a LiveContainer install, targets a device missing from the saved list (Graft lists your registered devices; it never registers one)</td>
 <td>An ES256 <strong>JWT signed with your App Store Connect API key</strong> (.p8), naming its issuer and key id; <strong>bundle ids</strong> (or wildcard patterns) and profile names. Graft reads the team's device list and matches UDIDs on the Mac; it never uploads one.</td>
 </tr>
 <tr>
@@ -148,12 +149,31 @@
 <tr>
 <td><code>github.com</code>, <code>api.github.com</code>, and <code>release-assets.githubusercontent.com</code>, where GitHub redirects the release files (the LiveContainer project's)</td>
 <td>CLI: <code>--lc-status</code>, <code>--lc-install</code></td>
-<td><code>--lc-status</code> runs <strong>on its own</strong> when a device's pane opens, and in Edit App for a LiveContainer app. <code>--lc-install</code> runs when you install LiveContainer.</td>
+<td><code>--lc-status</code> runs <strong>on its own</strong> when a device's pane or its Set Up LiveContainer… sheet opens, after each LiveContainer install, certificate push or removal and clean-up on a device, and in Edit App for a LiveContainer app. <code>--lc-install</code> runs when you press Set Up or Install / Update LiveContainer in Set Up LiveContainer….</td>
 <td>The request only</td>
 </tr>
 </tbody>
 </table>
 </div>
+<h3 id="checking-your-apps-for-updates">Checking your apps for updates</h3>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>When</th>
+<th>Who it contacts</th>
+<th>What for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>At launch and once a day while Graft is open, and after a get, build, tweak update or update, or when a device connects or disconnects while an update waits for one (at most every 10 minutes), unless Settings › Updates › Check my apps for updates is off; and when you press Check for updates now</td>
+<td>Apple's public iTunes lookup (one request per App Store country), and canister.me for attached tweaks with no recently cached repo index</td>
+<td>Your apps' bundle IDs and your attached tweaks' package IDs, to see whether newer versions are out. No Apple ID.</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>The check opens no connection to your iPhone or iPad and reads nothing from the keychain.</p>
 <h2 id="through-the-bundled-ipatool">Through the bundled ipatool</h2>
 <p>Graft runs ipatool 2.8.0 for everything that needs your Apple ID. ipatool 2.8 runs every App Store request through an emulator that runs Apple's own Store framework on Unicorn. Its source pins every host it signs in to and talks to with your session: an authenticated request goes only to <code>apple.com</code>, <code>*.apple.com</code>, <code>*.mzstatic.com</code> or <code>*.cdn-apple.com</code> (<code>internal/store/emulator/client.go</code>). A download goes to whatever URL Apple's answer names.</p>
 <div class="table-wrap"><table>
@@ -239,7 +259,7 @@
 <tr>
 <td>Your iPhone or iPad, through macOS's usbmuxd</td>
 <td>CLI: device features (pymobiledevice3)</td>
-<td>Whenever a device feature runs: listing, installing, pushing into LiveContainer, reading apps and icons</td>
+<td>Whenever a device feature runs: listing, installing, pushing into LiveContainer, reading apps and icons. <code>--update --plan --quick</code> asks usbmuxd which devices are connected and nothing more.</td>
 <td>Commands and files for the device</td>
 </tr>
 <tr>
@@ -293,7 +313,7 @@
 <li>a newer Graft's release page on GitHub, from Release Page on the main window's update banner, or Open Release Page after Help › Check for Updates…;</li>
 <li>a page a link in Help › What's New… points to: Graft's releases, or a page of its documentation, on <code>github.com</code>;</li>
 <li>the new Graft, once Restart to Update has installed it: the update's helper opens it (<code>open</code>), as Finder would;</li>
-<li>the guides the free-account setup's device steps link, each from its Open button: <code>sidestore.io</code>, iloader on <code>github.com</code>, and LiveContainer's installation guide on <code>livecontainer.github.io</code>;</li>
+<li>the guides the free-account setup's device steps link, each from its Open button (on the first-run screen, and in Set Up LiveContainer… on a free Apple ID): <code>sidestore.io</code>, iloader on <code>github.com</code>, and LiveContainer's installation guide on <code>livecontainer.github.io</code>;</li>
 <li>PlayCover's releases page on GitHub (<code>github.com/PlayCover/PlayCover/releases</code>), from Get PlayCover in an app's Build options, which shows only when PlayCover isn't installed;</li>
 <li>an app's <code>apps.apple.com</code> page, from Open in App Store on an app's pane, or the Mac App Store when Graft has no page for the app;</li>
 <li>the Mac App Store, from Open the Mac App Store in Set Up Decryption.</li>
