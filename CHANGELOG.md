@@ -7,7 +7,7 @@ is on [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
 
 ### New
 
-- **One-click Update.** Graft now says when an app has something to update:
+- **Updates for your apps.** Graft now says when an app has something to update:
   a newer version on the App Store, a newer build of a tweak it uses, or a
   build that changed since it was last installed. The app shows an arrow
   mark in the sidebar, and its pane says what ("Update available: App Store
