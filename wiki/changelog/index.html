@@ -75,6 +75,118 @@
 <h1>Changelog</h1>
 <p>What changed in each release of Graft, newest first. Each release's download
 is on <a href="https://github.com/GreenglassT/Graft/releases">GitHub Releases</a>.</p>
+<h2 id="231-2026-11-26">2.3.1 (2026-11-26)</h2>
+<h3 id="security">Security</h3>
+<ul>
+<li>A tweak updates only from where it came from: the repo or Canister
+repository you fetched it from. Another repo that publishes the same
+package can't replace it in your apps.</li>
+<li>When Graft can't verify a tweak update (Graft has no record of where the
+tweak came from, the source doesn't use HTTPS, or it lists no checksum),
+the update confirmation says why and where the update comes from, and the
+tweak updates only if you turn on <strong>Trust this source</strong>. You're trusting
+the update the confirmation shows: if the source offers something else by
+the time it runs, Graft doesn't update that app, and says so. The Tweaks
+pane asks first too.</li>
+<li>Graft names each tweak it downloads (<code>&lt;package id&gt;_&lt;version&gt;.deb</code>, with
+its architecture when the package names one), keeps a download only if
+it's a .deb of the package it asked for, and never replaces a different
+tweak. Fetching from a Canister search takes the build from the repository
+the result shows. In Terminal, a fetch by package id that several Canister
+repositories list names them and asks you to pick one.</li>
+<li>A Canister repository recorded as a tweak's source whose address has moved
+counts as unverified.</li>
+<li>A copy of the LiveContainer certificate left in the temporary folder by a
+push that was killed is removed the next time Graft runs.</li>
+</ul>
+<h3 id="changed">Changed</h3>
+<ul>
+<li>With a paid account, Add App starts a new app on Sideload, as the setup
+screen and the docs say, then on what you chose last. A line under the
+picker says what each mode does. With a free Apple ID, Add App shows
+Delivery: LiveContainer.</li>
+</ul>
+<h3 id="fixes">Fixes</h3>
+<ul>
+<li>⌘Q and Graft › Quit Graft work while a sheet is open: an update's
+progress, Edit…, a confirmation. With work running, Graft asks first, as
+it does with no sheet open, and quitting during an update's install waits
+for it to finish. With nothing running, Graft quits, and an open sheet's
+unsaved changes are discarded.</li>
+<li>What's New shows what's new to you: after an update, the releases since
+the version you used before; from Help › What's New…, the latest release.
+<strong>Show earlier releases</strong> shows the rest, in the same window.</li>
+<li>Check device says which device it checked (&quot;Checked iPad mini — the record
+still stands&quot;), and says so when the delivered file is gone from it.</li>
+<li>In an update's progress, a device whose install Stop Now canceled says
+Stopped, with Try Again. Not started is for devices the update never
+reached.</li>
+<li>Build for this Mac names a tweak it can't build by its name in the Tweaks
+library.</li>
+<li>Hints and messages about a device say iPhone or iPad, and LiveContainer's
+folder in the Files app is On My iPad on an iPad.</li>
+<li>After a get that changes an app's hold, Graft checks just that app for
+updates again.</li>
+<li><code>graft --update</code> in Terminal names the tweak step as the app does: &quot;→
+tweaks: 1 tweak&quot;.</li>
+<li>A device that's locked, or asking whether to trust this Mac, says &quot;Unlock
+it and tap Trust&quot; in the sidebar and on the app's bar, and Graft reads it
+again on its own, within a few seconds at first and every half minute
+after.</li>
+<li>Build &amp; Install, Build for this Mac and Export IPA… wait, and say what to
+do, until the app has a decrypted IPA. Build &amp; Install also waits for a
+connected iPhone or iPad, or for Skip install.</li>
+<li>Before the App Store is set up, Get latest from App Store, Get an older
+version… and Update wait and say where to set it up, with Open Settings.</li>
+<li>When a check can't reach the App Store or canister.me, as when your Mac is
+offline, the update marks stay and Graft checks again within the hour.
+Check for updates now says how it went, and VoiceOver reads it.</li>
+<li>After a LiveContainer build, the app's pane says where the IPA went and
+what's left (&quot;Sent to LiveContainer on iPhone 15 Pro. Open LiveContainer
+and import Example to finish.&quot;).</li>
+<li>Set Up LiveContainer says what would stop it before you press Set Up: an
+App Store Connect key that isn't set up yet (with Open Settings), or
+Developer Mode, which a LiveContainer from Graft needs on iOS 16 and
+later. It installs one LiveContainer by default, and with a free Apple ID
+and LiveContainer already on the device, lists only Import Certificate.
+With a paid account, when LiveContainer isn't on the device, the bar also
+offers switching the app to Sideload.</li>
+<li>Dump in a device's list of apps waits on a device without a jailbreak, as
+the Decrypt card says. On an Intel Mac, a newer App Store version says to
+drop a newer decrypted IPA on Source IPA, without the update arrow.</li>
+<li>A full disk says &quot;Your Mac is out of disk space: free some and press Try
+Again&quot; wherever it stops a get, a build, an update or a tweak update. An
+expired App Store sign-in says it has expired and points to Sign In
+Again….</li>
+<li>When GitHub is slow to answer Graft's own update check, Graft waits up to
+30 seconds, then says &quot;GitHub didn't answer in time&quot;.</li>
+<li>An app held at a build whose file was deleted says so (&quot;held at 1.2 (build
+1 of 2), which isn't downloaded&quot;). A device unplugged mid-update reads as
+waiting in the log too.</li>
+<li>A PlayCover handoff that fails or is stopped removes its copy of the IPA
+from the temporary folder. A damaged PlayCover settings file, a damaged
+<code>.ipa-info.json</code> in the cache, or a version with square brackets in it is
+handled without stopping anything.</li>
+<li>Fetching and updating tweaks works on volumes without hard links, such as
+exFAT or a network share.</li>
+<li>Graft's self-update finds its install in the update log even after a
+system tool's message with no line break.</li>
+<li>When Graft can't write its log after the device already has LiveContainer
+or the certificate, Set Up LiveContainer says what wasn't recorded, and
+the install and the reminder carry on.</li>
+<li>On an Apple silicon Mac running Graft-Intel.zip, a newer App Store version
+says to use Graft.zip, or to drop a newer decrypted IPA on Source IPA.</li>
+<li>On an Intel Mac, Settings › App Store says in one line that getting apps
+from the App Store needs a Mac with Apple silicon, and to add apps from a
+decrypted IPA, with no sign-in or setup to do. With Graft-Intel.zip on an
+Apple silicon Mac, it says which download can.</li>
+<li>Terminal: <code>--trust-tweak &lt;confirm_key&gt;</code> confirms an unverified tweak
+update for <code>--update</code> and <code>--update-tweak</code>, and <code>--fetch-repository ID</code>
+pins <code>--fetch</code> to one Canister repository. The update plan adds
+<code>checks_failed</code>, each tweak's <code>source</code>, <code>verified</code>, <code>unverified_reason</code>,
+<code>confirmed</code>, <code>confirm_key</code> and <code>trust_changed</code>, and each app's
+<code>needs_confirmation</code>; <code>tweak-update</code> adds <code>confirm_key</code>.</li>
+</ul>
 <h2 id="23-2026-11-26">2.3 (2026-11-26)</h2>
 <h3 id="new">New</h3>
 <ul>
@@ -176,7 +288,7 @@ Preferences framework too, as its libraries already did. The tooltips say
 that not every iPhone or iPad app runs under PlayCover, even without
 tweaks, and how to tell.</li>
 </ul>
-<h3 id="fixes">Fixes</h3>
+<h3 id="fixes-1">Fixes</h3>
 <ul>
 <li>An iPad's page in the sidebar says iPad where it used to say phone.</li>
 <li>Check device on a LiveContainer app's pane looks on the device the app was
@@ -231,7 +343,7 @@ silicon on macOS 13 can run <code>Graft-Intel.zip</code> too, and its banner say
 don't move through Add App's search results: click a result, or press
 Return to pick the first.</li>
 </ul>
-<h3 id="fixes-1">Fixes</h3>
+<h3 id="fixes-2">Fixes</h3>
 <ul>
 <li>Get an older version… tells apart builds the App Store has under the same
 version number. They used to look like the same row twice. Now they read
@@ -271,7 +383,7 @@ Mac runs, with a banner saying to download <code>Graft.zip</code> for everything
 <li>Help › Join the Graft Discord, the same button in Settings › Version, and a
 link in Graft › About Graft open the Graft Discord, for questions and help.</li>
 </ul>
-<h3 id="fixes-2">Fixes</h3>
+<h3 id="fixes-3">Fixes</h3>
 <ul>
 <li>Get an older version… stops when the connection stalls. It used to wait
 about a minute on the version it was reading, mark that version as
@@ -332,7 +444,7 @@ pages in your browser. The same two buttons are in Settings › Version, and
 Graft › About Graft links them too.</p>
 </li>
 </ul>
-<h3 id="fixes-3">Fixes</h3>
+<h3 id="fixes-4">Fixes</h3>
 <ul>
 <li>Help › Check for Updates… no longer offers Update for an update Graft is
 already downloading. It used to, and still said the update was available
@@ -385,7 +497,7 @@ Graft and move it to the Trash. In Terminal, <code>graft --remove-data</code> li
 the same, and <code>--items</code> removes what you name.
 <a href="/wiki/removing/">Removing Graft</a> has the whole list.</li>
 </ul>
-<h3 id="fixes-4">Fixes</h3>
+<h3 id="fixes-5">Fixes</h3>
 <ul>
 <li><strong>If Apple stops serving the macOS restore image</strong> that the bundled ipatool
 takes the App Store's frameworks from, the first sign-in or App Store action
@@ -476,7 +588,7 @@ Get latest from App Store downloads nothing and says &quot;Already have
 &lt;version&gt;&quot;. Get Again, or <code>--again</code> with <code>--appstore-get</code>, downloads it
 anyway.</li>
 </ul>
-<h3 id="fixes-5">Fixes</h3>
+<h3 id="fixes-6">Fixes</h3>
 <ul>
 <li><strong>Set Up Decryption</strong> suggests opening the app you picked first, with a
 button that does it: macOS sometimes clears the App Store state that step
@@ -554,7 +666,7 @@ waits a minute for it, instead of failing.</li>
 lists every bundled component, and each release page carries the source
 archive.</li>
 </ul>
-<h3 id="fixes-6">Fixes</h3>
+<h3 id="fixes-7">Fixes</h3>
 <ul>
 <li>Re-saving a password no longer asks for your keychain password. In 1.1,
 storing a <code>.p12</code> or SSH password over one already there asked for your login
@@ -598,7 +710,7 @@ keep their store.</li>
 <li>Warnings from saving an app's options or an App Store Connect key show in the
 app instead of being lost.</li>
 </ul>
-<h3 id="changed">Changed</h3>
+<h3 id="changed-1">Changed</h3>
 <ul>
 <li>Graft.app always runs the CLI inside it, never a <code>graft</code> installed with pipx.
 The pipx install still works on its own, with the tools you install.</li>

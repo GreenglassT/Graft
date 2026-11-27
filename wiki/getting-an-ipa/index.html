@@ -134,8 +134,10 @@ tools Graft.app doesn't include, which you install yourself:</p>
 </tbody>
 </table>
 </div>
-<p>The card checks what, if anything, is blocking a dump right now. Unless you
-choose a backend, Graft picks the one that can run, preferring frida-ios-dump:</p>
+<p>The card checks what, if anything, is blocking a dump right now. On a device
+with no jailbreak it says so in one line, and <strong>Dump</strong> in the device's list of
+apps waits. Unless you choose a backend, Graft picks the one that can run,
+preferring frida-ios-dump:</p>
 <ul>
 <li><strong>frida-ios-dump</strong> attaches to the running app. Graft brings it to the
 foreground first, launching it if needed. It copies the bundle over SSH:
