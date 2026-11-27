@@ -138,7 +138,7 @@ is on.</p>
 <p>Build &amp; Install runs this pipeline. Build options (beside it) picks the
 device and can build without installing. It can also export the IPA unsigned
 instead (see <a href="#exporting-an-ipa">Exporting an IPA</a>).</p>
-<figure class="wiki-shot"><img src="/wiki/img/app-ready.png" alt="An app pane with two tweaks attached and the Build &amp; Install button shown, under a yellow bar saying no device is connected." width="1600" height="1040" loading="lazy"><figcaption>An app with two tweaks attached. The yellow bar says no device is connected.</figcaption></figure>
+<figure class="wiki-shot"><img src="/wiki/img/app-ready.png" alt="An app pane with two tweaks attached and the Build &amp; Install button shown, under a bar saying to connect an iPhone or iPad." width="1600" height="1040" loading="lazy"><figcaption>An app with two tweaks attached. The bar says to connect an iPhone or iPad.</figcaption></figure>
 <ol>
 <li><strong>Pre-flight.</strong> Tools, signing files, password, device, and that the device
 is in the profile. Only what the delivery mode needs is checked. Settings ›
@@ -179,6 +179,7 @@ don't use it: an update installs on every device the app is on. The
 menu also makes a device the default. In Terminal, <code>--device &lt;UDID&gt;</code> does the
 same for one build, and that device must be connected. When a build goes
 somewhere other than the default, its log says where and why.</p>
+<figure class="wiki-shot"><img src="/wiki/img/device-bar-change.png" alt="The app&#x27;s bar with the Change menu open: iPhone 15 Pro, checked and the default, and iPad mini, each with its iOS version and LiveContainer, then Open Settings." width="2464" height="446" loading="lazy"><figcaption>Change on the bar picks the device for the next Build &amp; Install.</figcaption></figure>
 <p>With no device connected, Build &amp; Install waits, and the bar says to connect
 one. A device that's locked, or asking whether to trust this Mac, is connected
 but can't be read: the bar and the device's row in the sidebar say to unlock
@@ -287,6 +288,7 @@ a newer version on the App Store, a newer build of a tweak an app uses, or a
 build that changed since it was last installed. An app with something to
 update shows an arrow mark in the sidebar, and its pane says what: &quot;Update
 available: App Store 1.2.0 · 1 tweak&quot;.</p>
+<figure class="wiki-shot"><img src="/wiki/img/update-line.png" alt="An app pane whose update line says Update available: App Store 4.2.0 · 1 tweak, installs on iPhone 15 Pro and iPad mini, with Update &amp; Install. The sidebar has Update All (2) above the apps, and arrow marks on two of them." width="1600" height="1040" loading="lazy"><figcaption>An app with an update: the pane says what, and Update All is above the apps.</figcaption></figure>
 <ul>
 <li><strong>Update &amp; Install</strong> (or <strong>Update Tweaks &amp; Install</strong>, or <strong>Install
 Update</strong>) shows what will change, app by app, and each device it installs
@@ -344,6 +346,8 @@ stopped updating), it shows what Graft knows without the network until it
 can check again. Graft tries again within the hour, and the confirmation
 says when it couldn't check online.</li>
 </ul>
+<figure class="wiki-shot"><img src="/wiki/img/update-confirm.png" alt="The Update Apps confirmation: Photos to iPhone 15 Pro and to iPad mini via LiveContainer, each to import there, App Store 4.1.0 to 4.2.0, and example-tweak 1.0.0 to 1.1.0 from repo.example.com." width="1040" height="520" loading="lazy"><figcaption>The confirmation: what changes, and each device it installs on.</figcaption></figure>
+<figure class="wiki-shot"><img src="/wiki/img/update-progress.png" alt="Updating Apps midway: Photos is done on iPhone 15 Pro and installing on iPad mini, above the build log and a Stop button." width="1040" height="726" loading="lazy"><figcaption>An update in progress, device by device.</figcaption></figure>
 <p>Settings › Updates › <strong>Check my apps for updates</strong> turns the daily check off,
 and the checks after a get, build, tweak update, update, change to an app's
 options or tweaks, or device change.
