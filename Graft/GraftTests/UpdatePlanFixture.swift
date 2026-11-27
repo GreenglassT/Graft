@@ -15,23 +15,45 @@ enum UpdatePlanFixture {
     static let pad = "00000000-0000000000000002"
     static let spare = "00000000-0000000000000003"
 
+    static let tweakSource = "https://repo.example.com"
+
+    /// A tweak's `confirm_key` as the CLI writes one: its file, then a
+    /// SHA-256 over what the person is shown (re-verify #2).
+    static func key(_ filename: String, _ digit: Character = "a") -> String {
+        "\(filename)@" + String(repeating: digit, count: 64)
+    }
+
+    /// One attached tweak. `verified`: its update comes from its own source,
+    /// over HTTPS, with a published checksum (2.3.1 A1); `reason` says why
+    /// not. `confirmed` is `verified` unless given (`--trust-tweak`). An
+    /// unchecked one has no source, as the CLI writes it.
     static func tweak(
         _ filename: String, name: String? = nil, from: String = "1.0", to: String? = "1.1",
-        unchecked: Bool = false, also: [String] = []
+        unchecked: Bool = false, also: [String] = [], source: String? = tweakSource,
+        verified: Bool = true, reason: String? = nil, confirmed: Bool? = nil, confirmKey: String? = nil,
+        trustChanged: Bool = false
     ) -> [String: Any] {
-        ["filename": filename, "name": name as Any? ?? NSNull(), "from": from,
-         "to": to as Any? ?? NSNull(), "unchecked": unchecked, "also_affects": also]
+        let known = !unchecked && to != nil
+        return ["filename": filename, "name": name as Any? ?? NSNull(), "from": from,
+                "to": to as Any? ?? NSNull(), "unchecked": unchecked, "also_affects": also,
+                "source": (known ? source : nil) as Any? ?? NSNull(), "verified": known && verified,
+                "unverified_reason": reason as Any? ?? NSNull(),
+                "confirmed": known && (confirmed ?? verified),
+                "confirm_key": (known ? confirmKey ?? key(filename) : nil) as Any? ?? NSNull(),
+                "trust_changed": trustChanged]
     }
 
     /// One device an app is on. `waiting`: the sentence when it isn't
     /// connected; `blocked`: any other reason it can't install now. Either
     /// makes `install` false, as the CLI says it: nothing installs there in
     /// this run.
+    /// `kind`: its delivery state ("current", "stale", ...); `connected`:
+    /// on usbmux, which defaults to not `waiting`.
     static func target(
         _ device: String? = "Example iPhone", udid: String = phone, delivery: String = "livecontainer",
         install: Bool = true, installSkipped: String? = nil, manualInstall: Bool = false,
         waiting: String? = nil, blocked: String? = nil, readiness: String = "likely",
-        readinessNote: String? = nil
+        readinessNote: String? = nil, kind: String = "current", connected: Bool? = nil
     ) -> [String: Any] {
         [
             "udid": udid, "device_name": device as Any? ?? NSNull(), "delivery": delivery,
@@ -41,6 +63,7 @@ enum UpdatePlanFixture {
             "manual_install": manualInstall, "waiting": waiting as Any? ?? NSNull(),
             "blocked_reason": blocked as Any? ?? NSNull(), "readiness": readiness,
             "readiness_note": readinessNote as Any? ?? NSNull(),
+            "kind": kind, "connected": connected ?? (waiting == nil),
         ]
     }
 
@@ -69,7 +92,12 @@ enum UpdatePlanFixture {
         func text(_ target: [String: Any], _ key: String) -> String? { target[key] as? String }
         let ready = targets.filter { text($0, "waiting") == nil && text($0, "blocked_reason") == nil }
         let getsFromStore = to != nil && skipped == nil
-        let updatesTweaks = tweaks.contains { !($0["unchecked"] as? Bool ?? false) && $0["to"] is String }
+        let updatesTweaks = tweaks.contains {
+            !($0["unchecked"] as? Bool ?? false) && $0["to"] is String && ($0["confirmed"] as? Bool ?? false)
+        }
+        let awaiting = tweaks.contains {
+            !($0["unchecked"] as? Bool ?? false) && $0["to"] is String && !($0["confirmed"] as? Bool ?? false)
+        }
         let anyWork = targets.contains {
             flag($0, "install") || flag($0, "manual_install") || text($0, "waiting") != nil
                 || text($0, "blocked_reason") != nil
@@ -88,6 +116,7 @@ enum UpdatePlanFixture {
             "readiness_note": readinessNote as Any? ?? NSNull(),
             "targets": targets,
             "nothing_to_do": nothingToDo ?? !(getsFromStore || updatesTweaks || anyWork),
+            "needs_confirmation": awaiting,
             "actionable": actionable ?? ready.contains { flag($0, "install") },
         ]
     }
@@ -97,8 +126,12 @@ enum UpdatePlanFixture {
         return String(data: data, encoding: .utf8)!
     }
 
-    static func planLine(_ apps: [[String: Any]], quick: Bool = true) -> String {
-        line(["type": "update-plan", "quick": quick, "apps": apps])
+    /// `checksFailed`, when given: the plan's lookups all failed
+    /// (`checks_failed`); left out otherwise, as an older CLI leaves it.
+    static func planLine(_ apps: [[String: Any]], quick: Bool = true, checksFailed: Bool? = nil) -> String {
+        var payload: [String: Any] = ["type": "update-plan", "quick": quick, "apps": apps]
+        if let checksFailed { payload["checks_failed"] = checksFailed }
+        return line(payload)
     }
 
     static func record(_ apps: [[String: Any]], quick: Bool = false) -> UpdatePlanRecord {

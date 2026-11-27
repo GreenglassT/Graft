@@ -14,7 +14,7 @@ An agent can take the same steps you would, in order:
   or stage an IPA you give it;
 - search Canister or your repos for tweaks, download them and attach them;
 - build the app and deliver it to your iPhone or iPad, or export its IPA
-  unsigned, for a signer on your phone;
+  unsigned, for an on-device signer;
 - update your apps: a newer App Store version and newer tweaks, then the
   build and the install;
 - check what's out of date, what was last delivered, and why a build failed.
@@ -74,6 +74,9 @@ It tells the agent to ask you first before:
 - getting the latest version of an app that's held at an older one, or at a
   preferred version you set in Edit App: that lets go of the hold (see
   [Get an older version](app-store.md#get-an-older-version));
+- updating a tweak from a source Graft can't verify (it doesn't know where
+  the tweak came from, the source doesn't use HTTPS, or it lists no
+  checksum);
 - removing anything: an app, a tweak, a staged IPA or old builds.
 
 And it tells the agent never to:

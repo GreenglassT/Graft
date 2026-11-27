@@ -139,7 +139,7 @@ def test_a_cable_pulled_as_the_sandbox_opens_is_called_a_dropped_connection(
     with pytest.raises(lc_runner.LiveContainerError) as exc:
         lc_runner.push_ipa_to_livecontainer(ipa, "UDID1", free_account=True)
 
-    assert "connection to the phone dropped" in exc.value.hint
+    assert "connection to the device dropped" in exc.value.hint
     assert "open LiveContainer once" not in exc.value.hint
 
 

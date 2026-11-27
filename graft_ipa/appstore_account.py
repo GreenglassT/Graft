@@ -135,10 +135,15 @@ def marker_path() -> Path:
 
 
 def _read_marker() -> dict[str, Any]:
-    try:
-        data = json.loads(marker_path().read_text())
-    except (OSError, ValueError):
-        return {}
+    """The marker, or {} for anything Graft couldn't have written there.
+
+    Read as untrusted input (`data_dirs.read_small_json`): a regular file
+    only, not through a link, size-capped, opened without blocking, and JSON
+    nested too deep is no marker. `vouched` reads it on every plan
+    (`appstore.setup_missing`), the daily check's included, so a marker that
+    raised or hung would stop every update check.
+    """
+    data = data_dirs.read_small_json(marker_path())
     return data if isinstance(data, dict) else {}
 
 

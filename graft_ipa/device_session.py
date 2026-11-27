@@ -265,7 +265,7 @@ async def _cancelled_by_signals(coro: Coroutine[Any, Any, T], received: list[int
 #: moved.
 PAIR_TIMEOUT_SECONDS = 60.0
 
-TRUST_PROMPT = "Unlock the phone and tap Trust on the 'Trust This Computer?' prompt"
+TRUST_PROMPT = "Unlock the iPhone or iPad and tap Trust on the 'Trust This Computer?' prompt"
 
 
 #: Called with the prompt's text whenever `say_trust_prompt` runs. The CLI's

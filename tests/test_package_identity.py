@@ -73,6 +73,6 @@ def test_every_place_that_states_the_version_agrees() -> None:
     assert short == project.split(".")[: len(short)], (plist["CFBundleShortVersionString"], project)
 
 
-def test_this_is_graft_2_3() -> None:
+def test_this_is_graft_2_3_1() -> None:
     """The release this branch ships."""
-    assert __version__ == "2.3"
+    assert __version__ == "2.3.1"

@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import Graft
 
@@ -1304,5 +1305,291 @@ final class TerminationHoldTests: XCTestCase {
             QuitQuestion(reasons: [TerminationHold.waitingForPlayCover]).title,
             "Quit while Graft is waiting for PlayCover to install an app?"
         )
+    }
+}
+
+/// 2.3.1 spec §2: ⌘Q or Graft › Quit Graft with a sheet open reaches
+/// `applicationShouldTerminate`, and so `QuitGuard`, as it does with none.
+///
+/// AppKit's `terminate:` refused such a quit without asking the delegate
+/// (`SheetsAllowQuit` says why). Each test here hosts a window with a sheet
+/// attached for real, then sends the quit the way AppKit does: ⌘Q through the
+/// main menu's key equivalent, or the Quit Graft item itself. For that one
+/// call the app's delegate is a probe, which hands the quit to a `QuitGuard`
+/// of the test's own and records what it answered, but always tells AppKit
+/// `.terminateCancel`: the test host never quits, whatever the code under
+/// test does. The sheets are let through by the app's own wiring
+/// (`GraftAppDelegate`), so taking that out fails these tests.
+///
+/// What this can't cover is a quit that goes ahead: a test host that let one
+/// through would quit. The hands-on does (the 2.3.1 plan's last section).
+@MainActor
+final class QuitWithSheetTests: XCTestCase {
+    /// The app's delegate for one quit: the quit goes to `quitGuard`, and
+    /// AppKit always hears `.terminateCancel`.
+    @MainActor
+    final class Probe: NSObject, NSApplicationDelegate {
+        let quitGuard: QuitGuard
+        /// What `quitGuard` answered, once per quit AppKit asked about.
+        private(set) var answers: [NSApplication.TerminateReply] = []
+
+        init(_ quitGuard: QuitGuard) { self.quitGuard = quitGuard }
+
+        func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+            answers.append(quitGuard.shouldTerminate())
+            return .terminateCancel
+        }
+    }
+
+    /// What the hosted view has open: a sheet, and a confirmation over it.
+    final class Shown: ObservableObject {
+        @Published var sheet = true
+        @Published var confirmation = false
+    }
+
+    struct WithSheet: View {
+        @ObservedObject var shown: Shown
+
+        var body: some View {
+            Text("A window")
+                .frame(width: 360, height: 240)
+                .sheet(isPresented: $shown.sheet) { InSheet(shown: shown) }
+        }
+    }
+
+    /// The sheet, with a confirmation of its own, as the update's progress
+    /// sheet has for Stop.
+    struct InSheet: View {
+        @ObservedObject var shown: Shown
+
+        var body: some View {
+            Text("A sheet")
+                .frame(width: 280, height: 160)
+                .confirmationDialog("Stop the update?", isPresented: $shown.confirmation) {
+                    Button("Stop", role: .destructive) {}
+                }
+        }
+    }
+
+    enum Quit {
+        /// ⌘Q, as AppKit routes the key press: to the main menu's key
+        /// equivalents.
+        case commandQ
+        /// Graft › Quit Graft, chosen.
+        case menu
+    }
+
+    /// The main menu's Quit item: `terminate:`, to whoever answers it.
+    private func quitItem() throws -> NSMenuItem {
+        let appMenu = try XCTUnwrap(NSApp.mainMenu?.items.first?.submenu, "premise: the app menu")
+        let item = try XCTUnwrap(
+            appMenu.items.first { $0.action == #selector(NSApplication.terminate(_:)) },
+            "premise: the app menu's Quit item: \(appMenu.items.map(\.title))"
+        )
+        XCTAssertEqual(item.keyEquivalent, "q", "premise: ⌘Q is the Quit item's")
+        return item
+    }
+
+    /// Send the quit `how`, with `probe` as the app's delegate, then put the
+    /// app's own back. Nothing is sent unless the probe is in place: the
+    /// app's own delegate would answer a quit with nothing running by
+    /// quitting the test host.
+    private func quit(_ how: Quit, in window: NSWindow, answeredBy probe: Probe) throws {
+        let item = try quitItem()
+        let menu = try XCTUnwrap(item.menu)
+        let own = NSApp.delegate
+        NSApp.delegate = probe
+        defer { NSApp.delegate = own }
+        guard (NSApp.delegate as AnyObject?) === probe else {
+            return XCTFail("the probe isn't the app's delegate, so nothing was sent")
+        }
+        switch how {
+        case .commandQ:
+            let event = try XCTUnwrap(NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+                windowNumber: window.windowNumber, context: nil, characters: "q",
+                charactersIgnoringModifiers: "q", isARepeat: false, keyCode: 12
+            ))
+            XCTAssertTrue(try XCTUnwrap(NSApp.mainMenu).performKeyEquivalent(with: event), "⌘Q reached the Quit item")
+        case .menu:
+            menu.performActionForItem(at: menu.index(of: item))
+        }
+    }
+
+    /// `WithSheet` on screen, its sheet attached, and the confirmation over
+    /// that too when `confirming`.
+    private func withSheet(confirming: Bool = false) async throws -> (Hosted, Shown) {
+        let shown = Shown()
+        let box = hosted(WithSheet(shown: shown), size: NSSize(width: 360, height: 240))
+        await eventually({ box.window.attachedSheet != nil }, "the sheet never opened")
+        if confirming {
+            shown.confirmation = true
+            await eventually({ box.window.attachedSheet?.attachedSheet != nil }, "the confirmation never opened")
+        }
+        settle(box, seconds: 0.2)
+        return (box, shown)
+    }
+
+    /// Close what `withSheet` opened, so no sheet outlives its test.
+    private func close(_ box: Hosted, _ shown: Shown) async {
+        shown.confirmation = false
+        shown.sheet = false
+        await eventually({ box.window.attachedSheet == nil }, "the sheet never closed")
+        if let sheet = box.window.attachedSheet { box.window.endSheet(sheet) }
+    }
+
+    /// An update running: what QuitGuard asks about. The spec's case: the
+    /// progress sheet is open for the whole update.
+    private func updating() -> TerminationHoldTests.QuitHarness {
+        let h = TerminationHoldTests.QuitHarness()
+        _ = h.hold.begin(TerminationHold.updatingApps) {}
+        return h
+    }
+
+    func test_command_q_with_a_sheet_open_asks_the_quit_question() async throws {
+        let (box, shown) = try await withSheet()
+        let sheet = try XCTUnwrap(box.window.attachedSheet)
+        XCTAssertFalse(sheet.preventsApplicationTerminationWhenModal,
+                       "the sheet's window still stops a quit before the delegate is asked")
+        let h = updating()
+        let probe = Probe(h.quitGuard)
+
+        try quit(.commandQ, in: sheet, answeredBy: probe)
+
+        XCTAssertEqual(probe.answers, [.terminateLater], "AppKit asked the delegate, which asked QuitGuard")
+        XCTAssertEqual(h.questions.map(\.title), ["Quit while Graft is updating your apps?"])
+        XCTAssertNotNil(box.window.attachedSheet, "the sheet stays while the question is up")
+        await close(box, shown)
+    }
+
+    /// With nothing running, QuitGuard quits at once, sheet and all: its
+    /// unsaved edits go with the window.
+    func test_quit_graft_from_the_menu_with_a_sheet_open_and_nothing_running_quits() async throws {
+        let (box, shown) = try await withSheet()
+        let h = TerminationHoldTests.QuitHarness()
+        let probe = Probe(h.quitGuard)
+
+        try quit(.menu, in: try XCTUnwrap(box.window.attachedSheet), answeredBy: probe)
+
+        XCTAssertEqual(probe.answers, [.terminateNow], "Graft quits")
+        XCTAssertEqual(h.questions, [], "nothing to ask about")
+        await close(box, shown)
+    }
+
+    /// A confirmation inside a sheet is a sheet on the sheet: neither stops
+    /// the quit.
+    func test_command_q_with_a_confirmation_over_a_sheet_asks_the_quit_question() async throws {
+        let (box, shown) = try await withSheet(confirming: true)
+        let confirmation = try XCTUnwrap(box.window.attachedSheet?.attachedSheet)
+        let h = updating()
+        let probe = Probe(h.quitGuard)
+
+        try quit(.commandQ, in: confirmation, answeredBy: probe)
+
+        XCTAssertEqual(probe.answers, [.terminateLater])
+        XCTAssertEqual(h.questions.map(\.title), ["Quit while Graft is updating your apps?"])
+        await close(box, shown)
+    }
+
+    /// Not one kind of sheet: AppKit's own, as the Choose… panel's is, lets
+    /// the quit through too.
+    func test_quit_graft_with_an_appkit_sheet_open_asks_the_quit_question() async throws {
+        let box = hosted(Text("A window").frame(width: 360, height: 240), size: NSSize(width: 360, height: 240))
+        let sheet = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 280, height: 160),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        sheet.animationBehavior = .none
+        box.window.beginSheet(sheet, completionHandler: nil)
+        await eventually({ box.window.attachedSheet === sheet }, "the sheet never opened")
+        settle(box, seconds: 0.2)
+        let h = updating()
+        let probe = Probe(h.quitGuard)
+
+        try quit(.menu, in: sheet, answeredBy: probe)
+
+        XCTAssertEqual(probe.answers, [.terminateLater])
+        XCTAssertEqual(h.questions.map(\.title), ["Quit while Graft is updating your apps?"])
+        box.window.endSheet(sheet)
+    }
+
+    /// An AppKit sheet on screen, attached, with nothing pending from the
+    /// app's own `SheetsAllowQuit`, and its window put back to preventing a
+    /// quit, as AppKit leaves it: for `sheetBegins` to be seen alone.
+    private func sheetAsAppKitLeavesIt() async -> (Hosted, NSWindow) {
+        let box = hosted(Text("A window").frame(width: 360, height: 240), size: NSSize(width: 360, height: 240))
+        let sheet = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 280, height: 160),
+            styleMask: [.titled], backing: .buffered, defer: false
+        )
+        sheet.animationBehavior = .none
+        box.window.beginSheet(sheet, completionHandler: nil)
+        await eventually({ box.window.attachedSheet === sheet }, "the sheet never opened")
+        settle(box, seconds: 0.2)
+        sheet.preventsApplicationTerminationWhenModal = true
+        return (box, sheet)
+    }
+
+    /// The sheet is attached when AppKit says it begins, as it is on the
+    /// macOS that measured this: let through at once.
+    func test_a_sheet_attached_as_it_begins_is_let_through_at_once() async {
+        let (box, sheet) = await sheetAsAppKitLeavesIt()
+        SheetsAllowQuit.sheetBegins(windows: { [sheet] }, later: { _ in })
+        XCTAssertFalse(sheet.preventsApplicationTerminationWhenModal)
+        box.window.endSheet(sheet)
+    }
+
+    /// An AppKit that attaches the sheet only after saying it begins (an
+    /// older one may): caught on the next run-loop turn.
+    func test_a_sheet_attached_after_it_begins_is_let_through_on_the_next_turn() async {
+        let (box, sheet) = await sheetAsAppKitLeavesIt()
+        var looks = 0
+        var later: [@MainActor () -> Void] = []
+        SheetsAllowQuit.sheetBegins(
+            windows: {
+                looks += 1
+                return looks == 1 ? [] : [sheet]
+            },
+            later: { later.append($0) }
+        )
+        XCTAssertTrue(sheet.preventsApplicationTerminationWhenModal, "premise: not attached yet at the first look")
+        XCTAssertEqual(later.count, 1, "a second look, on the next turn")
+        later.forEach { $0() }
+        XCTAssertFalse(sheet.preventsApplicationTerminationWhenModal)
+        box.window.endSheet(sheet)
+    }
+
+    /// An AppKit that attaches the sheet later still, after the next turn
+    /// (macOS 13's is reasoned about, not measured): each look sweeps every
+    /// window, so the sheet's is let through before it is a sheet. The flag
+    /// does nothing on a window that isn't modal.
+    func test_each_look_sweeps_every_window_not_only_the_sheets() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 280, height: 160),
+            styleMask: [.titled], backing: .buffered, defer: true
+        )
+        XCTAssertNil(window.sheetParent, "premise: not attached at either look")
+        XCTAssertTrue(window.preventsApplicationTerminationWhenModal, "premise: AppKit's default")
+        var later: [@MainActor () -> Void] = []
+
+        SheetsAllowQuit.sheetBegins(windows: { [window] }, later: { later.append($0) })
+
+        XCTAssertFalse(window.preventsApplicationTerminationWhenModal, "at the first look")
+        window.preventsApplicationTerminationWhenModal = true
+        later.forEach { $0() }
+        XCTAssertFalse(window.preventsApplicationTerminationWhenModal, "and at the next turn's")
+    }
+
+    /// With no sheet, as before.
+    func test_command_q_with_no_sheet_asks_the_quit_question_as_before() throws {
+        let box = hosted(Text("A window").frame(width: 360, height: 240), size: NSSize(width: 360, height: 240))
+        XCTAssertNil(box.window.attachedSheet)
+        let h = updating()
+        let probe = Probe(h.quitGuard)
+
+        try quit(.commandQ, in: box.window, answeredBy: probe)
+
+        XCTAssertEqual(probe.answers, [.terminateLater])
+        XCTAssertEqual(h.questions.map(\.title), ["Quit while Graft is updating your apps?"])
     }
 }

@@ -420,3 +420,55 @@ extension TweakUpdatesTests {
         XCTAssertFalse(TweaksView.couldNotCheck(nil), "never checked says nothing")
     }
 }
+
+/// 2.3.1 A1: a tweak update whose source isn't verified (unknown, not HTTPS,
+/// or no published checksum) runs only on the person's OK.
+@MainActor
+final class TweakUpdateTrustTests: XCTestCase {
+    func test_the_record_says_whether_the_update_is_verified_and_why_not() throws {
+        let events = [
+            #"{"type":"tweak-update","filename":"a.deb","package_id":"com.x","installed":"1.0","latest":"2.0","source":"http://repo.example.com","update_available":true,"unchecked":false,"verified":false,"unverified_reason":"http://repo.example.com doesn't use HTTPS"}"#,
+            #"{"type":"tweak-update","filename":"b.deb","package_id":"com.y","installed":"1.0","latest":"2.0","source":"https://repo.example.com","update_available":true,"unchecked":false,"verified":true,"unverified_reason":null}"#,
+            #"{"type":"tweak-update","filename":"c.deb","package_id":"com.z","installed":"1.0","latest":"2.0","source":"https://repo.example.com","update_available":true,"unchecked":false}"#,
+        ].joined(separator: "\n").buildEvents().compactMap { event -> TweakUpdateRecord? in
+            if case let .tweakUpdate(record) = event { return record }
+            return nil
+        }
+        XCTAssertEqual(events.map(\.verified), [false, true, false], "what's missing never reads as verified")
+        XCTAssertEqual(events.first?.unverifiedReason, "http://repo.example.com doesn't use HTTPS")
+        XCTAssertEqual(events.map(TweaksView.needsTrust), [true, false, true])
+    }
+
+    func test_a_trusted_update_passes_the_rows_confirm_key() {
+        let tweak = TweakRecord(filename: "a.deb", sizeBytes: 0, usedBy: [])
+        let key = "a.deb@" + String(repeating: "b", count: 64)
+        XCTAssertEqual(TweaksStore.updateArguments(tweak, trustKey: nil), ["--json", "--update-tweak", "a.deb"])
+        XCTAssertEqual(TweaksStore.updateArguments(tweak, trustKey: key),
+                       ["--json", "--update-tweak", "a.deb", "--trust-tweak", key])
+    }
+
+    func test_the_record_carries_its_confirm_key() throws {
+        let key = "a.deb@" + String(repeating: "b", count: 64)
+        let record = try XCTUnwrap(#"{"type":"tweak-update","filename":"a.deb","package_id":"com.x","installed":"1.0","latest":"2.0","source":"https://repo.example.com","update_available":true,"unchecked":false,"verified":false,"unverified_reason":"source not confirmed yet: https://repo.example.com","confirm_key":"\#(key)"}"#
+            .buildEvents().compactMap { event -> TweakUpdateRecord? in
+                if case let .tweakUpdate(record) = event { return record }
+                return nil
+            }.first)
+        XCTAssertEqual(record.confirmKey, key)
+    }
+
+    func test_the_question_names_the_source_and_why_it_isnt_verified() throws {
+        let record = try XCTUnwrap(#"{"type":"tweak-update","filename":"a.deb","package_id":"com.x","installed":"1.0","latest":"2.0","source":"https://repo.example.com","update_available":true,"unchecked":false,"verified":false,"unverified_reason":"source unknown: https://repo.example.com"}"#
+            .buildEvents().compactMap { event -> TweakUpdateRecord? in
+                if case let .tweakUpdate(record) = event { return record }
+                return nil
+            }.first)
+        let tweak = TweakRecord(filename: "a.deb", sizeBytes: 0, usedBy: ["example"])
+
+        XCTAssertEqual(TweaksView.trustTitle(tweak, record), "Update a.deb from repo.example.com?")
+        XCTAssertEqual(TweaksView.notVerifiedLine(record), "Not verified (source unknown: https://repo.example.com)")
+        XCTAssertEqual(TweaksView.trustMessage(record),
+                       "Graft can't verify this update (source unknown: https://repo.example.com). "
+                       + "Update it only if you trust where it comes from.")
+    }
+}

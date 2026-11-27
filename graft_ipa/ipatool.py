@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from . import appstore_account, child_env, tools
-from .errors import AppStoreError
+from .errors import OUT_OF_SPACE, AppStoreError, out_of_space
 
 GOOD_VERSION = "2.8.0"
 KNOWN_BAD_VERSIONS = frozenset({"2.8.1"})
@@ -699,6 +699,19 @@ def revoke(path: Path, *, run: Runner = subprocess.run) -> None:
 AUTH_CODE_REQUIRED = "auth code is required"
 
 
+def _expired(error: str) -> AppStoreError | None:
+    """The error for ipatool's "password token is expired", else None.
+
+    Signed in still, as far as Settings can tell (`auth info` reads only the
+    keychain), which shows Sign In Again… for it: so that's the advice, not a
+    first sign-in's (`SIGN_IN_HINT`, the 2.3.1 review's T2-A2)."""
+    lower = error.lower()
+    if "token" not in lower or "expired" not in lower:
+        return None
+    return AppStoreError(f"ipatool's App Store sign-in has expired (ipatool: {error})",
+                         hint=RENEW_HINT)
+
+
 def _renewal_needs_code(error: str, *, hint: str) -> AppStoreError:
     return AppStoreError(
         "ipatool's App Store sign-in has expired, and Apple wants a 2FA code to renew it, "
@@ -729,6 +742,8 @@ def explain_purchase(error: str, *, bundle_id: str, path: Path) -> AppStoreError
         )
     if AUTH_CODE_REQUIRED in lower:
         return _renewal_needs_code(error, hint=RENEW_HINT)
+    if (expired := _expired(error)) is not None:
+        return expired
     if "token" in lower or "keyring" in lower or "not logged in" in lower:
         if (refused := keychain_refusal(error, path)) is not None:
             return refused
@@ -795,6 +810,8 @@ def account_error(error: str, *, bundle_id: str, path: Path) -> AppStoreError | 
     lower = error.lower()
     if AUTH_CODE_REQUIRED in lower:
         return _renewal_needs_code(error, hint=RENEW_HINT)
+    if (expired := _expired(error)) is not None:
+        return expired
     if (
         "keyring" in lower
         or "failed to get account" in lower
@@ -831,6 +848,10 @@ def explain(
     error = without_url_queries(error)
     if (found := account_error(error, bundle_id=bundle_id, path=path)) is not None:
         return found
+    if out_of_space(AppStoreError(error)):
+        # Go's "no space left on device", writing the download: this Mac's
+        # disk, not ipatool's own error (the 2.3.1 review's T2-B6).
+        return AppStoreError(OUT_OF_SPACE)
     what = doing or f"download {bundle_id}"
     if reported_version in KNOWN_BAD_VERSIONS:
         # Install advice only for a version known to be bad, and the advice

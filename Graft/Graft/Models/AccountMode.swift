@@ -78,12 +78,6 @@ enum PaidOnly {
     static let sideloadApp = "This app is set to Sideload, which needs a paid Apple "
         + "Developer account. Switch it to LiveContainer with Edit…"
 
-    /// Why Set Up LiveContainer's free variant has no Set Up or install
-    /// button. Where to update it instead is the device section's own note
-    /// (`freeAccountNotes`), which knows who installed it.
-    static let installLiveContainer = "Installing or updating LiveContainer from Graft "
-        + "needs a paid Apple Developer account."
-
     /// Settings: the .p12 password.
     static let p12Password = "A .p12 password is only used with a paid Apple Developer "
         + "account."

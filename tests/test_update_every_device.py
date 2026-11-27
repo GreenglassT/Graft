@@ -651,6 +651,26 @@ def test_in_terminal_each_device_is_said(world) -> None:
     assert lines[-1] == "updated: example; failed: none; blocked: none; waiting for 1 device"
 
 
+def test_in_terminal_the_tweak_step_reads_as_the_app_says_it(world) -> None:
+    """2.3.1 §3.2: the shared tweak step has no app. It was "→ every app:
+    tweaks 1 tweak"; the progress sheet's line is "→ tweaks: 1 tweak"
+    (`AppUpdateText.logLines`), and an app's own step still names it."""
+    _due(world)
+    world.published["com.example.atweak"] = "1.1"
+    lines: list[str] = []
+    cfg = world.cfg
+    pipe = dataclasses.replace(pipeline(world, None), say=lines.append)
+
+    code = update_run.run(cfg, ["example"], all_apps=False, with_affected=False,
+                          probe=update_readiness.FullProbe(cfg.state_dir), pipeline=pipe, emitter=None)
+
+    assert code == 0
+    arrows = [line for line in lines if line.startswith("→")]
+    assert arrows[0] == "→ tweaks: 1 tweak", arrows
+    assert "→ example: get 2.0" in arrows, arrows
+    assert not any("every app" in line for line in lines), lines
+
+
 def test_a_failed_tweak_is_said_once_when_another_device_still_installs(world) -> None:
     """The tweak was the iPhone's only change; the iPad's own delivery state
     still calls for an install, which goes ahead."""
@@ -672,3 +692,25 @@ def test_a_failed_tweak_is_said_once_when_another_device_still_installs(world) -
     assert targets[PHONE]["left"] == ["install"]
     (end,) = _of(evs, "update-app-end")
     assert end["error"] == "couldn't update a-tweak.deb: download failed: 503"
+
+
+def test_a_later_device_unplugged_mid_push_ends_its_envelope_waiting(world) -> None:
+    """T2-B7, on the devices after the first: their install has its own
+    `build-start` and `build-end`, and the end said the push failed while
+    the target said it waits."""
+    _on_both(world)
+    _due(world)
+
+    def push(ipa, *, udid, **_k):
+        world.phones.pop(udid, None)
+        raise _push_failed(udid)
+
+    with patch.object(cli_mod, "lc_runner") as lc:
+        lc.push_ipa_to_livecontainer.side_effect = push
+        code, evs = _run(world, ["example"], real_install=True)
+
+    waiting = "Example iPad isn't connected: it'll update when it is"
+    assert _targets(evs)[OTHER_PHONE]["waiting"] is True, "premise"
+    (end,) = _of(evs, "build-end")  # the iPad's install; the build here is a stand-in
+    assert (end["ok"], end.get("waiting"), end["error"]) == (False, True, waiting)
+    assert code == 0

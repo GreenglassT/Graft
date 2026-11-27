@@ -12,17 +12,28 @@ A `.deb` or `.dylib` you already have goes into the tweaks folder too.
 ## Canister, Repos and Tweaks
 
 - **Canister** searches canister.me. A download by package id is checked
-  against Canister's published SHA-256, when Canister has one.
+  against Canister's published SHA-256, when Canister has one, and comes from
+  the repository the result names.
 - **Repos** adds APT repositories and lists their packages. Free repositories
   only; repos that need a login or payment aren't supported.
 - **Tweaks** lists your library (`~/.config/graft/tweaks/`), checks it for
   newer published versions when you ask, and updates a tweak, re-pointing the
   apps that use it. Deleting one an app still uses asks first, and offers
   Detach and Delete. Deleted tweaks go to the Trash.
+- Graft names each download itself, `<package id>_<version>.deb` (with its
+  architecture when the .deb names one). It keeps a download only if it's a
+  .deb of the package and version it asked for, and never replaces a different
+  tweak of the same name: delete that one first if you want the new one.
+- Graft remembers where each tweak came from, and looks for its updates only
+  there. For a tweak Graft has no record of, it finds where the file most
+  likely came from, and asks you once: after you confirm one update, that
+  source is on record. An update it can't verify (where the tweak came from
+  isn't on record, the source doesn't use HTTPS, or it lists no checksum)
+  says why on the tweak's row, and **Update** asks before it downloads it.
 
 Updating an app (**Update & Install** on its pane, or `graft --update`) also
-updates every tweak it uses that has a newer build, once for all the apps that
-share it. While an update of an app runs, the **Update** button in Tweaks for
+updates every tweak it uses that has a newer build from where it came from,
+once for all the apps that share it. While an update of an app runs, the **Update** button in Tweaks for
 the tweaks that app uses waits until it's done. See
 [Updating your apps](building-and-delivery.md#updating-your-apps).
 

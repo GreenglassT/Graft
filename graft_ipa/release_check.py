@@ -33,11 +33,17 @@ RELEASES_PAGE = "https://github.com/GreenglassT/Graft/releases"
 #: Generic on purpose: GitHub's API refuses a request without one.
 USER_AGENT = "Graft"
 HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
-#: Seconds, to connect and then between bytes: a check is never worth a wait.
-TIMEOUT = 10
+#: Seconds, to connect and then between bytes: a check is never worth a
+#: long wait, but 10 failed once on a link another download was filling
+#: (the 2.3 self-update's own, at about 1 MB/s), where the retry passed
+#: (the 2.3.1 review's Track 4 item 1).
+TIMEOUT = 30
 
-#: Why a check failed, the event's `reason`.
+#: Why a check failed, the event's `reason`: no connection to GitHub, one
+#: that didn't answer within `TIMEOUT`, an HTTP error, or an answer that
+#: names no published release.
 OFFLINE = "offline"
+TIMED_OUT = "timeout"
 HTTP = "http"
 MALFORMED = "malformed"
 
@@ -45,7 +51,7 @@ _VERSION_RE = re.compile(r"[vV]?(\d+(?:\.\d+)*)", re.ASCII)
 
 
 class UpdateCheckError(GraftError):
-    """The check got no usable answer. `reason` is one of the three above,
+    """The check got no usable answer. `reason` is one of the four above,
     and `status` the HTTP status, when there was one."""
 
     def __init__(self, message: str, *, reason: str, status: int | None = None) -> None:
@@ -105,6 +111,15 @@ def latest_release_json() -> dict[str, Any]:
     try:
         with session:
             resp = session.get(LATEST_RELEASE_URL, headers=HEADERS, timeout=TIMEOUT)
+    except requests.Timeout as e:
+        # Slow, not offline: a busy link, or GitHub itself. "Check this Mac's
+        # internet connection" sent the person looking for a fault that
+        # wasn't there. Ahead of the arm below: a ConnectTimeout is a
+        # ConnectionError too.
+        raise UpdateCheckError(
+            "GitHub didn't answer in time. Try again in a moment.",
+            reason=TIMED_OUT,
+        ) from e
     except requests.RequestException as e:
         raise UpdateCheckError(
             "Couldn't reach GitHub to check for a newer Graft. Check this Mac's internet "

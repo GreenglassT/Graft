@@ -82,7 +82,7 @@ def test_no_device_where_one_is_needed_still_fails(
 
     assert (row.name, row.ok, row.info, row.status) == (NAME, False, False, "FAIL")
     assert row.detail == "none"
-    assert row.hint == "plug an iPhone in via USB and trust this Mac"
+    assert row.hint == "plug an iPhone or iPad in via USB and trust this Mac"
 
 
 def test_a_device_listing_that_failed_is_still_a_failure(

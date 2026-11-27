@@ -167,7 +167,61 @@ final class AppUpdateTextTests: XCTestCase {
                                                        skipped: CLIContract.Update.needsAppleSilicon,
                                                        install: false, nothingToDo: true)))
 
-        XCTAssertEqual(line, .init(headline: nil, notes: ["App Store has 2026.47.0, needs Apple silicon"], action: nil))
+        XCTAssertEqual(line, .init(headline: nil, notes: [AppUpdateText.intelNote(version: "2026.47.0")], action: nil))
+    }
+
+    /// B8: "App Store has 5.2, needs Apple silicon", under a blue arrow, for
+    /// good: it never says what this Mac can do instead.
+    func test_on_intel_the_note_says_what_this_mac_can_do_instead() {
+        XCTAssertEqual(AppUpdateText.intelNote(version: "5.2"),
+                       "The App Store has 5.2. This Mac can't download it: drop a newer decrypted IPA on Source IPA.")
+    }
+
+    /// The re-verify's nit: the Intel download on an Apple silicon Mac gets
+    /// the same skip ("needs Apple silicon"), and "This Mac can't" isn't so
+    /// there: Graft.zip can, where it opens.
+    func test_the_intel_download_on_apple_silicon_says_which_download_can() {
+        let sonoma = MacSupport(appleSiliconMac: true, build: .flavor(.x86_64), macOSMajorVersion: 14)
+        let ventura = MacSupport(appleSiliconMac: true, build: .flavor(.x86_64), macOSMajorVersion: 13)
+        let intel = MacSupport(appleSiliconMac: false, build: .flavor(.x86_64), macOSMajorVersion: 14)
+
+        XCTAssertEqual(AppUpdateText.intelNote(version: "5.2", mac: sonoma),
+                       "The App Store has 5.2. Graft's Intel download can't get it: use Graft.zip, or drop a "
+                       + "newer decrypted IPA on Source IPA.")
+        XCTAssertEqual(AppUpdateText.intelNote(version: "5.2", mac: ventura),
+                       "The App Store has 5.2. Graft's Intel download can't get it: drop a newer decrypted IPA "
+                       + "on Source IPA.")
+        XCTAssertEqual(AppUpdateText.intelNote(version: "5.2", mac: intel), AppUpdateText.intelNote(version: "5.2"))
+        let line = AppUpdateText.paneLine(F.plan(F.app("example", to: "5.2", skipped: CLIContract.Update.needsAppleSilicon,
+                                                       install: false, nothingToDo: true)), mac: sonoma)
+        XCTAssertEqual(line?.notes, [AppUpdateText.intelNote(version: "5.2", mac: sonoma)])
+    }
+
+    /// A line of notes alone is information, not an update: no arrow.
+    func test_only_a_line_with_an_update_has_the_mark() throws {
+        let intel = try XCTUnwrap(AppUpdateText.paneLine(F.plan(F.app(
+            "example", to: "5.2", skipped: CLIContract.Update.needsAppleSilicon, install: false,
+            nothingToDo: true))))
+        let update = try XCTUnwrap(AppUpdateText.paneLine(F.plan(F.app("example", to: "2.0"))))
+
+        XCTAssertFalse(AppUpdateLine.showsMark(intel))
+        XCTAssertTrue(AppUpdateLine.showsMark(update))
+    }
+
+    /// B5: before the App Store is set up the plan doesn't get, and the line
+    /// says where to set it up, with Open Settings.
+    func test_before_the_app_store_is_set_up_the_line_says_where() throws {
+        for (reason, words) in [(CLIContract.Update.decryptionNotSetUp, AppStoreStore.setUpFirst),
+                                (CLIContract.Update.notSignedIn, AppStoreStore.signedOutReason)] {
+            let line = try XCTUnwrap(AppUpdateText.paneLine(F.plan(F.app(
+                "example", to: "2.0", skipped: reason, install: false, nothingToDo: true))), reason)
+
+            XCTAssertEqual(line.notes, ["The App Store has 2.0. " + words], reason)
+            XCTAssertTrue(line.opensSettings, reason)
+            XCTAssertNil(line.action)
+        }
+        let held = try XCTUnwrap(AppUpdateText.paneLine(F.plan(F.app("example", to: "2.0"))))
+        XCTAssertFalse(held.opensSettings)
     }
 
     /// A device block in a plan is advisory (review S3): Update stays
@@ -411,7 +465,8 @@ final class AppUpdateTextTests: XCTestCase {
         XCTAssertEqual(rows.map(\.app), ["example", "delta", "echo"], "nothing to do: no row")
         guard rows.count == 3 else { return }
         XCTAssertEqual(rows[0].title, "Example+")
-        XCTAssertEqual(rows[0].changes, ["App Store 1.0 → 2.0", "A Tweak 1.0 → 1.1"])
+        XCTAssertEqual(rows[0].changes, ["App Store 1.0 → 2.0", "A Tweak 1.0 → 1.1 from repo.example.com"])
+        XCTAssertEqual(rows[0].trust, [], "a verified tweak asks nothing")
         XCTAssertEqual(rows[0].targets, [.init(udid: F.phone, line: "Example+ → Example iPad via LiveContainer",
                                                status: .installs(importNote: "You'll import it in LiveContainer on Example iPad"))])
         XCTAssertEqual(rows[0].alsoUsed, ["also used by Bravo: it will need an install afterward"])
@@ -428,6 +483,60 @@ final class AppUpdateTextTests: XCTestCase {
     /// A version the Apple ID was refused is said as the CLI words it, once:
     /// not "App Store 1.2.0: Your Apple ID doesn't have 1.2.0; …" (review
     /// part 1, nits).
+    // MARK: A tweak update whose source isn't verified (2.3.1 A1)
+
+    private func unconfirmed(_ filename: String = "a.deb", reason: String = "source unknown: https://repo.example.com")
+        -> [String: Any] {
+        F.tweak(filename, name: "A Tweak", verified: false, reason: reason)
+    }
+
+    func test_an_unconfirmed_tweak_alone_is_shown_but_raises_no_mark() {
+        // The CLI says nothing installs: the tweak isn't work until it's confirmed.
+        let plan = F.plan(F.app("example", tweaks: [unconfirmed()], install: false))
+
+        XCTAssertFalse(plan.isActionable, "not in Update All, and no sidebar mark")
+        XCTAssertNil(AppUpdateText.indicator(plan: plan, delivery: delivery(.current)))
+        XCTAssertTrue(plan.hasUpdate)
+        let line = AppUpdateText.paneLine(plan)
+        XCTAssertEqual(line?.headline, "Update available: 1 tweak to confirm")
+        XCTAssertEqual(line?.action, .button("Update Tweaks & Install"), "the confirmation is where it's confirmed")
+        XCTAssertEqual(AppUpdateText.offered(["example": plan], order: ["example"]), [])
+    }
+
+    func test_an_unconfirmed_tweak_beside_a_verified_change_is_said_apart() {
+        let plan = F.plan(F.app("example", to: "2.0", tweaks: [F.tweak("b.deb"), unconfirmed()]))
+
+        XCTAssertTrue(plan.isActionable, "the App Store version and the verified tweak still run")
+        XCTAssertEqual(AppUpdateText.paneLine(plan)?.headline,
+                       "Update available: App Store 2.0 · 1 tweak · 1 tweak to confirm")
+    }
+
+    func test_the_confirmation_shows_where_an_unconfirmed_tweak_comes_from_and_why() {
+        let rows = AppUpdateText.confirmRows(F.record([
+            F.app("example", tweaks: [unconfirmed(), unconfirmed("c.deb", reason: "http://c.example.com doesn't use HTTPS")],
+                  install: false),
+        ]), names: [:])
+
+        XCTAssertEqual(rows.map(\.app), ["example"], "listed, so it can be confirmed")
+        XCTAssertEqual(rows.first?.changes, [], "not a change until it's confirmed")
+        XCTAssertEqual(rows.first?.trust, [
+            .init(filename: "a.deb", line: "A Tweak 1.0 → 1.1 from repo.example.com",
+                  reason: "Not verified (source unknown: https://repo.example.com)",
+                  toggleName: "Trust repo.example.com for A Tweak"),
+            .init(filename: "c.deb", line: "A Tweak 1.0 → 1.1 from repo.example.com",
+                  reason: "Not verified (http://c.example.com doesn't use HTTPS)",
+                  toggleName: "Trust repo.example.com for A Tweak"),
+        ])
+    }
+
+    func test_a_source_with_no_address_is_named_as_the_cli_names_it() {
+        let rows = AppUpdateText.confirmRows(F.record([
+            F.app("example", tweaks: [F.tweak("a.deb", name: "A Tweak", source: "canister repository examplerepo")]),
+        ]), names: [:])
+
+        XCTAssertEqual(rows.first?.changes, ["A Tweak 1.0 → 1.1 from canister repository examplerepo"])
+    }
+
     func test_a_refused_version_is_said_once_in_the_confirmation() {
         let refused = "\(CLIContract.Update.refusedPrefix)1.2.0; get it in the App Store"
         let rows = AppUpdateText.confirmRows(F.record([
@@ -561,6 +670,13 @@ final class AppUpdateTextTests: XCTestCase {
         XCTAssertEqual(AppUpdateText.targetPhase(targetEnd(false, error: "the install failed")), .failed)
         XCTAssertEqual(AppUpdateText.targetPhase(targetEnd(false, left: ["install"])), .notStarted,
                        "the device a Stop kept the install from")
+        // Its install began and Stop Now cancelled it (2.3.1 §3.3): the same
+        // result, but it was reached.
+        XCTAssertEqual(AppUpdateText.targetPhase(targetEnd(false, left: ["install"]), installBegan: true), .stopped,
+                       "the device whose install Stop Now cancelled")
+        XCTAssertEqual(AppUpdateText.targetPhase(targetEnd(false, error: "the install failed", left: ["install"]),
+                                                 installBegan: true), .failed, "an install that failed says so")
+        XCTAssertEqual(AppUpdateText.targetPhase(targetEnd(true), installBegan: true), .done)
         XCTAssertEqual(AppUpdateText.phaseText(.skipped(F.notConnected("Example iPad"))), F.notConnected("Example iPad"))
     }
 

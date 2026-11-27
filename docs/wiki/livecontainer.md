@@ -26,8 +26,16 @@ who manages it, on either account.
   Convert to Shared App. LiveContainer asks for your .p12's password on the
   device; Graft can't type it for you. Selecting **I imported the
   certificate** takes the certificate off the device at once.
-- With a free Apple ID, the sheet has no Set Up button: it links to SideStore
-  and iloader, which install LiveContainer with your Apple ID, and lists the
+- Set Up and **Install / Update LiveContainer** need an App Store Connect key.
+  Without one, the sheet says so, with **Open Settings**. They install one
+  LiveContainer, the primary, unless more are on the device already; select
+  2 and 3 for side-by-side copies. The sheet also shows whether Developer Mode
+  is on, which a LiveContainer from Graft needs on iOS 16 and later, with
+  **Check again** for after the device restarts.
+- With a free Apple ID, the sheet has no Set Up button. When LiveContainer is
+  already on the device, it says which version it found, and the one step left
+  is Import Certificate from SideStore. Otherwise it links to SideStore and
+  iloader, which install LiveContainer with your Apple ID. Then it lists the
   same steps on the device.
 - Where SideStore or AltStore is on the device, Set Up is disabled, and the
   sheet's first step is Import Certificate from SideStore.

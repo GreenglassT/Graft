@@ -150,9 +150,16 @@ final class TweaksStore: ObservableObject, CLIStore {
     /// Returns the record so the caller can say what changed — the filename
     /// usually changes, and the apps that now point at the new one are the
     /// ones needing a rebuild.
+    /// `--update-tweak`'s arguments; with `trustKey`, the person's OK for an
+    /// update whose source isn't verified: the row's `confirm_key`, so the
+    /// yes is for the update they were shown (`--trust-tweak`, 2.3.1 A1).
+    static func updateArguments(_ tweak: TweakRecord, trustKey: String?) -> [String] {
+        [Flag.json, Flag.updateTweak, tweak.filename] + (trustKey.map { [Flag.trustTweak, $0] } ?? [])
+    }
+
     @discardableResult
     func updateTweak(
-        _ tweak: TweakRecord, argsOverride: [String]? = nil
+        _ tweak: TweakRecord, trustKey: String? = nil, argsOverride: [String]? = nil
     ) async -> TweakUpdatedRecord? {
         guard updatingFilename == nil else { return nil }
         updatingFilename = tweak.filename
@@ -161,7 +168,7 @@ final class TweaksStore: ObservableObject, CLIStore {
         let record: TweakUpdatedRecord?
         do {
             record = try await runner.run(
-                argsOverride ?? [Flag.json, Flag.updateTweak, tweak.filename],
+                argsOverride ?? Self.updateArguments(tweak, trustKey: trustKey),
                 failing: "Update tweak"
             ) { event -> TweakUpdatedRecord? in
                 if case let .tweakUpdated(record) = event { return record }

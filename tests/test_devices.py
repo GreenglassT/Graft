@@ -436,3 +436,71 @@ def test_a_listing_that_fails_knows_nothing(monkeypatch) -> None:
                         AsyncMock(side_effect=RuntimeError("busy")))
 
     assert asyncio.run(devices_mod._livecontainer_on_device_async(object())) == (None, False)
+
+
+# --- what a device that couldn't be read says (B1) --------------------------------
+
+
+class PairingDialogResponsePendingError(Exception):
+    """pymobiledevice3's, by name: matched by name, as `installer.connection_hint` does."""
+
+
+class PasswordRequiredError(Exception):
+    """pymobiledevice3's, by name."""
+
+
+def _failing_with(error: Exception):
+    def describe(udid: str) -> DeviceInfo:
+        raise error
+
+    return _run([_FakeMuxDevice("00008130-NEW")], describe).failures[0].error
+
+
+@pytest.mark.parametrize("error", [PairingDialogResponsePendingError(), PasswordRequiredError("locked")])
+def test_a_device_waiting_on_trust_says_what_to_do_not_the_exception(error: Exception) -> None:
+    """The sidebar row's tooltip and the update's "couldn't be read" said
+    `PairingDialogResponsePendingError`: the device is asking whether to
+    trust this Mac, and the words for that are `connection_hint`'s."""
+    from graft_ipa.installer import connection_hint
+
+    said = _failing_with(error)
+
+    assert said == devices_mod._without_rerun(connection_hint(type(error).__name__))
+    assert "Trust" in said
+    assert type(error).__name__ not in said
+
+
+# Every pymobiledevice3 failure `connection_hint` words, by name.
+_HINTED = ["PasswordRequiredError", "PairingDialogResponsePendingError", "UserDeniedPairingError",
+           "NotPairedError", "PairingError", "DeviceNotFoundError", "ConnectionTerminatedError",
+           "ConnectionResetError", "BrokenPipeError", "PhoneWentSilentError",
+           "ConnectionFailedToUsbmuxdError", "ConnectionFailedError", "StartServiceError"]
+
+
+@pytest.mark.parametrize("name", _HINTED)
+def test_what_a_listing_says_leaves_out_re_run(name: str) -> None:
+    """The re-verify's nit: the app reads a device it couldn't read again on
+    its own, so "…and re-run." told it to do what it already does. The rest
+    of the advice stays, as a sentence."""
+    from graft_ipa.installer import connection_hint
+
+    error = type(name, (Exception,), {})()
+    said = _failing_with(error)
+    hint = connection_hint(name)
+
+    assert hint and "re-run" in hint, "premise: the build's words say re-run"
+    assert "re-run" not in said and "rerun" not in said
+    assert said.endswith("."), said
+    assert said.split(" — ")[0] == hint.split(" — ")[0], "the same advice, less re-run"
+
+
+def test_the_trust_sentences_read_whole() -> None:
+    assert _failing_with(PasswordRequiredError("locked")) == (
+        "the device is locked or hasn't trusted this Mac — unlock it and tap Trust if asked.")
+    assert _failing_with(PairingDialogResponsePendingError()) == (
+        "the device is still asking whether to trust this Mac — unlock it and tap Trust on the "
+        "'Trust This Computer?' prompt.")
+
+
+def test_a_failure_with_no_words_of_its_own_keeps_the_exception() -> None:
+    assert _failing_with(KeyError("boom")) == "KeyError: 'boom'"

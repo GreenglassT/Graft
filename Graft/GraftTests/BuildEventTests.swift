@@ -47,12 +47,30 @@ final class BuildEventTests: XCTestCase {
     func test_decode_build_end_event_failure() throws {
         let json = #"{"type":"build-end","app":"example","ok":false,"error":"cyan failed"}"#
         let event = try BuildEvent.decode(line: json)
-        guard case let .buildEnd(app, ok, error, _, _) = event else {
+        guard case let .buildEnd(app, ok, error, _, _, waiting) = event else {
             return XCTFail("expected .buildEnd")
         }
         XCTAssertEqual(app, "example")
         XCTAssertFalse(ok)
         XCTAssertEqual(error, "cyan failed")
+        XCTAssertFalse(waiting, "absent is false")
+    }
+
+    /// T2-B7: an update's device unplugged mid-push. Its `build-end` says it
+    /// waits, in the update's words, and the transcript says so without ✗.
+    func test_a_waiting_build_end_reads_as_a_wait_not_a_failure() throws {
+        let said = "Example iPad isn't connected: it'll update when it is"
+        let json = #"{"type":"build-end","app":"example","ok":false,"stopped":false,"waiting":true,"error":"\#(said)","elapsed_seconds":4.2}"#
+        let event = try BuildEvent.decode(line: json)
+        guard case let .buildEnd(_, ok, error, _, stopped, waiting) = event else {
+            return XCTFail("expected .buildEnd")
+        }
+        XCTAssertEqual([ok, stopped, waiting], [false, false, true])
+        XCTAssertEqual(error, said)
+
+        let lines = BuildLogView.lines(for: event)
+        XCTAssertEqual(lines.map(\.text), ["  \(said) (4.2s)"])
+        XCTAssertEqual(lines.map(\.kind), [.dim])
     }
 
     func test_decode_app_record_event() throws {
@@ -929,7 +947,7 @@ final class BuildEventTests: XCTestCase {
 
     /// An app on two devices (contract G): the iPhone installs, the iPad
     /// waits for its device.
-    private static let planLine = #"{"type":"update-plan","quick":true,"apps":[{"app":"example","display_name":"Example+","store":{"from":"1.0","to":"2.0","skipped_reason":null},"tweaks":[{"filename":"a-tweak.deb","name":"A Tweak","from":"1.0","to":"1.1","unchecked":false,"also_affects":["bravo"]},{"filename":"b-tweak.deb","name":null,"from":"2.0","to":null,"unchecked":true,"also_affects":[]}],"install":true,"install_skipped_reason":null,"manual_install":false,"blocked_reason":null,"readiness":"likely","readiness_note":null,"actionable":true,"targets":[{"udid":"00000000-0000000000000001","device_name":"Example iPhone","delivery":"livecontainer","lc_bundle_id":"com.example.livecontainer","install":true,"install_skipped_reason":null,"manual_install":false,"waiting":null,"blocked_reason":null,"readiness":"checked","readiness_note":null},{"udid":"00000000-0000000000000002","device_name":"Example iPad","delivery":"livecontainer","lc_bundle_id":null,"install":false,"install_skipped_reason":null,"manual_install":false,"waiting":"Example iPad isn't connected: it'll update when it is","blocked_reason":null,"readiness":"likely","readiness_note":null}],"nothing_to_do":false}]}"#
+    private static let planLine = #"{"type":"update-plan","quick":true,"apps":[{"app":"example","display_name":"Example+","store":{"from":"1.0","to":"2.0","skipped_reason":null},"tweaks":[{"filename":"a-tweak.deb","name":"A Tweak","from":"1.0","to":"1.1","unchecked":false,"also_affects":["bravo"],"source":"https://repo.example.com","verified":true,"unverified_reason":null,"confirmed":true,"confirm_key":"a-tweak.deb@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","trust_changed":false},{"filename":"b-tweak.deb","name":null,"from":"2.0","to":null,"unchecked":true,"also_affects":[],"source":null,"verified":false,"unverified_reason":null,"confirmed":false}],"needs_confirmation":false,"install":true,"install_skipped_reason":null,"manual_install":false,"blocked_reason":null,"readiness":"likely","readiness_note":null,"actionable":true,"targets":[{"udid":"00000000-0000000000000001","device_name":"Example iPhone","delivery":"livecontainer","lc_bundle_id":"com.example.livecontainer","install":true,"install_skipped_reason":null,"manual_install":false,"waiting":null,"blocked_reason":null,"readiness":"checked","readiness_note":null},{"udid":"00000000-0000000000000002","device_name":"Example iPad","delivery":"livecontainer","lc_bundle_id":null,"install":false,"install_skipped_reason":null,"manual_install":false,"waiting":"Example iPad isn't connected: it'll update when it is","blocked_reason":null,"readiness":"likely","readiness_note":null}],"nothing_to_do":false}]}"#
 
     func test_decode_update_plan() throws {
         guard case let .updatePlan(record) = try BuildEvent.decode(line: Self.planLine) else {
@@ -943,12 +961,57 @@ final class BuildEventTests: XCTestCase {
         XCTAssertTrue(app.getsFromStore)
         XCTAssertEqual(app.tweakUpdates.map(\.filename), ["a-tweak.deb"], "an unchecked tweak is not an update")
         XCTAssertEqual(app.tweaks.first?.alsoAffects, ["bravo"])
+        XCTAssertEqual(app.tweaks.first?.source, "https://repo.example.com")
+        XCTAssertEqual(app.tweaks.first?.verified, true)
+        XCTAssertEqual(app.tweaks.first?.confirmed, true)
+        XCTAssertNil(app.tweaks.first?.unverifiedReason)
+        XCTAssertEqual(app.tweaks.first?.confirmKey, UpdatePlanFixture.key("a-tweak.deb"))
+        XCTAssertEqual(app.tweaks.first?.trustChanged, false)
+        XCTAssertNil(app.tweaks.last?.confirmKey, "an unchecked tweak has nothing to confirm")
+        XCTAssertFalse(app.needsConfirmation)
         XCTAssertEqual(app.readiness, CLIContract.Update.readinessLikely)
         XCTAssertFalse(app.manualInstall)
         XCTAssertNil(app.readinessNote)
         XCTAssertTrue(app.actionable)
         XCTAssertTrue(app.isActionable)
         XCTAssertTrue(app.hasUpdate)
+    }
+
+    /// A tweak whose update isn't verified (2.3.1 A1): its source and why,
+    /// and it isn't one of the app's updates until the person confirms it.
+    func test_decode_an_unverified_tweak_update() throws {
+        let line = UpdatePlanFixture.planLine([UpdatePlanFixture.app("example", tweaks: [
+            UpdatePlanFixture.tweak("a.deb", name: "A Tweak", source: "http://repo.example.com", verified: false,
+                                    reason: "http://repo.example.com doesn't use HTTPS"),
+        ], install: false)])
+        guard case let .updatePlan(record) = try BuildEvent.decode(line: line) else {
+            return XCTFail("expected .updatePlan")
+        }
+        let app = try XCTUnwrap(record.apps.first)
+        let tweak = try XCTUnwrap(app.tweaks.first)
+        XCTAssertEqual(tweak.source, "http://repo.example.com")
+        XCTAssertFalse(tweak.verified)
+        XCTAssertFalse(tweak.confirmed)
+        XCTAssertEqual(tweak.unverifiedReason, "http://repo.example.com doesn't use HTTPS")
+        XCTAssertEqual(app.tweakUpdates, [], "not an update without the person's OK")
+        XCTAssertEqual(app.unconfirmedTweaks.map(\.filename), ["a.deb"])
+        XCTAssertTrue(app.needsConfirmation)
+        XCTAssertFalse(app.isActionable, "nor in Update All")
+        XCTAssertTrue(app.hasUpdate, "but shown")
+    }
+
+    /// A tweak entry that doesn't say it's verified or confirmed is neither:
+    /// what's missing never reads as trust.
+    func test_a_tweak_entry_without_the_trust_fields_is_not_confirmed() throws {
+        let line = #"{"type":"update-plan","quick":true,"apps":[{"app":"example","display_name":null,"store":{"from":"1.0","to":null,"skipped_reason":null},"tweaks":[{"filename":"a.deb","name":null,"from":"1.0","to":"1.1","unchecked":false,"also_affects":[]}],"install":true,"install_skipped_reason":null,"manual_install":false,"blocked_reason":null,"readiness":"likely","readiness_note":null,"actionable":true,"targets":[],"nothing_to_do":false}]}"#
+        guard case let .updatePlan(record) = try BuildEvent.decode(line: line) else {
+            return XCTFail("expected .updatePlan")
+        }
+        let tweak = try XCTUnwrap(record.apps.first?.tweaks.first)
+        XCTAssertFalse(tweak.verified)
+        XCTAssertFalse(tweak.confirmed)
+        XCTAssertNil(tweak.source)
+        XCTAssertEqual(record.apps.first?.tweakUpdates, [])
     }
 
     /// Each device the app is on, in the CLI's order (the default first).
@@ -1085,7 +1148,7 @@ extension BuildEventTests {
     func test_a_stopped_build_end_is_a_stop_not_a_failure() throws {
         let line = #"{"type":"build-end","app":"example","ok":false,"stopped":true,"error":null,"elapsed_seconds":4.2}"#
         let event = try BuildEvent.decode(line: line)
-        guard case let .buildEnd(_, ok, _, _, stopped) = event else {
+        guard case let .buildEnd(_, ok, _, _, stopped, _) = event else {
             return XCTFail("expected .buildEnd")
         }
         XCTAssertFalse(ok)

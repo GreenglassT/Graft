@@ -33,6 +33,13 @@ final class AppStoreSettingsTests: XCTestCase {
         )
     }
 
+    /// Apple silicon with the Apple silicon download: no card, the rows as
+    /// they were (the Intel card is `IntelGatingTests`').
+    func test_on_apple_silicon_the_rows_stay() {
+        XCTAssertNil(AppStoreSettingsSection.unavailableCard(.appleSilicon, status: nil))
+        XCTAssertNil(MacSupport.appleSilicon.appStoreLine)
+    }
+
     func test_everything_ready_is_two_green_rows() {
         let rows = AppStoreSettingsSection.rows(for: status())
 

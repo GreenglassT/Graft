@@ -18,16 +18,22 @@ import SwiftUI
 ///
 /// **The sentences, longest first, because they are what has to fit one line at
 /// the app's 900pt minimum width.** Counted with "iPhone 15 Pro" and "iPad Air"
-/// where a sentence names a device: `.fallback` 85 characters, `.thisBuild` 77,
-/// `.overrideMissing` 72, `.liveContainerMissing` 65, `.fallback` with no
-/// default set 65, `.notDelivering` up to 63 when it speaks up about several
-/// devices, `.defaultMissing` 60, `.noDefault` 60, `.noDevice` 58,
+/// where a sentence names a device: `.fallback` 85 characters, `.noDevice` 81,
+/// `.overrideUnreadable` 80, `.thisBuild` 77, `.overrideMissing` 72,
+/// `.defaultUnreadable` 71, `.liveContainerMissing` 36 (and 41 on a second line),
+/// `.fallback` with no default set 65, `.unreadable` 64 at two phones and one
+/// more per decimal digit of the count, `.notDelivering` up to 63 when it
+/// speaks up about several devices, `.defaultMissing` 60, `.noDefault` 60,
 /// `.notDelivering` up to 55 when it stays quiet ("Install skipped …"),
-/// `.overrideUnreadable` 55, `.notDelivering` 47 when it speaks up about a
-/// chosen device, `.defaultUnreadable` 46, `.unreadable` 36 at two phones and one more
-/// per decimal digit of the count, `.notDelivering` 36 when it speaks up about
+/// `.notDelivering` 47 when it speaks up about a
+/// chosen device, `.notDelivering` 36 when it speaks up about
 /// an empty bench, `.scanning` 20. The two longest put their parenthetical and
 /// their "· then …" at the lowest `layoutPriority`, so those give first.
+///
+/// A paid account's missing LiveContainer takes two lines, its offer of
+/// Sideload under the fact: as one 90-character sentence it was cut, and
+/// `AppDetailLayoutTests` reads the two back off the accessibility tree to
+/// hold them to the minimum width.
 ///
 /// This inventory is documentation and nothing more — **no test can hold it to
 /// account, and one used to claim it could.** Every sentence below renders
@@ -66,8 +72,10 @@ enum BuildTarget: Equatable {
     case defaultUnreadable(name: String)
     /// A LiveContainer app, and the device the build goes to has none, as a
     /// listing that could read its apps said (`DeviceRecord.livecontainerKnown`).
-    /// Build & Install waits. `kind` is "iPhone", "iPad" or "iPod".
-    case liveContainerMissing(name: String, udid: String, kind: String)
+    /// Build & Install waits. `kind` is "iPhone", "iPad", "iPod touch" or
+    /// "device" (`deviceKind`). `sideload`: the account is known to be paid,
+    /// so the app could be switched to Sideload instead, and the bar says so.
+    case liveContainerMissing(name: String, udid: String, kind: String, sideload: Bool = false)
     /// Several devices are connected, Settings names no default (Ask each
     /// time), and none was picked for Build & Install: the person picks, and
     /// Build & Install waits (spec §5b's table).
@@ -202,10 +210,12 @@ enum BuildTarget: Equatable {
     /// — is about *speculative* device problems. This one is not speculative.
     var needsAttention: Bool {
         switch self {
-        case .noDefault, .noDevice, .overrideMissing, .overrideUnreadable, .unreadable,
+        case .noDefault, .overrideMissing, .overrideUnreadable, .unreadable,
              .needsPaidAccount, .defaultMissing, .defaultUnreadable, .liveContainerMissing:
             return true
-        case .device, .scanning, .thisBuild, .fallback:
+        // Nothing is wrong with an empty bench (B4): Build & Install waits for
+        // a device, and the bar says so in a neutral voice.
+        case .device, .scanning, .thisBuild, .fallback, .noDevice:
             return false
         case let .notDelivering(option, device):
             return option.stillResolvesDevice && device.isCertainDeviceFailure
@@ -264,27 +274,50 @@ enum BuildTarget: Equatable {
     var isCertainDeviceFailure: Bool { certainFailureClause != nil }
 
     /// Whether Build & Install waits: a device to pick, a picked device that
-    /// isn't connected, or no LiveContainer on the device the build would go
-    /// to (spec §5b). Only for a build that
+    /// isn't connected, no device at all, or no LiveContainer on the device
+    /// the build would go to (spec §5b). Only for a build that
     /// installs: a dry run or a skipped install is `.notDelivering`, which
     /// never waits.
     var blocksBuild: Bool {
         switch self {
-        case .noDefault, .defaultMissing, .liveContainerMissing, .overrideMissing:
+        // `.noDevice` too (B4): `select_device` raises "no iOS devices
+        // connected", which reached the pane as a red failure card.
+        case .noDefault, .defaultMissing, .liveContainerMissing, .overrideMissing, .noDevice:
             return true
-        case .device, .thisBuild, .fallback, .defaultUnreadable, .noDevice,
+        case .device, .thisBuild, .fallback, .defaultUnreadable,
              .overrideUnreadable, .scanning, .unreadable, .notDelivering, .needsPaidAccount:
             return false
         }
     }
 
-    /// "iPad", "iPod" or "iPhone", from a product type such as `iPad13,16`:
-    /// how a sentence names the kind of device ("the iPad's page").
+    /// "iPad", "iPod touch" or "iPhone", from a product type such as
+    /// `iPad13,16`: how a sentence names the kind of device ("the iPad's
+    /// page"), as the CLI does (`devices.family_from_lockdown`). A model
+    /// none of them starts is a "device": not guessed to be an iPhone.
     static func deviceKind(model: String) -> String {
         if model.hasPrefix("iPad") { return "iPad" }
-        if model.hasPrefix("iPod") { return "iPod" }
-        return "iPhone"
+        if model.hasPrefix("iPod") { return "iPod touch" }
+        if model.hasPrefix("iPhone") { return "iPhone" }
+        return "device"
     }
+
+    /// The bar's sentence for `.noDevice` (B4): both ways forward, in one
+    /// line; the tooltip says it in two.
+    static let noDeviceLine = "Connect your iPhone or iPad to install, or turn on Skip install in Build options."
+
+    /// The bar's sentences for the devices the CLI couldn't read (B1): what
+    /// to do, on the line, not only on a tooltip.
+    static func unreadableLine(count: Int) -> String {
+        "\(pluralized(count, "connected device")) couldn't be read: unlock \(count == 1 ? "it" : "them") "
+            + "and tap Trust."
+    }
+
+    static func defaultUnreadableLine(name: String) -> String {
+        "\(name), your default, couldn't be read: unlock it and tap Trust."
+    }
+
+    static let overrideUnreadableLine = "The device picked for Build & Install couldn't be read: "
+        + "unlock it and tap Trust."
 
     /// The bar's sentence for `.needsPaidAccount`: short, because the bar is
     /// one line; the tooltip has the rest.
@@ -490,13 +523,15 @@ struct BuildTargetBar: View {
                 device: target(
                     devices: devices, delivery: delivery, overrideUDID: overrideUDID,
                     deviceErrors: deviceErrors, hasLoaded: hasLoaded, notDelivering: nil,
-                    remembered: remembered, overrideName: overrideName
+                    account: account, remembered: remembered, overrideName: overrideName
                 )
             )
         }
         if let chosen = overrideUDID, !chosen.isEmpty {
             if let match = devices.first(where: { $0.udid == chosen }) {
-                if let missing = liveContainerMissing(on: match, delivery: delivery) { return missing }
+                if let missing = liveContainerMissing(on: match, delivery: delivery, account: account) {
+                    return missing
+                }
                 // Picking the default is no pick: the build goes there anyway.
                 if match.isDefault { return .device(name: match.name, mode: delivery.displayName) }
                 return .thisBuild(
@@ -550,7 +585,7 @@ struct BuildTargetBar: View {
             return .noDevice
         }
         if let marked = devices.first(where: \.isDefault) {
-            return liveContainerMissing(on: marked, delivery: delivery)
+            return liveContainerMissing(on: marked, delivery: delivery, account: account)
                 ?? .device(name: marked.name, mode: delivery.displayName)
         }
         let absentDefault = remembered.first(where: \.isDefault)
@@ -558,7 +593,7 @@ struct BuildTargetBar: View {
             return .defaultUnreadable(name: absentDefault.displayName)
         }
         if devices.count + deviceErrors.count == 1, let only = devices.first {
-            return liveContainerMissing(on: only, delivery: delivery) ?? .fallback(
+            return liveContainerMissing(on: only, delivery: delivery, account: account) ?? .fallback(
                 name: only.name, mode: delivery.displayName,
                 because: absentDefault.map { "\($0.displayName), your default, isn't connected" }
                     ?? "no default device is set"
@@ -571,13 +606,17 @@ struct BuildTargetBar: View {
     /// `.liveContainerMissing` for a LiveContainer app on `device`, when a
     /// listing that could read its apps found none; else nil. An unread
     /// listing (`livecontainerKnown` false: a locked phone, or an older CLI)
-    /// says nothing, so it never blocks a build.
-    static func liveContainerMissing(on device: DeviceRecord, delivery: DeliveryMode) -> BuildTarget? {
+    /// says nothing, so it never blocks a build. On a paid account, known to
+    /// be one, it offers Sideload too (`sideload`).
+    static func liveContainerMissing(
+        on device: DeviceRecord, delivery: DeliveryMode, account: AccountMode? = nil
+    ) -> BuildTarget? {
         guard delivery == .livecontainer, device.livecontainerKnown,
               device.livecontainerBundleId == nil
         else { return nil }
         return .liveContainerMissing(
-            name: device.name, udid: device.udid, kind: BuildTarget.deviceKind(model: device.model)
+            name: device.name, udid: device.udid, kind: BuildTarget.deviceKind(model: device.model),
+            sideload: account == .paid
         )
     }
 
@@ -656,9 +695,19 @@ struct BuildTargetBar: View {
     /// scan could read the device's apps (`livecontainerKnown`), so a locked
     /// phone is never offered a setup.
     static func setUpTarget(_ target: BuildTarget) -> (udid: String, kind: String)? {
-        if case let .liveContainerMissing(_, udid, kind) = target { return (udid, kind) }
+        if case let .liveContainerMissing(_, udid, kind, _) = target { return (udid, kind) }
         return nil
     }
+
+    /// The bar's line for `.liveContainerMissing`. The Set Up LiveContainer…
+    /// button beside it is the way on.
+    static func liveContainerMissingLine(name: String) -> String { "LiveContainer isn't on \(name)" }
+
+    /// The other way on, for a paid account: switch the app to Sideload with
+    /// the pane's Edit… (2.3.1 B2). A line of its own under the one above: the
+    /// two as one sentence, beside Set Up LiveContainer… and Change, were cut
+    /// at the minimum width (`AppDetailLayoutTests`).
+    static let sideloadOffer = "Or switch this app to Sideload with Edit…"
 
     /// Set Up LiveContainer…'s tooltip. The bar doesn't know the account, and
     /// a free Apple ID's sheet installs nothing (SideStore or iloader does),
@@ -814,14 +863,27 @@ struct BuildTargetBar: View {
         case let .defaultMissing(name):
             missing("\(name), your default, isn't connected: pick a device.")
         case let .defaultUnreadable(name):
-            missing("\(name), your default, couldn't be read.")
-        case let .liveContainerMissing(name, _, _):
-            // The button beside it says what to do (`action`).
-            missing("LiveContainer isn't on \(name)")
+            missing(BuildTarget.defaultUnreadableLine(name: name))
+        case let .liveContainerMissing(name, _, _, sideload):
+            // The button beside it says what to do (`action`), and on a paid
+            // account the line under it says the other way.
+            if sideload {
+                VStack(alignment: .leading, spacing: 2) {
+                    missing(Self.liveContainerMissingLine(name: name))
+                    Text(Self.sideloadOffer)
+                        .font(AppFont.body)
+                        .foregroundStyle(Palette.textMuted)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            } else {
+                missing(Self.liveContainerMissingLine(name: name))
+            }
         case .noDefault:
             missing("Several devices are connected: pick one for Build & Install.")
         case .noDevice:
-            missing("No device is connected, so a build has nowhere to install.")
+            // Muted, not amber (B4): `needsAttention` is false for it.
+            pending(BuildTarget.noDeviceLine)
         case .overrideMissing:
             // The udid stays in the tooltip. It is forty characters of
             // hexadecimal on a single-row bar that must not truncate the
@@ -835,9 +897,9 @@ struct BuildTargetBar: View {
             }
         case .overrideUnreadable:
             // Same reasoning as the case above: the udid stays in the tooltip.
-            missing("The device picked for Build & Install couldn't be read.")
+            missing(BuildTarget.overrideUnreadableLine)
         case let .unreadable(count):
-            missing("\(pluralized(count, "connected phone")) couldn't be read.")
+            missing(BuildTarget.unreadableLine(count: count))
         case .scanning:
             // The sidebar's words, not a second set — see
             // `DevicesStore.scanningLine`.
@@ -1007,13 +1069,16 @@ struct BuildTargetBar: View {
                 + "usually it's passcode-locked, or hasn't been told to trust this Mac. The build "
                 + "still goes to it, since a locked iPhone or iPad still counts as connected, and "
                 + "may then fail at the install. Unlock it, or pick another device with Change."
-        case let .liveContainerMissing(name, _, kind):
-            return "This app is delivered into LiveContainer, and \(name)'s apps don't include "
+        case let .liveContainerMissing(name, _, kind, sideload):
+            let waits = "This app is delivered into LiveContainer, and \(name)'s apps don't include "
                 + "it, so Build & Install waits. Set Up LiveContainer… opens its setup for this "
                 + "\(kind) without leaving this pane, or pick another device with Change."
+            guard sideload else { return waits }
+            return waits + " Or switch this app to Sideload with Edit…, and Graft installs it on "
+                + "\(name) as a normal app."
         case .noDevice:
-            return "No iPhone or iPad is connected. A build can still make the IPA with "
-                + "Skip install under Build options, but it has nothing to deliver to."
+            return "Connect your iPhone or iPad to install. To build without installing, turn on "
+                + "Skip install in Build options."
         case let .overrideMissing(udid, name):
             let named = name.map { "\($0) (\(udid))" } ?? "device \(udid)"
             return "Build & Install is set to \(named), which isn't connected, so it waits. A "
@@ -1030,15 +1095,15 @@ struct BuildTargetBar: View {
                 + "and may then fail at the install instead. Unlock it, or clear it with ✕."
         case let .unreadable(count):
             // `pluralized` carries the whole noun phrase rather than leaving a
-            // verb outside it: "2 phones is connected" is what the obvious
+            // verb outside it: "2 devices is connected" is what the obvious
             // spelling produces.
-            return "\(pluralized(count, "connected phone")) could not be described by "
+            return "\(pluralized(count, "connected device")) could not be described by "
                 + "the CLI — usually one that is passcode-locked, or that has not been "
                 + "told to trust this Mac. The scan exits 0 either way, so nothing else "
                 + "reports it. The Devices section has a row and a retry for each. A "
                 + "build may still reach it, because the installer enumerates over "
-                + "usbmux and usbmux can see a locked phone — but this pane cannot say "
-                + "whose phone it is, so it will not claim one."
+                + "usbmux and usbmux can see a locked device — but this pane cannot say "
+                + "whose device it is, so it will not claim one."
         case .needsPaidAccount:
             return PaidOnly.sideloadApp + " This config has no signing: section, so it is "
                 + "set up for a free Apple ID, and Sideload signs the app with a paid "
@@ -1047,16 +1112,16 @@ struct BuildTargetBar: View {
                 + "LiveContainer signs the app when you import it."
         case .scanning:
             return "The first device scan has not finished — a full listing costs about "
-                + "a second per phone in lockdown handshakes. Until it lands, an empty "
+                + "a second per device in lockdown handshakes. Until it lands, an empty "
                 + "list is not an answer, and \"no device is connected\" would be a claim "
                 + "nothing has checked yet."
         case let .notDelivering(option, device):
             let reason = option.suppressesDelivery ?? option.defaultLabel
             let opening = "\(reason) is set under Build options, so this build makes the "
-                + "IPA and stops — nothing is sent to any phone, whatever is plugged in. "
+                + "IPA and stops — nothing is sent to any device, whatever is plugged in. "
             guard option.stillResolvesDevice else {
                 return opening
-                    + "No phone is looked for either: Skip install skips the device lookup "
+                    + "No device is looked for either: Skip install skips the device lookup "
                     + "and the preflight's device checks alike, so nothing about what is on "
                     + "the bench can make this build fail."
             }
@@ -1069,13 +1134,13 @@ struct BuildTargetBar: View {
                     + "But a dry run is not Skip install: it still resolves a device "
                     + "first, and nothing is connected — so this build will not do "
                     + "nothing quietly, it will stop with \"no iOS devices connected\". "
-                    + "Plug a phone in, or use Skip install instead, which never looks."
+                    + "Plug an iPhone or iPad in, or use Skip install instead, which never looks."
             case let .overrideMissing(udid, _):
                 return opening
                     + "But a dry run is not Skip install: it still resolves a device "
                     + "first, and this build names device \(udid), which is not "
                     + "connected — so this build will stop with \"requested device … not "
-                    + "connected\". Clear it with ✕, plug that phone in, or use Skip "
+                    + "connected\". Clear it with ✕, plug that device in, or use Skip "
                     + "install instead, which never looks."
             case .noDefault, .defaultMissing:
                 return opening

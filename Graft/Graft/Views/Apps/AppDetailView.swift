@@ -85,7 +85,7 @@ struct AppDetailView: View {
     /// Build options' "This Mac" section (`MacBuildSection`). `ContentView`
     /// passes `GraftApp`'s, which asks LaunchServices and opens the browser.
     let playCover: PlayCover
-    /// One-click Update: the pane's update line and its button, and Check
+    /// Updates for your apps: the pane's update line and its button, and Check
     /// for updates now. Nil in a test of something else.
     @ObservedOptionalObject var appUpdates: AppUpdatesStore?
     /// Open Set Up LiveContainer for a device (spec §5c): the build-target
@@ -93,6 +93,10 @@ struct AppDetailView: View {
     /// presents the sheet over this pane, so Build is one press away once
     /// it's done. Nil, the default, offers no button.
     let setUpLiveContainer: ((String) -> Void)?
+
+    /// Whether App Store gets run here: what a missing IPA's wait suggests
+    /// (`missingIPA`).
+    @Environment(\.macSupport) private var mac
 
     @State private var buildState: BuildState = .idle
     @State private var logLines: [LogLine] = []
@@ -118,6 +122,9 @@ struct AppDetailView: View {
     /// What the last export from this pane wrote, for its confirmation and
     /// Show in Finder. Goes when the next build starts or the app changes.
     @State private var exported: IPAExportedRecord?
+    /// The last build's push into LiveContainer, for its next-step card;
+    /// gone when the next build starts or another app is shown.
+    @State private var sentToLiveContainer: LiveContainerSent?
 
     /// What the last `--reconcile` said about itself, as opposed to what it
     /// changed — which arrives separately, as a re-reported delivery state on
@@ -126,7 +133,9 @@ struct AppDetailView: View {
     /// order, so without this the button would appear to confirm a delivery it
     /// never looked at.
     private enum DeviceCheck: Equatable {
-        case clean
+        /// No warning: the line naming the device it asked
+        /// (`ReconcileOutcome.cleanLine`).
+        case clean(String)
         case warned([String])
     }
 
@@ -197,6 +206,7 @@ struct AppDetailView: View {
                     encryptedBinariesCard
                     lastBuildFailureCard
                     exportedCard
+                    liveContainerSentCard
                     deliverySection
                     ipaSection
                     tweaksSection
@@ -237,6 +247,7 @@ struct AppDetailView: View {
             buildState = .idle
             logLines = []
             exported = nil
+            sentToLiveContainer = nil
             // The note belongs to the app it was run for, so it goes. The
             // *spinner* deliberately does not live here any more: it is
             // `store.checkingApp`, because a view-local flag reset on every
@@ -268,6 +279,9 @@ struct AppDetailView: View {
             // pin selects. After the cache read, so the CLI's two answers about
             // the cache are never from different moments.
             await appStore.checkVersion(app: app.name, context: versionContext)
+            // What Get waits for (B5): the check above read the setup from
+            // files; with no answer from it, status, once.
+            await appStore.checkSetupIfUnknown()
         }
         // A drop or get for this app staged a new file: the card is now stale.
         // Artwork is `ContentView`'s, which watches every app's completions so
@@ -487,9 +501,10 @@ struct AppDetailView: View {
                 // Nor while an update runs, for any app: the slot is one
                 // (spec 4.5), and its tooltip says so (`Busy.updating`).
                 // And while the bar waits for a pick, or the target has no
-                // LiveContainer (spec §5b): the build could only fail.
+                // LiveContainer (spec §5b): the build could only fail. And
+                // while the cache has said there's no IPA (B3).
                 .disabled(store.buildingApp != nil || store.updatingApps != nil || appStore.isBusy(app.name)
-                          || buildRefusal != nil || barTarget.blocksBuild)
+                          || buildRefusal != nil || barTarget.blocksBuild || ipaWait != nil)
                 .help(buildButtonHelp)
 
                 if store.buildingApp == app.name {
@@ -639,16 +654,18 @@ struct AppDetailView: View {
     @ViewBuilder
     private var updateLine: some View {
         if let appUpdates, let plan = appUpdates.plans[app.name],
-           let line = AppUpdateText.paneLine(plan, title: app.shownName) {
+           let line = AppUpdateText.paneLine(plan, title: app.shownName, mac: mac) {
             AppUpdateLine(
-                line: line, isBusy: updateIsBusy, help: AppUpdateText.buttonHelp(plan),
+                line: line, isBusy: updateIsBusy,
+                help: updateWaitsForSetUp ? appStore.setUpReason : AppUpdateText.buttonHelp(plan),
                 failure: appUpdates.dropFailure.flatMap { $0.app == app.name ? $0.message : nil },
                 stopUpdatingDisabled: appUpdates.isUpdating || appUpdates.dropping != nil,
                 onStopUpdating: { udid in Task { await appUpdates.dropTarget(app: app.name, udid: udid) } },
                 offeredBlock: { udid in
                     offeredInstallBlock(udid, name: line.offered.first { $0.udid == udid }?.deviceName)
                 },
-                onInstallOffered: installOffered
+                onInstallOffered: installOffered,
+                onOpenSettings: showSettings
             ) {
                 appUpdates.openConfirmation(apps: [app.name])
             }
@@ -656,6 +673,15 @@ struct AppDetailView: View {
         } else if let appUpdates, !appUpdates.checkApps {
             HStack {
                 Spacer()
+                // How it went (B10), beside the button that asked.
+                if let result = appUpdates.checkResult, result.apps == [app.name] {
+                    Text(result.message)
+                        .font(AppFont.monoSmall)
+                        .foregroundStyle(result.failed ? Palette.warn : Palette.textDim)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .help(result.message)
+                }
                 Button(AppUpdateText.checkNow) { Task { await appUpdates.checkNow(apps: [app.name]) } }
                     .controlSize(.small)
                     .disabled(appUpdates.isChecking)
@@ -710,12 +736,52 @@ struct AppDetailView: View {
             busy: store.busy != nil || appUpdates?.isUpdating == true,
             getting: appStore.isBusy(app.name),
             updatingTweak: tweaksStore.updatingFilename.map { app.tweaks.contains($0) } ?? false,
-            refused: buildRefusal != nil
+            refused: buildRefusal != nil,
+            setUp: updateWaitsForSetUp
         )
     }
 
-    static func updateIsBusy(busy: Bool, getting: Bool, updatingTweak: Bool, refused: Bool) -> Bool {
-        busy || getting || updatingTweak || refused
+    /// `setUp`: the update gets from the App Store, and status says the App
+    /// Store isn't set up (B5), so the get would fail.
+    static func updateIsBusy(busy: Bool, getting: Bool, updatingTweak: Bool, refused: Bool,
+                             setUp: Bool = false) -> Bool {
+        busy || getting || updatingTweak || refused || setUp
+    }
+
+    /// This app's plan gets from the App Store and status says the App Store
+    /// isn't set up (B5): Update & Install waits, saying so. The plan already
+    /// skips the get for what files can tell (`update_plan.setup_missing`);
+    /// status knows the rest, another ipatool's sign-in among it.
+    private var updateWaitsForSetUp: Bool {
+        appUpdates?.plans[app.name]?.getsFromStore == true && appStore.setUpReason != nil
+    }
+
+    /// Why a build waits for an IPA, or nil (B3): only once the cache has said
+    /// there's none. Nil while the read runs, or when it failed, which are no
+    /// answer. `appStore`: App Store gets run here, so Get latest is a way to
+    /// one; where they don't (`MacSupport.unavailableLine`), it's disabled,
+    /// and the wait doesn't name it.
+    static func missingIPA(_ cached: CachedIPARecord?, appStore: Bool = true) -> String? {
+        guard cached?.exists == false else { return nil }
+        return appStore
+            ? "Add a decrypted IPA first: drop one on Source IPA below, or use Get latest from App Store."
+            : "Add a decrypted IPA first: drop one on Source IPA below."
+    }
+
+    /// `missingIPA` for this pane's app, on this Mac.
+    private var ipaWait: String? { Self.missingIPA(cachedIPA, appStore: mac.unavailableLine == nil) }
+
+    /// Build options' two actions that build (`popoverWait`).
+    enum PopoverAction { case macBuild, export }
+
+    /// Why Build for this Mac or Export IPA… waits, beyond the build slot, or
+    /// nil (the re-verify of B3: both ran with no IPA, and failed with flag
+    /// hints). A refusal of every build of the app (`buildRefusal`) stops the
+    /// Mac build, never an export, which signs nothing; a missing IPA stops
+    /// both.
+    static func popoverWait(_ action: PopoverAction, refusal: String?, cached: CachedIPARecord?,
+                            appStore: Bool) -> String? {
+        (action == .macBuild ? refusal : nil) ?? missingIPA(cached, appStore: appStore)
     }
 
     /// Where the next Build & Install goes, from the facts the CLI's table
@@ -749,8 +815,13 @@ struct AppDetailView: View {
         _ = try? await devices.load()
     }
 
+    /// `popoverWait` for this pane's app, on this Mac.
+    private func popoverWait(_ action: PopoverAction) -> String? {
+        Self.popoverWait(action, refusal: buildRefusal, cached: cachedIPA, appStore: mac.unavailableLine == nil)
+    }
+
     private var buildButtonHelp: String {
-        buildRefusal ?? store.busy?.explanation
+        buildRefusal ?? store.busy?.explanation ?? ipaWait
             ?? (barTarget.blocksBuild ? BuildTargetBar.explanation(for: barTarget) : nil)
             ?? "Build and install \(app.shownName)"
     }
@@ -886,7 +957,7 @@ struct AppDetailView: View {
                     // directly under "3 connected" with nothing saying whether
                     // three is the total or the readable ones.
                     if !devices.deviceErrors.isEmpty {
-                        Text("\(pluralized(devices.deviceErrors.count, "more connected phone")) "
+                        Text("\(pluralized(devices.deviceErrors.count, "more connected device")) "
                              + "couldn't be read — see Devices.")
                             .font(AppFont.monoSmall)
                             .foregroundStyle(Palette.warn)
@@ -937,10 +1008,11 @@ struct AppDetailView: View {
                 // running for another app. Also not while this app's
                 // source IPA is being replaced, as Build & Install.
                 isBuildDisabled: store.buildingApp != nil || appStore.isBusy(app.name)
-                    || buildRefusal != nil,
+                    || popoverWait(.macBuild) != nil,
                 // A Mac build of a sideload app is refused too: the
                 // refusal is the build's first step, whatever its target.
-                buildHelp: buildRefusal ?? Self.macBuildHelp,
+                // And it waits for an IPA, as Build & Install does (B3).
+                buildHelp: popoverWait(.macBuild) ?? Self.macBuildHelp,
                 onBuild: { startMacBuild() }
             )
 
@@ -960,8 +1032,10 @@ struct AppDetailView: View {
                 Button(Self.exportLabel) { chooseExportDestination() }
                     .controlSize(.small)
                     // The build slot, as Build for this Mac: there is one.
-                    .disabled(store.buildingApp != nil || appStore.isBusy(app.name))
-                    .help(Self.exportHelp)
+                    // And an IPA to export (B3).
+                    .disabled(store.buildingApp != nil || appStore.isBusy(app.name)
+                              || popoverWait(.export) != nil)
+                    .help(popoverWait(.export) ?? Self.exportHelp)
             }
         }
         .font(AppFont.body)
@@ -977,8 +1051,8 @@ struct AppDetailView: View {
     /// Build for this Mac's tooltip: what it does, and what to expect of any
     /// app under PlayCover (spec 5d item 4).
     static let macBuildHelp = "Build with the stub framework PlayCover needs, then hand it to "
-        + "PlayCover to install here. Nothing is sent to the phone, and the artifact is not "
-        + "one a phone can use. " + PlayCover.expectations
+        + "PlayCover to install here. Nothing is sent to the device, and the artifact is not "
+        + "one an iPhone or iPad can use. " + PlayCover.expectations
 
     /// The staged line to show, or nil once a build has started since it
     /// landed — whichever button started it. See `ConfigStore.buildStartedAt`.
@@ -1175,6 +1249,54 @@ struct AppDetailView: View {
 
     static func exportedTitle(_ record: IPAExportedRecord) -> String {
         "Exported \(record.filename)"
+    }
+
+    /// A LiveContainer push a build finished (2.3.1 B9): where it went, off
+    /// the `lc-push` stage's end, and the file it left in Documents.
+    struct LiveContainerSent: Equatable {
+        let udid: String?
+        /// What Graft last saw the device called, or nil when it never was.
+        let deviceName: String?
+        let filename: String?
+    }
+
+    /// The push a finished build made, off its stream, or nil: a dry run, a
+    /// sideload, or a build that pushed nothing. Only a push the CLI says
+    /// went (`dry_run` false) counts.
+    static func liveContainerSent(in events: [BuildEvent]) -> LiveContainerSent? {
+        events.compactMap { event -> LiveContainerSent? in
+            guard case let .stage(name, status, fields) = event,
+                  name == CLIContract.Stage.liveContainerPush, status == "end",
+                  (fields["dry_run"] as? Bool) == false
+            else { return nil }
+            return LiveContainerSent(
+                udid: fields["udid"] as? String,
+                deviceName: fields["device_name"] as? String,
+                filename: (fields["documents_path"] as? String).map { ($0 as NSString).lastPathComponent }
+            )
+        }.last
+    }
+
+    /// The next step, which is the person's: Graft can't see the import. Said
+    /// on the pane and to VoiceOver, since the CLI's own reminder goes to
+    /// stderr and the button only says "Done".
+    static func sentLine(device: String?, app: String) -> String {
+        "Sent to LiveContainer on \(device ?? "your iPhone or iPad"). Open LiveContainer and import "
+            + "\(app) to finish."
+    }
+
+    static func sentFileLine(_ filename: String) -> String {
+        "It's \(filename) in LiveContainer's Documents."
+    }
+
+    /// The device's name: the push's own, else the device list's for its
+    /// udid, else the remembered one's. Never the udid itself.
+    static func sentDeviceName(
+        _ sent: LiveContainerSent, devices: [DeviceRecord], remembered: [SeenDeviceRecord]
+    ) -> String? {
+        if let name = sent.deviceName, !name.isEmpty { return name }
+        guard let udid = sent.udid else { return nil }
+        return devices.first { $0.udid == udid }?.name ?? remembered.first { $0.udid == udid }?.name
     }
 
     /// Re-run the full scan directly, the same call the sidebar's own retry
@@ -1493,6 +1615,41 @@ struct AppDetailView: View {
         }
     }
 
+    private func sentDeviceName(_ sent: LiveContainerSent) -> String? {
+        Self.sentDeviceName(sent, devices: devices.devices, remembered: devices.remembered)
+    }
+
+    /// A LiveContainer build's next step, which only the person can take on
+    /// the device. A card, like the export's, because it says how the last
+    /// run ended; it goes when the next one starts.
+    @ViewBuilder
+    private var liveContainerSentCard: some View {
+        if let sent = sentToLiveContainer {
+            HStack(alignment: .top, spacing: 10) {
+                Symbols.ok.image(size: 14)
+                    .foregroundStyle(Palette.success)
+                    .padding(.top, 1)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(Self.sentLine(device: sentDeviceName(sent), app: app.shownName))
+                        .font(AppFont.bodyMedium)
+                        .foregroundStyle(Palette.text)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let filename = sent.filename {
+                        Text(Self.sentFileLine(filename))
+                            .font(AppFont.monoSmall)
+                            .foregroundStyle(Palette.textDim)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(Metrics.cardPadding)
+            .cardStyle()
+        }
+    }
+
     /// What we believe about the phone, and the one control that can test it.
     ///
     /// The state line and the Check-device button have to share a section
@@ -1611,7 +1768,7 @@ struct AppDetailView: View {
         if app.delivery != .livecontainer {
             return "Only LiveContainer apps can be checked. A sideload is installed "
                 + "under a bundle id cyan rewrites at build time and nothing records, "
-                + "so there is nothing on the phone to look for."
+                + "so there is nothing on the device to look for."
         }
         if let busy = store.busy { return busy.explanation }
         return "Look on the connected device for the file this app last delivered"
@@ -1627,7 +1784,9 @@ struct AppDetailView: View {
     /// device was consulted, and the run still ends clean — so "the file is
     /// there" or "the device confirms this" would be false exactly when the
     /// user most needs it not to be. "The record still stands" claims only
-    /// what this side actually knows: the check raised no objection.
+    /// what this side actually knows: the check raised no objection. A check
+    /// that did ask a device names it (`reconcile-checked`), and says so when
+    /// the file was gone (2.3.1 §3.5, `ReconcileOutcome.cleanLine`).
     @ViewBuilder
     private var deviceCheckNote: some View {
         // While the check waits on the phone, what it is waiting for, in the
@@ -1648,8 +1807,8 @@ struct AppDetailView: View {
         switch deviceCheck {
         case .none:
             EmptyView()
-        case .some(.clean):
-            Text("Checked — the record still stands.")
+        case let .some(.clean(line)):
+            Text(line)
                 .font(AppFont.monoSmall)
                 .foregroundStyle(Palette.textDim)
         case let .some(.warned(lines)):
@@ -1696,7 +1855,11 @@ struct AppDetailView: View {
             let outcome = try await store.reconcile(appName: owner)
             guard canApplyCheck(owner) else { return }
             let warnings = outcome.warnings
-            deviceCheck = warnings.isEmpty ? .clean : .warned(warnings)
+            // The window's name for the device, for one the CLI has none for.
+            let known = outcome.checked.flatMap { checked in
+                devices.devices.first { $0.udid == checked.udid }?.name
+            }
+            deviceCheck = warnings.isEmpty ? .clean(outcome.cleanLine(knownName: known)) : .warned(warnings)
         } catch {
             // A non-zero exit, or a subprocess that never launched. Same
             // channel as the CLI's own warnings: this is the check reporting
@@ -1781,7 +1944,9 @@ struct AppDetailView: View {
                 appName: app.shownName,
                 claimBlockedReason: appStore.claimBlockedReason,
                 getBlockedReason: appStore.getBlockedReason,
-                onOlderVersions: { showingOlderVersions = true }
+                onOlderVersions: { showingOlderVersions = true },
+                setUpReason: appStore.setUpReason,
+                onOpenSettings: showSettings
             )
             // What the last get or drop staged, until the next action — a
             // drop that worked used to look exactly like one that did nothing.
@@ -2169,6 +2334,12 @@ struct AppDetailView: View {
         if options.exportPath != nil, logOwner == owner {
             exported = events.flatMap(Self.exportedRecord(in:))
         }
+        // A LiveContainer build's next step, only once it finished cleanly.
+        if options.exportPath == nil, logOwner == owner,
+           let sent = events.flatMap(Self.liveContainerSent(in:)) {
+            sentToLiveContainer = sent
+            VoiceOverAnnouncement.thisMac.post(Self.sentLine(device: sentDeviceName(sent), app: app.shownName))
+        }
         // One read of the build log serving both things that want it: the meta
         // strip, and — for a Mac build — the filename PlayCover is handed. Two
         // `--builds` runs would be two answers about one build, and the second
@@ -2252,6 +2423,7 @@ struct AppDetailView: View {
     ) async -> [BuildEvent]? {
         logLines = []
         exported = nil
+        sentToLiveContainer = nil
         buildState = .running(stage: "starting")
         // The note describes a check of the *previous* delivery, and this build
         // is about to replace it. Leaving "the record still stands" under a

@@ -144,9 +144,13 @@ def unsupported_frameworks(binary: Path) -> list[str]:
 
 def tweak_origins(tweaks: Iterable[Path]) -> dict[str, str]:
     """Which names in an app's `Frameworks/` the attached tweaks brought,
-    each to the tweak's filename: every `.dylib` and every `.framework` in a
+    each to the tweak's name: every `.dylib` and every `.framework` in a
     .deb's data (cyan puts both in `Frameworks/`), and an attached bare
     `.dylib` or `.framework` itself.
+
+    A .deb is named as the Tweaks library names it (`--tweaks`' `name`, from
+    `deb.control_fields`: its control `Name`, else its package id), or by its
+    file name when its control can't be read; a bare binary by its file name.
 
     A .deb it can't read (`deb.data_names` None) claims nothing, so its
     binaries are taken for the app's own: they warn instead of refusing.
@@ -154,13 +158,15 @@ def tweak_origins(tweaks: Iterable[Path]) -> dict[str, str]:
     origins: dict[str, str] = {}
     for path in tweaks:
         if path.suffix == ".deb":
-            for name in deb.data_names(path) or []:
+            names = deb.data_names(path) or []
+            named = (deb.control_fields(path).get("name") or path.name) if names else path.name
+            for name in names:
                 parts = name.split("/")
                 bundle = next((p for p in parts[:-1] if p.endswith(".framework")), None)
                 if bundle is not None:
-                    origins.setdefault(bundle, path.name)
+                    origins.setdefault(bundle, named)
                 elif parts[-1].endswith(".dylib"):
-                    origins.setdefault(parts[-1], path.name)
+                    origins.setdefault(parts[-1], named)
         elif path.suffix in (".dylib", ".framework"):
             origins.setdefault(path.name, path.name)
     return origins
@@ -173,8 +179,8 @@ class UnsupportedLink:
     #: Its name in `Frameworks/`: `Example.dylib` or `ExampleKit.framework`.
     binary: str
     framework: str
-    #: The tweak that brought it (its filename), or None for the app's own
-    #: binary, or one whose origin can't be told.
+    #: The tweak that brought it (its name, `tweak_origins`), or None for the
+    #: app's own binary, or one whose origin can't be told.
     tweak: str | None
 
     @property
@@ -267,7 +273,7 @@ def refusal_message(links: list[UnsupportedLink]) -> str:
             by_tweak[link.tweak].append(link.framework)
     return " ".join(
         f"{tweak} needs iOS's {' and '.join(frameworks)}, which macOS doesn't have, so it "
-        "can't run under PlayCover. Phone builds can still use it; to build for this Mac, "
+        "can't run under PlayCover. iPhone and iPad builds can still use it; to build for this Mac, "
         "remove it from the app first."
         for tweak, frameworks in by_tweak.items()
     )

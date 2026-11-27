@@ -92,6 +92,39 @@ enum Changelog {
         return line.dropFirst(2).trimmingCharacters(in: .whitespaces)
     }
 
+    /// A release's version, as its heading and `CFBundleShortVersionString`
+    /// write it: numbers between dots ("2.3.1"). Compared number by number,
+    /// not as text, so 2.10 comes after 2.9; trailing zeros don't count, so
+    /// 2.3 is 2.3.0.
+    struct Version: Comparable {
+        /// The numbers, without trailing zeros.
+        let parts: [Int]
+
+        /// Nil unless `text` is ASCII digits between single dots.
+        init?(_ text: String) {
+            var parts: [Int] = []
+            for piece in text.split(separator: ".", omittingEmptySubsequences: false) {
+                guard !piece.isEmpty, piece.allSatisfy({ ("0"..."9").contains($0) }), let number = Int(piece) else {
+                    return nil
+                }
+                parts.append(number)
+            }
+            while parts.last == 0 { parts.removeLast() }
+            self.parts = parts
+        }
+
+        /// The version a release heading names, `## <version> (<date>)`: its
+        /// first word. Nil for a heading that doesn't start with one.
+        init?(heading: String) {
+            guard let word = heading.split(separator: " ", maxSplits: 1).first else { return nil }
+            self.init(String(word))
+        }
+
+        static func < (lhs: Version, rhs: Version) -> Bool {
+            lhs.parts.lexicographicallyPrecedes(rhs.parts)
+        }
+    }
+
     /// What the changelog's relative links are relative to: the repository,
     /// as GitHub shows the file.
     static let repositoryURL = URL(string: "https://github.com/GreenglassT/Graft/blob/main/")!
@@ -125,8 +158,8 @@ enum Changelog {
     }
 }
 
-/// Help › What's New…: the window that shows `Changelog`, and when it opens
-/// by itself.
+/// Help › What's New…: the window that shows `Changelog`, which releases it
+/// opens on, and when it opens by itself.
 enum WhatsNew {
     static let windowID = "whats-new"
     static let windowTitle = "What's New"
@@ -134,6 +167,9 @@ enum WhatsNew {
     /// What the window says when this copy of Graft has no changelog, or
     /// can't read it.
     static let missing = "The changelog isn't in this copy of Graft."
+    /// The button at the end of the page that shows the rest of the
+    /// changelog.
+    static let showEarlier = "Show earlier releases"
 
     /// What the window shows.
     enum Content: Equatable {
@@ -146,6 +182,66 @@ enum WhatsNew {
     static func content(of text: String?) -> Content {
         let blocks = text.map(Changelog.blocks(in:)) ?? []
         return blocks.isEmpty ? .missing : .blocks(blocks)
+    }
+
+    /// What the window opens on.
+    enum Opening: Equatable {
+        /// The newest release: Help › What's New…, and any opening with no
+        /// version to start from.
+        case newest
+        /// After an update: the releases newer than `last`, the version
+        /// that launched before, up to and including `current`, this one.
+        case since(last: String, current: String)
+    }
+
+    /// What the window shows of the changelog's `blocks`.
+    struct Page: Equatable {
+        let blocks: [Changelog.Block]
+        /// Whether a release is left out: then Show earlier releases ends
+        /// the page.
+        let hasMore: Bool
+    }
+
+    /// The page for `opening`: the blocks before the first release (the
+    /// title and intro), then the releases it opens on, in the changelog's
+    /// order, which is newest first. `expanded`, after Show earlier
+    /// releases, is every block.
+    ///
+    /// A release is a `##` heading and what follows it, up to the next.
+    /// `.since` is each release whose version is newer than `last` and no
+    /// newer than `current`, by number (`Changelog.Version`); a heading that
+    /// isn't a version counts as older, so it's never in one. When that's
+    /// none, or either version doesn't parse, it opens as `.newest` does: on
+    /// the release with the highest version, or the first when no heading
+    /// is a version.
+    static func page(_ blocks: [Changelog.Block], opening: Opening, expanded: Bool) -> Page {
+        // Each release's range in `blocks`, and its version.
+        var releases: [(range: Range<Int>, version: Changelog.Version?)] = []
+        for (index, block) in blocks.enumerated() {
+            guard case let .heading(2, text) = block else { continue }
+            if let last = releases.indices.last { releases[last].range = releases[last].range.lowerBound..<index }
+            releases.append((index..<blocks.count, Changelog.Version(heading: text)))
+        }
+        guard !expanded, let first = releases.first else { return Page(blocks: blocks, hasMore: false) }
+
+        var chosen: [Range<Int>] = []
+        if case let .since(last, current) = opening,
+           let last = Changelog.Version(last), let current = Changelog.Version(current) {
+            chosen = releases.filter { release in
+                guard let version = release.version else { return false }
+                return last < version && version <= current
+            }.map(\.range)
+        }
+        if chosen.isEmpty {
+            // `max` keeps the first of equals.
+            let versioned = releases.compactMap { release in release.version.map { (release.range, $0) } }
+            chosen = [versioned.max { $0.1 < $1.1 }?.0 ?? first.range]
+        }
+        let preamble = blocks[..<first.range.lowerBound]
+        return Page(
+            blocks: Array(preamble) + chosen.flatMap { blocks[$0] },
+            hasMore: chosen.count < releases.count
+        )
     }
 
     static func isWebPage(_ url: URL) -> Bool {
@@ -166,26 +262,53 @@ enum WhatsNew {
     /// The `UserDefaults` key for the version of Graft that last launched.
     static let lastVersionKey = "whatsNew.lastVersion"
 
-    /// Whether What's New opens by itself at this launch: when this Mac last
-    /// launched a different version of Graft, so once after each update.
+    /// What What's New opens on by itself at this launch, or nil when it
+    /// doesn't open. It opens when this Mac last launched a different version
+    /// of Graft, so once after each update, on the releases since that one.
     /// Not at a first launch, with no version recorded: that one is the
     /// setup screen's. Records `version` either way.
-    static func opensAfterUpdate(version: String, defaults: UserDefaults) -> Bool {
+    static func opensAfterUpdate(version: String, defaults: UserDefaults) -> Opening? {
         let last = defaults.string(forKey: lastVersionKey)
-        guard last != version else { return false }
+        guard last != version else { return nil }
         defaults.set(version, forKey: lastVersionKey)
-        return last != nil
+        return last.map { .since(last: $0, current: version) }
+    }
+}
+
+/// What the What's New window opens on, and whether Show earlier releases
+/// was pressed. One for the app: Help › What's New… and the opening after an
+/// update set it before they open the window, which may already be open.
+@MainActor
+final class WhatsNewStore: ObservableObject {
+    /// `.newest` until something opens the window: a window macOS reopens
+    /// at launch shows the newest release, as Help does.
+    @Published private(set) var opening: WhatsNew.Opening = .newest
+    /// Show earlier releases was pressed: the whole changelog shows.
+    @Published private(set) var expanded = false
+
+    /// Opens on `opening`, with the earlier releases folded away again.
+    func show(_ opening: WhatsNew.Opening) {
+        self.opening = opening
+        expanded = false
+    }
+
+    /// Show earlier releases.
+    func expand() {
+        expanded = true
     }
 }
 
 /// The What's New window's content: the changelog as headings, paragraphs
-/// and lists, newest release first, or one line saying it isn't there.
+/// and lists, or one line saying it isn't there. It opens on what `store`
+/// says (`WhatsNew.page`): the releases since the last version after an
+/// update, the newest from Help, with Show earlier releases for the rest.
 ///
 /// `open` is how a link opens: `GraftApp` passes the browser, a test a
 /// recorder. Set as the window's `openURL`, so SwiftUI's own default, the
 /// real browser, never applies (`NoRealDefaultsTests`).
 struct WhatsNewView: View {
     private let content: WhatsNew.Content
+    @ObservedObject private var store: WhatsNewStore
     private let open: (URL) -> Void
 
     /// Wide enough for a line of about 90 characters at `AppFont.body`, and
@@ -196,8 +319,9 @@ struct WhatsNewView: View {
     /// How far each list level is indented.
     static let indent: CGFloat = 18
 
-    init(changelog: String?, open: @escaping (URL) -> Void) {
+    init(changelog: String?, store: WhatsNewStore, open: @escaping (URL) -> Void) {
         content = WhatsNew.content(of: changelog)
+        self.store = store
         self.open = open
     }
 
@@ -211,10 +335,15 @@ struct WhatsNewView: View {
                     .padding(Metrics.paneGutter)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             case let .blocks(blocks):
+                let page = WhatsNew.page(blocks, opening: store.opening, expanded: store.expanded)
                 ScrollView {
                     VStack(alignment: .leading, spacing: Metrics.titleGap) {
-                        ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
+                        ForEach(Array(page.blocks.enumerated()), id: \.offset) { index, block in
                             ChangelogBlockView(block: block, isFirst: index == 0)
+                        }
+                        if page.hasMore {
+                            Button(WhatsNew.showEarlier) { store.expand() }
+                                .padding(.top, Metrics.sectionGap)
                         }
                     }
                     .frame(maxWidth: Self.readingWidth, alignment: .leading)
@@ -291,26 +420,37 @@ private struct ChangelogBlockView: View {
     }
 }
 
-/// Help › What's New…: opens the window, or brings it forward.
+/// Help › What's New…: opens the window on the newest release, or brings it
+/// forward and shows the newest release there.
 struct WhatsNewCommand: View {
+    @ObservedObject var store: WhatsNewStore
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button(WhatsNew.menuTitle) { openWindow(id: WhatsNew.windowID) }
+        Button(WhatsNew.menuTitle) {
+            store.show(.newest)
+            openWindow(id: WhatsNew.windowID)
+        }
     }
 }
 
 /// Opens What's New once after an update (`WhatsNew.opensAfterUpdate`), when
-/// the main window first appears. Nil `defaults` turns it off: `GraftApp`
-/// passes nil in a test host, which is this app.
+/// the main window first appears, on the releases since the version that
+/// launched before. Nil `defaults` turns it off: `GraftApp` passes nil in a
+/// test host, which is this app.
 struct OpensWhatsNewAfterUpdate: ViewModifier {
     let defaults: UserDefaults?
     let version: String
+    /// The window's, told what to open on before it opens.
+    @PassedThrough var store: WhatsNewStore
     @Environment(\.openWindow) private var openWindow
 
     func body(content: Content) -> some View {
         content.task {
-            guard let defaults, WhatsNew.opensAfterUpdate(version: version, defaults: defaults) else { return }
+            guard let defaults, let opening = WhatsNew.opensAfterUpdate(version: version, defaults: defaults) else {
+                return
+            }
+            store.show(opening)
             openWindow(id: WhatsNew.windowID)
         }
     }

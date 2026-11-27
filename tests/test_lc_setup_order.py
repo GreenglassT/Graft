@@ -26,7 +26,7 @@ import yaml
 
 from graft_ipa import apple_portal, lc_manage, setup_portal, signer
 from graft_ipa.config import load_config
-from graft_ipa.errors import SigningError
+from graft_ipa.errors import ConfigError, SigningError
 
 from .test_lc_install import FakeDevice, Recorder
 
@@ -110,3 +110,26 @@ def test_a_device_that_isnt_registered_stops_before_any_progress(
     assert calls == [0]
     assert lc_install.rec.of("lc-install-progress") == [], "the app puts this on Set Up's first step"
     assert lc_install.fetched == []
+
+
+def test_no_app_store_connect_key_is_refused_before_the_keychain(
+    lc_install: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2.3.1 B6: with no App Store Connect key, `--lc-install` used to read
+    the .p12's password from the keychain first, then refuse in config words
+    ("needs an app_store_connect section"). It now refuses first, in the words
+    the app's Set Up LiveContainer sheet uses, and names where to add one."""
+    raw = yaml.safe_load(lc_install.config.read_text())
+    del raw["app_store_connect"]
+    lc_install.config.write_text(yaml.safe_dump(raw, sort_keys=False))
+    read: list[object] = []
+    monkeypatch.setattr(signer, "resolve_p12_password", lambda cfg: read.append(cfg) or "pw")
+
+    with pytest.raises(ConfigError) as err:
+        _run(lc_install)
+
+    assert err.value.message == "installing LiveContainer needs an App Store Connect key"
+    assert "Settings › App Store Connect" in (err.value.hint or "")
+    assert "graft --setup-portal" in (err.value.hint or "")
+    assert read == [], "the keychain wasn't read for a refusal"
+    assert lc_install.rec.of("lc-install-progress") == []

@@ -213,7 +213,7 @@ struct CachePaneView: View {
             return .confirm(
                 "\(record.filename) — \(size). This deletes the file outright; it does "
                 + "not go to the Trash. Getting it back means dumping the app from a "
-                + "phone again."
+                + "device again."
             )
         }
     }
@@ -336,7 +336,7 @@ struct CachePaneView: View {
             // why). None of them licenses a word about what the cache holds.
             return "Not read yet — no cache listing has come back."
         case .empty:
-            return "Nothing staged. Dumping an app from a phone puts its IPA here."
+            return "Nothing staged. Dumping an app from a device puts its IPA here."
         case .rows:
             return nil
         }

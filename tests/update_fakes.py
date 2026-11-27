@@ -5,7 +5,10 @@ A world of two LiveContainer apps, `example` and `bravo`, sharing a tweak
 once to the one phone, with:
 - the App Store lookup answered from `store` (`itunes.lookup_by_bundle_ids`),
   every request recorded in `lookups`;
-- published tweak versions in `published` (`updates.canister_latest`), and a
+- published tweak versions in `published` (`updates.canister_offers`, one
+  canister repository, `REPO_URL`, which lists every build the library holds),
+  each library tweak recorded as fetched from it (`tweak_sources`), so its
+  updates are verified (`serve_insecure` makes one plain http), and a
   download that writes the new .deb (`canister.fetch_deb`), recorded;
 - phones at usbmux's, lockdown's and installation_proxy's boundaries
   (`devices`, `lc_manage.UsbmuxDevice`, `device_info`);
@@ -34,6 +37,7 @@ from graft_ipa import (
     devices,
     itunes,
     lc_manage,
+    tweak_sources,
     update_plan,
     update_run,
     updates,
@@ -45,8 +49,9 @@ from graft_ipa.devices import BriefDevice, DeviceInfo, DeviceListing, DeviceLook
 from graft_ipa.errors import DeviceNotConnectedError, ITunesError
 from graft_ipa.ipa_cache import find_in_cache
 from graft_ipa.json_output import JsonEmitter
+from graft_ipa.tweak_sources import CANISTER, Source, file_sha256
 from graft_ipa.update_readiness import FullProbe, QuickProbe
-from graft_ipa.updates import Availability, LookupUnavailable
+from graft_ipa.updates import Download, LookupUnavailable, Offer
 
 from .appstore_fakes import FakeTools, itunes_offline, make_ipa
 from .test_deb_control import _deb
@@ -54,11 +59,26 @@ from .test_deb_control import _deb
 PHONE = "00008130-FAKE00000000PHONE1"
 OTHER_PHONE = "00008130-FAKE00000000PHONE2"
 LIVECONTAINER = "com.kdt.livecontainer"
+#: The canister repository every published tweak comes from.
+REPO_ID = "examplerepo"
+REPO_URL = "https://repo.example.com"
 BUNDLES = {"example": "com.example.app", "bravo": "com.bravo.app", "delta": "com.delta.app"}
 #: A signing profile's entitlements: a development one, which needs Developer
 #: Mode on the phone, and an ad hoc one, which doesn't (`developer_mode.needed`).
 DEVELOPMENT = {"get-task-allow": True, "application-identifier": "ABCDE12345.com.example.*"}
 AD_HOC = {"get-task-allow": False, "application-identifier": "ABCDE12345.com.example.*"}
+
+
+def update_deb_package(path: Path) -> str | None:
+    from graft_ipa.deb import identity
+
+    found = identity(path)
+    return found[0] if found else None
+
+
+def new_name(package_id: str, version: str) -> str:
+    """The library name Graft gives a fetched build (`tweak_sources.library_name`)."""
+    return f"{package_id}_{version}.deb"
 
 
 def deb(path: Path, package_id: str, version: str, name: str | None = None) -> Path:
@@ -167,6 +187,8 @@ class World:
         self.lookups: list[tuple[list[str], str | None]] = []
         self.lookup_error: str | None = None
         self.published: dict[str, str] = {}
+        #: Package ids whose repository serves over plain http: unverified.
+        self.insecure: set[str] = set()
         self.unreachable: set[str] = set()
         #: Every package id canister was asked about, in order.
         self.latest_asked: list[str] = []
@@ -179,8 +201,8 @@ class World:
         monkeypatch.setattr(itunes, "lookup_by_bundle_ids", self._lookup)
         # A refused get looks the price up; never on the network here.
         monkeypatch.setattr(itunes, "lookup_by_bundle_id", itunes_offline)
-        monkeypatch.setattr(updates, "repo_catalog", lambda _cfg, max_age=updates.CACHE_MAX_AGE: {})
-        monkeypatch.setattr(updates, "canister_latest", self._latest)
+        monkeypatch.setattr(updates, "repo_offers", lambda _cfg, max_age=updates.CACHE_MAX_AGE: {})
+        monkeypatch.setattr(updates, "canister_offers", self._offers)
         monkeypatch.setattr(canister, "fetch_deb", self._fetch)
         # usbmux's list: `preflight.list_connected_devices_with_transport`,
         # and through it `installer.resolve_target`, read it at call time.
@@ -269,19 +291,44 @@ class World:
         return {b: itunes.ITunesApp(track_id=1, bundle_id=b, name=b, version=self.store[b])
                 for b in bundle_ids if b in self.store}
 
-    def _latest(self, package_id: str) -> Availability | None:
+    def _offers(self, package_id: str, _repositories=None) -> list[Offer]:
         self.latest_asked.append(package_id)
         if package_id in self.unreachable:
             raise LookupUnavailable(f"canister.me didn't answer for {package_id}")
         version = self.published.get(package_id)
-        return Availability(version, "canister", package_id) if version else None
+        if not version:
+            return []
+        url = REPO_URL.replace("https://", "http://") if package_id in self.insecure else REPO_URL
+        library = self.cfg.tweaks_dir
+        hashes = frozenset(
+            file_sha256(f) or "" for f in (library.iterdir() if library.is_dir() else [])
+            if f.is_file() and update_deb_package(f) == package_id
+        )
+        return [Offer(Source(CANISTER, REPO_ID, url), version,
+                      (Download(f"{url}/debs/{package_id}_{version}.deb", "0" * 64),), hashes)]
 
-    def _fetch(self, target: str, dest_dir: Path, expected_sha=None, *, version=None) -> Path:
+    def _fetch(self, target: str, dest_dir: Path, expected_sha=None, *, version=None,
+               on_pick=None) -> Path:
         self.fetches.append((target, dest_dir))
         if self.fetch_error is not None:
             raise self.fetch_error
-        stem = target.rsplit(".", 1)[-1]
-        return deb(dest_dir / f"{stem}-tweak_{version}.deb", target, version)
+        package_id, version = target.rsplit("/", 1)[-1].removesuffix(".deb").rsplit("_", 1)
+        return deb(dest_dir / "download.deb", package_id, version)
+
+    def record_source(self, filename: str, url: str = REPO_URL) -> None:
+        """`filename` was fetched from the canister repository, at `url`."""
+        cfg = self.cfg
+        tweak_sources.record(cfg.state_dir, cfg.tweaks_dir, filename, Source(CANISTER, REPO_ID, url),
+                             file_sha256(cfg.tweaks_dir / filename) or "")
+
+    def serve_insecure(self, package_id: str) -> None:
+        """The repository serves `package_id` over plain http, as it did when
+        the library's file of it was fetched: its update isn't verified."""
+        self.insecure.add(package_id)
+        plain = REPO_URL.replace("https://", "http://")
+        for f in self.cfg.tweaks_dir.iterdir():
+            if f.is_file() and update_deb_package(f) == package_id:
+                self.record_source(f.name, plain)
 
     def _brief(self) -> list[BriefDevice]:
         return [BriefDevice(udid=u, connection_type="USB") for u in self.phones]
@@ -321,6 +368,9 @@ def make_world(temp_config_env: Path, tmp_path: Path, monkeypatch) -> World:
     cfg = world.cfg
     deb(cfg.tweaks_dir / "a-tweak.deb", "com.example.atweak", "1.0", "A Tweak")
     deb(cfg.tweaks_dir / "b-tweak.deb", "com.example.btweak", "2.0", "B Tweak")
+    # Fetched from the repository: a source on record, so updates verify.
+    world.record_source("a-tweak.deb")
+    world.record_source("b-tweak.deb")
     world.stage("example", "1.0")
     world.stage("bravo", "5.0")
     world.store = {BUNDLES["example"]: "1.0", BUNDLES["bravo"]: "5.0"}
@@ -330,8 +380,15 @@ def make_world(temp_config_env: Path, tmp_path: Path, monkeypatch) -> World:
     return world
 
 
+def confirm_keys(world: World, names: list[str]) -> dict[str, str]:
+    """Each tweak's `confirm_key` in the plan as it stands: what the person
+    confirms, and `--trust-tweak` takes."""
+    return {t["filename"]: t["confirm_key"] for p in plan_of(world, names).values() for t in p["tweaks"]
+            if t.get("confirm_key")}
+
+
 def plan_of(world: World, names: list[str], *, quick: bool = False,
-            with_affected: bool = False) -> dict[str, dict]:
+            with_affected: bool = False, trusted: dict[str, str] | None = None) -> dict[str, dict]:
     """The `update-plan` payload's apps, by name."""
     from graft_ipa import cli as cli_mod
 
@@ -339,7 +396,7 @@ def plan_of(world: World, names: list[str], *, quick: bool = False,
     probe = QuickProbe(cfg.state_dir) if quick else FullProbe(cfg.state_dir)
     plans = update_plan.plan(cfg, names, quick=quick, with_affected=with_affected, probe=probe,
                              tweak_records=cli_mod._collect_tweak_records,
-                             delivery=cli_mod._delivery_targets(cfg))
+                             delivery=cli_mod._delivery_targets(cfg), trusted=trusted or {})
     return {a["app"]: a for a in update_plan.payload(plans, quick=quick)["apps"]}
 
 

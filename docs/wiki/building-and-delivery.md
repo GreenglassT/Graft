@@ -10,8 +10,14 @@ Press **Build & Install**.
 - **Sideload delivery (paid only):** Graft signs the IPA with your
   certificate and installs it as a normal app.
 
-To sign on the phone instead, or install with TrollStore, **Export IPA…** in
-Build options saves the IPA unsigned. See [Exporting an IPA](#exporting-an-ipa).
+Build & Install waits until the app has a decrypted IPA and an iPhone or iPad
+is connected, and says which it's waiting for; Build for this Mac and Export
+IPA… wait for the IPA too. To build without installing, turn on **Skip
+install** in Build options.
+
+To sign on your iPhone or iPad instead, or install with TrollStore,
+**Export IPA…** in Build options saves the IPA unsigned. See
+[Exporting an IPA](#exporting-an-ipa).
 
 Builds lists every build, with its log and archive. See [Building](#building).
 
@@ -19,8 +25,10 @@ Builds lists every build, with its log and archive. See [Building](#building).
 
 Each app has a delivery mode, LiveContainer or Sideload. An app added without
 one is LiveContainer with a free Apple ID and Sideload with a paid account.
-Graft writes the mode whenever it adds an app, so an app keeps its mode if the
-config later changes account. Change it in the app's Edit sheet.
+Add App starts on that one too, or on the one you chose last; a free Apple ID
+has only LiveContainer. Graft writes the mode whenever it adds an app, so an
+app keeps its mode if the config later changes account. Change it in the app's
+Edit sheet.
 
 ### LiveContainer (recommended)
 
@@ -35,7 +43,8 @@ device-in-profile checks are skipped for these builds.
 
 How a delivery works:
 
-1. Build & Install pushes `Documents/<name>.ipa` into LiveContainer.
+1. Build & Install pushes `Documents/<name>.ipa` into LiveContainer. The
+   app's pane then names the device and reminds you to import it.
 2. On the device, open LiveContainer. The IPA is in its Documents; import it
    as an app. LiveContainer signs it on import, and that is when the tweaks
    start loading.
@@ -60,8 +69,10 @@ Developer Mode on. Graft checks before building one and stops if it's off. A
 real build first makes the switch appear in Settings › Privacy & Security ›
 Developer Mode, which iOS hides until a development app is installed: turn it
 on there, and confirm after the device restarts. The device's page shows
-whether it's on. Ad hoc and enterprise profiles, and LiveContainer delivery,
-don't need it.
+whether it's on. Ad hoc and enterprise profiles don't need it, nor do the apps
+you import into LiveContainer. A LiveContainer Graft installs does: it's signed
+with a development profile. Set Up LiveContainer… shows whether Developer Mode
+is on.
 
 ## Building
 
@@ -113,9 +124,16 @@ menu also makes a device the default. In Terminal, `--device <UDID>` does the
 same for one build, and that device must be connected. When a build goes
 somewhere other than the default, its log says where and why.
 
+With no device connected, Build & Install waits, and the bar says to connect
+one. A device that's locked, or asking whether to trust this Mac, is connected
+but can't be read: the bar and the device's row in the sidebar say to unlock
+it and tap Trust, and Graft reads it again on its own, within a few seconds at
+first and every half minute after.
+
 For a LiveContainer app, a device without LiveContainer can't take the build:
 the bar says so and offers **Set Up LiveContainer…** for that device, over the
-app pane. When a Sideload build signed with a profile Graft makes, or
+app pane. With a paid account it also says you can switch the app to Sideload
+with **Edit…**. When a Sideload build signed with a profile Graft makes, or
 installing LiveContainer, goes to a device added to your developer account
 since you last saved App Store Connect in Settings, Graft reads the account's
 devices again first and saves the new list. A profile you made yourself isn't
@@ -188,7 +206,9 @@ Limits worth knowing:
   file, not whether you imported it. Checking the device lists LiveContainer's
   Documents and can only downgrade a state: a missing file means the record is
   out of date, but a present file doesn't prove an import.
-- Checking the device leaves sideload apps alone.
+- Checking the device looks on the device the app was last delivered to, and
+  says which ("Checked iPad mini — the record still stands"). It leaves
+  sideload apps alone.
 - A re-install of an archive that a recorded push shipped, byte for byte
   (usually the newest build), is compared like that push. Any other
   re-installed archive reads `stale`, because what went into it wasn't
@@ -231,6 +251,15 @@ available: App Store 1.2.0 · 1 tweak".
   a Build & Install to that device; Graft doesn't install it on its own.
 - When a tweak is shared, its other apps need an install too: the
   confirmation says which, and **Also install … now** adds them.
+- A tweak updates only from where it came from: the repo or Canister
+  repository you fetched it from. The confirmation says where each one comes
+  from. When Graft can't verify an update (where the tweak came from isn't on
+  record, that source doesn't use HTTPS, or it lists no checksum for it), the
+  confirmation says why, and the tweak updates only if you turn on **Trust this
+  source**. You're trusting the update the confirmation shows: if the source
+  offers something else by the time it runs, Graft doesn't update that app
+  and says so. On its own, such an update doesn't mark the app in the sidebar
+  or count in Update All; the app's pane says "1 tweak to confirm".
 - **Stop** stops at once, except during an install or while a tweak is being
   swapped in, which finish first. **Stop Now** cancels that install, and
   after three minutes **Force Stop** ends it outright. The progress shows
@@ -238,14 +267,25 @@ available: App Store 1.2.0 · 1 tweak".
   every app or for one device, picks up where it stopped.
 - LiveContainer apps end up in LiveContainer's Documents on each device, to
   import there.
-- On an Intel Mac, a newer App Store version shows, and can't be downloaded.
+- Before the App Store is set up on this Mac (Settings › App Store), an
+  update doesn't download from it: the pane says so, with **Open Settings**.
+- On an Intel Mac, a newer App Store version shows, and can't be downloaded:
+  drop a newer decrypted IPA on Source IPA instead. With Graft's Intel
+  download on an Apple silicon Mac, Graft.zip can download it.
+- A check that can't reach the App Store or canister.me, as when your Mac is
+  offline, keeps what the last online check found while nothing has changed
+  on this Mac. After a change (an IPA you staged, an install, a device you
+  stopped updating), it shows what Graft knows without the network until it
+  can check again. Graft tries again within the hour, and the confirmation
+  says when it couldn't check online.
 
 Settings › Updates › **Check my apps for updates** turns the daily check off,
 and the checks after a get, build, tweak update, update, change to an app's
 options or tweaks, or device change.
 With it off, Graft checks only when you press **Check for updates now**,
 there, in the sidebar or on an app's pane, and the Update buttons show what
-that check found. The check sends your apps' bundle IDs to Apple's App
+that check found. Beside the button, it says how the check went: up to date,
+how many apps have updates, or that it couldn't check. The check sends your apps' bundle IDs to Apple's App
 Store lookup and your tweaks' package IDs to canister.me, and nothing that
 identifies you or your Mac. It opens no connection to your iPhone or iPad and
 reads nothing from the keychain.
@@ -261,8 +301,8 @@ Mac, PlayCover can't run, and the button is disabled.) A staged IPA or
 an archived build can be handed over too.
 
 Some tweak libraries import iOS private frameworks that macOS doesn't have;
-for these Mac builds Graft bundles a minimal stand-in instead. Phone builds
-are never changed this way.
+for these Mac builds Graft bundles a minimal stand-in instead. iPhone and iPad
+builds are never changed this way.
 
 Graft.app carries that stand-in prebuilt, so a Mac build needs no Xcode. A
 `graft` installed with pipx builds it on demand and needs full Xcode for that;
@@ -270,8 +310,9 @@ see [The CLI without the app](cli-install.md#the-cli-without-the-app-pipx).
 
 Some tweaks need an iOS framework that macOS doesn't have at all. Graft won't
 build such a tweak for this Mac, or hand over a build that has one, and says
-which tweak and which framework. Phone builds can still use it. A framework the
-app itself links only gets a warning.
+which tweak, by its name in the Tweaks library, and which framework. iPhone and
+iPad builds can still use it. A framework the app itself links only gets a
+warning.
 
 After handing a build over, Graft waits up to two minutes for PlayCover to
 finish installing it, and says when it has. If it hasn't by then, check
@@ -301,21 +342,21 @@ page.
 
 ## Exporting an IPA
 
-If you sign apps on the phone, with an on-device signer and a certificate
-service, or install them with TrollStore, Graft can give you the IPA instead
-of delivering it. **Export IPA…** in Build options builds the app as far as
-injecting its tweaks, then saves that IPA where you choose.
+If you sign apps on your iPhone or iPad, with an on-device signer and a
+certificate service, or install them with TrollStore, Graft can give you the
+IPA instead of delivering it. **Export IPA…** in Build options builds the app
+as far as injecting its tweaks, then saves that IPA where you choose.
 
 - **What the file is.** The app's decrypted IPA with its tweaks injected and
   the app's options applied, with your Apple ID's purchase data removed. It
   isn't signed: the binaries cyan changed need re-signing before iOS runs
   them.
-- **What to do with it.** Put it on the phone (in Files, say) and open it in
-  your on-device signer, which signs it with your certificate and installs
-  it. Or install it with TrollStore.
+- **What to do with it.** Put it on your iPhone or iPad (in Files, say) and
+  open it in your on-device signer, which signs it with your certificate and
+  installs it. Or install it with TrollStore.
 - **What Graft doesn't do.** It signs nothing and sends nothing to a device,
   whatever the app's delivery mode, so a free Apple ID can export a Sideload
-  app too. Graft only saves the file; moving it to the phone is up to you.
+  app too. Graft only saves the file; moving it to the device is up to you.
 - **It isn't a build in Builds.** An export adds no row to the build history
   and keeps no log, and archive clean-up never touches the file.
 - **For your own devices.** It's an app your Apple ID owns or got for free.

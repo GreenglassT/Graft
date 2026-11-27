@@ -117,13 +117,13 @@ def test_a_passing_ssh_check_has_no_reason(monkeypatch: pytest.MonkeyPatch, auth
 def test_no_server_gets_the_no_jailbreak_advice() -> None:
     ssh = _ssh(_report((False, "no SSH server answered on the device", "x", decrypt_ready.SSH_NO_SERVER)))
     assert ssh.reason == decrypt_ready.SSH_NO_SERVER
-    assert ssh.fix is not None and ssh.fix.startswith("either this phone has no jailbreak")
+    assert ssh.fix is not None and ssh.fix.startswith("either this device has no jailbreak")
 
 
 def test_a_rejected_login_keeps_its_password_fix() -> None:
     """A jailbroken phone with the wrong stored password: telling its owner the
     phone may have no jailbreak sends them away from the one fix that works."""
-    fix = "set the phone's root password with `graft --set-ssh-password`"
+    fix = "set the device's root password with `graft --set-ssh-password`"
     ssh = _ssh(_report((False, "SSH-2.0-OpenSSH_9.6, but the login was rejected", fix,
                         decrypt_ready.SSH_LOGIN_REJECTED)))
     assert (ssh.reason, ssh.fix) == (decrypt_ready.SSH_LOGIN_REJECTED, fix)

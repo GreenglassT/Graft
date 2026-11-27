@@ -153,6 +153,27 @@ struct MacSupport: Equatable, Sendable {
         return opensAppleSiliconDownload ? Self.needsAppleSiliconDownload : Self.needsAppleSiliconDownloadAndMacOS14
     }
 
+    /// Settings › App Store's one line where no App Store get can run here,
+    /// in place of its ipatool and UnfairPlay rows and their buttons, or nil
+    /// where they can. An Intel Mac can't; the Intel download says which
+    /// download can, and before macOS 14, where Graft.zip doesn't open, only
+    /// that it needs macOS 14 (a user's report found the grayed-out Sign In and
+    /// its reason only in a tooltip).
+    var appStoreLine: String? {
+        guard !appleSiliconFeatures else { return nil }
+        guard appleSiliconMac else { return Self.appStoreNeedsAppleSilicon }
+        return opensAppleSiliconDownload ? Self.appStoreNeedsAppleSiliconDownload
+            : Self.appStoreNeedsAppleSiliconDownloadAndMacOS14
+    }
+
+    static let appStoreInstead = "Add apps from a decrypted IPA instead: drop one on Source IPA in an app's pane."
+    static let appStoreNeedsAppleSilicon = "Getting apps from the App Store needs a Mac with Apple silicon. "
+        + appStoreInstead
+    static let appStoreNeedsAppleSiliconDownload = "Getting apps from the App Store needs the Apple silicon "
+        + "download of Graft, Graft.zip. " + appStoreInstead
+    static let appStoreNeedsAppleSiliconDownloadAndMacOS14 = "Getting apps from the App Store needs Graft's Apple "
+        + "silicon download, which needs macOS 14 or later. " + appStoreInstead
+
     /// The line over the Intel download on an Apple silicon Mac
     /// (`IntelBuildBanner`), or nil anywhere else. Before macOS 14 it says
     /// Graft.zip needs macOS 14, rather than send the user to a download

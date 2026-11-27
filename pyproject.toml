@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "graft-ipa"
-version = "2.3"
+version = "2.3.1"
 description = "Inject tweaks and install IPAs on iPhone and iPad: into LiveContainer with a free Apple ID, or signed with a paid Apple Developer account."
 readme = "README.md"
 requires-python = ">=3.11"

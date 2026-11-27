@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import errno
+import os
 
 
 class GraftError(Exception):
@@ -297,3 +298,80 @@ EXIT_CODES: dict[int, str] = {
     128 + 1: "Stopped by SIGHUP",
     128 + 15: "Stopped by SIGTERM: the app's Stop",
 }
+
+
+# --- A full disk, said as one -----------------------------------------------------
+
+#: What Graft says when a full disk stops it, wherever that was (the 2.3.1
+#: review's T2-B6): staging, a tweak update, ipatool's download, a config or
+#: log write. Mapped once, where errors are shown (`presented`), rather than
+#: at every place that writes a file.
+OUT_OF_SPACE = "Your Mac is out of disk space: free some and press Try Again"
+
+#: A full disk: no space left, or the user's quota used up.
+_FULL_ERRNOS = frozenset({errno.ENOSPC, errno.EDQUOT})
+
+#: How what Graft reads says it: Python's own "[Errno 28]", the system's
+#: sentence (in a tool's stderr, or lowercase in ipatool's, Go's), and
+#: SQLite's. Matched without regard to case.
+_FULL_WORDS = (
+    *(f"[errno {n}]" for n in sorted(_FULL_ERRNOS)),
+    *(os.strerror(n).lower() for n in sorted(_FULL_ERRNOS)),
+    "database or disk is full",
+)
+
+#: The errors whose words are the device's: an install, a LiveContainer push,
+#: a dump from a jailbroken device. "No space left on device" there is the
+#: phone's disk, not this Mac's.
+_DEVICE_EXIT_CODES = frozenset({InstallError.exit_code, EXIT_DECRYPT, EXIT_LIVECONTAINER})
+
+
+def _chain(exc: BaseException) -> list[BaseException]:
+    """`exc` and what it was raised from or during, nearest first."""
+    seen: list[BaseException] = []
+    pending: list[BaseException | None] = [exc]
+    while pending and len(seen) < 16:
+        node = pending.pop(0)
+        if node is None or any(node is s for s in seen):
+            continue
+        seen.append(node)
+        pending += [node.__cause__, node.__context__]
+    return seen
+
+
+def out_of_space(exc: BaseException) -> bool:
+    """Whether `exc` is this Mac's disk being full, said in no words of
+    Graft's own yet: an OSError for it (ENOSPC, EDQUOT) anywhere it was
+    raised from, or the words for it in what it says (`_FULL_WORDS`).
+
+    Not when what it says already talks about the space once those words
+    are taken out (an export's "free some space on the disk … is on, or
+    choose another folder", which names the disk), nor for the words in a
+    device's error (`_DEVICE_EXIT_CODES`): its full disk is the phone's.
+    """
+    if isinstance(exc, GraftError):
+        said = f"{exc.message} {exc.hint or ''}".lower()
+        rest = said
+        for words in _FULL_WORDS:
+            rest = rest.replace(words, "")
+        if "space" in rest:
+            return False
+        if exc.exit_code not in _DEVICE_EXIT_CODES and any(w in said for w in _FULL_WORDS):
+            return True
+    elif any(w in str(exc).lower() for w in _FULL_WORDS):
+        return True
+    return any(isinstance(e, OSError) and e.errno in _FULL_ERRNOS for e in _chain(exc))
+
+
+def presented(exc: BaseException) -> BaseException:
+    """`exc` as Graft shows it: `OUT_OF_SPACE` for a full disk
+    (`out_of_space`), with `exc`'s exit status, else `exc` itself.
+
+    Where errors are shown: the CLI's error boundary (`cli._reported`), a
+    build's `build-end`, a multi-app build's summary line, and an update's
+    results (`update_run._message`)."""
+    if not out_of_space(exc):
+        return exc
+    shown = GraftError(OUT_OF_SPACE)
+    shown.exit_code = getattr(exc, "exit_code", GraftError.exit_code)
+    return shown

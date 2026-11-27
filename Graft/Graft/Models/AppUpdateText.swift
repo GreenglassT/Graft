@@ -103,6 +103,9 @@ enum AppUpdateText {
         /// Update (spec §11.1): one Install Update per device it's offered
         /// on, each a Build & Install to that device.
         var offered: [Offered] = []
+        /// A note says to set up the App Store (B5): the line offers Open
+        /// Settings.
+        var opensSettings = false
 
         enum Action: Equatable {
             /// Update & Install, Update Tweaks & Install or Install Update:
@@ -143,16 +146,49 @@ enum AppUpdateText {
         }
     }
 
+    /// A newer version this copy of Graft can't get (B8), and what it can
+    /// do. The CLI's skip is "needs Apple silicon" for an Intel Mac and for
+    /// the Intel download on an Apple silicon Mac alike; on the second,
+    /// Graft.zip gets it where it opens (macOS 14), so it says so rather than
+    /// "This Mac can't" (the re-verify's nit). `mac` nil reads as an Intel Mac.
+    static func intelNote(version: String, mac: MacSupport? = nil) -> String {
+        guard let mac, mac.isIntelBuildOnAppleSilicon else {
+            return "The App Store has \(version). This Mac can't download it: drop a newer decrypted IPA on Source IPA."
+        }
+        return mac.opensAppleSiliconDownload
+            ? "The App Store has \(version). Graft's Intel download can't get it: use Graft.zip, or drop a "
+                + "newer decrypted IPA on Source IPA."
+            : "The App Store has \(version). Graft's Intel download can't get it: drop a newer decrypted IPA "
+                + "on Source IPA."
+    }
+
+    /// The pane's words for a plan that won't get until the App Store is set
+    /// up (`update_plan.setup_missing`), as Get latest says them, or nil for
+    /// any other reason.
+    static func setUpWords(_ reason: String) -> String? {
+        switch reason {
+        case CLIContract.Update.decryptionNotSetUp: return AppStoreStore.setUpFirst
+        case CLIContract.Update.notSignedIn: return AppStoreStore.signedOutReason
+        default: return nil
+        }
+    }
+
     /// The pane's line for `plan`. `title`: the app's name as the sidebar
-    /// shows it, for Stop updating's words.
-    static func paneLine(_ plan: UpdatePlanApp?, title: String? = nil) -> PaneLine? {
+    /// shows it, for Stop updating's words. `mac`: this Mac and download, for
+    /// what a newer version it can't get says (`intelNote`).
+    static func paneLine(_ plan: UpdatePlanApp?, title: String? = nil, mac: MacSupport? = nil) -> PaneLine? {
         guard let plan else { return nil }
         var notes: [String] = []
+        var opensSettings = false
         if !plan.getsFromStore, let to = plan.store.to, let reason = plan.store.skippedReason {
             if reason == CLIContract.Update.needsAppleSilicon {
-                notes.append("App Store has \(to), \(reason)")
+                notes.append(intelNote(version: to, mac: mac))
             } else if reason.hasPrefix(CLIContract.Update.refusedPrefix) {
                 notes.append(reason)
+            } else if let words = setUpWords(reason) {
+                // B5: the get can't run until the App Store is set up.
+                notes.append("The App Store has \(to). " + words)
+                opensSettings = true
             }
         }
         // A deliberate Re-install of an older build, or an install that
@@ -162,10 +198,11 @@ enum AppUpdateText {
         // which.
         if plan.manualInstall, !plan.hasUpdate, let offered = offeredInstalls(plan) {
             return PaneLine(headline: offered.headline, notes: offered.notes + notes, action: nil,
-                            offered: offered.buttons)
+                            offered: offered.buttons, opensSettings: opensSettings)
         }
         guard plan.hasUpdate else {
-            return notes.isEmpty ? nil : PaneLine(headline: nil, notes: notes, action: nil)
+            return notes.isEmpty ? nil
+                : PaneLine(headline: nil, notes: notes, action: nil, opensSettings: opensSettings)
         }
         // A device block is advisory (review S3): the plan that found it may
         // be the quick one, which only guesses at the phone. Update stays
@@ -182,6 +219,9 @@ enum AppUpdateText {
         if plan.getsFromStore, let to = plan.store.to { parts.append("App Store \(to)") }
         let tweaks = plan.tweakUpdates.count
         if tweaks > 0 { parts.append(tweaks == 1 ? "1 tweak" : "\(tweaks) tweaks") }
+        // From a source that isn't verified (2.3.1 A1): the confirmation asks.
+        let toConfirm = plan.unconfirmedTweaks.count
+        if toConfirm > 0 { parts.append(toConfirm == 1 ? "1 tweak to confirm" : "\(toConfirm) tweaks to confirm") }
         if parts.isEmpty {
             let due = [plan.installTargets, plan.waitingTargets, plan.blockedTargets].first { !$0.isEmpty } ?? []
             parts.append("the latest build isn't on \(due.isEmpty ? "the device" : devices(due)) yet")
@@ -193,10 +233,10 @@ enum AppUpdateText {
         }
         // Only devices that aren't connected need it: nothing could run, so
         // no button. A blocked device keeps it (advisory, above).
-        let offersUpdate = !plan.installTargets.isEmpty || !plan.blockedTargets.isEmpty
+        let offersUpdate = !plan.installTargets.isEmpty || !plan.blockedTargets.isEmpty || plan.needsConfirmation
         return PaneLine(headline: "Update available: " + parts.joined(separator: " · "), notes: notes,
                         action: offersUpdate ? .button(buttonTitle(plan)) : nil,
-                        installsOn: installsOn(plan), waiting: waiting)
+                        installsOn: installsOn(plan), waiting: waiting, opensSettings: opensSettings)
     }
 
     /// The offered installs: each reason, once, with the devices it's about
@@ -262,7 +302,7 @@ enum AppUpdateText {
 
     static func buttonTitle(_ plan: UpdatePlanApp) -> String {
         if plan.getsFromStore { return "Update & Install" }
-        if !plan.tweakUpdates.isEmpty { return "Update Tweaks & Install" }
+        if !plan.tweakUpdates.isEmpty || plan.needsConfirmation { return "Update Tweaks & Install" }
         return "Install Update"
     }
 
@@ -303,7 +343,44 @@ enum AppUpdateText {
         /// What the plan says about the phone, for information
         /// (`readinessNote`).
         var readinessNote: String? = nil
+        /// Each tweak update whose source isn't verified: shown with why,
+        /// and run only once its "Trust this source" is on (2.3.1 A1).
+        var trust: [TrustLine] = []
         var id: String { app }
+    }
+
+    /// A tweak update the person has to confirm: "A Tweak 1.0 → 1.1 from
+    /// repo.example.com", why it isn't verified, and its toggle's name for
+    /// VoiceOver.
+    struct TrustLine: Equatable, Identifiable {
+        let filename: String
+        let line: String
+        let reason: String
+        let toggleName: String
+        var id: String { filename }
+    }
+
+    static let trustTitle = "Trust this source"
+    static let trustHelp = "Graft can't verify this download. It updates the tweak only if you turn this on."
+
+    /// Where a tweak comes from, as a row says it: a URL's host, else what
+    /// the CLI calls it ("canister repository examplerepo").
+    static func sourceName(_ source: String) -> String {
+        if let url = URL(string: source), let host = url.host(), !host.isEmpty { return host }
+        return source
+    }
+
+    /// "A Tweak 1.0 → 1.1 from repo.example.com".
+    static func tweakLine(_ tweak: UpdatePlanApp.TweakChange) -> String {
+        let change = "\(tweak.name ?? tweak.filename) \(tweak.from ?? "?") → \(tweak.to ?? "?")"
+        return tweak.source.map { "\(change) from \(sourceName($0))" } ?? change
+    }
+
+    static func trustLine(_ tweak: UpdatePlanApp.TweakChange) -> TrustLine {
+        let source = tweak.source.map(sourceName) ?? "its source"
+        return TrustLine(filename: tweak.filename, line: tweakLine(tweak),
+                         reason: "Not verified (\(tweak.unverifiedReason ?? "its source isn't known"))",
+                         toggleName: "Trust \(source) for \(tweak.name ?? tweak.filename)")
     }
 
     /// One device of a confirmation's row: "Example+ → iPhone 15 Pro via
@@ -336,7 +413,7 @@ enum AppUpdateText {
             }
             var alsoUsed: [String] = []
             for tweak in app.tweakUpdates {
-                changes.append("\(tweak.name ?? tweak.filename) \(tweak.from ?? "?") → \(tweak.to ?? "?")")
+                changes.append(tweakLine(tweak))
                 if let line = alsoUsedLine(tweak, names: names) { alsoUsed.append(line) }
             }
             var skipped: [String] = []
@@ -356,7 +433,7 @@ enum AppUpdateText {
             return ConfirmRow(
                 app: app.app, title: title, changes: changes, alsoUsed: alsoUsed, skipped: skipped,
                 targets: targets, blocked: targets.isEmpty ? app.blockedReason : nil,
-                readinessNote: app.readinessNote
+                readinessNote: app.readinessNote, trust: app.unconfirmedTweaks.map(trustLine)
             )
         }
     }
@@ -511,14 +588,19 @@ enum AppUpdateText {
     }
 
     /// A device's phase from its result: a device not reached (no error,
-    /// its install left: a Stop, or a failure before it) wasn't started. One
-    /// that went away during the run waits for it (review part 2, #9): the
+    /// its install left: a Stop, or a failure before it) wasn't started.
+    /// The same result for one whose install began (`installBegan`: its
+    /// `update-step` `install` started and never ended) is one Stop Now
+    /// canceled: it was stopped, not "Not started" (2.3.1 §3.3). One that
+    /// went away during the run waits for it (review part 2, #9): the
     /// CLI's sentence, with no Try Again, as one not connected from the
     /// start.
-    static func targetPhase(_ end: UpdateAppEndRecord.Target) -> UpdatePhase {
+    static func targetPhase(_ end: UpdateAppEndRecord.Target, installBegan: Bool = false) -> UpdatePhase {
         if end.waiting { return .skipped(end.error ?? waitingFallback(end.deviceName)) }
         if end.ok { return .done }
-        if end.error == nil, end.left.contains(CLIContract.Update.stepInstall) { return .notStarted }
+        if end.error == nil, end.left.contains(CLIContract.Update.stepInstall) {
+            return installBegan ? .stopped : .notStarted
+        }
         return .failed
     }
 

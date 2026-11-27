@@ -13,7 +13,12 @@ import XCTest
 ///   with `hang-install` it waits, with `fail-install` it fails, and
 ///   otherwise it installs the primary;
 /// - `--lc-push-cert`: with `fail-push`, fails; otherwise makes `cert.mark`;
-/// - `--lc-clean`: removes `cert.mark`.
+/// - `--lc-clean`: removes `cert.mark`;
+/// - `--settings`: with `no-key`, settings whose `app_store_connect` is null
+///   (no key); otherwise nothing, so the sheet knows nothing of the key and
+///   disables nothing;
+/// - `--device-info`: Developer Mode off with `devmode-off`, on with
+///   `devmode-on`, otherwise null (couldn't tell).
 struct FakeLiveContainerCLI {
     static let primary = "com.kdt.livecontainer.ABCDE12345"
     let dir: URL
@@ -66,6 +71,17 @@ struct FakeLiveContainerCLI {
           rm -f "$D/cert.mark"
           printf '%s\\n' '{"type":"lc-cleaned","udid":"\(udid)","bundle_id":"\(p)","removed":["AppleDevelopment.p12"],"kept":0}'
           ;;
+        *--settings*)
+          if [ -f "$D/no-key" ]; then
+            printf '%s\\n' '{"type":"settings","default_device_udid":null,"archive_keep":2,"signing_cert":"/c","signing_profile":"/p","signing_team_id":"ABCDE12345","app_store_connect":null}'
+          fi
+          ;;
+        *--device-info*)
+          DM=null
+          if [ -f "$D/devmode-off" ]; then DM=false; fi
+          if [ -f "$D/devmode-on" ]; then DM=true; fi
+          printf '%s\\n' '{"type":"device-info","udid":"\(udid)","reachable":true,"total_bytes":null,"free_bytes":null,"battery_percent":null,"battery_charging":null,"developer_mode":'"$DM"'}'
+          ;;
         esac
         """
         let file = dir.appending(path: "graft")
@@ -74,8 +90,8 @@ struct FakeLiveContainerCLI {
     }
 
     /// Turn a marker on or off: `fail-check`, `fail-install`, `hang-install`,
-    /// `fail-push`, `no-primary`, `altstore`, `hold-status`, or `cert.mark`
-    /// (the certificate's record).
+    /// `fail-push`, `no-primary`, `altstore`, `hold-status`, `no-key`,
+    /// `devmode-off`, `devmode-on`, or `cert.mark` (the certificate's record).
     func set(_ marker: String, _ on: Bool = true) throws {
         let file = dir.appending(path: marker)
         if on {
@@ -455,6 +471,13 @@ final class LiveContainerSetUpTests: XCTestCase {
         let steps = SetUpLiveContainerSheet.deviceSteps(account: .paid, kind: "iPad")
         XCTAssertEqual(steps.map(\.removesCertificate), [true, false, false, false])
         XCTAssertTrue(steps[0].text.contains("On My iPad › LiveContainer"), steps[0].text)
+        // A model Graft can't name is a "device" (`BuildTarget.deviceKind`);
+        // the Files app has no "On My device".
+        let unnamed = SetUpLiveContainerSheet.deviceSteps(account: .paid, kind: "device")
+        XCTAssertTrue(unnamed[0].text.contains("(On My iPhone or iPad › LiveContainer)"), unnamed[0].text)
+        // An iPod touch's folder is "On My iPod", as the Files app names it.
+        let pod = SetUpLiveContainerSheet.deviceSteps(account: .paid, kind: BuildTarget.deviceKind(model: "iPod9,1"))
+        XCTAssertTrue(pod[0].text.contains("(On My iPod › LiveContainer)"), pod[0].text)
         XCTAssertTrue(steps[0].text.contains("LiveContainer asks for it on the device; Graft can't type it for you."),
                       steps[0].text)
         XCTAssertFalse(steps[0].text.contains("never asks"), steps[0].text)
@@ -632,17 +655,134 @@ final class LiveContainerSetUpTests: XCTestCase {
         XCTAssertEqual(store.name(of: Self.udid), "Example iPad")
     }
 
+    // MARK: - New-user dead ends (2.3.1 B6)
+
+    private func settings(_ part: String) throws -> SettingsRecord {
+        let line = #"{"type":"settings","default_device_udid":null,"archive_keep":2,"signing_cert":"/c","signing_profile":"/p","signing_team_id":"T"\#(part)}"#
+        guard case let .settings(record)? = line.buildEvents().first else { throw XCTSkip("fixture") }
+        return record
+    }
+
+    /// Without an App Store Connect key `--lc-install` can't make
+    /// LiveContainer's profiles, so Set Up says so before it's pressed. Not
+    /// known (settings unread, a CLI too old to say, the account unknown)
+    /// disables nothing, as everywhere (`AccountMode`).
+    func test_set_up_needs_an_app_store_connect_key() throws {
+        typealias Sheet = SetUpLiveContainerSheet
+        let key = #","app_store_connect":{"key_id":"K","issuer_id":"I","key_file":"/k.p8","key_file_exists":true}"#
+        let lost = #","app_store_connect":{"key_id":"K","issuer_id":"I","key_file":"/k.p8","key_file_exists":false}"#
+        XCTAssertEqual(Sheet.needsKeyLine,
+                       "Set up an App Store Connect key in Settings › App Store Connect first.")
+        XCTAssertEqual(Sheet.needsKey(account: .paid, settings: try settings(#","app_store_connect":null"#)),
+                       Sheet.needsKeyLine)
+        XCTAssertEqual(Sheet.needsKey(account: .paid, settings: try settings(lost)), Sheet.needsKeyLine,
+                       "a key whose .p8 is gone makes no profile either")
+        XCTAssertNil(Sheet.needsKey(account: .paid, settings: try settings(key)))
+        XCTAssertNil(Sheet.needsKey(account: .paid, settings: try settings("")), "a CLI too old to say")
+        XCTAssertNil(Sheet.needsKey(account: .paid, settings: nil), "not read yet")
+        let store = LCStatusRecord(
+            udid: Self.udid, reachable: true, error: nil, instances: [], managedBy: .altstore, latest: nil,
+            updateAvailable: false, sources: [:], certificatePushed: false, freeSetupSteps: [])
+        XCTAssertNil(Sheet.needsKey(account: .paid, settings: try settings(#","app_store_connect":null"#),
+                                    status: store),
+                     "SideStore or AltStore manages it: Graft installs nothing there, key or not")
+        XCTAssertEqual(Sheet.needsKey(account: .paid, settings: try settings(#","app_store_connect":null"#),
+                                      status: try XCTUnwrap(status(""))), Sheet.needsKeyLine)
+        XCTAssertNil(Sheet.needsKey(account: .free, settings: try settings(#","app_store_connect":null"#)),
+                     "a free Apple ID installs nothing")
+        XCTAssertEqual(Sheet.needsKey(account: nil, settings: try settings(#","app_store_connect":null"#)),
+                       Sheet.needsKeyLine, "the paid side shows for an account not known yet")
+
+        let status = try XCTUnwrap(status(""))
+        XCTAssertFalse(Sheet.setUpEnabled(status: status, busy: false, instances: [1], resumes: false,
+                                          keyMissing: true))
+        XCTAssertTrue(Sheet.setUpEnabled(status: status, busy: false, instances: [1], resumes: true,
+                                         keyMissing: true), "putting the certificate on needs no key")
+        XCTAssertTrue(Sheet.setUpEnabled(status: status, busy: false, instances: [1], resumes: false,
+                                         keyMissing: false))
+    }
+
+    /// Graft's LiveContainer is signed with a development profile, so on iOS 16
+    /// and later it opens only with Developer Mode on. The sheet says so where
+    /// Graft installs it: not on a free Apple ID (SideStore or iloader installs
+    /// it), not where SideStore or AltStore manages it, and not before iOS 16.
+    func test_developer_mode_is_shown_where_graft_installs_livecontainer() throws {
+        typealias Sheet = SetUpLiveContainerSheet
+        let graft = try XCTUnwrap(status(""))
+        let store = LCStatusRecord(
+            udid: Self.udid, reachable: true, error: nil, instances: [], managedBy: .altstore, latest: nil,
+            updateAvailable: false, sources: [:], certificatePushed: false, freeSetupSteps: [])
+        XCTAssertEqual(Sheet.developerMode(account: .paid, status: graft, iosVersion: "26.1", reading: false), .off)
+        XCTAssertEqual(Sheet.developerMode(account: .paid, status: graft, iosVersion: "26.1", reading: true), .on)
+        XCTAssertEqual(Sheet.developerMode(account: .paid, status: graft, iosVersion: "26.1", reading: nil), .unknown)
+        XCTAssertEqual(Sheet.developerMode(account: nil, status: nil, iosVersion: "16.0", reading: nil), .unknown)
+        XCTAssertNil(Sheet.developerMode(account: .free, status: graft, iosVersion: "26.1", reading: false))
+        XCTAssertNil(Sheet.developerMode(account: .paid, status: store, iosVersion: "26.1", reading: false))
+        XCTAssertNil(Sheet.developerMode(account: .paid, status: graft, iosVersion: "15.8", reading: nil))
+        let note = Sheet.developerModeNote(name: "Example iPad")
+        XCTAssertTrue(note.contains("Settings › Privacy & Security › Developer Mode"), note)
+        XCTAssertTrue(note.contains("Example iPad"), note)
+    }
+
+    /// One LiveContainer unless more are there already: an update still
+    /// updates each one Graft finds.
+    func test_set_up_starts_with_one_livecontainer() throws {
+        typealias Sheet = SetUpLiveContainerSheet
+        XCTAssertEqual(Sheet.defaultInstances(status: nil), [1])
+        XCTAssertEqual(Sheet.defaultInstances(status: try XCTUnwrap(status(""))), [1])
+        let two = LCStatusRecord(udid: Self.udid, reachable: true, error: nil, instances: [
+                LCInstanceRecord(bundleId: FakeLiveContainerCLI.primary, version: "3.8.14", role: "primary",
+                                 wildcardSigned: false),
+                LCInstanceRecord(bundleId: "com.kdt.LiveContainer2.ABCDE12345", version: "3.8.14", role: "2",
+                                 wildcardSigned: false),
+                LCInstanceRecord(bundleId: "com.kdt.livecontainer", version: "3.0", role: "legacy",
+                                 wildcardSigned: false),
+            ], managedBy: .graft, latest: nil, updateAvailable: false, sources: [:],
+            certificatePushed: false, freeSetupSteps: [])
+        XCTAssertEqual(Sheet.defaultInstances(status: two), [1, 2])
+        XCTAssertEqual(Sheet.instanceLabel(1), "LiveContainer (the primary)")
+        XCTAssertEqual(Sheet.instanceLabel(2), "LiveContainer2")
+        XCTAssertEqual(Sheet.instanceLabel(3), "LiveContainer3")
+    }
+
+    /// A free Apple ID with LiveContainer already on the device is told so,
+    /// and has one step left, importing the certificate; without it, every
+    /// step.
+    func test_a_free_sheet_with_livecontainer_there_has_only_the_certificate_step() throws {
+        typealias Sheet = SetUpLiveContainerSheet
+        let given = ["Install SideStore.", "Install LiveContainer.", "Import Certificate from SideStore."]
+        let none = try XCTUnwrap(status(""))
+        let there = LCStatusRecord(udid: Self.udid, reachable: true, error: nil, instances: [
+                LCInstanceRecord(bundleId: "com.kdt.livecontainer.ABCDE12345", version: "3.8.14",
+                                 role: "primary", wildcardSigned: false),
+            ], managedBy: .unknown, latest: nil, updateAvailable: false, sources: [:],
+            certificatePushed: false, freeSetupSteps: given)
+        XCTAssertEqual(Sheet.freeSteps(given: given, status: none), given)
+        XCTAssertEqual(Sheet.freeSteps(given: given, status: there), ["Import Certificate from SideStore."])
+        XCTAssertEqual(Sheet.freeSteps(given: [], status: there), [Sheet.freeFallback.last!],
+                       "a CLI too old to send its steps")
+        XCTAssertEqual(Sheet.freeSteps(given: [], status: nil), Sheet.freeFallback)
+        XCTAssertNil(Sheet.foundLine(status: none, name: "Example iPad"))
+        XCTAssertEqual(Sheet.foundLine(status: there, name: "Example iPad"),
+                       "Graft found LiveContainer 3.8.14 on Example iPad.")
+    }
+
     // MARK: - The sheet, hosted
 
     private func hostedSheet(
-        account: AccountMode, cli: FakeLiveContainerCLI, onRunEnded: @escaping () -> Void = {}
+        account: AccountMode, cli: FakeLiveContainerCLI, onRunEnded: @escaping () -> Void = {},
+        onOpenSettings: (() -> Void)? = nil
     ) async throws -> (Hosted, LiveContainerStore) {
         try AccessibilityTree.requireServed()
         let store = LiveContainerStore(runner: cli.runner)
         await store.load(udid: Self.udid)
         let device = try XCTUnwrap(deviceRecord())
         let box = hosted(
-            SetUpLiveContainerSheet(device: device, store: store, account: account, onRunEnded: onRunEnded),
+            SetUpLiveContainerSheet(
+                device: device, store: store, settings: SettingsStore(runner: cli.runner),
+                deviceInfo: DeviceInfoStore(runner: cli.runner), account: account,
+                onRunEnded: onRunEnded, onOpenSettings: onOpenSettings
+            ),
             size: NSSize(width: 600, height: 900)
         )
         try await Task.sleep(nanoseconds: 400_000_000)
@@ -689,6 +829,7 @@ final class LiveContainerSetUpTests: XCTestCase {
             "Install LiveContainer with it.",
             "In LiveContainer, import the certificate from SideStore.",
         ])
+        try cli.set("no-primary")
         let (box, _) = try await hostedSheet(account: .free, cli: cli)
         let nodes = try AccessibilityTree.nodes(in: box.window)
         let names = nodes.map(\.name)
@@ -701,9 +842,92 @@ final class LiveContainerSetUpTests: XCTestCase {
         XCTAssertTrue(nodes.contains { $0.role == "AXLink" && $0.name == "Open example.invalid" },
                       "the CLI's steps, with their links: \(names)")
         let texts = try AccessibilityTree.texts(in: box.window)
-        XCTAssertTrue(texts.contains(PaidOnly.installLiveContainer), "\(texts)")
+        XCTAssertFalse(texts.contains { $0.contains("needs a paid Apple Developer account") },
+                       "the steps say what to do; no refusal: \(texts)")
         XCTAssertTrue(texts.contains("Then, in LiveContainer on Example iPad:"), "\(texts)")
         XCTAssertTrue(texts.contains("Long-press each app › Convert to Shared App."), "\(texts)")
+    }
+
+    /// No App Store Connect key: Set Up and Install / Update wait, with the
+    /// line saying what to do and Open Settings beside it.
+    func test_a_paid_sheet_without_a_key_says_where_to_set_one_up() async throws {
+        let cli = try FakeLiveContainerCLI(for: self, udid: Self.udid)
+        try cli.set("no-key")
+        final class Opened { var count = 0 }
+        let opened = Opened()
+        let (box, _) = try await hostedSheet(account: .paid, cli: cli, onOpenSettings: { opened.count += 1 })
+        let nodes = try AccessibilityTree.nodes(in: box.window)
+        let buttons = nodes.filter { $0.role == kAXButtonRole }
+        XCTAssertEqual(buttons.first { $0.name == SetUpLiveContainerSheet.setUpLabel }?.enabled, false,
+                       "\(buttons.map(\.name))")
+        XCTAssertEqual(buttons.first { $0.name == SetUpLiveContainerSheet.installLabel }?.enabled, false)
+        let texts = try AccessibilityTree.texts(in: box.window)
+        XCTAssertTrue(texts.contains(SetUpLiveContainerSheet.needsKeyLine), "\(texts)")
+        XCTAssertTrue(cli.argv.contains("--json --settings"), "the sheet read the settings: \(cli.argv)")
+
+        try clickButton(named: SetUpLiveContainerSheet.openSettingsLabel, in: box.window)
+        XCTAssertEqual(opened.count, 1)
+        XCTAssertFalse(cli.verbs.contains("--lc-install"))
+    }
+
+    /// Developer Mode off on the device: said, with what to do, and read
+    /// again on Check again.
+    func test_the_paid_sheet_says_developer_mode_is_off() async throws {
+        let cli = try FakeLiveContainerCLI(for: self, udid: Self.udid)
+        try cli.set("devmode-off")
+        let (box, _) = try await hostedSheet(account: .paid, cli: cli)
+        let texts = try AccessibilityTree.texts(in: box.window)
+        XCTAssertTrue(texts.contains(DeviceDeveloperModeRow.line(isOn: false)), "\(texts)")
+        XCTAssertTrue(texts.contains(SetUpLiveContainerSheet.developerModeNote(name: "Example iPad")), "\(texts)")
+        XCTAssertTrue(cli.argv.contains("--json --device-info --device \(Self.udid)"), "\(cli.argv)")
+
+        try cli.set("devmode-off", false)
+        try cli.set("devmode-on")
+        try clickButton(named: SetUpLiveContainerSheet.checkAgainLabel, in: box.window)
+        let deadline = Date().addingTimeInterval(10)
+        var after: [String] = []
+        repeat {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            settle(box)
+            after = try AccessibilityTree.texts(in: box.window)
+        } while !after.contains(DeviceDeveloperModeRow.line(isOn: true)) && Date() < deadline
+        XCTAssertTrue(after.contains(DeviceDeveloperModeRow.line(isOn: true)), "\(after)")
+        XCTAssertFalse(after.contains(SetUpLiveContainerSheet.developerModeNote(name: "Example iPad")), "\(after)")
+    }
+
+    /// The three LiveContainer checkboxes and the channel picker say what
+    /// they are to VoiceOver, and only the primary starts checked.
+    func test_the_install_choices_are_labeled_and_start_with_one() async throws {
+        let cli = try FakeLiveContainerCLI(for: self, udid: Self.udid)
+        try cli.set("no-primary")
+        let (box, _) = try await hostedSheet(account: .paid, cli: cli)
+        let nodes = try AccessibilityTree.nodes(in: box.window)
+        let boxes = nodes.filter { $0.role == kAXCheckBoxRole }
+        for n in 1...3 {
+            let node = try XCTUnwrap(boxes.first { $0.name == SetUpLiveContainerSheet.instanceLabel(n) },
+                                     "\(boxes.map(\.name))")
+            XCTAssertEqual((node.value as? NSNumber)?.boolValue, n == 1, "LiveContainer \(n)")
+        }
+        XCTAssertTrue(nodes.contains { $0.role == kAXPopUpButtonRole && $0.name == SetUpLiveContainerSheet.channelLabel },
+                      "\(nodes.filter { $0.role == kAXPopUpButtonRole }.map(\.name))")
+    }
+
+    /// A free Apple ID with LiveContainer already on the device: no refusal
+    /// first, Graft says what it found, and the one step left.
+    func test_the_free_sheet_with_livecontainer_there_says_so() async throws {
+        let cli = try FakeLiveContainerCLI(for: self, udid: Self.udid, freeSteps: [
+            "Install SideStore (https://example.invalid/sidestore) with your free Apple ID.",
+            "Install LiveContainer with it.",
+            "In LiveContainer, import the certificate from SideStore.",
+        ])
+        let (box, _) = try await hostedSheet(account: .free, cli: cli)
+        let texts = try AccessibilityTree.texts(in: box.window)
+        let found = "Graft found LiveContainer 3.8.14 on Example iPad."
+        XCTAssertTrue(texts.contains(found), "\(texts)")
+        XCTAssertFalse(texts.contains { $0.contains("Install SideStore") }, "\(texts)")
+        XCTAssertTrue(texts.contains { $0.contains("import the certificate from SideStore") }, "\(texts)")
+        XCTAssertFalse(texts.contains { $0.contains("needs a paid Apple Developer account") },
+                       "no refusal: \(texts)")
     }
 
     /// A paid account's SideStore phone: no Set Up, no Put certificate, no
@@ -722,6 +946,22 @@ final class LiveContainerSetUpTests: XCTestCase {
         let texts = try AccessibilityTree.texts(in: box.window)
         XCTAssertTrue(texts.contains(SetUpLiveContainerSheet.altStoreNote(name: "Example iPad")), "\(texts)")
         XCTAssertTrue(texts.contains(SetUpLiveContainerSheet.storeCertificateStep), "\(texts)")
+    }
+
+    /// The same phone with no App Store Connect key: Set Up is off for
+    /// SideStore's sake, so the key isn't what to fix, and isn't said.
+    func test_a_paid_sidestore_phone_says_nothing_of_the_key() async throws {
+        let cli = try FakeLiveContainerCLI(for: self, udid: Self.udid)
+        try cli.set("altstore")
+        try cli.set("no-key")
+        let (box, _) = try await hostedSheet(account: .paid, cli: cli, onOpenSettings: {})
+        let texts = try AccessibilityTree.texts(in: box.window)
+        XCTAssertTrue(texts.contains(SetUpLiveContainerSheet.altStoreNote(name: "Example iPad")), "\(texts)")
+        XCTAssertTrue(cli.argv.contains("--json --settings"), "premise: the settings were read: \(cli.argv)")
+        XCTAssertFalse(texts.contains(SetUpLiveContainerSheet.needsKeyLine), "\(texts)")
+        XCTAssertFalse(try AccessibilityTree.nodes(in: box.window).contains {
+            $0.role == kAXButtonRole && $0.name == SetUpLiveContainerSheet.openSettingsLabel
+        })
     }
 
     /// While a run goes, Close waits (Stop is beside it), so nothing carries
@@ -863,6 +1103,7 @@ final class LiveContainerSetUpTests: XCTestCase {
         settle(box)
         let texts = try AccessibilityTree.texts(in: box.window)
         XCTAssertTrue(texts.contains("LiveContainer isn't on Example iPad"), "no trailing period: \(texts)")
+        XCTAssertFalse(texts.contains(BuildTargetBar.sideloadOffer), "not known to be paid: \(texts)")
 
         try clickButton(named: DeviceLiveContainerSection.setUpLabel, in: box.window)
 

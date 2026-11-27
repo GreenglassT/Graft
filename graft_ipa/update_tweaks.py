@@ -6,7 +6,9 @@ partway leaves some apps on the new build and some on the old. An update
 builds every app it re-points straight afterward, so it can't have that. Here
 the new .deb is downloaded first, into a folder of its own inside the library
 (`workdir`: dotted, so `--tweaks` never lists it, and on the library's
-filesystem, so the move is a rename); then it is moved in and every app that
+filesystem, so the move is a link); checked and named by Graft
+(`tweak_sources.place`: never the repo's filename, never over another
+tweak); then it is moved in and every app that
 uses the tweak is re-pointed in **one** config write under `config.yaml.lock`
 (`config.repoint_tweak`). A Stop during the move and the write waits for both,
 however many arrive (`StopGate.deferring`); a Stop during the download just
@@ -22,7 +24,6 @@ a get's.
 from __future__ import annotations
 
 import contextlib
-import os
 import shutil
 import tempfile
 import time
@@ -30,7 +31,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import canister
+from . import canister, tweak_sources, updates
 from .config import Config, repoint_tweak
 from .json_output import JsonEmitter
 from .stop_deferral import StopGate
@@ -82,28 +83,40 @@ class Updated:
 def update(
     cfg: Config, status: TweakStatus, users: list[str], *, gate: StopGate,
     emitter: JsonEmitter | None, on_done: Callable[[Updated], None] | None = None,
+    trusted: bool = False,
 ) -> Updated:
     """Download `status`'s newer build and re-point `users` (the apps that use
     it, as `--tweaks` lists them) to it. Emits `tweak-updated`, with the same
     fields `--update-tweak` gives, once the write is done, and calls
     `on_done` then: inside the deferred step, so a caller learns the tweak is
-    in even when a Stop is waiting to be raised as the step ends."""
-    assert status.available is not None
+    in even when a Stop is waiting to be raised as the step ends.
+
+    Only from the tweak's own source, and only a verified update unless the
+    person confirmed it (`trusted`, `--trust-tweak`): otherwise refused
+    before anything is downloaded (`tweak_sources.untrusted`). The download is
+    checked and named by `tweak_sources` (a .deb of this package at this
+    version, under Graft's name, never over a different file), and its
+    source is recorded for the new file."""
+    available = status.available
+    assert available is not None
+    if not available.verified and not trusted:
+        raise tweak_sources.untrusted(status.filename, available.version, available.source,
+                                      available.unverified_reason, status.confirm_key or "")
     with workdir(cfg.tweaks_dir) as work:
-        downloaded = canister.fetch_deb(
-            status.available.download, work, status.available.sha256,
-            version=status.available.version,
-        )
+        downloaded = updates.download(available, work)
+        name = tweak_sources.checked_name(downloaded, cfg.tweaks_dir, package_id=status.package_id,
+                                          version=available.version)
         rollback_dir = cfg.state_dir / "tweak-rollback"
         rollback_dir.mkdir(parents=True, exist_ok=True)
         rollback = rollback_dir / status.filename
         shutil.copy2(cfg.tweaks_dir / status.filename, rollback)
-        dest = cfg.tweaks_dir / downloaded.name
-        in_place = dest.name == status.filename
-        existed = dest.exists()
+        existed = (cfg.tweaks_dir / name).exists()
         with gate.deferring(None, STEP):
             old_key = cfg.tweak_key(status.filename)
-            os.replace(downloaded, dest)
+            dest = tweak_sources.place(downloaded, cfg.tweaks_dir, package_id=status.package_id,
+                                       version=available.version)
+            # Only when the download is byte for byte the file already in use.
+            in_place = dest.name == status.filename
             if in_place:
                 apps = list(users)
             else:
@@ -114,6 +127,7 @@ def update(
                     if not existed:
                         dest.unlink(missing_ok=True)
                     raise
+            record_source(cfg, dest, available.origin)
             done = Updated(status.filename, dest.name, apps, in_place)
             if emitter:
                 emitter.emit(
@@ -122,8 +136,8 @@ def update(
                     new_filename=dest.name,
                     package_id=status.package_id,
                     installed=status.installed,
-                    latest=status.available.version,
-                    source=status.available.source,
+                    latest=available.version,
+                    source=available.source,
                     apps=apps,
                     replaced_in_place=in_place,
                     rollback=str(rollback),
@@ -133,3 +147,14 @@ def update(
             if on_done is not None:
                 on_done(done)
     return done
+
+
+def record_source(cfg: Config, path: Path, source: tweak_sources.Source) -> None:
+    """Record `path`'s source, for its next update. Best effort: the file is
+    in and the apps re-pointed, and a tweak with no record has its source
+    inferred from its own hash on the next check."""
+    sha256 = tweak_sources.file_sha256(path)
+    if sha256 is None:
+        return
+    with contextlib.suppress(OSError):
+        tweak_sources.record(cfg.state_dir, cfg.tweaks_dir, path.name, source, sha256)

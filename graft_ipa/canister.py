@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,20 @@ HTTP_TIMEOUT = 30
 
 class CanisterError(GraftError):
     exit_code = EXIT_CANISTER
+
+
+class SeveralRepositoriesError(CanisterError):
+    """A fetch by package id alone that several Canister repositories list
+    (re-verify #4): the newest of any of them won, and its source was then
+    recorded as the tweak's. `repositories`: (id, URI) of each."""
+
+    def __init__(self, package_id: str, repositories: list[tuple[str, str]]) -> None:
+        listed = ", ".join(f"{repo_id} ({uri or 'no address'})" for repo_id, uri in repositories)
+        super().__init__(
+            f"several Canister repositories list {package_id}: {listed}",
+            hint=f"pick the one you trust: graft --fetch {package_id} --fetch-repository <id>",
+        )
+        self.repositories = repositories
 
 
 @dataclass
@@ -212,12 +227,16 @@ def download_url(package: Package, repo: Repository) -> str:
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
-def _candidates(package_id: str, version: str | None) -> list[Package]:
+def _candidates(package_id: str, version: str | None,
+                repository_id: str | None = None, rows: list[Package] | None = None) -> list[Package]:
     """The builds to try, best first: one version, every architecture of it.
 
     With no `version` that is the newest one (`--fetch <id>`). With one, exactly
     that version — never a neighbour, so a caller that reported "latest 1.7.24"
-    cannot be handed 1.7.20 because 1.7.24's file was missing.
+    cannot be handed 1.7.20 because 1.7.24's file was missing. With
+    `repository_id`, only that repository's rows: the one a search result
+    named, so another repository listing the same id at a higher version
+    can't win the fetch (2.3.1 A1).
     """
     from .repo import version_key
 
@@ -225,12 +244,21 @@ def _candidates(package_id: str, version: str | None) -> list[Package]:
     # outside the 404 handling and hide the URLs that did 404. Filtered before
     # "newest" is decided, too, so a version that exists only as such rows is
     # never chosen as the one to fetch — `get_package` reports from here.
-    packages = [p for p in get_packages(package_id) if p.package_filename]
+    listed = rows if rows is not None else get_packages(package_id)
+    packages = [p for p in listed if p.package_filename
+                and (repository_id is None or p.repository_id == repository_id)]
+    if repository_id is not None and not packages:
+        error = CanisterError(
+            f"canister lists no downloadable build of {package_id} in repository {repository_id}",
+            hint="search again: the repository may have dropped it",
+        )
+        error.status = 404
+        raise error
     if version is None:
         if not packages:
             error = CanisterError(f"canister lists no downloadable build of {package_id}")
             # 404, like canister's own "no such package": there is nothing to
-            # fetch or update to, which `updates.canister_latest` reads as
+            # fetch or update to, which `updates.canister_offers` reads as
             # absent rather than as a lookup that failed.
             error.status = 404
             raise error
@@ -253,6 +281,8 @@ def fetch_deb(
     expected_sha: str | None = None,
     *,
     version: str | None = None,
+    on_pick: Callable[[Package, Repository], None] | None = None,
+    repository_id: str | None = None,
 ) -> Path:
     """Download a .deb to dest_dir. `target` is either a direct URL or a canister package id.
 
@@ -263,6 +293,9 @@ def fetch_deb(
     For a package-id target, `version` pins the build to download (default: the
     newest). Variants of that one version are tried in turn, moving on only when
     a file is genuinely absent (404) — any other failure stops the download.
+    `on_pick` is told which row, from which repository, was downloaded: the
+    tweak's source, which `--fetch` records (`tweak_sources`). `repository_id`
+    takes only that repository's builds (`_candidates`).
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
     if _URL_RE.match(target):
@@ -272,7 +305,15 @@ def fetch_deb(
             filename = filename + ".deb"
         return _download(url, dest_dir, filename, expected_sha)
 
-    candidates = _candidates(target, version)
+    rows = get_packages(target)
+    if repository_id is None:
+        # By package id alone, only while one repository lists it: else the
+        # newest of any of them would win, and be recorded as its source.
+        listing = sorted({p.repository_id for p in rows if p.package_filename and p.repository_id})
+        if len(listing) > 1:
+            raise SeveralRepositoriesError(
+                target, [(repo_id, get_repository(repo_id).uri.rstrip("/")) for repo_id in listing])
+    candidates = _candidates(target, version, repository_id, rows=rows)
     repos: dict[str, Repository] = {}
     missing: list[str] = []
     for pkg in candidates:
@@ -280,11 +321,15 @@ def fetch_deb(
         repos[pkg.repository_id] = repo
         url = download_url(pkg, repo)
         try:
-            return _download(url, dest_dir, pkg.deb_basename, pkg.sha256)
+            path = _download(url, dest_dir, pkg.deb_basename, pkg.sha256)
         except CanisterError as e:
             if getattr(e, "status", None) != 404:
                 raise
             missing.append(url)
+            continue
+        if on_pick is not None:
+            on_pick(pkg, repo)
+        return path
     raise CanisterError(
         f"no downloadable build of {target} {candidates[0].version}: "
         + ", ".join(f"{u} -> 404" for u in missing),

@@ -35,6 +35,149 @@ final class AppStoreStoreTests: XCTestCase {
 
     // MARK: status
 
+    /// B5: Get latest before the App Store is set up failed with "not
+    /// enrolled… sudo /bin/sh" or "not signed in". It waits, saying where.
+    @MainActor
+    func test_get_waits_for_the_setup_status_says_is_missing() async throws {
+        let unenrolled = Self.statusLine.replacingOccurrences(of: #""enrolled":true"#, with: #""enrolled":false"#)
+        let (runner, _) = try scriptRunner("printf '%s\\n' '\(unenrolled)'")
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        XCTAssertNil(store.getBlockedReason, "status not read yet is no reason: the CLI checks")
+
+        await store.loadStatus()
+
+        XCTAssertEqual(store.setUpReason, AppStoreStore.setUpFirst)
+        XCTAssertEqual(store.getBlockedReason, AppStoreStore.setUpFirst)
+    }
+
+    /// The App Store check the pane runs as it appears, with what it read of
+    /// this Mac's setup from files alone (`setup_missing`). Quoted for the
+    /// script's single-quoted `printf` argument: "decryption isn't set up"
+    /// has an apostrophe.
+    private static func checkLine(setupMissing: String?) -> String {
+        let setup = setupMissing.map { "\"\($0)\"" } ?? "null"
+        let line = #"{"type":"appstore-version","app":"example","bundle_id":"com.example.app","store_version":"2.0","cached_version":"1.0","update_available":true,"held_version":null,"held_version_id":null,"held_build":null,"setup_missing":"#
+            + setup + #","error":null}"#
+        return line.replacingOccurrences(of: "'", with: "'\\''")
+    }
+
+    /// B5 after the re-verify: status is read only from Settings, Add App's
+    /// search and a sign-in, so adding by URL, or a relaunch straight into a
+    /// pane, left Get latest enabled. The pane's own check says it, with no
+    /// keychain and no status read.
+    @MainActor
+    func test_the_panes_check_says_get_waits_for_setup_without_a_status_read() async throws {
+        for (said, words) in [(CLIContract.Update.decryptionNotSetUp, AppStoreStore.setUpFirst),
+                              (CLIContract.Update.notSignedIn, AppStoreStore.signedOutReason)] {
+            let (runner, log) = try scriptRunner("printf '%s\\n' '\(Self.checkLine(setupMissing: said))'")
+            let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+            await store.checkVersion(app: "example")
+
+            XCTAssertEqual(store.getBlockedReason, words, said)
+            XCTAssertEqual(try argv(log), ["--json --appstore-check --app example"], "no status read")
+        }
+    }
+
+    @MainActor
+    func test_a_check_that_finds_the_setup_done_blocks_nothing() async throws {
+        let (runner, _) = try scriptRunner("printf '%s\\n' '\(Self.checkLine(setupMissing: nil))'")
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        await store.checkVersion(app: "example")
+
+        XCTAssertNil(store.setUpReason)
+    }
+
+    /// Status, once read, knows more than files (another ipatool's sign-in,
+    /// a known-bad ipatool), so it decides.
+    @MainActor
+    func test_a_status_read_decides_over_what_the_files_said() async throws {
+        let (runner, _) = try scriptRunner("""
+        case "$*" in
+        *--appstore-status*) printf '%s\\n' '\(Self.statusLine)' ;;
+        *) printf '%s\\n' '\(Self.checkLine(setupMissing: CLIContract.Update.decryptionNotSetUp))' ;;
+        esac
+        """)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        await store.checkVersion(app: "example")
+        XCTAssertEqual(store.setUpReason, AppStoreStore.setUpFirst, "premise")
+
+        await store.loadStatus()
+
+        XCTAssertNil(store.setUpReason)
+    }
+
+    /// The fallback: a check that answered nothing about the setup (it
+    /// failed, or a CLI too old to say) reads status, once.
+    @MainActor
+    func test_with_no_answer_from_the_files_status_is_read_once() async throws {
+        let (runner, log) = try scriptRunner("""
+        case "$*" in
+        *--appstore-status*) printf '%s\\n' '\(Self.statusLine)' ;;
+        *) echo 'error: lookup failed' >&2; exit 13 ;;
+        esac
+        """)
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        await store.checkVersion(app: "example")
+
+        await store.checkSetupIfUnknown()
+        await store.checkSetupIfUnknown()
+
+        XCTAssertEqual(try argv(log).filter { $0.contains("--appstore-status") }.count, 1)
+        XCTAssertNotNil(store.status)
+    }
+
+    @MainActor
+    func test_with_an_answer_from_the_files_status_isnt_read() async throws {
+        let (runner, log) = try scriptRunner("printf '%s\\n' '\(Self.checkLine(setupMissing: nil))'")
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+        await store.checkVersion(app: "example")
+
+        await store.checkSetupIfUnknown()
+
+        XCTAssertFalse(try argv(log).contains { $0.contains("--appstore-status") })
+    }
+
+    /// Signed in with a known-bad ipatool: not "Sign in…", which it is.
+    @MainActor
+    func test_a_known_bad_ipatool_says_set_up_not_sign_in() async throws {
+        // Signed out too: signing in alone wouldn't help, so it's Set up.
+        let bad = Self.statusLine.replacingOccurrences(of: #""warning":null"#, with: #""warning":"2.8.1 can't download""#)
+            .replacingOccurrences(of: #""signed_in":true"#, with: #""signed_in":false"#)
+        XCTAssertTrue(bad.contains(#""signed_in":false"#) && bad.contains("2.8.1"), "the fixture is signed out with a bad ipatool")
+        let (runner, _) = try scriptRunner("printf '%s\\n' '\(bad.replacingOccurrences(of: "'", with: "'\\''"))'")
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        await store.loadStatus()
+
+        XCTAssertEqual(store.setUpReason, AppStoreStore.setUpFirst)
+    }
+
+    /// Signed out and nothing else: the sign-in's own words.
+    @MainActor
+    func test_get_signed_out_says_to_sign_in() async throws {
+        let signedOut = Self.statusLine.replacingOccurrences(of: #""signed_in":true"#, with: #""signed_in":false"#)
+        let (runner, _) = try scriptRunner("printf '%s\\n' '\(signedOut)'")
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        await store.loadStatus()
+
+        XCTAssertEqual(store.getBlockedReason, AppStoreStore.signedOutReason)
+        XCTAssertEqual(store.claimBlockedReason, AppStoreStore.signedOutReason)
+    }
+
+    @MainActor
+    func test_a_set_up_mac_gets() async throws {
+        let (runner, _) = try scriptRunner("printf '%s\\n' '\(Self.statusLine)'")
+        let store = AppStoreStore(runner: runner, shell: NoAdminShell())
+
+        await store.loadStatus()
+
+        XCTAssertNil(store.setUpReason)
+        XCTAssertNil(store.getBlockedReason)
+    }
+
     @MainActor
     func test_status_asks_for_json_and_the_verb() async throws {
         let (runner, log) = try scriptRunner("printf '%s\\n' '\(Self.statusLine)'")

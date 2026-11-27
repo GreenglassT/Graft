@@ -232,6 +232,8 @@ def test_lc_install_hands_its_device_to_the_profiles(
 ) -> None:
     from graft_ipa import lc_manage
 
+    # An install needs a key, and refuses before the keychain without one.
+    _with_asc(temp_config_env, udids=[PHONE])
     made: list = []
     monkeypatch.setattr(signer, "resolve_p12_password", lambda cfg: "pw")
     monkeypatch.setattr(lc_manage, "AscProfiles",

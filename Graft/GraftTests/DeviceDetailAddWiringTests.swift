@@ -132,7 +132,7 @@ final class DeviceDetailAddWiringTests: XCTestCase {
         )
         XCTAssertEqual(
             result.versionLine,
-            "This phone runs 21.20.1; the staged dump is 21.16.2.",
+            "This device runs 21.20.1; the staged dump is 21.16.2.",
             "proof the two inputs actually disagree, not just that some string was set"
         )
     }

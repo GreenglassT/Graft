@@ -188,6 +188,46 @@ def test_the_installed_line_is_the_one_the_app_reads(rig: Rig, gone_pid: int) ->
     assert before <= when <= after
 
 
+#: What lsregister -u printed on the trashed copy in the 2.2.1 -> 2.3
+#: update, with no newline after it (the 2.3.1 review's Track 4 item 2).
+LSREGISTER_SCAN_FAILED = "failed to scan $2: -10814 from spotlight"
+
+#: Each line the helper writes: its time, with its offset, then what it says.
+HELPER_LINE = re.compile(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d [+-]\d{4} \S")
+
+
+def test_lsregister_s_complaint_about_the_trashed_copy_stays_out_of_the_log(
+    rig: Rig, gone_pid: int
+) -> None:
+    """The -u's answer is no news: the copy is in the Trash either way. Its
+    unended line ran into the helper's own "installed" line, which the app
+    then didn't read as one."""
+    rig._tool("lsregister", f'[ "$1" = -u ] && printf "%s" "{LSREGISTER_SCAN_FAILED}"')
+
+    assert rig.run(rig.env(pid=gone_pid)).returncode == 0
+    written = rig.log.read_text()
+
+    assert "from spotlight" not in written
+    assert f"lsregister -u {rig.trash / 'Graft.app'}" in rig.tool_calls(), "it still runs"
+
+
+def test_every_line_the_helper_writes_begins_with_its_time_after_any_tool_s_output(
+    rig: Rig, gone_pid: int
+) -> None:
+    """A tool whose output the log keeps (here lsregister -f) and that ends
+    it without a newline: the helper's next line still begins a line, so
+    the app reads its time (`UpdateStore.installLogged`)."""
+    rig._tool("lsregister", '[ "$1" = -f ] && printf "%s" "registered $2 (no newline)"')
+
+    assert rig.run(rig.env(pid=gone_pid)).returncode == 0
+    lines = rig.log.read_text().splitlines()
+
+    assert f"registered {rig.app} (no newline)" in lines, "its output is kept, on its own line"
+    said = [line for line in lines if not line.startswith("registered ")]
+    assert said and all(HELPER_LINE.match(line) for line in said), lines
+    assert any(" installed Graft 2.0.2 at " in line for line in said)
+
+
 #: The Swift tests, and the folder their copy of the helper's line names
 #: where the rig's is (`UpdateStoreTests.helperInstalledLine`).
 SWIFT_TESTS = REPO_ROOT / "Graft" / "GraftTests" / "UpdateStoreTests.swift"

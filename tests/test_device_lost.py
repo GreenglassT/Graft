@@ -38,7 +38,7 @@ from graft_ipa.errors import InstallError
 from .device_fakes import phone
 
 REPO = Path(__file__).parent.parent
-DROPPED = "the connection to the phone dropped"
+DROPPED = "the connection to the device dropped"
 
 
 def _ipa(tmp_path):
@@ -55,7 +55,7 @@ def _ipa(tmp_path):
     ("connect", ConnectionFailedToUsbmuxdError(), "usbmuxd"),
     ("connect", DeviceNotFoundError("no device u1"), "not connected"),
     ("connect", StartServiceError("com.apple.afc", ""), "wouldn't start the service"),
-    ("install", AppInstallError(), "without the phone saying why"),
+    ("install", AppInstallError(), "without the device saying why"),
 ], ids=lambda v: v if isinstance(v, str) else type(v).__name__)
 def test_a_phone_lost_mid_transfer_gets_a_plain_hint(tmp_path, monkeypatch, capsys, where, error, phrase):
     phone(monkeypatch, **{where: error})
@@ -116,7 +116,7 @@ def test_over_the_real_afc_a_lost_phone_is_one_plain_error_and_a_quiet_stderr(mo
 # --- a phone that goes silent, the connection still open (re-check #13) ----------
 
 
-SILENT = "the phone stopped answering"
+SILENT = "the device stopped answering"
 
 
 @pytest.mark.parametrize("mode", ["silent-write", "silent-install"])

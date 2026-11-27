@@ -38,7 +38,8 @@ def _push_end(buf: StringIO) -> dict:
     return end
 
 
-def _build(tmp_path: Path, *, dry_run: bool, pin: str | None = None) -> dict:
+def _build(tmp_path: Path, *, dry_run: bool, pin: str | None = None,
+           target: cli_mod.Target | None = None) -> dict:
     cfg = _stub_config(tmp_path)
     cfg.apps["example"].lc_bundle_id = pin
 
@@ -51,7 +52,8 @@ def _build(tmp_path: Path, *, dry_run: bool, pin: str | None = None) -> dict:
     with patch.object(cli_mod, "run_all_checks", return_value=[]), \
          patch.object(cli_mod, "acquire_ipa") as acquire, \
          patch.object(cli_mod, "run_cyan", side_effect=cyan), \
-         patch.object(cli_mod, "resolve_target", return_value=cli_mod.Target("UDID1", None, "USB")):
+         patch.object(cli_mod, "resolve_target",
+                      return_value=target or cli_mod.Target("UDID1", None, "USB")):
         acquire.return_value.path = tmp_path / "in.ipa"
         acquire.return_value.version = "1.0"
         cli_mod._build_one(cfg=cfg, log=BuildLog(tmp_path / "log.sqlite"), app_name="example",
@@ -101,6 +103,21 @@ def test_a_real_push_says_it_was_not_a_dry_run(tmp_path, monkeypatch) -> None:
     assert end["bundle_id"] == PRIMARY
     assert end["documents_path"] == "Documents/example.ipa"
     assert (PRIMARY, "Documents/example.ipa") in written
+
+
+def test_a_real_push_names_the_device_it_went_to(tmp_path, monkeypatch) -> None:
+    """2.3.1 B9: the app says "Sent to LiveContainer on <device>" once the
+    push is done, so the end of the push names the device: its UDID, and the
+    name Graft last saw it by (`installer.Target.name`), or null when Graft
+    was never told one."""
+    fake_device(monkeypatch, [PRIMARY])
+    named = _build(tmp_path / "named", dry_run=False,
+                   target=cli_mod.Target("UDID1", "Example iPad", "USB"))
+    fake_device(monkeypatch, [PRIMARY])  # a fresh phone: the first push's file isn't there
+    unnamed = _build(tmp_path / "unnamed", dry_run=False)
+
+    assert (named["udid"], named["device_name"]) == ("UDID1", "Example iPad")
+    assert (unnamed["udid"], unnamed["device_name"]) == ("UDID1", None)
 
 
 def test_a_reinstall_push_carries_both_fields(tmp_path) -> None:

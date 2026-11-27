@@ -432,11 +432,21 @@ struct TweakUpdateRecord: Decodable, Hashable {
     /// The summary already counts these (`TweakUpdatesEndRecord.unchecked`);
     /// this says *which* rows. False when absent, from a CLI too old to say.
     var unchecked: Bool = false
+    /// The update comes from the tweak's own source, over HTTPS, with a
+    /// published checksum (2.3.1 A1). One that isn't runs only on the
+    /// person's OK (`--trust-tweak`); `unverifiedReason` says why. False
+    /// when absent: what's missing never reads as verified.
+    var verified: Bool = false
+    var unverifiedReason: String? = nil
+    /// What `--trust-tweak` takes to confirm exactly this update.
+    var confirmKey: String? = nil
 
     enum CodingKeys: String, CodingKey {
-        case filename, installed, latest, source, unchecked
+        case filename, installed, latest, source, unchecked, verified
         case packageId = "package_id"
         case updateAvailable = "update_available"
+        case unverifiedReason = "unverified_reason"
+        case confirmKey = "confirm_key"
     }
 }
 
@@ -454,6 +464,9 @@ extension TweakUpdateRecord {
         source = try c.decodeIfPresent(String.self, forKey: .source)
         updateAvailable = try c.decode(Bool.self, forKey: .updateAvailable)
         unchecked = try c.decodeIfPresent(Bool.self, forKey: .unchecked) ?? false
+        verified = try c.decodeIfPresent(Bool.self, forKey: .verified) ?? false
+        unverifiedReason = try c.decodeIfPresent(String.self, forKey: .unverifiedReason)
+        confirmKey = try c.decodeIfPresent(String.self, forKey: .confirmKey)
     }
 }
 
@@ -1575,7 +1588,7 @@ struct UpdateCheckRecord: Codable, Hashable {
     /// `defaults`, which any process running as the user can write.
     let url: String?
     let updateAvailable: Bool
-    /// Why it failed (offline, http, malformed); nil when it didn't.
+    /// Why it failed (offline, timeout, http, malformed); nil when it didn't.
     let reason: String?
     /// The HTTP status of a failure GitHub answered; nil otherwise.
     let status: Int?
@@ -1671,6 +1684,22 @@ struct UpdateTargetDroppedRecord: Decodable, Equatable {
     }
 }
 
+/// `reconcile-checked`: Check device (`--reconcile`) asked the device
+/// `udid` about `app`'s last delivery and it answered: `deviceName`, what
+/// Graft knows it as, if anything, and whether the delivered file was there
+/// (`found`). None when no device was asked (2.3.1 §3.5).
+struct ReconcileCheckedRecord: Decodable, Equatable {
+    let app: String
+    let udid: String
+    let deviceName: String?
+    let found: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case app, udid, found
+        case deviceName = "device_name"
+    }
+}
+
 enum CanisterFetchResult: Equatable {
     case success(filename: String, sizeBytes: Int, path: String?)
     case failure(error: String)
@@ -1699,7 +1728,11 @@ enum BuildEvent {
     /// `stopped` is the CLI saying the build ended because it was told to
     /// stop (SIGTERM/SIGINT), not because anything went wrong: C-STOP. False
     /// when absent, which is every CLI from before that contract.
-    case buildEnd(app: String, ok: Bool, error: String?, elapsedSeconds: Double?, stopped: Bool = false)
+    /// `waiting`: under `graft --update`, its device went away during the
+    /// build or its install, and `error` is the update's waiting sentence
+    /// (T2-B7). Not a failure, as the update's own events say.
+    case buildEnd(app: String, ok: Bool, error: String?, elapsedSeconds: Double?, stopped: Bool = false,
+                  waiting: Bool = false)
     case canisterResult(CanisterPackage)
     case canisterSearchEnd(count: Int)
     case canisterFetchStart(target: String)
@@ -1715,6 +1748,7 @@ enum BuildEvent {
     case appRemoved(AppRemovedRecord)
     case appUpdated(AppUpdatedRecord)
     case deliveryState(DeliveryStateRecord)
+    case reconcileChecked(ReconcileCheckedRecord)
     case cachedIPA(CachedIPARecord)
     case ipaProvided(CachedIPARecord)
     case stagedIPA(StagedIPARecord)
@@ -1838,8 +1872,10 @@ enum BuildEvent {
         let elapsedSeconds: Double?
         /// Optional on the wire: a CLI from before C-STOP never sends it.
         let stopped: Bool?
+        /// Only under `graft --update`, and only when true (T2-B7).
+        let waiting: Bool?
         enum CodingKeys: String, CodingKey {
-            case app, ok, error, stopped
+            case app, ok, error, stopped, waiting
             case elapsedSeconds = "elapsed_seconds"
         }
     }
@@ -1975,7 +2011,8 @@ enum BuildEvent {
                 ok: p.ok ?? false,
                 error: p.error,
                 elapsedSeconds: p.elapsedSeconds,
-                stopped: p.stopped ?? false
+                stopped: p.stopped ?? false,
+                waiting: p.waiting ?? false
             )
         case "stage":
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -2076,6 +2113,8 @@ enum BuildEvent {
             return .appUpdated(try decoder.decode(AppUpdatedRecord.self, from: data))
         case "delivery-state":
             return .deliveryState(try decoder.decode(DeliveryStateRecord.self, from: data))
+        case "reconcile-checked":
+            return .reconcileChecked(try decoder.decode(ReconcileCheckedRecord.self, from: data))
         case "cached-ipa":
             // The "missing" event omits all fields except exists+app; decode
             // permissively so a partial JSON shape doesn't fail.
@@ -2341,7 +2380,7 @@ extension BuildEvent {
             return .liveContainerChoice(record)
         case let .ipaExported(record):
             return .exported(record)
-        case let .buildEnd(_, ok, error, elapsedSeconds, stopped):
+        case let .buildEnd(_, ok, error, elapsedSeconds, stopped, _):
             // Ahead of `ok`: a stopped build-end carries `ok: false`, and
             // that is not a verdict on the build.
             if stopped { return .stopped(elapsed: elapsedSeconds) }

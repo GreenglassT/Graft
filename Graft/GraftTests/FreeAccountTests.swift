@@ -500,7 +500,7 @@ final class FreeAccountViewTests: XCTestCase {
         XCTAssertNotEqual(setUp.enabled, false)
         XCTAssertNil(button("Install / Update LiveContainer", in: nodes), "it's in the Set Up sheet")
         XCTAssertNil(button("Remove certificate", in: nodes), "the sheet's tick, or the reminder's Remove it")
-        XCTAssertFalse(texts(nodes).contains(PaidOnly.installLiveContainer))
+        XCTAssertFalse(texts(nodes).contains { $0.contains("needs a paid Apple Developer account") })
     }
 
     // MARK: Settings

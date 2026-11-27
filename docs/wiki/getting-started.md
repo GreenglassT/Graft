@@ -36,7 +36,8 @@ libimobiledevice's `iproxy` and tools you install yourself (see
   - Build for this Mac, and handing builds to PlayCover.
 
   Those buttons are there but disabled, with "Needs a Mac with Apple
-  silicon". Use a decrypted IPA you already have, or dump one from a
+  silicon", and Settings › App Store says so in one line, with no sign-in or
+  setup to do. Use a decrypted IPA you already have, or dump one from a
   jailbroken device. `Graft.zip` opened on an Intel Mac only says to download
   `Graft-Intel.zip`; `Graft-Intel.zip` on an Apple silicon Mac runs, with a
   banner saying to download `Graft.zip` for everything.

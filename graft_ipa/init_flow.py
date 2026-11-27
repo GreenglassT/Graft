@@ -263,7 +263,7 @@ def _pick_device(console: Console) -> str | None:
     if devices:
         console.print(f"detected: {', '.join(devices)}")
         return devices[0]
-    console.print("[yellow]![/yellow] no devices detected — connect your iPhone via USB and trust this Mac")
+    console.print("[yellow]![/yellow] no devices detected — connect your iPhone or iPad via USB and trust this Mac")
     return None
 
 

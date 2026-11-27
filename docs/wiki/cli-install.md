@@ -56,8 +56,8 @@ only the tools your apps' delivery modes use: zsign only when some app
 sideloads (or, on a paid config with no apps yet, since a new app sideloads by
 default). The `brew` commands need [Homebrew](https://brew.sh), and `--check`
 says so when it isn't installed. Neither kind of install needs
-libimobiledevice or the Xcode Command Line Tools for phone builds: Graft reads
-binaries and installs apps itself, through pymobiledevice3.
+libimobiledevice or the Xcode Command Line Tools for iPhone and iPad builds:
+Graft reads binaries and installs apps itself, through pymobiledevice3.
 
 ### Where each tool comes from
 

@@ -3,6 +3,119 @@
 What changed in each release of Graft, newest first. Each release's download
 is on [GitHub Releases](https://github.com/GreenglassT/Graft/releases).
 
+## 2.3.1 (2026-11-26)
+
+### Security
+
+- A tweak updates only from where it came from: the repo or Canister
+  repository you fetched it from. Another repo that publishes the same
+  package can't replace it in your apps.
+- When Graft can't verify a tweak update (Graft has no record of where the
+  tweak came from, the source doesn't use HTTPS, or it lists no checksum),
+  the update confirmation says why and where the update comes from, and the
+  tweak updates only if you turn on **Trust this source**. You're trusting
+  the update the confirmation shows: if the source offers something else by
+  the time it runs, Graft doesn't update that app, and says so. The Tweaks
+  pane asks first too.
+- Graft names each tweak it downloads (`<package id>_<version>.deb`, with
+  its architecture when the package names one), keeps a download only if
+  it's a .deb of the package it asked for, and never replaces a different
+  tweak. Fetching from a Canister search takes the build from the repository
+  the result shows. In Terminal, a fetch by package id that several Canister
+  repositories list names them and asks you to pick one.
+- A Canister repository recorded as a tweak's source whose address has moved
+  counts as unverified.
+- A copy of the LiveContainer certificate left in the temporary folder by a
+  push that was killed is removed the next time Graft runs.
+
+### Changed
+
+- With a paid account, Add App starts a new app on Sideload, as the setup
+  screen and the docs say, then on what you chose last. A line under the
+  picker says what each mode does. With a free Apple ID, Add App shows
+  Delivery: LiveContainer.
+
+### Fixes
+
+- ⌘Q and Graft › Quit Graft work while a sheet is open: an update's
+  progress, Edit…, a confirmation. With work running, Graft asks first, as
+  it does with no sheet open, and quitting during an update's install waits
+  for it to finish. With nothing running, Graft quits, and an open sheet's
+  unsaved changes are discarded.
+- What's New shows what's new to you: after an update, the releases since
+  the version you used before; from Help › What's New…, the latest release.
+  **Show earlier releases** shows the rest, in the same window.
+- Check device says which device it checked ("Checked iPad mini — the record
+  still stands"), and says so when the delivered file is gone from it.
+- In an update's progress, a device whose install Stop Now canceled says
+  Stopped, with Try Again. Not started is for devices the update never
+  reached.
+- Build for this Mac names a tweak it can't build by its name in the Tweaks
+  library.
+- Hints and messages about a device say iPhone or iPad, and LiveContainer's
+  folder in the Files app is On My iPad on an iPad.
+- After a get that changes an app's hold, Graft checks just that app for
+  updates again.
+- `graft --update` in Terminal names the tweak step as the app does: "→
+  tweaks: 1 tweak".
+- A device that's locked, or asking whether to trust this Mac, says "Unlock
+  it and tap Trust" in the sidebar and on the app's bar, and Graft reads it
+  again on its own, within a few seconds at first and every half minute
+  after.
+- Build & Install, Build for this Mac and Export IPA… wait, and say what to
+  do, until the app has a decrypted IPA. Build & Install also waits for a
+  connected iPhone or iPad, or for Skip install.
+- Before the App Store is set up, Get latest from App Store, Get an older
+  version… and Update wait and say where to set it up, with Open Settings.
+- When a check can't reach the App Store or canister.me, as when your Mac is
+  offline, the update marks stay and Graft checks again within the hour.
+  Check for updates now says how it went, and VoiceOver reads it.
+- After a LiveContainer build, the app's pane says where the IPA went and
+  what's left ("Sent to LiveContainer on iPhone 15 Pro. Open LiveContainer
+  and import Example to finish.").
+- Set Up LiveContainer says what would stop it before you press Set Up: an
+  App Store Connect key that isn't set up yet (with Open Settings), or
+  Developer Mode, which a LiveContainer from Graft needs on iOS 16 and
+  later. It installs one LiveContainer by default, and with a free Apple ID
+  and LiveContainer already on the device, lists only Import Certificate.
+  With a paid account, when LiveContainer isn't on the device, the bar also
+  offers switching the app to Sideload.
+- Dump in a device's list of apps waits on a device without a jailbreak, as
+  the Decrypt card says. On an Intel Mac, a newer App Store version says to
+  drop a newer decrypted IPA on Source IPA, without the update arrow.
+- A full disk says "Your Mac is out of disk space: free some and press Try
+  Again" wherever it stops a get, a build, an update or a tweak update. An
+  expired App Store sign-in says it has expired and points to Sign In
+  Again….
+- When GitHub is slow to answer Graft's own update check, Graft waits up to
+  30 seconds, then says "GitHub didn't answer in time".
+- An app held at a build whose file was deleted says so ("held at 1.2 (build
+  1 of 2), which isn't downloaded"). A device unplugged mid-update reads as
+  waiting in the log too.
+- A PlayCover handoff that fails or is stopped removes its copy of the IPA
+  from the temporary folder. A damaged PlayCover settings file, a damaged
+  `.ipa-info.json` in the cache, or a version with square brackets in it is
+  handled without stopping anything.
+- Fetching and updating tweaks works on volumes without hard links, such as
+  exFAT or a network share.
+- Graft's self-update finds its install in the update log even after a
+  system tool's message with no line break.
+- When Graft can't write its log after the device already has LiveContainer
+  or the certificate, Set Up LiveContainer says what wasn't recorded, and
+  the install and the reminder carry on.
+- On an Apple silicon Mac running Graft-Intel.zip, a newer App Store version
+  says to use Graft.zip, or to drop a newer decrypted IPA on Source IPA.
+- On an Intel Mac, Settings › App Store says in one line that getting apps
+  from the App Store needs a Mac with Apple silicon, and to add apps from a
+  decrypted IPA, with no sign-in or setup to do. With Graft-Intel.zip on an
+  Apple silicon Mac, it says which download can.
+- Terminal: `--trust-tweak <confirm_key>` confirms an unverified tweak
+  update for `--update` and `--update-tweak`, and `--fetch-repository ID`
+  pins `--fetch` to one Canister repository. The update plan adds
+  `checks_failed`, each tweak's `source`, `verified`, `unverified_reason`,
+  `confirmed`, `confirm_key` and `trust_changed`, and each app's
+  `needs_confirmation`; `tweak-update` adds `confirm_key`.
+
 ## 2.3 (2026-11-26)
 
 ### New

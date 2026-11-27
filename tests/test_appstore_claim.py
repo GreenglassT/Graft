@@ -279,7 +279,7 @@ def test_a_known_bad_ipatool_is_refused_before_anything_is_purchased(
     [
         ("failed to purchase item with param 'STDQ': Account Not In This Store", "different country"),
         ("purchasing paid apps is not supported", "isn't free"),
-        ("password token is expired", "not signed in"),
+        ("password token is expired", "sign-in has expired"),
         ("subscription required", "Apple Arcade"),
         ("item is temporarily unavailable", "isn't available"),
     ],

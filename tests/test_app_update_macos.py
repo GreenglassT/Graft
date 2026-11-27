@@ -235,6 +235,35 @@ def test_the_same_zip_is_refused_again_without_downloading_it(
     assert leftovers() == [app_update.MACOS_NOTE]
 
 
+def test_the_note_is_written_owner_only_and_never_through_a_link(tmp_path: Path) -> None:
+    """Written as Graft's other private files are (`data_dirs.private_write`):
+    a link planted where the note's temporary used to go, `<note>.part`, was
+    opened with O_TRUNC and written through (the 2.3.1 review's A4)."""
+    import os
+    import stat
+
+    root = tmp_path / "updates"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.write_text("someone else's file")
+    (root / (app_update.MACOS_NOTE + ".part")).symlink_to(elsewhere)
+
+    app_update._note_minimum(root, version="2.0.2", sha256="ab" * 32, minimum="15.0")
+
+    assert elsewhere.read_text() == "someone else's file"
+    note = root / app_update.MACOS_NOTE
+    assert not note.is_symlink()
+    assert stat.S_IMODE(os.lstat(note).st_mode) == 0o600
+    assert app_update._noted_minimum(root, version="2.0.2", sha256="ab" * 32) == "15.0"
+
+
+def test_a_note_that_cant_be_written_is_no_failure(tmp_path: Path) -> None:
+    """Best effort: without it the next try downloads the zip again."""
+    app_update._note_minimum(tmp_path / "no-such-folder", version="2.0.2", sha256="ab" * 32,
+                             minimum="15.0")
+    assert not (tmp_path / "no-such-folder").exists()
+
+
 def test_once_this_mac_has_that_macos_the_same_zip_downloads(
     server: FixtureServer, tools: FakeTools, tmp_path: Path, installed: Path,
 ) -> None:

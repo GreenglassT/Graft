@@ -156,6 +156,192 @@ final class WhatsNewTests: XCTestCase {
         ])
     }
 
+    // MARK: - Versions
+
+    private typealias Version = Changelog.Version
+
+    func test_a_version_is_numbers_between_dots() {
+        XCTAssertEqual(Version("2.3.1")?.parts, [2, 3, 1])
+        XCTAssertEqual(Version("2")?.parts, [2])
+        XCTAssertEqual(Version("2.10")?.parts, [2, 10])
+        for text in ["", "v2.3", "2..3", "2.3.", ".2", "2.3b", "2.3 (2026-11-26)", "Unreleased", "?", "２.３"] {
+            XCTAssertNil(Version(text), "\"\(text)\" is not a version")
+        }
+    }
+
+    /// `## <version> (<date>)`: the version is the heading's first word.
+    func test_a_release_heading_names_its_version() {
+        XCTAssertEqual(Version(heading: "2.3.1 (2026-11-26)"), Version("2.3.1"))
+        XCTAssertEqual(Version(heading: "2.0.1"), Version("2.0.1"))
+        XCTAssertNil(Version(heading: "Unreleased"))
+        XCTAssertNil(Version(heading: "Version 2.3 (2026-11-26)"))
+        XCTAssertNil(Version(heading: ""))
+    }
+
+    /// Number by number, not as text: 2.10 comes after 2.9.
+    func test_versions_compare_by_number() throws {
+        func v(_ text: String) throws -> Version { try XCTUnwrap(Version(text)) }
+        XCTAssertGreaterThan(try v("2.10"), try v("2.9"))
+        XCTAssertGreaterThan(try v("10.0"), try v("9.9"))
+        XCTAssertGreaterThan(try v("2.3.1"), try v("2.3"))
+        XCTAssertGreaterThan(try v("2.3.0.1"), try v("2.3"))
+        XCTAssertLessThan(try v("2.2.1"), try v("2.3"))
+        XCTAssertEqual(try v("2.3"), try v("2.3.0"))
+        XCTAssertFalse(try v("2.3") < v("2.3.0"))
+        XCTAssertFalse(try v("2.3.0") < v("2.3"))
+    }
+
+    // MARK: - What the window opens on
+
+    /// A title and intro, then five releases, newest first; 2.3 has a group.
+    private static let fiveReleases = """
+        # Changelog
+
+        What changed in each release of Graft, newest first.
+
+        ## 2.3.1 (2026-11-26)
+
+        - Fixed one.
+
+        ## 2.3 (2026-11-26)
+
+        ### New
+
+        - Added two.
+
+        ## 2.2.1 (2026-11-25)
+
+        - Fixed three.
+
+        ## 2.2 (2026-11-25)
+
+        - Added four.
+
+        ## 2.1 (2026-11-24)
+
+        - Added five.
+        """
+
+    /// The release headings in `blocks`.
+    private func releases(_ blocks: [Block]) -> [String] {
+        blocks.compactMap { block -> String? in
+            if case let .heading(2, text) = block { return text }
+            return nil
+        }
+    }
+
+    /// The releases a changelog of these headings, each with one bullet,
+    /// opens on.
+    private func opened(_ headings: [String], on opening: WhatsNew.Opening) -> [String] {
+        let text = "# Changelog\n\n" + headings.map { "## \($0)\n\n- Something.\n" }.joined(separator: "\n")
+        return releases(WhatsNew.page(Changelog.blocks(in: text), opening: opening, expanded: false).blocks)
+    }
+
+    /// `blocks` up to the heading `text`, which isn't included.
+    private func blocks(_ blocks: [Block], upTo text: String) throws -> [Block] {
+        Array(blocks.prefix(upTo: try XCTUnwrap(blocks.firstIndex(of: .heading(level: 2, text: text)))))
+    }
+
+    /// After an update from 2.2, which skipped 2.2.1: 2.3.1, 2.3 and 2.2.1,
+    /// whole, under the title and intro, with the rest a button away.
+    func test_after_an_update_the_releases_since_the_last_version() throws {
+        let all = Changelog.blocks(in: Self.fiveReleases)
+        let page = WhatsNew.page(all, opening: .since(last: "2.2", current: "2.3.1"), expanded: false)
+
+        XCTAssertEqual(page.blocks, try blocks(all, upTo: "2.2 (2026-11-25)"))
+        XCTAssertEqual(releases(page.blocks), ["2.3.1 (2026-11-26)", "2.3 (2026-11-26)", "2.2.1 (2026-11-25)"])
+        XCTAssertEqual(Array(page.blocks.prefix(2)), [
+            .heading(level: 1, text: "Changelog"),
+            .paragraph("What changed in each release of Graft, newest first."),
+        ])
+        XCTAssertTrue(page.blocks.contains(.heading(level: 3, text: "New")))
+        XCTAssertFalse(page.blocks.contains(.bullet(depth: 0, text: "Added four.")))
+        XCTAssertTrue(page.hasMore)
+    }
+
+    /// Newer than the last version, by number, and no newer than this one.
+    func test_the_range_is_bounded_by_number() {
+        let headings = ["2.10 (2026-12-03)", "2.9.1 (2026-12-02)", "2.9 (2026-12-01)", "2.8 (2026-11-30)"]
+        XCTAssertEqual(opened(headings, on: .since(last: "2.8", current: "2.10")),
+                       ["2.10 (2026-12-03)", "2.9.1 (2026-12-02)", "2.9 (2026-12-01)"])
+        XCTAssertEqual(opened(headings, on: .since(last: "2.9", current: "2.10")),
+                       ["2.10 (2026-12-03)", "2.9.1 (2026-12-02)"])
+        XCTAssertEqual(opened(headings, on: .since(last: "2.8", current: "2.9.1")),
+                       ["2.9.1 (2026-12-02)", "2.9 (2026-12-01)"])
+        XCTAssertEqual(opened(headings, on: .since(last: "2.8.0", current: "2.9.0")), ["2.9 (2026-12-01)"])
+    }
+
+    /// A release this copy doesn't have yet (an entry for the next one) is
+    /// left out.
+    func test_a_release_newer_than_this_one_is_left_out() {
+        XCTAssertEqual(opened(["2.4", "2.3.1", "2.3"], on: .since(last: "2.3", current: "2.3.1")), ["2.3.1"])
+    }
+
+    /// A heading that doesn't parse counts as older: it isn't newer than
+    /// any version, so no update shows it, and it's never the newest.
+    func test_a_heading_that_is_not_a_version_counts_as_older() {
+        let headings = ["Unreleased", "2.3.1 (2026-11-26)", "Notes", "2.3 (2026-11-26)", "2.2 (2026-11-25)"]
+        XCTAssertEqual(opened(headings, on: .since(last: "2.2", current: "2.3.1")),
+                       ["2.3.1 (2026-11-26)", "2.3 (2026-11-26)"])
+        XCTAssertEqual(opened(headings, on: .newest), ["2.3.1 (2026-11-26)"])
+    }
+
+    /// Help › What's New…: the newest release, under the title and intro,
+    /// with the rest a button away.
+    func test_help_opens_on_the_newest_release_only() throws {
+        let all = Changelog.blocks(in: Self.fiveReleases)
+        let page = WhatsNew.page(all, opening: .newest, expanded: false)
+        XCTAssertEqual(page.blocks, try blocks(all, upTo: "2.3 (2026-11-26)"))
+        XCTAssertEqual(releases(page.blocks), ["2.3.1 (2026-11-26)"])
+        XCTAssertTrue(page.hasMore)
+    }
+
+    /// The newest is the highest version, wherever it is; the first
+    /// release only when no heading is a version.
+    func test_the_newest_release_is_the_highest_version() {
+        XCTAssertEqual(opened(["2.2", "2.3.1", "2.3"], on: .newest), ["2.3.1"])
+        XCTAssertEqual(opened(["Next", "Later"], on: .newest), ["Next"])
+    }
+
+    /// An update with nothing in its range (back to an older version, or to
+    /// one the changelog doesn't have), or a version that doesn't parse,
+    /// opens as Help does.
+    func test_nothing_since_the_last_version_opens_on_the_newest() {
+        let headings = ["2.3.1", "2.3", "2.2"]
+        for opening: WhatsNew.Opening in [
+            .since(last: "2.4", current: "2.3.1"),
+            .since(last: "2.3.1", current: "2.3.2"),
+            .since(last: "?", current: "2.3.1"),
+            .since(last: "2.2", current: "?"),
+            .since(last: "", current: ""),
+        ] {
+            XCTAssertEqual(opened(headings, on: opening), ["2.3.1"], "\(opening)")
+        }
+    }
+
+    /// Show earlier releases: the whole changelog, as before 2.3.1, and no
+    /// button.
+    func test_expanded_is_the_whole_changelog() {
+        let all = Changelog.blocks(in: Self.fiveReleases)
+        for opening: WhatsNew.Opening in [.newest, .since(last: "2.2", current: "2.3.1"), .since(last: "?", current: "?")] {
+            XCTAssertEqual(WhatsNew.page(all, opening: opening, expanded: true), WhatsNew.Page(blocks: all, hasMore: false),
+                           "\(opening)")
+        }
+    }
+
+    /// The button is there only when some release isn't shown.
+    func test_nothing_more_when_every_release_is_shown() {
+        let one = Changelog.blocks(in: "# Changelog\n\n## 2.3.1\n\n- One.")
+        XCTAssertEqual(WhatsNew.page(one, opening: .newest, expanded: false), WhatsNew.Page(blocks: one, hasMore: false))
+
+        let none = Changelog.blocks(in: "# Changelog\n\nNothing yet.")
+        XCTAssertEqual(WhatsNew.page(none, opening: .newest, expanded: false), WhatsNew.Page(blocks: none, hasMore: false))
+
+        let all = Changelog.blocks(in: Self.fiveReleases)
+        XCTAssertEqual(WhatsNew.page(all, opening: .since(last: "1.0", current: "2.3.1"), expanded: false),
+                       WhatsNew.Page(blocks: all, hasMore: false))
+    }
+
     // MARK: - Inline
 
     private func run(
@@ -269,24 +455,39 @@ final class WhatsNewTests: XCTestCase {
 
     // MARK: - The window
 
-    /// The lines on screen: each static text's value, and each heading's
-    /// (a heading is its own role, not a static text). Empty ones aren't
-    /// lines.
-    private func shown(_ view: WhatsNewView) throws -> [String] {
-        try AccessibilityTree.requireServed()
-        let pane = hosted(view, size: NSSize(width: 640, height: 600))
-        addTeardownBlock { pane.window.orderOut(nil) }
-        settle(pane)
-        return try AccessibilityTree.nodes(in: pane.window)
+    /// The lines on screen in `nodes`: each static text's value, and each
+    /// heading's (a heading is its own role, not a static text). Empty ones
+    /// aren't lines.
+    private func lines(_ nodes: [AccessibilityTree.Node]) -> [String] {
+        nodes
             .filter { [kAXStaticTextRole, "AXHeading"].contains($0.role) }
             .map { ($0.value as? String).flatMap { $0.isEmpty ? nil : $0 } ?? $0.name }
             .filter { !$0.isEmpty }
     }
 
+    /// The Show earlier releases button in `nodes`.
+    private func showEarlier(_ nodes: [AccessibilityTree.Node]) -> AccessibilityTree.Node? {
+        nodes.first { $0.role == kAXButtonRole && $0.name == WhatsNew.showEarlier }
+    }
+
+    private func hostedWindow(_ view: WhatsNewView) throws -> Hosted {
+        try AccessibilityTree.requireServed()
+        let pane = hosted(view, size: NSSize(width: 640, height: 600))
+        addTeardownBlock { pane.window.orderOut(nil) }
+        settle(pane)
+        return pane
+    }
+
+    private func shown(_ view: WhatsNewView) throws -> [String] {
+        lines(try AccessibilityTree.nodes(in: try hostedWindow(view).window))
+    }
+
+    private func noLink(_ url: URL) { XCTFail("nothing pressed: \(url)") }
+
     func test_the_window_shows_the_changelog() throws {
         let texts = try shown(WhatsNewView(
             changelog: "# Changelog\n\n## 2.0.1 (2026-11-24)\n\n- Fixed `this`.\n  - And that.",
-            open: { _ in XCTFail("nothing pressed") }
+            store: WhatsNewStore(), open: noLink
         ))
         for line in ["Changelog", "2.0.1 (2026-11-24)", "Fixed this.", "And that."] {
             XCTAssertTrue(texts.contains(line), "\(line) not in \(texts)")
@@ -295,8 +496,78 @@ final class WhatsNewTests: XCTestCase {
     }
 
     func test_the_window_without_a_changelog_says_so() throws {
-        let texts = try shown(WhatsNewView(changelog: nil, open: { _ in XCTFail("nothing pressed") }))
+        let texts = try shown(WhatsNewView(changelog: nil, store: WhatsNewStore(), open: noLink))
         XCTAssertEqual(texts, [WhatsNew.missing])
+    }
+
+    private static let newestLines = [
+        "Changelog", "What changed in each release of Graft, newest first.", "2.3.1 (2026-11-26)", "Fixed one.",
+    ]
+    private static let earlierLines = [
+        "2.3 (2026-11-26)", "Added two.", "2.2.1 (2026-11-25)", "Fixed three.", "2.2 (2026-11-25)", "Added four.",
+        "2.1 (2026-11-24)", "Added five.",
+    ]
+
+    /// As Help opens it: the title and intro, the newest release, and the
+    /// button, not the earlier releases.
+    func test_the_window_opens_on_the_newest_release_with_the_rest_a_button_away() throws {
+        let nodes = try AccessibilityTree.nodes(in: try hostedWindow(WhatsNewView(
+            changelog: Self.fiveReleases, store: WhatsNewStore(), open: noLink
+        )).window)
+        let texts = lines(nodes)
+        for line in Self.newestLines {
+            XCTAssertTrue(texts.contains(line), "\(line) not in \(texts)")
+        }
+        for line in Self.earlierLines {
+            XCTAssertFalse(texts.contains(line), "\(line) in \(texts)")
+        }
+        XCTAssertNotNil(showEarlier(nodes), "no \(WhatsNew.showEarlier) button")
+        XCTAssertEqual(WhatsNew.showEarlier, "Show earlier releases")
+    }
+
+    /// Show earlier releases: every release, in the same window, and the
+    /// button goes.
+    func test_show_earlier_releases_shows_the_rest_in_the_same_window() throws {
+        let store = WhatsNewStore()
+        let pane = try hostedWindow(WhatsNewView(changelog: Self.fiveReleases, store: store, open: noLink))
+        // Clicked through the window: `AccessibilityTree.press` runs the
+        // action off the main thread (`clickButton`).
+        try clickButton(named: WhatsNew.showEarlier, in: pane.window)
+        settle(pane)
+
+        XCTAssertTrue(store.expanded)
+        let nodes = try AccessibilityTree.nodes(in: pane.window)
+        let texts = lines(nodes)
+        for line in Self.newestLines + Self.earlierLines {
+            XCTAssertTrue(texts.contains(line), "\(line) not in \(texts)")
+        }
+        XCTAssertNil(showEarlier(nodes), "the button is still there")
+    }
+
+    /// After an update from 2.2, the releases since; and an opening while
+    /// the window is open changes it there.
+    func test_the_window_shows_what_its_store_opens_on() throws {
+        let store = WhatsNewStore()
+        store.show(.since(last: "2.2", current: "2.3.1"))
+        let pane = try hostedWindow(WhatsNewView(changelog: Self.fiveReleases, store: store, open: noLink))
+
+        var nodes = try AccessibilityTree.nodes(in: pane.window)
+        var texts = lines(nodes)
+        for line in Self.newestLines + ["2.3 (2026-11-26)", "Added two.", "2.2.1 (2026-11-25)", "Fixed three."] {
+            XCTAssertTrue(texts.contains(line), "\(line) not in \(texts)")
+        }
+        for line in ["2.2 (2026-11-25)", "Added four.", "2.1 (2026-11-24)", "Added five."] {
+            XCTAssertFalse(texts.contains(line), "\(line) in \(texts)")
+        }
+        XCTAssertNotNil(showEarlier(nodes))
+
+        store.show(.newest)
+        settle(pane)
+        nodes = try AccessibilityTree.nodes(in: pane.window)
+        texts = lines(nodes)
+        XCTAssertTrue(texts.contains("2.3.1 (2026-11-26)"), "\(texts)")
+        XCTAssertFalse(texts.contains("2.3 (2026-11-26)"), "\(texts)")
+        XCTAssertNotNil(showEarlier(nodes))
     }
 
     // MARK: - Help › What's New…
@@ -304,6 +575,28 @@ final class WhatsNewTests: XCTestCase {
     private func helpMenu() throws -> NSMenu {
         let items = NSApplication.shared.mainMenu?.items ?? []
         return try XCTUnwrap(items.first { $0.title == "Help" }?.submenu, "no Help menu in \(items.map(\.title))")
+    }
+
+    private func whatsNewWindow() -> NSWindow? {
+        NSApplication.shared.windows.first { $0.title == WhatsNew.windowTitle && $0.isVisible }
+    }
+
+    /// Chooses Help › What's New… in this app's own menu, and waits for the
+    /// window.
+    private func chooseWhatsNew() throws -> NSWindow {
+        let help = try helpMenu()
+        let item = try XCTUnwrap(help.items.first { $0.title == WhatsNew.menuTitle })
+        help.performActionForItem(at: help.index(of: item))
+        let deadline = Date().addingTimeInterval(3)
+        while whatsNewWindow() == nil, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        return try XCTUnwrap(whatsNewWindow(), "no What's New window opened")
+    }
+
+    private func pump(_ seconds: TimeInterval = 0.5) {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
     }
 
     func test_help_has_whats_new_after_check_for_updates() throws {
@@ -315,20 +608,49 @@ final class WhatsNewTests: XCTestCase {
 
     /// Chosen from the app's own Help menu, it opens the window.
     func test_whats_new_opens_its_window() throws {
-        let help = try helpMenu()
-        let item = try XCTUnwrap(help.items.first { $0.title == WhatsNew.menuTitle })
-        func window() -> NSWindow? {
-            NSApplication.shared.windows.first { $0.title == WhatsNew.windowTitle && $0.isVisible }
-        }
-        XCTAssertNil(window(), "premise: not open yet")
+        XCTAssertNil(whatsNewWindow(), "premise: not open yet")
+        try chooseWhatsNew().close()
+    }
 
-        help.performActionForItem(at: help.index(of: item))
-        let deadline = Date().addingTimeInterval(3)
-        while window() == nil, Date() < deadline {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        }
-        let opened = try XCTUnwrap(window(), "no What's New window opened")
-        opened.close()
+    /// The app's own window, from its own menu, with the changelog it
+    /// carries: the newest release, and the button for the rest.
+    func test_help_opens_on_the_newest_release() throws {
+        try AccessibilityTree.requireServed()
+        XCTAssertNil(whatsNewWindow(), "premise: not open yet")
+        let blocks = Changelog.blocks(in: try XCTUnwrap(Changelog.bundled))
+        let all = releases(blocks)
+        XCTAssertGreaterThan(all.count, 1, "premise: the changelog has earlier releases")
+        let newest = releases(WhatsNew.page(blocks, opening: .newest, expanded: false).blocks)
+        XCTAssertEqual(newest.count, 1)
+
+        let window = try chooseWhatsNew()
+        addTeardownBlock { window.close() }
+        pump()
+        let nodes = try AccessibilityTree.nodes(in: window)
+        // Each release heading shown, once: a heading may be read as a
+        // static text too.
+        var seen = Set<String>()
+        XCTAssertEqual(lines(nodes).filter { all.contains($0) && seen.insert($0).inserted }, newest)
+        XCTAssertNotNil(showEarlier(nodes), "no \(WhatsNew.showEarlier) button")
+    }
+
+    /// Chosen while the window shows more (after an update, or after Show
+    /// earlier releases), Help shows the newest release again.
+    func test_help_shows_the_newest_release_in_a_window_that_shows_more() throws {
+        try AccessibilityTree.requireServed()
+        let store = WhatsNewStore()
+        store.show(.since(last: "2.2", current: "2.3.1"))
+        store.expand()
+        // The test host's own What's New window, which the command opens.
+        addTeardownBlock { self.whatsNewWindow()?.close() }
+        let pane = hosted(WhatsNewCommand(store: store), size: NSSize(width: 200, height: 60))
+        addTeardownBlock { pane.window.orderOut(nil) }
+        settle(pane)
+
+        try clickButton(named: WhatsNew.menuTitle, in: pane.window)
+        pump(0.2)
+        XCTAssertEqual(store.opening, .newest)
+        XCTAssertFalse(store.expanded)
     }
 
     // MARK: - After an update
@@ -344,17 +666,66 @@ final class WhatsNewTests: XCTestCase {
     /// version is remembered for the next.
     func test_the_first_launch_opens_nothing_and_remembers_the_version() throws {
         let defaults = try throwawayDefaults()
-        XCTAssertFalse(WhatsNew.opensAfterUpdate(version: "2.0.1", defaults: defaults))
+        XCTAssertNil(WhatsNew.opensAfterUpdate(version: "2.0.1", defaults: defaults))
         XCTAssertEqual(defaults.string(forKey: WhatsNew.lastVersionKey), "2.0.1")
-        XCTAssertFalse(WhatsNew.opensAfterUpdate(version: "2.0.1", defaults: defaults), "the same version again")
+        XCTAssertNil(WhatsNew.opensAfterUpdate(version: "2.0.1", defaults: defaults), "the same version again")
     }
 
-    func test_a_new_version_opens_it_once() throws {
+    /// Once, on the releases since the version that launched before.
+    func test_a_new_version_opens_it_once_on_what_changed_since_the_last() throws {
         let defaults = try throwawayDefaults()
         defaults.set("2.0.1", forKey: WhatsNew.lastVersionKey)
 
-        XCTAssertTrue(WhatsNew.opensAfterUpdate(version: "2.0.2", defaults: defaults))
+        XCTAssertEqual(WhatsNew.opensAfterUpdate(version: "2.0.2", defaults: defaults),
+                       .since(last: "2.0.1", current: "2.0.2"))
         XCTAssertEqual(defaults.string(forKey: WhatsNew.lastVersionKey), "2.0.2")
-        XCTAssertFalse(WhatsNew.opensAfterUpdate(version: "2.0.2", defaults: defaults), "only once")
+        XCTAssertNil(WhatsNew.opensAfterUpdate(version: "2.0.2", defaults: defaults), "only once")
+    }
+
+    /// The main window's modifier tells the window's store what to open on
+    /// before it opens the window.
+    func test_the_main_window_opens_it_on_the_releases_since_the_last_version() throws {
+        let defaults = try throwawayDefaults()
+        defaults.set("2.2", forKey: WhatsNew.lastVersionKey)
+        let store = WhatsNewStore()
+        // The test host's own What's New window, if `openWindow` reaches it
+        // from a hosted view.
+        addTeardownBlock { self.whatsNewWindow()?.close() }
+        let pane = hosted(
+            Color.clear.modifier(OpensWhatsNewAfterUpdate(defaults: defaults, version: "2.3.1", store: store)),
+            size: NSSize(width: 40, height: 40)
+        )
+        addTeardownBlock { pane.window.orderOut(nil) }
+        let deadline = Date().addingTimeInterval(3)
+        while store.opening == .newest, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertEqual(store.opening, .since(last: "2.2", current: "2.3.1"))
+        XCTAssertEqual(defaults.string(forKey: WhatsNew.lastVersionKey), "2.3.1")
+    }
+
+    // MARK: - The window's store
+
+    /// Nothing recorded yet, or a window macOS reopened at launch: the
+    /// newest release, as Help opens it.
+    func test_a_new_store_opens_on_the_newest_release() {
+        let store = WhatsNewStore()
+        XCTAssertEqual(store.opening, .newest)
+        XCTAssertFalse(store.expanded)
+    }
+
+    func test_show_earlier_releases_expands_and_the_next_opening_folds_again() {
+        let store = WhatsNewStore()
+        store.show(.since(last: "2.2", current: "2.3.1"))
+        XCTAssertEqual(store.opening, .since(last: "2.2", current: "2.3.1"))
+        XCTAssertFalse(store.expanded)
+
+        store.expand()
+        XCTAssertTrue(store.expanded)
+        XCTAssertEqual(store.opening, .since(last: "2.2", current: "2.3.1"))
+
+        store.show(.newest)
+        XCTAssertEqual(store.opening, .newest)
+        XCTAssertFalse(store.expanded, "Help opens on the newest release again")
     }
 }

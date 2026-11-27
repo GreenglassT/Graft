@@ -306,7 +306,7 @@ final class AddAppSheetPrefillTests: XCTestCase {
         )
         XCTAssertEqual(
             prefill.versionLine,
-            "This phone runs 21.20.1; the staged dump is 21.16.2."
+            "This device runs 21.20.1; the staged dump is 21.16.2."
         )
     }
 

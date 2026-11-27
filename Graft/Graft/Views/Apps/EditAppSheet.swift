@@ -162,7 +162,7 @@ struct EditAppSheet: View {
         deviceName: String?, hasLoaded: Bool, status: LCStatusRecord?,
         otherDevicesConnected: Bool = false
     ) -> String {
-        let automatic = "Automatic uses the only LiveContainer on the phone, or its "
+        let automatic = "Automatic uses the only LiveContainer on the device, or its "
             + "primary. Pin one to push into another, or when there are two primaries."
         guard let deviceName else {
             if otherDevicesConnected {

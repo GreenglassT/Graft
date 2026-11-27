@@ -334,7 +334,7 @@ final class DeviceKindWordingTests: XCTestCase {
     func test_the_kind_is_the_models_or_device() throws {
         XCTAssertEqual(try Self.device(model: "iPad13,16").kindName, "iPad")
         XCTAssertEqual(try Self.device(model: "iPhone14,2").kindName, "iPhone")
-        XCTAssertEqual(try Self.device(model: "iPod9,1").kindName, "iPod")
+        XCTAssertEqual(try Self.device(model: "iPod9,1").kindName, "iPod touch")
         XCTAssertEqual(try Self.device(model: "").kindName, "device")
         XCTAssertEqual(try Self.device(model: "Unknown1,1").kindName, "device")
     }

@@ -229,7 +229,7 @@ final class AppUpdateViewsTests: XCTestCase {
 
         let found = try nodes(AppUpdateLine(line: line, isBusy: false) {})
 
-        XCTAssertTrue(found.contains { ($0.value as? String) == "App Store has 2026.47.0, needs Apple silicon" })
+        XCTAssertTrue(found.contains { ($0.value as? String) == AppUpdateText.intelNote(version: "2026.47.0") })
         XCTAssertEqual(found.filter { $0.role == kAXButtonRole }.map(\.name), [])
     }
 
@@ -252,6 +252,8 @@ final class AppUpdateViewsTests: XCTestCase {
         XCTAssertTrue(AppDetailView.updateIsBusy(busy: false, getting: true, updatingTweak: false, refused: false))
         XCTAssertTrue(AppDetailView.updateIsBusy(busy: false, getting: false, updatingTweak: true, refused: false))
         XCTAssertTrue(AppDetailView.updateIsBusy(busy: false, getting: false, updatingTweak: false, refused: true))
+        XCTAssertTrue(AppDetailView.updateIsBusy(busy: false, getting: false, updatingTweak: false, refused: false,
+                                                 setUp: true), "B5: the get would fail before the App Store's setup")
     }
 
     private func detail(_ app: AppRecord, config: ConfigStore, appUpdates: AppUpdatesStore) -> some View {
@@ -443,7 +445,7 @@ final class AppUpdateViewsTests: XCTestCase {
 
         let texts = nodes.compactMap { $0.value as? String }
         XCTAssertTrue(texts.contains("App Store 1.0 → 2.0"))
-        XCTAssertTrue(texts.contains("A Tweak 1.0 → 1.1"))
+        XCTAssertTrue(texts.contains("A Tweak 1.0 → 1.1 from repo.example.com"), "and where it comes from")
         XCTAssertTrue(texts.contains("Example+ → Example iPhone via LiveContainer"), "its device")
         XCTAssertTrue(texts.contains(AppUpdateText.importNote(device: "Example iPhone")))
         XCTAssertTrue(texts.contains("also used by Bravo: it will need an install afterward"))
@@ -454,6 +456,35 @@ final class AppUpdateViewsTests: XCTestCase {
         XCTAssertNotNil(nodes.first { $0.role == kAXButtonRole && $0.name == "Update" && $0.enabled == true },
                         "one app ready: Update")
         XCTAssertNotNil(nodes.first { $0.role == kAXButtonRole && $0.name == "Cancel" })
+    }
+
+    /// A tweak update whose source isn't verified (2.3.1 A1): where it comes
+    /// from, why, and its own "Trust this source", off, so Update waits for it.
+    func test_an_unverified_tweak_has_its_reason_and_a_trust_toggle_off_by_default() async throws {
+        try AccessibilityTree.requireServed()
+        let full = F.planLine([
+            F.app("example", displayName: "Example+",
+                  tweaks: [F.tweak("a-tweak.deb", name: "A Tweak", verified: false,
+                                   reason: "source unknown: https://repo.example.com")],
+                  install: false, readiness: "checked"),
+        ], quick: false)
+        let (store, _) = try stores(try fakeCLI(full: full))
+        store.openConfirmation(apps: ["example"])
+        await eventually { store.confirmation?.plan != nil }
+
+        var nodes = try sheetNodes(store)
+
+        let texts = nodes.compactMap { $0.value as? String }
+        XCTAssertTrue(texts.contains("A Tweak 1.0 → 1.1 from repo.example.com"))
+        XCTAssertTrue(texts.contains("Not verified (source unknown: https://repo.example.com)"))
+        let toggle = try XCTUnwrap(nodes.first { $0.role == kAXCheckBoxRole })
+        XCTAssertEqual(toggle.name, "Trust repo.example.com for A Tweak")
+        XCTAssertEqual((toggle.value as? NSNumber)?.boolValue, false, "off by default")
+        XCTAssertNotNil(nodes.first { $0.role == kAXButtonRole && $0.name == "Done" }, "nothing runs yet")
+
+        store.setTrusted("a-tweak.deb", true)
+        nodes = try sheetNodes(store)
+        XCTAssertNotNil(nodes.first { $0.role == kAXButtonRole && $0.name == "Update" && $0.enabled == true })
     }
 
     /// A device that isn't connected is listed with its sentence and its

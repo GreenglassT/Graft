@@ -272,7 +272,7 @@ final class CachePaneTests: XCTestCase {
         )
         XCTAssertEqual(
             CachePaneView.message(for: .empty),
-            "Nothing staged. Dumping an app from a phone puts its IPA here."
+            "Nothing staged. Dumping an app from a device puts its IPA here."
         )
     }
 
@@ -581,7 +581,7 @@ final class CachePaneTests: XCTestCase {
             .confirm(
                 "com.a.one_1.0.ipa — 128.3 MB. This deletes the file outright; it does "
                 + "not go to the Trash. Getting it back means dumping the app from a "
-                + "phone again."
+                + "device again."
             )
         )
     }

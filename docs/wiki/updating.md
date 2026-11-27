@@ -76,6 +76,7 @@ otherwise `needs_macos` is null.
 
 ## What's new
 
-Help › What's New… shows what changed in each release. It also opens by
-itself once, the first time a new version of Graft starts. The
-[Changelog](../../CHANGELOG.md) has the same list.
+Help › What's New… shows what changed in the latest release. It also opens
+by itself once, the first time a new version of Graft starts, on what's new
+since the version you used before. **Show earlier releases** adds the rest. The
+[Changelog](../../CHANGELOG.md) has every release.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 
 from .device_session import PAIR_TIMEOUT_SECONDS, closing_best_effort
@@ -127,10 +128,39 @@ def _mux_udid(mux_dev) -> str | None:
 
 
 def _failure_text(result: object) -> str:
+    """What to say about a device that couldn't be described: what to do,
+    when the failure is one `installer.connection_hint` has words for (a
+    device asking whether to trust this Mac, or locked), else the exception
+    as it came. The sidebar's row and an update's "couldn't be read" show
+    it, where `PairingDialogResponsePendingError` told nobody to tap Trust."""
     if isinstance(result, BaseException):
+        from .installer import connection_hint
+
         text = str(result).strip()
-        return f"{type(result).__name__}: {text}" if text else type(result).__name__
+        raw = f"{type(result).__name__}: {text}" if text else type(result).__name__
+        hint = connection_hint(raw)
+        return _without_rerun(hint) if hint else raw
     return repr(result)
+
+
+def _without_rerun(hint: str) -> str:
+    """`connection_hint`'s words without "re-run": they're written for a
+    build, which the person runs again, and a device that couldn't be read is
+    read again on its own (the app's poll, B1). "A, B, and re-run." becomes
+    "A and B."; "then re-run and tap Trust" keeps the tap."""
+    hint = hint.replace(", then re-run and ", ", then ")
+    found = re.search(r",? and re-run(?=[.;])", hint)
+    if found is None:
+        return hint
+    head, tail = hint[:found.start()], hint[found.end():]
+    if found.group().startswith(","):
+        # The list it ended: its last comma, within the advice after the
+        # dash, is now the "and".
+        clause = head.rfind(" — ") + 1
+        comma = head.rfind(", ", clause)
+        if comma >= 0:
+            head = head[:comma] + " and " + head[comma + 2:]
+    return head + tail
 
 
 async def _describe_device(mux_dev, udid: str) -> DeviceInfo:
@@ -200,6 +230,13 @@ def model_or_family_from_lockdown(lockdown) -> str | None:
     model's name, else the family, else None. For the Developer Mode hint,
     "your iPad", which would read oddly as "your Sample's iPad"."""
     return _model_name(lockdown) or _family(lockdown)
+
+
+def family_from_lockdown(lockdown) -> str | None:
+    """"iPhone", "iPad" or "iPod touch" from the product type, or None when
+    the lockdown doesn't say: how a sentence names the kind of device ("On
+    My iPad")."""
+    return _family(lockdown)
 
 
 def _model_name(lockdown) -> str | None:

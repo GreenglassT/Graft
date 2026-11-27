@@ -15,4 +15,17 @@ final class CanisterStoreTests: XCTestCase {
         XCTAssertEqual(results[1].repositoryId, "chariz")
         XCTAssertTrue(store.hasSearched)
     }
+
+    /// A fetch from a search result takes that result's repository only, so
+    /// another repository listing the same id at a higher version can't win
+    /// it (2.3.1 A1). A fetch with no repository says none.
+    @MainActor
+    func test_a_fetch_from_a_result_names_its_repository() {
+        XCTAssertEqual(CanisterStore.fetchArguments("com.example.ctweak", repository: "examplerepo"),
+                       ["--json", "--fetch", "com.example.ctweak", "--fetch-repository", "examplerepo"])
+        XCTAssertEqual(CanisterStore.fetchArguments("com.example.ctweak", repository: nil),
+                       ["--json", "--fetch", "com.example.ctweak"])
+        XCTAssertEqual(CanisterStore.fetchArguments("com.example.ctweak", repository: ""),
+                       ["--json", "--fetch", "com.example.ctweak"])
+    }
 }

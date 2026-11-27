@@ -188,6 +188,21 @@ final class InstalledAppsSectionTests: XCTestCase {
         )
     }
 
+    /// B7: on a device the decrypt card found unavailable, Dump is there and
+    /// doesn't answer: the card's line, on its tooltip, says why.
+    func test_a_dump_the_card_found_unavailable_does_nothing() {
+        var dumped = false
+        let tile = DeviceAppTile(
+            app: Self.installed("com.a.one", encrypted: true),
+            state: .dumpable,
+            unavailable: DeviceDecryptSection.unavailableLine,
+            onDump: { dumped = true }
+        )
+        let box = hosted(tile, width: 500)
+        click(at: NSPoint(x: box.size.width - 16, y: box.size.height / 2), in: box.window)
+        XCTAssertFalse(dumped, "Dump ran on a device that can't be dumped from here")
+    }
+
     /// Guards against a mutant that draws `dumpButton` for `.inert` the way
     /// `.dumpable` does: nothing at the trailing edge of a truly inert row
     /// may answer a click.

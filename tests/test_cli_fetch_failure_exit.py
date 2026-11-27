@@ -11,6 +11,8 @@ from typer.testing import CliRunner
 from graft_ipa import cli as cli_mod
 from graft_ipa.errors import GraftError
 
+from .test_tweak_source_records import write_deb
+
 
 def test_json_fetch_failure_still_emits_the_end_event_and_exits_nonzero(
     temp_config_env: Path,
@@ -31,8 +33,7 @@ def test_json_fetch_failure_still_emits_the_end_event_and_exits_nonzero(
 
 
 def test_json_fetch_success_exits_zero(temp_config_env: Path, tmp_path: Path) -> None:
-    deb = tmp_path / "out.deb"
-    deb.write_bytes(b"x")
+    deb = write_deb(tmp_path / "out.deb", "com.example.ok", "1.0")
     with patch.object(cli_mod.canister, "fetch_deb", return_value=deb):
         result = CliRunner().invoke(
             cli_mod.app, ["--config", str(temp_config_env), "--json", "--fetch", "com.example.ok"]

@@ -93,7 +93,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import macho, release_check
+from . import data_dirs, macho, release_check
 from .child_env import child_env
 from .data_dirs import cache_dir
 from .enrollment import DEVELOPER_ID_CA, DEVELOPER_ID_LEAF
@@ -199,9 +199,10 @@ TOOL_TIMEOUT = 300
 #: changes nothing.
 WAIT_TICKS = 300
 
-#: Why an update failed, the events' `reason`. The first three are the
+#: Why an update failed, the events' `reason`. The first four are the
 #: check's own (`release_check`).
 OFFLINE = release_check.OFFLINE
+TIMED_OUT = release_check.TIMED_OUT
 HTTP = release_check.HTTP
 MALFORMED = release_check.MALFORMED
 NOT_NEWER = "not-newer"
@@ -1026,12 +1027,12 @@ def _clear(root: Path) -> None:
 def _noted_minimum(root: Path, *, version: str, sha256: str) -> str | None:
     """The macOS `MACOS_NOTE` in `root` says the release `version`'s zip,
     by its `sha256`, needs; None when there is no such note, it is about
-    another zip, or it isn't one."""
-    try:
-        with (root / MACOS_NOTE).open("rb") as f:
-            note = json.loads(f.read(4096))
-    except (OSError, ValueError):
-        return None
+    another zip, or it isn't one.
+
+    Read as Graft's other small state files are (`data_dirs.read_small_json`):
+    a regular file only, not through a link, and never waiting on a FIFO,
+    which `--check-update` would otherwise hang on (the 2.3.1 review's A4)."""
+    note = data_dirs.read_small_json(root / MACOS_NOTE)
     if not isinstance(note, dict) or note.get("version") != version or note.get("sha256") != sha256:
         return None
     minimum = note.get("minimum")
@@ -1040,14 +1041,14 @@ def _noted_minimum(root: Path, *, version: str, sha256: str) -> str | None:
 
 def _note_minimum(root: Path, *, version: str, sha256: str, minimum: str) -> None:
     """Leave `MACOS_NOTE` in `root`. Best effort: without it the next try
-    downloads the zip again and refuses it again, as it always did."""
+    downloads the zip again and refuses it again, as it always did.
+
+    Owner-only, into a fresh file renamed into place
+    (`data_dirs.private_write`), never opened through a link planted at
+    its name (the 2.3.1 review's A4)."""
     note = json.dumps({"version": version, "sha256": sha256, "minimum": minimum}).encode()
-    part = root / (MACOS_NOTE + ".part")
     with contextlib.suppress(OSError):
-        fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(note)
-        os.replace(part, root / MACOS_NOTE)
+        data_dirs.private_write(note, root / MACOS_NOTE)
 
 
 def noted_refusal(data: dict[str, Any], release: release_check.Release,
@@ -1218,7 +1219,14 @@ copy="$parent/.Graft-update-$$.app"
 # Each line's time has its offset from UTC: the app reads the log at its next
 # launch (UpdateStore.installLogged), and this script's zone is the CLI's,
 # which has any TZ the user's shell profile sets, where the app's may not.
-say() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*" >>"$log" 2>/dev/null; }
+# Always a line of its own: a tool whose output the log keeps may end it
+# without a newline, and the line after it ran on from it.
+say() {
+  if [ -s "$log" ] && [ -n "$(tail -c 1 "$log" 2>/dev/null)" ]; then
+    printf '\n' >>"$log" 2>/dev/null
+  fi
+  printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$*" >>"$log" 2>/dev/null
+}
 
 reopen() {
   if [ "$GRAFT_UPDATE_RELAUNCH" = 1 ] && [ -d "$app" ]; then
@@ -1293,8 +1301,10 @@ fi
 # unregistered; NSWorkspace's icon for it registered it at once. A second
 # -u, after the relaunch or on a retry, would be undone the same way by the
 # next look, so there isn't one. The relaunch below opens the new app by
-# its path, not by its bundle id.
-"$GRAFT_UPDATE_LSREGISTER" -u "$trashed" >>"$log" 2>&1
+# its path, not by its bundle id. What the -u says isn't kept: it is no
+# news (the copy is in the Trash either way), and on the 2.3 update it was
+# "failed to scan …: -10814 from spotlight", with no newline.
+"$GRAFT_UPDATE_LSREGISTER" -u "$trashed" >/dev/null 2>&1
 "$GRAFT_UPDATE_LSREGISTER" -f "$app" >>"$log" 2>&1 || say "Launch Services didn't register $app"
 rmdir "$(dirname "$staged")" "$(dirname "$(dirname "$staged")")" 2>/dev/null
 say "installed Graft $version at $app; the old one is in the Trash at $trashed"

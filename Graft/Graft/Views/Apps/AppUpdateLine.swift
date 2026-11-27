@@ -27,13 +27,24 @@ struct AppUpdateLine: View {
     var offeredBlock: (String) -> String? = { _ in nil }
     /// An offered install's press: Build & Install to its device.
     var onInstallOffered: (AppUpdateText.PaneLine.Offered) -> Void = { _ in }
+    /// Open Settings, for a note that says to set up the App Store (B5).
+    var onOpenSettings: () -> Void = {}
     let onUpdate: () -> Void
+
+    /// Whether the line wears the update mark: only an update. A line of
+    /// notes alone (a newer version this Mac can't get, or a refusal) is
+    /// information, and its arrow was there for good (B8).
+    static func showsMark(_ line: AppUpdateText.PaneLine) -> Bool {
+        line.headline != nil
+    }
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Metrics.controlGap) {
-            Symbols.updateAvailable.image(size: 11)
-                .foregroundStyle(Palette.accent)
-                .accessibilityHidden(true)
+            if Self.showsMark(line) {
+                Symbols.updateAvailable.image(size: 11)
+                    .foregroundStyle(Palette.accent)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 2) {
                 if let headline = line.headline {
                     Text(headline)
@@ -85,6 +96,10 @@ struct AppUpdateLine: View {
                 }
             }
             Spacer(minLength: Metrics.controlGap)
+            if line.opensSettings {
+                Button("Open Settings", action: onOpenSettings)
+                    .controlSize(.small)
+            }
             if let action = line.action {
                 Button(action.title, action: onUpdate)
                     .controlSize(.small)

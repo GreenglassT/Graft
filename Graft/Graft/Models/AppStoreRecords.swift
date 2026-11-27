@@ -125,6 +125,10 @@ struct AppStoreVersionRecord: Decodable, Equatable {
     /// Which of its version's builds the hold names, when the App Store has
     /// more than one under that number: the line says "(build 1 of 2)".
     var heldBuild: HeldBuild? = nil
+    /// Why no get can run on this Mac yet, from files alone
+    /// (`appstore.setup_missing`, B5): `CLIContract.Update.decryptionNotSetUp`
+    /// or `.notSignedIn`, or nil. The same on every app's record.
+    var setupMissing: String? = nil
 
     /// `held_build`, numbered from the oldest as the Older Versions sheet
     /// numbers them (`AppStoreVersionsStore.duplicateBuilds`).
@@ -142,6 +146,7 @@ struct AppStoreVersionRecord: Decodable, Equatable {
         case heldVersion = "held_version"
         case heldVersionId = "held_version_id"
         case heldBuild = "held_build"
+        case setupMissing = "setup_missing"
     }
 }
 
@@ -527,6 +532,23 @@ extension AppStoreStatusRecord {
     var canGet: Bool {
         ipatool.present && ipatool.signedIn == true && ipatool.warning == nil
             && unfairplay.present && unfairplay.enrolled
+    }
+
+    /// Whether status says a part of the App Store's setup is missing (B5):
+    /// no ipatool, signed out (or only Graft 1.x's sign-in), no UnfairPlay,
+    /// or not enrolled. Not `!canGet`: "couldn't tell" (a locked keychain)
+    /// and a known-bad ipatool aren't setup to do, and the get says what
+    /// they are.
+    var setUpMissing: Bool {
+        !ipatool.present || ipatool.signedIn == false || ipatool.legacySignin == true || ipatool.warning != nil
+            || !unfairplay.present || !unfairplay.enrolled
+    }
+
+    /// Signed out (or only Graft 1.x's sign-in) is all that's missing: Get
+    /// says "Sign in…" rather than "Set up…".
+    var onlySignInMissing: Bool {
+        (ipatool.signedIn == false || ipatool.legacySignin == true) && ipatool.present
+            && ipatool.warning == nil && unfairplay.present && unfairplay.enrolled
     }
 }
 

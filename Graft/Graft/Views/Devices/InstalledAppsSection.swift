@@ -106,6 +106,10 @@ struct InstalledAppsSection: View {
     /// Select the app that already claims this bundle id, by config key.
     var onSelectApp: (String) -> Void = { _ in }
 
+    /// Whether this copy can get from the App Store here, for the words
+    /// Dump waits with (`dumpUnavailable`).
+    @Environment(\.macSupport) private var mac
+
     /// This phone's listing, or nothing if it has never been asked for.
     private var apps: [DeviceAppRecord] { deviceApps.apps[device.udid] ?? [] }
     private var isLoading: Bool { deviceApps.loading.contains(device.udid) }
@@ -211,6 +215,9 @@ struct InstalledAppsSection: View {
                             ),
                             isDumpingThis: dumpingBundleId == app.bundleId,
                             isBusy: isDumping,
+                            unavailable: Self.dumpUnavailable(
+                                deviceApps.readiness[device.udid], appleSilicon: mac.appleSiliconFeatures
+                            ),
                             onDump: { onDump(app) },
                             onAdd: { record in onAdd(app, record) },
                             onSelectApp: onSelectApp,
@@ -221,6 +228,14 @@ struct InstalledAppsSection: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Why the list's Dump can't run on this device, in the decrypt card's
+    /// words (B7), or nil: the card's probe found it unavailable
+    /// (`DeviceDecryptSection.isUnavailable`). Not probed yet is no answer.
+    static func dumpUnavailable(_ readiness: DecryptCheckRecord?, appleSilicon: Bool) -> String? {
+        guard let readiness, DeviceDecryptSection.isUnavailable(readiness) else { return nil }
+        return appleSilicon ? DeviceDecryptSection.unavailableLine : DeviceDecryptSection.unavailableLineWithoutAppStore
     }
 
     /// The line in place of the list: a listing under way, or none yet.
@@ -311,6 +326,9 @@ struct DeviceAppTile: View {
     /// Some dump is running — this row's or another's, on this pane or in the
     /// card above. One at a time, so every button is out.
     var isBusy: Bool = false
+    /// The decrypt card found this device can't be dumped from here
+    /// (`InstalledAppsSection.dumpUnavailable`): Dump waits, saying why.
+    var unavailable: String? = nil
     var onDump: () -> Void = {}
     /// Open the prefilled add sheet for this app and its staged IPA.
     var onAdd: (StagedIPARecord) -> Void = { _ in }
@@ -551,10 +569,10 @@ struct DeviceAppTile: View {
             }
         }
         .controlSize(.small)
-        .disabled(isBusy)
+        .disabled(isBusy || unavailable != nil)
         .fixedSize()
-        .help("Launch \(app.name) on the \(deviceKind), dump it, and stage it for a build. "
-              + "Progress and the result appear in the decrypt card above.")
+        .help(unavailable ?? ("Launch \(app.name) on the \(deviceKind), dump it, and stage it for a build. "
+              + "Progress and the result appear in the decrypt card above."))
     }
 
     /// Resolved from `iconPath` on each draw, through

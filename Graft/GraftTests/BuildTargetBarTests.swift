@@ -104,6 +104,40 @@ final class BuildTargetBarTests: XCTestCase {
         )
     }
 
+    /// B4: Build & Install with nothing connected ended in a red failure card.
+    /// It waits, in a neutral voice: nothing is wrong yet, and the bar says
+    /// both ways forward.
+    func test_with_no_device_build_and_install_waits_and_says_how_to_go_on() {
+        let target = BuildTargetBar.target(devices: [], delivery: .livecontainer, hasLoaded: true)
+
+        XCTAssertEqual(target, .noDevice)
+        XCTAssertTrue(target.blocksBuild)
+        XCTAssertFalse(target.needsAttention, "neutral, not amber")
+        XCTAssertEqual(BuildTarget.noDeviceLine,
+                       "Connect your iPhone or iPad to install, or turn on Skip install in Build options.")
+        XCTAssertEqual(BuildTargetBar.explanation(for: .noDevice),
+                       "Connect your iPhone or iPad to install. To build without installing, turn on "
+                       + "Skip install in Build options.")
+    }
+
+    func test_skip_install_with_no_device_still_builds() {
+        let target = BuildTargetBar.target(devices: [], delivery: .livecontainer, hasLoaded: true,
+                                           notDelivering: .skipInstall)
+        XCTAssertFalse(target.blocksBuild)
+    }
+
+    /// B1: what to do lived on a 10 pt icon's tooltip; the line says it.
+    func test_a_device_that_couldnt_be_read_says_to_unlock_it_and_tap_trust() {
+        XCTAssertEqual(BuildTarget.unreadableLine(count: 1),
+                       "1 connected device couldn't be read: unlock it and tap Trust.")
+        XCTAssertEqual(BuildTarget.unreadableLine(count: 2),
+                       "2 connected devices couldn't be read: unlock them and tap Trust.")
+        XCTAssertEqual(BuildTarget.defaultUnreadableLine(name: "iPhone 15 Pro"),
+                       "iPhone 15 Pro, your default, couldn't be read: unlock it and tap Trust.")
+        XCTAssertEqual(BuildTarget.overrideUnreadableLine,
+                       "The device picked for Build & Install couldn't be read: unlock it and tap Trust.")
+    }
+
     /// Two phones, neither marked — and deliberately with **different names**,
     /// so this case is falsifying rather than coincidental.
     ///
@@ -804,7 +838,7 @@ final class BuildTargetBarTests: XCTestCase {
                            "\(target): \(text)")
             XCTAssertFalse(text.contains("idevice_id"), "\(target): \(text)")
         }
-        XCTAssertTrue(BuildTargetBar.explanation(for: .noDevice).contains("make the IPA"))
+        XCTAssertTrue(BuildTargetBar.explanation(for: .noDevice).contains("Skip install"))
         XCTAssertTrue(BuildTargetBar.explanation(for: .overrideUnreadable(udid: "U"))
             .contains("asks usbmuxd"))
     }
@@ -964,6 +998,48 @@ extension BuildTargetBarTests {
         )
     }
 
+    /// B2: on a paid account a LiveContainer app that can't go to this device
+    /// can go as a sideload instead, so the bar offers that too. Never on a
+    /// free account, which can't sideload, nor before the account is known.
+    func test_a_paid_account_is_offered_sideload_where_livecontainer_is_missing() throws {
+        let bare = try ipad(liveContainer: nil, known: true)
+        for (account, offered) in [(AccountMode.paid, true), (.free, false), (nil, false)] {
+            XCTAssertEqual(
+                BuildTargetBar.target(devices: [bare], delivery: .livecontainer,
+                                      overrideUDID: Self.ipadUDID, account: account),
+                .liveContainerMissing(name: "iPad Air", udid: Self.ipadUDID, kind: "iPad", sideload: offered),
+                "\(String(describing: account))"
+            )
+        }
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [bare], delivery: .livecontainer, account: .paid),
+            .liveContainerMissing(name: "iPad Air", udid: Self.ipadUDID, kind: "iPad", sideload: true),
+            "the only device, not picked"
+        )
+        XCTAssertEqual(
+            BuildTargetBar.target(devices: [bare], delivery: .livecontainer, overrideUDID: Self.ipadUDID,
+                                  notDelivering: .dryRun, account: .paid),
+            .notDelivering(option: .dryRun, device: .liveContainerMissing(
+                name: "iPad Air", udid: Self.ipadUDID, kind: "iPad", sideload: true)),
+            "a dry run still resolves the device, on the same account"
+        )
+    }
+
+    /// The offer is a line of its own, under the fact: on one line, beside
+    /// Set Up LiveContainer… and Change, it didn't fit the minimum width
+    /// (`AppDetailLayoutTests`).
+    func test_the_missing_livecontainer_line_offers_sideload_only_when_it_can() {
+        XCTAssertEqual(BuildTargetBar.liveContainerMissingLine(name: "iPad Air"),
+                       "LiveContainer isn't on iPad Air")
+        XCTAssertEqual(BuildTargetBar.sideloadOffer, "Or switch this app to Sideload with Edit…")
+        let offered = BuildTargetBar.explanation(
+            for: .liveContainerMissing(name: "iPad Air", udid: Self.ipadUDID, kind: "iPad", sideload: true))
+        XCTAssertTrue(offered.contains("Or switch this app to Sideload with Edit…"), offered)
+        let free = BuildTargetBar.explanation(
+            for: .liveContainerMissing(name: "iPad Air", udid: Self.ipadUDID, kind: "iPad"))
+        XCTAssertFalse(free.contains("Sideload"), free)
+    }
+
     func test_livecontainer_unread_or_not_needed_never_blocks() throws {
         XCTAssertEqual(
             BuildTargetBar.target(devices: [try ipad(liveContainer: nil, known: false)],
@@ -986,9 +1062,11 @@ extension BuildTargetBarTests {
 
     func test_the_kind_of_device_comes_from_its_model() {
         XCTAssertEqual(BuildTarget.deviceKind(model: "iPad13,16"), "iPad")
-        XCTAssertEqual(BuildTarget.deviceKind(model: "iPod9,1"), "iPod")
+        // As the CLI says (`devices.family_from_lockdown`).
+        XCTAssertEqual(BuildTarget.deviceKind(model: "iPod9,1"), "iPod touch")
         XCTAssertEqual(BuildTarget.deviceKind(model: "iPhone16,1"), "iPhone")
-        XCTAssertEqual(BuildTarget.deviceKind(model: "unknown"), "iPhone")
+        // A model nothing names isn't guessed to be an iPhone (2.3.1 §3.1).
+        XCTAssertEqual(BuildTarget.deviceKind(model: "unknown"), "device")
     }
 
     func test_the_new_states_have_tooltips_and_no_cli_jargon() {
@@ -1151,5 +1229,98 @@ extension BuildTargetBarTests {
             XCTAssertFalse(text.contains("No iOS device"), "\(state): \(text)")
             XCTAssertFalse(text.contains("usbmux"), "\(state): \(text)")
         }
+    }
+}
+
+/// What the app calls a device in the text a person reads (2.3.1 §3.1): an
+/// iPhone or iPad, the device, or its kind when it's known; never a bare
+/// "phone", which on an iPad's page reads as a mistake. A scan of every string
+/// literal in the app's sources, comments left out.
+final class DeviceWordsTests: XCTestCase {
+    /// A whole-word "phone" or "phones": not "iPhone", and not an Apple ID's
+    /// "email or phone".
+    static let barePhone = try! NSRegularExpression(
+        pattern: #"(?<![A-Za-z])phones?\b(?<!email or phone)"#, options: [.caseInsensitive]
+    )
+    /// "the iPhone", "an iPhone", "your iPhone", "On My iPhone": one kind for
+    /// every device. A sentence split over lines is read whole
+    /// (`offenders`), so one that goes on to "or iPad" on the next line is
+    /// let off by what it says there, not by where the line ends.
+    static let oneKind = try! NSRegularExpression(
+        pattern: #"\b(?:the|an|your|On My) iPhone\b(?! or iPad|, iPad|/iPad)"#
+    )
+    /// A string literal on one line, escapes and all.
+    static let literal = try! NSRegularExpression(pattern: #""(?:[^"\\]|\\.)*""#)
+
+    static func offends(_ text: String) -> Bool {
+        let range = NSRange(text.startIndex..., in: text)
+        return [barePhone, oneKind].contains { $0.firstMatch(in: text, range: range) != nil }
+    }
+
+    static func literals(in line: String) -> [String] {
+        literal.matches(in: line, range: NSRange(line.startIndex..., in: line)).compactMap {
+            Range($0.range, in: line).map { String(line[$0]) }
+        }
+    }
+
+    /// Each string literal in `lines` that offends, as "line: literal". A
+    /// line's last literal that the next line carries on with `+ "…"` is
+    /// joined to that one first, and named by the line it starts on.
+    static func offenders(in lines: [(number: Int, text: String)]) -> [String] {
+        var found: [(number: Int, text: String)] = []
+        var carriesOn = false
+        for line in lines {
+            let code = line.text.trimmingCharacters(in: .whitespaces)
+            var here = literals(in: line.text).map { (number: line.number, text: $0) }
+            if carriesOn, code.hasPrefix("+ \""), !here.isEmpty, let open = found.popLast() {
+                here[0] = (open.number, String(open.text.dropLast()) + here[0].text.dropFirst())
+            }
+            found += here
+            carriesOn = code.hasSuffix("\"")
+        }
+        return found.filter { offends($0.text) }.map { "\($0.number): \($0.text)" }
+    }
+
+    func test_no_string_in_the_app_says_phone() throws {
+        let root = try SourceScan.appSources()
+        var offenders: [String] = []
+        for file in try SourceScan.swiftSources(under: root) {
+            let path = SourceScan.relativePath(of: file, under: root)
+            offenders += Self.offenders(in: try SourceScan.codeLines(of: file)).map { "\(path):\($0)" }
+        }
+        XCTAssertEqual(offenders, [], offenders.joined(separator: "\n"))
+    }
+
+    /// The patterns themselves, so a scan that matches nothing can't pass.
+    func test_the_scan_tells_a_phone_from_an_iphone() {
+        XCTAssertTrue(Self.offends(#""Pick an app, a phone, or a section.""#))
+        XCTAssertTrue(Self.offends(#""connected phone""#))
+        XCTAssertTrue(Self.offends(#""Plug an iPhone in over USB""#))
+        XCTAssertFalse(Self.offends(#""Apple ID (email or phone)""#))
+        XCTAssertFalse(Self.offends(#""Plug an iPhone or iPad in over USB""#))
+        XCTAssertFalse(Self.offends(#""on your iPhone, iPad or other Mac""#))
+        XCTAssertEqual(Self.literals(in: #"Text("a \"phone\"") // the phone"#), [#""a \"phone\"""#])
+    }
+
+    /// A sentence split over two lines, `"… your iPhone "` then `+ "…"`, is
+    /// read as the one sentence it makes: ending where the line does
+    /// doesn't let "your iPhone" off unless the next line says "or iPad".
+    func test_a_sentence_split_over_lines_is_read_whole() {
+        let split: [(number: Int, text: String)] = [
+            (number: 7, text: #"    static let body = "Unlock your iPhone ""#),
+            (number: 8, text: #"        + "and try again.""#),
+        ]
+        XCTAssertEqual(Self.offenders(in: split), [#"7: "Unlock your iPhone and try again.""#])
+        let either: [(number: Int, text: String)] = [
+            (number: 7, text: #"    static let body = "Installs them on your iPhone ""#),
+            (number: 8, text: #"        + "or iPad.""#),
+        ]
+        XCTAssertEqual(Self.offenders(in: either), [])
+        // Carried on with something not a literal: nothing says "or iPad".
+        let unsaid: [(number: Int, text: String)] = [
+            (number: 7, text: #"    static let body = "Unlock your iPhone ""#),
+            (number: 8, text: #"        + name"#),
+        ]
+        XCTAssertEqual(Self.offenders(in: unsaid), [#"7: "Unlock your iPhone ""#])
     }
 }

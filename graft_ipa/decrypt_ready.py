@@ -147,7 +147,7 @@ def check(udid: str | None = None, device_name: str | None = None) -> Readiness:
     # jailbreak.
     server_version = third if frida_ok else None
     frida_fix = None if frida_ok else (
-        third or "open the Dopamine app on the phone to (re)start the jailbreak"
+        third or "open the Dopamine app on the device to (re)start the jailbreak"
     )
 
     ssh_ok, ssh_detail, ssh_fix, ssh_reason = _check_ssh(udid)
@@ -167,8 +167,8 @@ def check(udid: str | None = None, device_name: str | None = None) -> Readiness:
     # both keep `_check_ssh`'s own fix, which is the one that works.
     if ssh_reason == SSH_NO_SERVER:
         ssh_fix = (
-            "either this phone has no jailbreak — decryption needs one, so pass "
-            "--device with a jailbroken phone — or OpenSSH has stopped on it: "
+            "either this device has no jailbreak — decryption needs one, so pass "
+            "--device with a jailbroken iPhone or iPad — or OpenSSH has stopped on it: "
             "respring, or restart it from Sileo"
         )
         # Both possibilities, in that order, because nothing here can tell them
@@ -220,7 +220,7 @@ def check(udid: str | None = None, device_name: str | None = None) -> Readiness:
             "what `--decrypt-frontmost` would pick, and with an empty screen "
             "there is nothing to pick, so name the app you want"
             if r.can_dump_from_list else
-            "unlock the phone and open the app you want to decrypt"
+            "unlock the device and open the app you want to decrypt"
         ),
     ))
     return r
@@ -266,7 +266,7 @@ def _check_frida(udid: str | None) -> tuple[bool, str, str | None]:
             return False, (
                 f"frida-server's major version differs from ours (we have {ours})"
             ), (
-                "the phone is fine — align this end, in frida-ios-dump's virtualenv: "
+                "the device is fine — align this end, in frida-ios-dump's virtualenv: "
                 f"`{pip} install 'frida=={major}.*'` to match the device's frida-server"
             )
         return False, f"frida-server is not reachable: {text[:90]}", None
@@ -370,7 +370,7 @@ def _check_ssh(udid: str | None) -> tuple[bool, str, str | None, str | None]:
     if auth is True:
         return True, f"{banner}, authenticated as root", None, None
     return False, f"{banner}, but the login was rejected", (
-        "set the phone's root password with `graft --set-ssh-password` "
+        "set the device's root password with `graft --set-ssh-password` "
         "(or from the device's row in the Devices pane)"
     ), SSH_LOGIN_REJECTED
 
@@ -503,7 +503,7 @@ def _backends(
     elif frida_ok and _frida_mismatch(bag_version, server_version):
         out.append(BackendStatus(
             decrypt_runner.BAGBAK, False,
-            f"bagbak bundles frida {bag_version} and the phone runs frida-server "
+            f"bagbak bundles frida {bag_version} and the device runs frida-server "
             f"{server_version} — install a bagbak whose frida matches "
             f"({decrypt_runner.BAGBAK_INSTALL} for a 16.x server)",
         ))
@@ -547,7 +547,7 @@ def _version_skew_note(client: str | None, server: str | None) -> str | None:
     if client.split(".")[0] != server.split(".")[0]:
         return None
     return (
-        f"bagbak bundles frida {client}, the phone runs {server}. Majors match so it "
+        f"bagbak bundles frida {client}, the device runs {server}. Majors match so it "
         f"connects — but if a dump hangs just after \"spawned app pid\", try matching "
         f"them exactly."
     )

@@ -258,8 +258,50 @@ final class AppStoreStore: ObservableObject {
     }
 
     /// Why Get latest and Get (free) must wait: a sign-in, sign-out or
-    /// enrollment is changing what they would use.
-    var getBlockedReason: String? { account.isBusy ? Self.accountBusyReason : nil }
+    /// enrollment is changing what they would use, or the App Store isn't
+    /// set up yet (`setUpReason`, B5), when the get would fail with Terminal
+    /// steps or "not signed in".
+    var getBlockedReason: String? { account.isBusy ? Self.accountBusyReason : setUpReason }
+
+    /// Add App's words for it, without "To download it from here" (B5).
+    nonisolated static let setUpFirst = "Set up the App Store in Settings › App Store first."
+
+    /// Why no get can run until the App Store is set up, or nil: set up, or
+    /// nothing has said, which is no reason (the CLI checks). "Sign in…" when
+    /// the sign-in is all that's missing.
+    ///
+    /// From the last status read (`AppStoreStatusRecord.setUpMissing`) when
+    /// there is one: it knows more (another ipatool's sign-in, a known-bad
+    /// ipatool). Else from what the pane's App Store check read from files
+    /// (`setupFromFiles`): status is read only by Settings › App Store, Add
+    /// App's search and a sign-in, so adding by URL, or a relaunch straight
+    /// into a pane, used to leave Get enabled (the re-verify of B5).
+    var setUpReason: String? {
+        if let status {
+            guard status.setUpMissing else { return nil }
+            return status.onlySignInMissing ? Self.signedOutReason : Self.setUpFirst
+        }
+        guard case let .missing(reason) = setupFromFiles else { return nil }
+        return reason == CLIContract.Update.notSignedIn ? Self.signedOutReason : Self.setUpFirst
+    }
+
+    /// What an App Store check (`--appstore-check`) last read of this Mac's
+    /// setup, from files alone, no keychain and no ipatool
+    /// (`appstore-version`'s `setup_missing`); nil before one answered.
+    enum SetupFromFiles: Equatable {
+        case ready
+        case missing(String)
+    }
+
+    @Published private(set) var setupFromFiles: SetupFromFiles?
+
+    /// The pane's fallback (B5): when no check has said anything about the
+    /// setup (it failed, or a CLI too old to say), read status, once. A read
+    /// that ended, failed or not, is the once (`hasLoadedStatus`).
+    func checkSetupIfUnknown() async {
+        guard setupFromFiles == nil, !hasLoadedStatus, !isLoadingStatus else { return }
+        await loadStatus()
+    }
 
     static func statusArgs() -> [String] { [Flag.json, Flag.appstoreStatus] }
     /// `expectEmail` is the Apple ID the confirmation named: the CLI then
@@ -434,18 +476,24 @@ final class AppStoreStore: ObservableObject {
             return
         }
         let answer: AppStoreVersionRecord
+        // The CLI's own record: only that says anything about the setup.
+        var heard: AppStoreVersionRecord?
         do {
-            let record = try await runner.run(Self.checkArgs(app: app), failing: "App Store check") { event in
+            heard = try await runner.run(Self.checkArgs(app: app), failing: "App Store check") { event in
                 if case let .appStoreVersion(record) = event { return record }
                 return nil
             }
-            answer = record ?? Self.couldNotTell(app, "graft reported no version")
+            answer = heard ?? Self.couldNotTell(app, "graft reported no version")
         } catch {
             answer = Self.couldNotTell(app, error.localizedDescription)
         }
         guard !Task.isCancelled else { return }
         versions[app] = answer
         checkedAt[app] = answer.storeVersion != nil ? (context, now()) : nil
+        if let heard {
+            let setup: SetupFromFiles = heard.setupMissing.map(SetupFromFiles.missing) ?? .ready
+            if setup != setupFromFiles { setupFromFiles = setup }
+        }
     }
 
     private static func couldNotTell(_ app: String, _ why: String) -> AppStoreVersionRecord {
@@ -526,9 +574,11 @@ final class AppStoreStore: ObservableObject {
     /// signed in, or only Graft 1.x's ipatool is. Status not read yet is no
     /// reason: the CLI checks again.
     var claimBlockedReason: String? {
-        if let getBlockedReason { return getBlockedReason }
-        guard let ipa = status?.ipatool else { return nil }
-        return ipa.signedIn == false || ipa.legacySignin == true ? Self.signedOutReason : nil
+        if account.isBusy { return Self.accountBusyReason }
+        if let ipa = status?.ipatool, ipa.signedIn == false || ipa.legacySignin == true {
+            return Self.signedOutReason
+        }
+        return setUpReason
     }
 
     /// The confirmation Get (free) asks first: one click is a permanent

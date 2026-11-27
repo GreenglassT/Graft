@@ -67,6 +67,14 @@ Follow these even when a command's hint suggests something else.
    unless the person asks for that exact removal; it deletes their settings,
    sign-in or saved passwords. `--remove-data` on its own only lists, and is
    safe.
+10. **A tweak update Graft can't verify needs the person's yes.** It comes
+   from a source not on record for that tweak, one without HTTPS, or one that
+   lists no checksum, so it's what lets another repo's build into their apps.
+   Pass `--trust-tweak <confirm_key>` (with `--update` or `--update-tweak`)
+   only after the person says yes to that tweak, that version, from that
+   `source`, told its `unverified_reason`; never to make a refusal go away.
+   The key is for exactly that update: if it changes, Graft refuses it, and
+   you ask again.
 
 These report, change nothing on a device or an account, and are safe to run
 without asking: `--version`, `--describe`, `--help`, `--list`, `--tweaks`,
@@ -152,7 +160,9 @@ graft --appstore-get --app example --json
 ```
 
 - If `ipatool.signed_in` or `unfairplay.enrolled` isn't true, stop and ask
-  the person (rules 3 and 4).
+  the person (rules 3 and 4). `--appstore-check`, which reads no keychain,
+  says the same from files alone: its `setup_missing` is "decryption isn't
+  set up on this Mac", "not signed in to the App Store", or null.
 - A get emits `appstore-stage` (`download`, `decrypt`, `stage`) and ends with
   `ipa-provided` {bundle_id, version, filename}. If what it would get is
   already staged, it emits `appstore-already-staged` and downloads nothing;
@@ -201,16 +211,29 @@ graft --provide-ipa ~/Downloads/Example.ipa --app example --json   # ipa-provide
 ### 3. Find and fetch tweaks
 
 ```bash
-graft --search "some tweak" --json              # canister-result {package_id, name, version, ...}, canister-search-end
-graft --fetch com.example.sometweak --json      # canister-fetch-end {ok, filename, path}
+graft --search "some tweak" --json              # canister-result {package_id, name, version, repository_id, ...}, canister-search-end
+graft --fetch com.example.sometweak --fetch-repository <repository_id> --json   # canister-fetch-end {ok, filename, path}
 graft --tweaks --json                           # the tweaks library
 ```
+
+Pass the result's `repository_id` as `--fetch-repository`: the fetch then takes
+only that repository's build, the one the result showed. Without it, a fetch by
+package id that more than one Canister repository lists downloads nothing and
+exits 2, naming each repository and its address: ask the person which one,
+then pass it.
 
 From an APT repository the person added, `graft --repo-packages <URL> --json`
 lists `repo-package` events with `download_url` and `sha256`; fetch one with
 `graft --fetch <download_url> --fetch-sha <sha256> --json`. Add a repository
 only when the person gives you its URL (`--add-repo <URL>`). Use rootless
 tweaks; RootHide builds don't load outside a jailbreak.
+
+Graft names the file itself, `<package id>_<version>[_<architecture>].deb`,
+from the .deb's own control file. A fetch exits 9 when the download isn't a
+.deb (or, by package id, isn't that package), or when a different file of that
+name is already in the library; it never replaces one. It records where the
+tweak came from (the Canister repository, or the added repo a URL is under),
+and the tweak's updates come only from there.
 
 ### 4. Attach them
 
@@ -281,8 +304,16 @@ graft --appstore-check --json                 # appstore-version: App Store vers
 graft --tweak-updates --json                  # tweak-update: newer published versions
 ```
 
+Each `tweak-update` has `source` (where its newer version comes from: the
+tweak's own repo or Canister repository) and `verified`, with
+`unverified_reason` when it isn't, and `confirm_key`, what `--trust-tweak`
+takes for exactly that update (rule 10).
+
 `kind` is `current` (matches the last delivery), `stale` (something changed;
-`reasons` says what), `never` or `unknown`.
+`reasons` says what), `never` or `unknown`. `--reconcile` emits
+`reconcile-checked` {app, udid, device_name, found} before an app's
+`delivery-state` once a device answered; with none, no device was checked,
+and a `log` warning says why when there's a reason to give.
 
 ### 7. Bring apps up to date
 
@@ -294,18 +325,44 @@ graft --drop-update-target example --device <UDID> --json   # after a yes: stop 
 
 - `update-plan` has one entry per app: `store` {from, to, skipped_reason}
   (a get is planned when `to` is set and `skipped_reason` isn't), `tweaks`
-  (each with `from`, `to`, `unchecked` and `also_affects`), `install`,
-  `install_skipped_reason`, `manual_install`, `targets`, `blocked_reason`,
-  `readiness_note`, `nothing_to_do` and `actionable` (there's something to
-  do now, on a device that can take it). Ask with the plan in hand (rule 7).
+  (each with `from`, `to`, `unchecked`, `also_affects`, `source`,
+  `verified`, `unverified_reason`, `confirmed`, `confirm_key` and
+  `trust_changed`), `needs_confirmation`,
+  `install`, `install_skipped_reason`, `manual_install`, `targets`,
+  `blocked_reason`, `readiness_note`, `nothing_to_do` and `actionable`
+  (there's something to do now, on a device that can take it). Ask with the
+  plan in hand (rule 7). The plan's `checks_failed` is true when it asked the
+  App Store and canister.me and neither answered, as when offline: every app
+  then looks up to date, and isn't known to be. Say so, and ask again later.
+- A tweak's newer build comes only from its own `source`. One that isn't
+  `verified` is `confirmed` only when the plan was made with `--trust-tweak`
+  and its `confirm_key`; until then it isn't part of the update, and the app
+  has `needs_confirmation`. On its own it's nothing to do: `--update` leaves
+  the app out. `unverified_reason` says why:
+  - "source not confirmed yet: …": a tweak from before Graft 2.3.1, or whose
+    record was lost. Graft found where it most likely came from, and asks
+    once; after a confirmed update, that source is on record.
+  - "source unknown: …": no index lists the file, or several do.
+  - "its source moved from … to …": the Canister repository on record now
+    points somewhere else.
+  - "… doesn't use HTTPS" or "… lists no checksum for …".
+
+  Ask the person (rule 10), then pass `--trust-tweak <confirm_key>` to both
+  the plan and the update. A `confirm_key` is for one update: the source, the
+  version and its builds. If the update changed since (a new version, build
+  or source), the plan says `trust_changed`, and `--update` fails that app
+  before doing anything for it, with "… changed since you confirmed it: it's
+  now …". Show the person the new plan and ask again.
 - `targets` is every device the app was installed on, the default first,
   then by name: {udid, device_name, delivery, lc_bundle_id, install,
-  install_skipped_reason, manual_install, waiting, blocked_reason, readiness,
-  readiness_note}. An update never installs anywhere else. A device that
-  isn't connected is `waiting` ("iPad mini isn't connected: it'll update when
-  it is") and the others still install; it installs on a later run, once
-  connected. An app is blocked only when none of its devices with something
-  to do can take it.
+  install_skipped_reason, manual_install, kind, connected, waiting,
+  blocked_reason, readiness, readiness_note}. `kind` (the delivery state) and
+  `connected` are there for every device; `waiting` and the readiness fields
+  only for one with something to do. An update never installs anywhere
+  else. A device that isn't connected is `waiting` ("iPad mini isn't
+  connected: it'll update when it is") and the others still install; it
+  installs on a later run, once connected. An app is blocked only when none
+  of its devices with something to do can take it.
 - A device that's gone (sold, retired, reset) waits forever. With the
   person's yes, `--drop-update-target APP --device UDID` stops updating that
   app there until it's installed there again; it emits
@@ -318,7 +375,9 @@ graft --drop-update-target example --device <UDID> --json   # after a yes: stop 
   `device_name` and `waiting`), and the get's and the build's own events
   come through as they do on their own. Each later device's install has its
   own `build-start` and `build-end`, unless its device isn't connected by
-  then: that install is skipped, with `waiting` true.
+  then: that install is skipped, with `waiting` true. A device unplugged
+  during its build or install ends that `build-end` with `waiting` true and
+  the waiting sentence as `error`: it waits, as its `update-step` says.
 - One device's failure doesn't stop the others. A device that refuses the
   build before it starts (Developer Mode off, or a file of the same name in
   its LiveContainer that Graft didn't put there) fails alone, and the build
@@ -359,8 +418,10 @@ graft --drop-update-target example --device <UDID> --json   # after a yes: stop 
   Developer Mode off, or not in the profile that signs the app). A plan's
   `blocked_reason` is set only when no device with something to do can take
   it, and joins their reasons. `store.skipped_reason` says why the App Store
-  step won't run (`held at …`, `needs Apple silicon`, `couldn't check the
-  App Store`, or the Apple ID doesn't have that version).
+  step won't run (`held at …`, `needs Apple silicon`, `decryption isn't set
+  up on this Mac`, `not signed in to the App Store`, `couldn't check the App
+  Store`, or the Apple ID doesn't have that version). The two about setup are
+  the person's (rules 3 and 4).
 - `install_skipped_reason` is `not installed yet` for an app never delivered
   (build it instead), `Update was stopped on every device it's on` after
   `--drop-update-target` dropped them all, "Build & Install <app> once, so
@@ -376,6 +437,14 @@ graft --drop-update-target example --device <UDID> --json   # after a yes: stop 
   null and `left` ["install"]. One that isn't connected has `waiting` true,
   `ok` false, the waiting sentence as `error` and `left` ["install"], and
   isn't a failure. `graft --update <app>` again does what's left.
+- `--update-tweak` refuses a tweak update that isn't verified (exit 2, with
+  the reason, the source and its `confirm_key` in the hint) unless
+  `--trust-tweak` gives that update's `confirm_key`; one that changed since
+  that key was read exits 2 too. Its download is refused with exit 9, and
+  nothing changes, when it isn't a .deb of that package at that version, or a
+  different file has its name. `--trust-tweak` with a bare filename, or
+  anything but a `confirm_key`, exits 2; one naming a file the library doesn't
+  have exits 15.
 - `--install-to-mac` emits `handed-to-playcover` once PlayCover has the IPA,
   then `playcover-installed` {bundle_id, version, settings_disabled,
   settings_restored} when PlayCover has installed it, or
@@ -400,7 +469,7 @@ graft --drop-update-target example --device <UDID> --json   # after a yes: stop 
 | 4 | No staged IPA to build from |
 | 5 | The IPA is malformed or failed its decryption check |
 | 6, 7, 8 | cyan couldn't inject the tweaks; signing failed; installing on the device failed |
-| 9, 12 | Canister; an APT repository |
+| 9, 12 | Canister, or a tweak download Graft refused (not a .deb of that package, or another file's name); an APT repository |
 | 10, 11 | App Store Connect; a dump from a jailbroken device |
 | 13 | An App Store lookup or search, or an App Store URL it couldn't read |
 | 14 | A provided IPA didn't validate |
@@ -422,5 +491,5 @@ graft --drop-update-target example --device <UDID> --json   # after a yes: stop 
 - `graft --check --json` checks the tools, the device and LiveContainer.
 - `graft --builds --json` gives build ids; `graft --build-log <id>` prints
   that build's saved log.
-- A phone that lists no apps is usually locked: ask the person to unlock it
-  and stay on the home screen.
+- An iPhone or iPad that lists no apps is usually locked: ask the person to
+  unlock it and stay on the home screen.

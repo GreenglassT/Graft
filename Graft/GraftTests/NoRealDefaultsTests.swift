@@ -284,7 +284,7 @@ final class NoRealDefaultsTests: XCTestCase {
     func test_only_the_named_environment_wrapper_is_allowed() {
         let sheet = """
         struct AddAppSheet: View {
-            @AppStorage("lastDeliveryMode") private var lastDelivery: DeliveryMode = AddAppSheet.defaultDelivery
+            @AppStorage("lastDeliveryMode") private var lastDelivery: DeliveryMode?
             @SceneStorage("tab") var tab = 0
         }
         """

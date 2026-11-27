@@ -223,9 +223,8 @@ def test_github_s_rate_limit_says_so(github: FakeGitHub, status: int) -> None:
 
 
 @pytest.mark.parametrize("error", [
-    requests.ConnectTimeout("connect timed out"),
-    requests.ReadTimeout("read timed out"),
     requests.ConnectionError("no route to host"),
+    requests.exceptions.SSLError("handshake failed"),
 ])
 def test_no_answer_is_offline(github: FakeGitHub, error: Exception) -> None:
     github.error = error
@@ -234,11 +233,29 @@ def test_no_answer_is_offline(github: FakeGitHub, error: Exception) -> None:
     assert "internet connection" in found["message"]
 
 
-def test_the_timeout_is_short(github: FakeGitHub) -> None:
+@pytest.mark.parametrize("error", [
+    requests.ConnectTimeout("connect timed out"),
+    requests.ReadTimeout("read timed out"),
+])
+def test_an_answer_too_slow_is_said_as_that_not_as_offline(github: FakeGitHub, error: Exception) -> None:
+    """A link busy with another download (the 2.3 self-update's own, on a
+    1 MB/s hotspot) is slow, not offline: "check this Mac's internet
+    connection" sent the person looking for a fault that wasn't there (the
+    2.3.1 review's Track 4 item 1)."""
+    github.error = error
+    found = _check()
+    assert (found["ok"], found["reason"], found["status"]) == (False, release_check.TIMED_OUT, None)
+    assert found["message"].startswith("GitHub didn't answer in time.")
+    assert "internet connection" not in found["message"]
+
+
+def test_the_timeout_is_short_but_outlasts_a_busy_link(github: FakeGitHub) -> None:
+    """Seconds to connect, then between bytes: 10 failed once on a link
+    another download was filling, where the retry passed."""
     _check()
     (_, kwargs), = github.sent
     assert kwargs["timeout"] == release_check.TIMEOUT
-    assert 0 < release_check.TIMEOUT <= 10
+    assert 30 <= release_check.TIMEOUT <= 60
 
 
 # --- What it sends ----------------------------------------------------------

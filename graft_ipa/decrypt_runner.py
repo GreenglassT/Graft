@@ -401,7 +401,7 @@ def device_dump_lock(lock_path: Path, udid: str | None):
         except OSError:
             raise DumpInProgressError(
                 f"another dump is already running for {udid or 'this device'}",
-                hint="a dump puts its app on screen, and the phone has one screen — "
+                hint="a dump puts its app on screen, and the device has one screen — "
                 "so they cannot overlap. Wait for the first to finish, or stop it.",
             ) from None
         handle.write(str(os.getpid()))
@@ -751,7 +751,7 @@ def _dump_bagbak(
         if _LOCKED_RE.search(combined):
             raise DecryptError(
                 f"the device is locked, so {bundle_id} could not be launched to dump it",
-                hint="unlock the phone (and keep it awake), then retry",
+                hint="unlock the device (and keep it awake), then retry",
             )
         if _FRIDA_VERSION_RE.search(combined):
             installed = bagbak_major()
@@ -771,7 +771,7 @@ def _dump_bagbak(
         if _EXT_FLAKY_RE.search(combined):
             raise DecryptError(
                 f"an app extension of {bundle_id} could not be dumped",
-                hint="iOS reaped the extension mid-dump — keep the phone unlocked and "
+                hint="iOS reaped the extension mid-dump — keep the device unlocked and "
                 "awake and retry; some apps' extensions resist bagbak and won't dump",
             )
         if _NOT_INSTALLED_RE.search(combined):
@@ -785,16 +785,16 @@ def _dump_bagbak(
             raise DecryptError(
                 f"bagbak timed out dumping {bundle_id} after downloading the bundle",
                 hint="two known causes, and bagbak cannot tell them apart: an app "
-                "extension declaring a minimum iOS newer than this phone (bagbak "
+                "extension declaring a minimum iOS newer than this device's (bagbak "
                 "prints that possibility on every timeout, so it is not evidence "
-                "about this app), or a phone that locked or slept mid-dump. Keep it "
+                "about this app), or a device that locked or slept mid-dump. Keep it "
                 "awake and retry; if it repeats, try frida-ios-dump, which does not "
                 "touch extensions",
             )
         if _TIMEOUT_RE.search(combined):
             raise DecryptError(
                 f"bagbak timed out dumping {bundle_id}",
-                hint="most often this is a locked phone: bagbak has to launch the app "
+                hint="most often this is a locked iPhone or iPad: bagbak has to launch the app "
                 "and iOS won't launch anything while the device is locked, but bagbak "
                 "reports only a timeout. Unlock it, keep it awake, and retry. Failing "
                 "that, an extension that can't run on this iOS version will also hang "
@@ -885,7 +885,7 @@ def frida_not_importable(e: FridaNotImportable, need: str) -> DecryptError:
     pip = shlex.quote(str(frida_ios_dump_pip()))
     return DecryptError(
         f"the frida module is needed to {need}, and frida-ios-dump's virtualenv can't import frida: {e}",
-        hint=f"reinstall it there: `{pip} install 'frida==16.*'` (the phone is fine), or "
+        hint=f"reinstall it there: `{pip} install 'frida==16.*'` (the device is fine), or "
         f"{frida_ios_dump_setup_hint()}",
     )
 
@@ -1271,7 +1271,7 @@ def _launch_failure(bundle_id: str, outcome: str) -> tuple[str, str]:
             f"{bundle_id} started and then exited on its own",
             "the app quit within a second of launching under frida. The device's "
             "own launcher would have been the second opinion, but it could not be "
-            "reached — check SSH on the phone (`--decrypt-check`). Apps that refuse "
+            "reached — check SSH on the device (`--decrypt-check`). Apps that refuse "
             "to run on a jailbroken device quit exactly like this.",
         )
     if outcome == LAUNCH_DIED:
@@ -1291,7 +1291,7 @@ def _launch_failure(bundle_id: str, outcome: str) -> tuple[str, str]:
         )
     return (
         f"{bundle_id} could not be launched on the device",
-        "unlock the phone and keep it awake — iOS will not launch an app while the "
+        "unlock the device and keep it awake — iOS will not launch an app while the "
         "device is locked. If it is unlocked, check the app is still installed.",
     )
 
@@ -1392,7 +1392,7 @@ def _dump_frida_ios_dump(
                 "could not open an SSH tunnel to the device",
                 hint="iproxy could not bind a local port for the dump — check that "
                 "no other dump is running and that usbmuxd is up "
-                "(`brew services list`, or replug the phone)",
+                "(`brew services list`, or replug the iPhone or iPad)",
             )
         returncode, combined = _run_streaming(
             cmd, cwd=str(frida_dump_home()), env=child_env(ssh_env), on_line=on_line
@@ -1409,14 +1409,14 @@ def _dump_frida_ios_dump(
         if _FRIDA_SSH_AUTH_RE.search(combined):
             raise DecryptError(
                 f"the device rejected the SSH login while dumping {bundle_id}",
-                hint="store the phone's root password with `graft "
+                hint="store the device's root password with `graft "
                 "--set-ssh-password` (it is kept in the Keychain, per device, so "
                 "the GUI can use it too), or set GRAFT_SSH_KEY to a key file",
             )
         if _FRIDA_SSH_NO_ROUTE_RE.search(combined):
             raise DecryptError(
                 f"couldn't reach the device over SSH to dump {bundle_id}",
-                hint="install OpenSSH on the phone from Sileo — this backend needs it",
+                hint="install OpenSSH on the device from Sileo — this backend needs it",
             )
         tail = combined.strip().splitlines()[-8:]
         raise DecryptError(

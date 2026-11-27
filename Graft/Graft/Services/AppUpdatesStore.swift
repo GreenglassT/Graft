@@ -2,7 +2,7 @@ import Foundation
 
 private typealias Flag = CLIContract.Flag
 
-/// One-click Update (spec §4): the daily check, the confirmation, the run.
+/// Updates for your apps (spec §4): the daily check, the confirmation, the run.
 ///
 /// The CLI does the work (`graft --update`, Plan A). This store runs it and
 /// holds what the window shows: each app's plan from the last quick check
@@ -51,15 +51,39 @@ final class AppUpdatesStore: ObservableObject {
         var failure: String?
         /// "Also install … now" (`--with-affected`). Off by default.
         var alsoInstall = false
+        /// The tweaks whose "Trust this source" is on: their updates run
+        /// although their sources aren't verified (`--trust-tweak`, 2.3.1
+        /// A1). Off for each by default, and never kept past this sheet.
+        var trusted: Set<String> = []
         /// Why Update didn't start just now: a build took the slot meanwhile.
         var refusal: String?
 
         var isLoading: Bool { plan == nil && failure == nil }
+        /// The full plan couldn't check online (`checksFailed`): what it shows
+        /// is the last online answer with what's known locally
+        /// (`AppUpdatesStore.merged`), and the sheet says so.
+        var offlineNote: String? { plan?.checksFailed == true ? AppUpdatesStore.offlineNote : nil }
         /// The full plan found nothing to update: "Nothing left to update",
         /// and the button is Done.
         var isNothingLeft: Bool { plan.map { $0.apps.allSatisfy { !$0.hasUpdate } } ?? false }
-        /// What Update runs: the apps the full plan says are ready.
-        var runnable: [String] { plan?.apps.filter(\.isActionable).map(\.app) ?? [] }
+        /// What Update runs: the apps the full plan says are ready, and an
+        /// app whose only change is a tweak to confirm once its source is
+        /// trusted (the run's own plan then says where it installs).
+        var runnable: [String] {
+            plan?.apps.filter { app in
+                app.isActionable || (!app.targets.isEmpty && app.installSkippedReason == nil
+                                     && app.unconfirmedTweaks.contains {
+                                         trusted.contains($0.filename) && $0.confirmKey != nil
+                                     })
+            }.map(\.app) ?? []
+        }
+        /// What the run is told the person trusted: each trusted tweak's
+        /// `confirm_key` in this plan, the update this sheet showed, never
+        /// a bare filename (re-verify #2).
+        var trustedKeys: Set<String> {
+            Set((plan?.apps ?? []).flatMap(\.unconfirmedTweaks)
+                .filter { trusted.contains($0.filename) }.compactMap(\.confirmKey))
+        }
         /// How many apps Update installs: the ready ones, and with "Also
         /// install" the others their updated tweaks affect (the button's
         /// count).
@@ -216,6 +240,11 @@ final class AppUpdatesStore: ObservableObject {
                 case .blocked: continue
                 // Waiting, as its result says too, or with nothing more said.
                 case .skipped where result.waiting || result.error == nil: continue
+                // Its install started and never ended: Stop Now canceled it.
+                // Stopped already, as the same end read again after the run
+                // (`perform`), or as `settle` reads a step a Stop cut short.
+                case .installing, .stopped:
+                    rows[i].targets[t].phase = AppUpdateText.targetPhase(result, installBegan: true)
                 default: rows[i].targets[t].phase = AppUpdateText.targetPhase(result)
                 }
             }
@@ -348,6 +377,27 @@ final class AppUpdatesStore: ObservableObject {
     /// Each app's plan from the last quick check, by app name.
     @Published private(set) var plans: [String: UpdatePlanApp] = [:]
     @Published private(set) var isChecking = false
+
+    /// How a Check for updates now went (B10): what the place it was pressed
+    /// says beside its button, and VoiceOver hears. `apps` is what it
+    /// checked: nil, every app (the sidebar, Settings); else one app's pane.
+    struct CheckResult: Equatable {
+        let apps: [String]?
+        let message: String
+        let failed: Bool
+    }
+
+    /// The last Check for updates now's answer, until the next one starts.
+    /// The daily check and the re-checks say nothing.
+    @Published private(set) var checkResult: CheckResult?
+
+    /// What a check that reached nothing says (`UpdatePlanRecord.checksFailed`).
+    nonisolated static let unreachable = "Couldn't check for updates: the App Store and canister.me didn't "
+        + "answer. Check this Mac's internet connection."
+
+    /// Says a Check for updates now's answer to VoiceOver; a test listens.
+    /// Unpublished: a setting, drawn nowhere.
+    var announce: (String) -> Void = { VoiceOverAnnouncement.thisMac.post($0) }
     @Published private(set) var sheet: Sheet?
     @Published private(set) var confirmation: Confirmation?
     @Published private(set) var progress: Progress?
@@ -378,9 +428,10 @@ final class AppUpdatesStore: ObservableObject {
     /// When the last check of every app succeeded.
     /// Unpublished: nothing draws it.
     private var lastChecked: Date?
-    /// A check came due while the busy slot was held, or while one ran.
+    /// A check came due while the busy slot was held, or while one ran,
+    /// and which apps it's for (`PendingCheck`).
     /// Unpublished: nothing draws it.
-    private var pendingCheck = false
+    private var pending: PendingCheck?
     /// With the switch off, a check by hand ("Check for updates now", spec
     /// §11.4) found `plans`: they are what the Update buttons show, so they
     /// are kept, and the confirmation's full plan updates them. Never read
@@ -388,9 +439,6 @@ final class AppUpdatesStore: ObservableObject {
     /// anything.
     /// Unpublished: nothing draws it; `plans` is what is drawn.
     private var checkedByHand = false
-    /// The check that waited for the slot was asked for by hand.
-    /// Unpublished: nothing draws it.
-    private var pendingByHand = false
     /// The SIGKILL grace an update's Stop gives (`RunStopper`); a test
     /// shortens it.
     /// Unpublished: a setting, drawn nowhere.
@@ -469,6 +517,14 @@ final class AppUpdatesStore: ObservableObject {
     /// nothing is sent but by Check for updates now (spec §11.4, review part
     /// 1 #3), and the buttons keep what that found, stale or not.
     func recheck(apps: [String]?) async {
+        // Whatever made the plan worth reading again (a get, a build, an
+        // update) made Check for updates now's line about it stale, switch on
+        // or off (the re-verify's nit): it went on saying "has an update"
+        // after the update.
+        if let shown = checkResult, apps == nil || shown.apps == nil
+            || shown.apps?.contains(where: { apps?.contains($0) == true }) == true {
+            checkResult = nil
+        }
         guard checkApps else { return }
         await check(apps: apps)
     }
@@ -534,11 +590,17 @@ final class AppUpdatesStore: ObservableObject {
     /// added, is checked again, all in one check; with the switch off,
     /// nothing is sent (`recheck`, spec §11.4). An app removed drops what
     /// was found for it, either way: that sends nothing, and an app added
-    /// later under its name mustn't show it.
+    /// later under its name mustn't show it. It leaves a check waiting for
+    /// the slot too (`PendingCheck.removing`): the CLI refuses a plan that
+    /// names an app it doesn't know, and the quick plan is quiet about it,
+    /// so the other apps in that check would keep what they showed.
     func configChanged(from old: [AppRecord], to new: [AppRecord]) async {
         let (changed, removed) = Self.configChanges(from: old, to: new)
         if removed.contains(where: { plans[$0] != nil }) {
             plans = plans.filter { !removed.contains($0.key) }
+        }
+        if let waiting = pending, !removed.isEmpty {
+            pending = waiting.removing(removed)
         }
         guard !changed.isEmpty else { return }
         await recheck(apps: changed)
@@ -586,13 +648,36 @@ final class AppUpdatesStore: ObservableObject {
         }
     }
 
+    /// The checks that came while the slot was held, or while a check ran,
+    /// as the one check they wait to be (2.3.1 §3.6): of the apps they
+    /// named, or of every app (`apps` nil) when any was; by hand when any
+    /// was. A get that changes a hold asks for its app's plan, and so does
+    /// the config change it makes, while the first runs: that second check
+    /// was of every app, before it remembered which.
+    struct PendingCheck: Equatable {
+        var apps: [String]?
+        var byHand: Bool
+
+        /// This check and another for `apps`, `byHand` or not, as one.
+        func adding(apps more: [String]?, byHand also: Bool) -> PendingCheck {
+            guard let apps, let more else { return PendingCheck(apps: nil, byHand: byHand || also) }
+            return PendingCheck(apps: apps + more.filter { !apps.contains($0) }, byHand: byHand || also)
+        }
+
+        /// This check without the apps `removed`, or nil when none it named
+        /// is left. A check of every app stays as it is.
+        func removing(_ removed: [String]) -> PendingCheck? {
+            guard let apps else { return self }
+            let left = apps.filter { !removed.contains($0) }
+            return left.isEmpty ? nil : PendingCheck(apps: left, byHand: byHand)
+        }
+    }
+
     /// The busy slot came free: a check that waited for it runs now.
     func slotFreed() async {
-        guard pendingCheck, config.busy == nil else { return }
-        let byHand = pendingByHand
-        pendingCheck = false
-        pendingByHand = false
-        await check(apps: nil, byHand: byHand)
+        guard let waiting = pending, config.busy == nil else { return }
+        pending = nil
+        await check(apps: waiting.apps, byHand: waiting.byHand)
     }
 
     /// The plans are kept and read again: the switch is on, or a check by
@@ -604,44 +689,169 @@ final class AppUpdatesStore: ObservableObject {
     }
 
     /// `byHand`: asked for by "Check for updates now", which runs with the
-    /// switch off too.
+    /// switch off too, and says how it went (`checkResult`, B10).
+    ///
+    /// **A plan whose checks all failed is half an answer** (T2-A1): offline,
+    /// every app reads nothing-to-do from the network, and taking that took
+    /// every badge down and started the day's clock, so one launch on a dead
+    /// hotspot hid the updates for a day. But what it knows locally (an IPA
+    /// staged by hand, an install just done) is right, and dropping the
+    /// whole plan lost that too. So it's merged over what was shown
+    /// (`merged`), and `lastChecked` stays: the next poll asks again. A run
+    /// that failed changes nothing.
     private func check(apps: [String]?, byHand: Bool = false) async {
         guard checkApps || byHand else { return }
         guard config.busy == nil, !isChecking else {
-            pendingCheck = true
-            pendingByHand = pendingByHand || byHand
+            pending = pending?.adding(apps: apps, byHand: byHand) ?? PendingCheck(apps: apps, byHand: byHand)
             return
         }
         isChecking = true
-        let found = await quickPlan(apps: apps)
+        if byHand { checkResult = nil }
+        let answer = await quickPlan(apps: apps)
         isChecking = false
         // A switch turned off meanwhile drops it, unless it was asked for.
-        if let found, checkApps || byHand {
+        if let found = answer.plan, checkApps || byHand {
             if !checkApps { checkedByHand = true }
+            let taken = found.checksFailed ? found.apps.map { Self.merged($0, over: plans[$0.app]) } : found.apps
             if apps == nil {
-                plans = Dictionary(found.apps.map { ($0.app, $0) }, uniquingKeysWith: { _, latest in latest })
-                lastChecked = now()
+                plans = Dictionary(taken.map { ($0.app, $0) }, uniquingKeysWith: { _, latest in latest })
+                if !found.checksFailed { lastChecked = now() }
             } else {
-                for app in found.apps { plans[app.app] = app }
+                for app in taken { plans[app.app] = app }
             }
         }
-        if pendingCheck, config.busy == nil {
-            let byHand = pendingByHand
-            pendingCheck = false
-            pendingByHand = false
-            await check(apps: nil, byHand: byHand)
+        if byHand { report(Self.result(of: answer, apps: apps)) }
+        if let waiting = pending, config.busy == nil {
+            pending = nil
+            await check(apps: waiting.apps, byHand: waiting.byHand)
         }
     }
 
-    /// Quiet: a run that fails, or answers with no plan, is nil.
-    private func quickPlan(apps: [String]?) async -> UpdatePlanRecord? {
-        guard let result = try? await runner.runOnce(arguments: Self.quickArguments(apps: apps)),
-              result.exitCode == 0
-        else { return nil }
-        return result.stdout.buildEvents().lazy.compactMap { event -> UpdatePlanRecord? in
+    /// What a quick plan run came to.
+    enum QuickAnswer: Equatable {
+        /// A plan that learned something.
+        case found(UpdatePlanRecord)
+        /// A plan whose every lookup failed (`checksFailed`): its local facts
+        /// only.
+        case unreachable(UpdatePlanRecord)
+        /// The run failed, or answered with no plan: what it said.
+        case failed(String)
+
+        var plan: UpdatePlanRecord? {
+            switch self {
+            case let .found(plan), let .unreachable(plan): return plan
+            case .failed: return nil
+            }
+        }
+    }
+
+    /// The failure-mode re-verify of T2-A1: an app's plan from a check that
+    /// couldn't go online, over the one shown before (`old`).
+    ///
+    /// **The boundary.** An app's network-derived facts are the App Store's
+    /// newer version (`store.to`, with its skip reason) and each tweak's
+    /// newer build (`tweaks`' `to`, `unchecked`). Its local facts are the
+    /// staged IPA's version (`store.from`), each attached tweak's installed
+    /// version (`from`), and each device it's on: which (`udid`), how
+    /// (`delivery`), its delivery state (`kind`) and whether it's connected
+    /// (`connected`); with no device, why (`installSkippedReason`). A
+    /// target's `install`, `manualInstall`, `installSkippedReason` and
+    /// `waiting` aren't compared: the CLI works them out from whether the
+    /// target has work, and an App Store update gives every target work, so
+    /// they differ between an online plan and an offline one with nothing
+    /// changed. `kind` and `connected` are what they're made from locally.
+    ///
+    /// The old plan stands, whole, only while it carries a network answer the
+    /// new one couldn't check (the App Store lookup failed, or a tweak is
+    /// unchecked now) **and every local fact is the same.** Anything changed
+    /// offline (a device stopped updating, a Build & Install, an IPA staged by
+    /// hand, an update half done, a device plugged in, a tweak detached) and
+    /// the new plan stands: right about everything local, and without the
+    /// network's answers until the next online check fills them back in.
+    static func merged(_ found: UpdatePlanApp, over old: UpdatePlanApp?) -> UpdatePlanApp {
+        guard let old else { return found }
+        let store = old.getsFromStore && found.store.skippedReason == CLIContract.Update.lookupFailed
+        let tweak = old.tweaks.contains { change in
+            !change.unchecked && change.to != nil
+                && found.tweaks.contains { $0.filename == change.filename && $0.unchecked }
+        }
+        return (store || tweak) && sameLocalFacts(old, found) ? old : found
+    }
+
+    /// Whether two plans of one app agree on every local fact (`merged`).
+    static func sameLocalFacts(_ old: UpdatePlanApp, _ found: UpdatePlanApp) -> Bool {
+        guard old.store.from == found.store.from else { return false }
+        // Each tweak the old plan named, at the same installed version: one
+        // gone is a tweak detached. An offline plan names every attached
+        // tweak (each unchecked), an online one only those with something to
+        // say, so the new plan may name more.
+        for change in old.tweaks {
+            guard found.tweaks.contains(where: { $0.filename == change.filename && $0.from == change.from })
+            else { return false }
+        }
+        func device(_ t: UpdatePlanApp.Target) -> [String?] {
+            [t.delivery, t.kind, t.connected.map { $0 ? "on" : "off" }]
+        }
+        let was = Dictionary(old.targets.map { ($0.udid, device($0)) }, uniquingKeysWith: { first, _ in first })
+        let now = Dictionary(found.targets.map { ($0.udid, device($0)) }, uniquingKeysWith: { first, _ in first })
+        guard was == now else { return false }
+        return !old.targets.isEmpty || old.installSkippedReason == found.installSkippedReason
+    }
+
+    /// The confirmation's line when its plan couldn't check online.
+    nonisolated static let offlineNote = "Couldn't check online; showing what Graft knows."
+
+    /// Check for updates now with no apps at all.
+    nonisolated static let noApps = "There are no apps to check."
+
+    /// Never throws: a failure is an answer of its own, which only a check
+    /// by hand says.
+    private func quickPlan(apps: [String]?) async -> QuickAnswer {
+        let result: CLIRunner.RunResult
+        do {
+            result = try await runner.runOnce(arguments: Self.quickArguments(apps: apps))
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+        guard result.exitCode == 0 else { return .failed(result.failureSummary) }
+        let plan = result.stdout.buildEvents().lazy.compactMap { event -> UpdatePlanRecord? in
             if case let .updatePlan(record) = event { return record }
             return nil
         }.first
+        guard let plan else { return .failed(Self.noPlan) }
+        return plan.checksFailed ? .unreachable(plan) : .found(plan)
+    }
+
+    /// A check by hand's words (B10): up to date, how many have updates, or
+    /// why it couldn't check. `apps`: what it checked, as `checkNow` was
+    /// asked.
+    static func result(of answer: QuickAnswer, apps: [String]?) -> CheckResult {
+        switch answer {
+        case let .found(plan):
+            let updating = plan.apps.filter(\.hasUpdate)
+            let message: String
+            if plan.apps.isEmpty {
+                message = noApps
+            } else if let only = apps, only.count == 1, let app = plan.apps.first(where: { $0.app == only[0] }) {
+                let name = app.displayName ?? app.app
+                message = app.hasUpdate ? "\(name) has an update." : "\(name) is up to date."
+            } else if updating.isEmpty {
+                message = "Your apps are up to date."
+            } else {
+                message = updating.count == 1 ? "1 app has an update." : "\(updating.count) apps have updates."
+            }
+            return CheckResult(apps: apps, message: message, failed: false)
+        case .unreachable:
+            return CheckResult(apps: apps, message: unreachable, failed: true)
+        case let .failed(why):
+            return CheckResult(apps: apps, message: "Couldn't check for updates: \(why)", failed: true)
+        }
+    }
+
+    /// Show a check by hand's answer, and say it to VoiceOver.
+    private func report(_ result: CheckResult) {
+        checkResult = result
+        announce(result.message)
     }
 
     // MARK: Stop updating on a device
@@ -763,6 +973,13 @@ final class AppUpdatesStore: ObservableObject {
         }
         // Closed, or another opened, while it ran: not this one's.
         guard confirmation?.apps == apps else { return }
+        // Offline, the full plan said "Nothing left to update" and cleared the
+        // badges: it shows what Graft knows instead (`merged`), and says so
+        // (`Confirmation.offlineNote`).
+        if let found = record, found.checksFailed {
+            record = UpdatePlanRecord(quick: found.quick, checksFailed: true,
+                                      apps: found.apps.map { Self.merged($0, over: plans[$0.app]) })
+        }
         confirmation?.plan = record
         confirmation?.failure = failure
         if let record, keepsPlans {
@@ -772,6 +989,13 @@ final class AppUpdatesStore: ObservableObject {
 
     func setAlsoInstall(_ on: Bool) {
         confirmation?.alsoInstall = on
+    }
+
+    /// "Trust this source" for a tweak, by its library file: one tweak two
+    /// apps share is trusted once.
+    func setTrusted(_ filename: String, _ on: Bool) {
+        // Bound below to the plan's `confirm_key` for it (`trustedKeys`).
+        if on { confirmation?.trusted.insert(filename) } else { confirmation?.trusted.remove(filename) }
     }
 
     func cancelConfirmation() {
@@ -804,7 +1028,8 @@ final class AppUpdatesStore: ObservableObject {
             self.confirmation?.refusal = wait
             return false
         }
-        guard start(apps: confirmation.runnable, withAffected: confirmation.alsoInstall, plan: plan) else {
+        guard start(apps: confirmation.runnable, withAffected: confirmation.alsoInstall, plan: plan,
+                    trusted: confirmation.trustedKeys) else {
             // Said, not swallowed: a build (or another update) took the slot
             // while the confirmation was open.
             self.confirmation?.refusal = config.busy?.explanation ?? Self.anotherRuns
@@ -820,15 +1045,19 @@ final class AppUpdatesStore: ObservableObject {
     /// An update is running.
     var isUpdating: Bool { task != nil }
 
-    static func runArguments(apps: [String], withAffected: Bool) -> [String] {
+    /// `trusted`: the `confirm_key` of each tweak the person trusted, from
+    /// the plan the confirmation showed (re-verify #2): the run refuses one
+    /// whose update has changed since.
+    static func runArguments(apps: [String], withAffected: Bool, trusted: Set<String> = []) -> [String] {
         [Flag.json, Flag.update] + apps + (withAffected ? [Flag.withAffected] : [])
+            + trusted.sorted().flatMap { [Flag.trustTweak, $0] }
     }
 
     /// Run `graft --update` for `apps`, in the busy slot and under the quit
     /// hold. `plan` names each row and its phone. False when an update or a
     /// build already holds the slot.
     @discardableResult
-    func start(apps: [String], withAffected: Bool, plan: UpdatePlanRecord?) -> Bool {
+    func start(apps: [String], withAffected: Bool, plan: UpdatePlanRecord?, trusted: Set<String> = []) -> Bool {
         guard task == nil, !apps.isEmpty, waitsFor(apps) == nil, config.beginUpdate(apps: apps) else { return false }
         let byApp = Dictionary((plan?.apps ?? []).map { ($0.app, $0) }, uniquingKeysWith: { first, _ in first })
         progress = Progress(rows: apps.map { name in
@@ -843,7 +1072,7 @@ final class AppUpdatesStore: ObservableObject {
         log.clear()
         let stopper = RunStopper(grace: stopGrace)
         self.stopper = stopper
-        let args = Self.runArguments(apps: apps, withAffected: withAffected)
+        let args = Self.runArguments(apps: apps, withAffected: withAffected, trusted: trusted)
         // Held from here, with the slot: a quit a moment after Update is
         // asked about it. Quit Anyway is this update's own first Stop.
         let hold = self.hold

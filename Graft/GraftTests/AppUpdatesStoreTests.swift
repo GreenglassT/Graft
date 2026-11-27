@@ -86,6 +86,392 @@ final class AppUpdatesStoreTests: XCTestCase {
         return (store, config)
     }
 
+    // MARK: A check that reached nothing (T2-A1), and Check for updates now's answer (B10)
+
+    /// A `graft` whose quick plan is `online` until `offline` exists, then
+    /// `whenOffline`, the same apps with every lookup failed.
+    private func switchingCLI(online: String, whenOffline: String, offline: URL) throws -> ScriptCLI {
+        try ScriptCLI("""
+        case "$*" in
+        *--quick*)
+        if [ -e '\(offline.path)' ]; then
+        cat <<'EOF'
+        \(whenOffline)
+        EOF
+        else
+        cat <<'EOF'
+        \(online)
+        EOF
+        fi
+        ;;
+        esac
+        """, test: self)
+    }
+
+    private static let offlinePlan = F.planLine(
+        [F.app("example", skipped: CLIContract.Update.lookupFailed, install: false, nothingToDo: true)],
+        checksFailed: true)
+
+    func test_a_plan_says_when_its_checks_failed() throws {
+        XCTAssertTrue(F.record([F.app("example")], quick: true).checksFailed == false, "absent is false")
+        guard case let .updatePlan(record) = try BuildEvent.decode(line: Self.offlinePlan) else {
+            return XCTFail("not an update-plan")
+        }
+        XCTAssertTrue(record.checksFailed)
+    }
+
+    /// A launch on a dead hotspot: every lookup fails and the plan still says
+    /// nothing to do. That took the badges down and started the day's clock.
+    func test_a_daily_check_that_reached_nothing_keeps_the_badges_and_tries_again() async throws {
+        let offline = temporaryURL("offline")
+        let cli = try switchingCLI(online: F.planLine([F.app("example", to: "2.0")]),
+                                   whenOffline: Self.offlinePlan, offline: offline)
+        let (store, _) = try makeStore(cli)
+        await store.checkIfDue()
+        XCTAssertEqual(store.plans["example"]?.hasUpdate, true, "premise: the update was found")
+
+        FileManager.default.createFile(atPath: offline.path, contents: nil)
+        clock.now += AppUpdatesStore.interval + 1
+        await store.checkIfDue()
+        XCTAssertEqual(cli.argv().count, 2, "premise: the day's check ran")
+
+        XCTAssertEqual(store.plans["example"]?.hasUpdate, true, "an answer from nowhere took the badge down")
+        await store.checkIfDue()
+        XCTAssertEqual(cli.argv().count, 3, "a check that reached nothing counted as the day's")
+    }
+
+    func test_a_check_of_one_app_that_reached_nothing_keeps_its_plan() async throws {
+        let offline = temporaryURL("offline")
+        let cli = try switchingCLI(online: F.planLine([F.app("example", to: "2.0")]),
+                                   whenOffline: Self.offlinePlan, offline: offline)
+        let (store, _) = try makeStore(cli)
+        await store.checkIfDue()
+        FileManager.default.createFile(atPath: offline.path, contents: nil)
+
+        await store.recheck(apps: ["example"])
+
+        XCTAssertEqual(store.plans["example"]?.store.to, "2.0")
+    }
+
+    private func checkNowResult(_ quick: String, apps: [String]? = nil, exit: Int = 0) async throws
+        -> (AppUpdatesStore, [String]) {
+        let cli = try ScriptCLI("""
+        cat <<'EOF'
+        \(quick)
+        EOF
+        echo 'error: the plan broke' >&2
+        exit \(exit)
+        """, test: self)
+        let defaults = try throwawayDefaults()
+        defaults.set(false, forKey: AppUpdatesStore.Key.check)
+        let (store, _) = try makeStore(cli, defaults: defaults)
+        var said: [String] = []
+        store.announce = { said.append($0) }
+        await store.checkNow(apps: apps)
+        return (store, said)
+    }
+
+    /// B10: pressed, and nothing to show for it, whatever it found.
+    func test_check_now_says_everything_is_up_to_date_and_announces_it() async throws {
+        let (store, said) = try await checkNowResult(F.planLine([F.app("example", install: false, nothingToDo: true)]))
+
+        XCTAssertEqual(store.checkResult, .init(apps: nil, message: "Your apps are up to date.", failed: false))
+        XCTAssertEqual(said, ["Your apps are up to date."])
+    }
+
+    func test_check_now_counts_the_apps_with_updates() async throws {
+        let (store, said) = try await checkNowResult(F.planLine([
+            F.app("example", to: "2.0"), F.app("bravo", to: "3.0"),
+            F.app("delta", install: false, nothingToDo: true),
+        ]))
+
+        XCTAssertEqual(store.checkResult?.message, "2 apps have updates.")
+        XCTAssertEqual(said, ["2 apps have updates."])
+    }
+
+    func test_check_now_for_one_app_names_it() async throws {
+        let (store, _) = try await checkNowResult(
+            F.planLine([F.app("example", displayName: "Example+", install: false, nothingToDo: true)]),
+            apps: ["example"])
+
+        XCTAssertEqual(store.checkResult, .init(apps: ["example"], message: "Example+ is up to date.", failed: false))
+    }
+
+    func test_check_now_that_reached_nothing_says_so_and_keeps_what_was_shown() async throws {
+        let (store, said) = try await checkNowResult(Self.offlinePlan)
+
+        XCTAssertEqual(store.checkResult?.message, AppUpdatesStore.unreachable)
+        XCTAssertEqual(store.checkResult?.failed, true)
+        XCTAssertEqual(said, [AppUpdatesStore.unreachable])
+        XCTAssertEqual(store.plans["example"]?.hasUpdate, false, "what it knows locally, and nothing more")
+    }
+
+    /// The re-verify's nit: with no apps, "Your apps are up to date" said
+    /// something about apps nobody has.
+    func test_check_now_with_no_apps_says_there_are_none() async throws {
+        let (store, _) = try await checkNowResult(F.planLine([]))
+
+        XCTAssertEqual(store.checkResult?.message, AppUpdatesStore.noApps)
+    }
+
+    /// And the line stayed after the app was updated or built: anything that
+    /// reads the plan again (`recheck`) makes it stale, switch on or off.
+    func test_check_now_s_line_goes_once_something_reads_the_plan_again() async throws {
+        let (store, _) = try await checkNowResult(F.planLine([F.app("example", to: "2.0")]))
+        XCTAssertNotNil(store.checkResult, "premise")
+
+        await store.recheck(apps: ["example"])
+
+        XCTAssertNil(store.checkResult)
+    }
+
+    func test_one_app_s_line_stays_while_another_app_is_read_again() async throws {
+        let (store, _) = try await checkNowResult(F.planLine([F.app("example", to: "2.0")]), apps: ["example"])
+
+        await store.recheck(apps: ["bravo"])
+
+        XCTAssertNotNil(store.checkResult)
+    }
+
+    // MARK: An offline plan's local facts (the failure-mode re-verify of T2-A1)
+
+    /// Offline, a newer IPA staged by hand is an install Graft knows of with
+    /// no network: the plan says `checks_failed` and `actionable`, and the
+    /// whole plan was dropped, so no badge.
+    func test_an_offline_check_still_shows_an_install_it_knows_of() async throws {
+        let offline = F.planLine([F.app("example", from: "2.0", skipped: CLIContract.Update.lookupFailed)],
+                                 checksFailed: true)
+        let cli = try fakeCLI(quick: offline)
+        let (store, _) = try makeStore(cli)
+
+        await store.checkIfDue()
+
+        XCTAssertEqual(store.plans["example"]?.isActionable, true)
+    }
+
+    /// The App Store's 2.0, from the last online check, and then 2.0 staged by
+    /// hand offline: what the old answer rested on changed, so the offline
+    /// plan, right about the staged IPA, stands.
+    func test_an_ipa_staged_since_the_online_answer_takes_the_offline_plan() async throws {
+        let offline = temporaryURL("offline")
+        let cli = try switchingCLI(
+            online: F.planLine([F.app("example", from: "1.0", to: "2.0")]),
+            whenOffline: F.planLine([F.app("example", from: "2.0", skipped: CLIContract.Update.lookupFailed)],
+                                    checksFailed: true),
+            offline: offline)
+        let (store, _) = try makeStore(cli)
+        await store.checkIfDue()
+        FileManager.default.createFile(atPath: offline.path, contents: nil)
+
+        await store.recheck(apps: nil)
+
+        XCTAssertEqual(store.plans["example"]?.store.from, "2.0")
+        XCTAssertEqual(store.plans["example"]?.getsFromStore, false)
+        XCTAssertEqual(store.plans["example"]?.isActionable, true)
+    }
+
+    /// After an update or a build offline, `finish`'s recheck reads the plan
+    /// offline: what it did locally is done, so its badge goes. An App Store
+    /// update it couldn't get offline still stands.
+    func test_an_offline_recheck_after_an_update_clears_what_it_did_and_keeps_what_it_couldnt() async throws {
+        let offline = temporaryURL("offline")
+        let cli = try ScriptCLI("""
+        case "$*" in
+        *--quick*)
+        if [ -e '\(offline.path)' ]; then
+        cat <<'EOF'
+        \(F.planLine([F.app("example", skipped: CLIContract.Update.lookupFailed, install: false, nothingToDo: true),
+                     F.app("bravo", skipped: CLIContract.Update.lookupFailed, install: false, nothingToDo: true)],
+                    checksFailed: true))
+        EOF
+        else
+        cat <<'EOF'
+        \(F.planLine([F.app("example"), F.app("bravo", to: "2.0")]))
+        EOF
+        fi
+        ;;
+        *--plan*) ;;
+        *)
+        touch '\(offline.path)'
+        cat <<'EOF'
+        \(F.end(ok: true, updated: ["example"]))
+        EOF
+        ;;
+        esac
+        """, test: self)
+        let (store, _) = try makeStore(cli)
+        await store.checkIfDue()
+        XCTAssertEqual(store.plans["example"]?.isActionable, true, "premise: a local install to do")
+
+        XCTAssertTrue(store.start(apps: ["example"], withAffected: false, plan: nil))
+        await eventually { store.lastFinished != nil && cli.argv().filter { $0.contains("--quick") }.count == 2 }
+        try await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertEqual(store.plans["example"]?.hasUpdate, false, "installed: the badge goes")
+        XCTAssertEqual(store.plans["bravo"]?.getsFromStore, true, "the App Store's 2.0 is still to get")
+    }
+
+    /// The confirmation's full plan, offline, said "Nothing left to update"
+    /// and cleared the badges. It shows what Graft knows, and says so.
+    func test_the_confirmation_offline_shows_what_graft_knows() async throws {
+        let cli = try fakeCLI(
+            quick: F.planLine([F.app("example", to: "2.0")]),
+            full: F.planLine([F.app("example", skipped: CLIContract.Update.lookupFailed, install: false,
+                                    nothingToDo: true)], quick: false, checksFailed: true))
+        let (store, _) = try makeStore(cli)
+        await store.checkIfDue()
+
+        store.openConfirmation(apps: ["example"])
+        await eventually { store.confirmation?.plan != nil }
+
+        let confirmation = try XCTUnwrap(store.confirmation)
+        XCTAssertFalse(confirmation.isNothingLeft)
+        XCTAssertEqual(confirmation.plan?.apps.first?.getsFromStore, true)
+        XCTAssertEqual(confirmation.offlineNote, AppUpdatesStore.offlineNote)
+        XCTAssertEqual(store.plans["example"]?.hasUpdate, true, "the badge stays")
+    }
+
+    // MARK: The merge keeps the old plan only while every local fact is the same
+
+    private static let pad = F.pad
+
+    /// The plan from the last online check: the App Store's 2.0, a tweak's
+    /// 1.1, on the iPhone (connected) and the iPad (not, so it waits).
+    private static func online(from: String = "1.0", tweak: String = "1.0") -> UpdatePlanApp {
+        F.plan(F.app("example", from: from, to: "2.0",
+                     tweaks: [F.tweak("a.deb", from: tweak, to: "1.1")],
+                     targets: [F.target("Example iPhone"),
+                               F.target("Example iPad", udid: pad, waiting: F.notConnected("Example iPad"))]))
+    }
+
+    /// The same Mac offline: the App Store and canister couldn't be asked, so
+    /// nothing has work, and readiness wasn't asked: no `install`, no
+    /// `waiting`, though the iPad is still unplugged (`connected`).
+    private static func offline(from: String = "1.0", tweak: String = "1.0", kind: String = "current",
+                                targets: [[String: Any]]? = nil) -> UpdatePlanApp {
+        F.plan(F.app("example", from: from, skipped: CLIContract.Update.lookupFailed,
+                     tweaks: [F.tweak("a.deb", from: tweak, to: nil, unchecked: true)],
+                     nothingToDo: true,
+                     targets: targets ?? [F.target("Example iPhone", install: false, kind: kind),
+                                          F.target("Example iPad", udid: pad, install: false, kind: kind,
+                                                   connected: false)]))
+    }
+
+    /// Nothing local changed: the old plan's network facts stand, its
+    /// `install` and `waiting` included, though the offline plan's differ
+    /// (they're worked out only for a target with work).
+    func test_with_nothing_local_changed_the_online_answer_stands() {
+        XCTAssertEqual(AppUpdatesStore.merged(Self.offline(), over: Self.online()), Self.online())
+    }
+
+    /// The final check of the merge: Stop updating a device offline left it
+    /// listed, as `dropTarget`'s recheck got the old plan back.
+    func test_a_device_stopped_updating_offline_leaves_the_list() {
+        let dropped = Self.offline(targets: [F.target("Example iPhone", install: false)])
+
+        XCTAssertEqual(AppUpdatesStore.merged(dropped, over: Self.online()), dropped)
+    }
+
+    /// An offline Build & Install: what was stale on the device is current.
+    func test_an_offline_build_and_install_shows_what_the_device_has_now() {
+        let before = F.plan(F.app("example", to: "2.0",
+                                  targets: [F.target("Example iPhone", kind: "stale")]))
+        let after = Self.offline(targets: [F.target("Example iPhone", install: false, kind: "current")])
+
+        XCTAssertEqual(AppUpdatesStore.merged(after, over: before), after)
+    }
+
+    /// A hand-staged IPA hid behind a tweak update the old plan showed: the
+    /// tweak's base was the same, so the old plan was kept whole.
+    func test_an_ipa_staged_by_hand_shows_though_a_tweak_update_was_shown() {
+        let staged = Self.offline(from: "2.0", kind: "stale")
+
+        XCTAssertEqual(AppUpdatesStore.merged(staged, over: Self.online()), staged)
+    }
+
+    /// An update that got and built 2.0 and failed its tweak still said
+    /// "App Store 2.0".
+    func test_a_half_done_update_shows_what_it_did() {
+        let halfDone = Self.offline(from: "2.0", kind: "current")
+
+        XCTAssertEqual(AppUpdatesStore.merged(halfDone, over: Self.online()), halfDone)
+    }
+
+    /// The iPad plugged back in offline: its "isn't connected" line is the
+    /// old plan's, and wrong now.
+    func test_a_device_plugged_in_since_shows_it() {
+        let plugged = Self.offline(targets: [F.target("Example iPhone", install: false),
+                                             F.target("Example iPad", udid: Self.pad, install: false)])
+
+        XCTAssertEqual(AppUpdatesStore.merged(plugged, over: Self.online()), plugged)
+    }
+
+    /// A tweak detached offline is a local change too.
+    func test_a_tweak_detached_offline_shows_it() {
+        let detached = F.plan(F.app("example", skipped: CLIContract.Update.lookupFailed, tweaks: [],
+                                    nothingToDo: true,
+                                    targets: [F.target("Example iPhone", install: false),
+                                              F.target("Example iPad", udid: Self.pad, install: false,
+                                                       connected: false)]))
+
+        XCTAssertEqual(AppUpdatesStore.merged(detached, over: Self.online()), detached)
+    }
+
+    /// With no device to compare, why there's none is the local fact: every
+    /// device dropped since (`--drop-update-target`) is a change.
+    func test_with_no_device_why_there_is_none_is_compared() {
+        let before = F.plan(F.app("example", to: "2.0", installSkipped: CLIContract.Update.notInstalledYet))
+        let dropped = F.plan(F.app("example", skipped: CLIContract.Update.lookupFailed,
+                                   installSkipped: "Update was stopped on every device it's on", targets: []))
+        let same = F.plan(F.app("example", skipped: CLIContract.Update.lookupFailed,
+                                installSkipped: CLIContract.Update.notInstalledYet))
+
+        XCTAssertEqual(AppUpdatesStore.merged(dropped, over: before), dropped)
+        XCTAssertEqual(AppUpdatesStore.merged(same, over: before), before)
+    }
+
+    /// The boundary itself: which of an app's facts are the network's.
+    func test_an_old_online_answer_stands_only_while_unanswered_and_what_it_rests_on_is_the_same() {
+        let old = F.plan(F.app("example", from: "1.0", to: "2.0"))
+        let offline = F.plan(F.app("example", from: "1.0", skipped: CLIContract.Update.lookupFailed,
+                                   install: false, nothingToDo: true))
+        let answered = F.plan(F.app("example", from: "1.0", install: false, nothingToDo: true))
+        let staged = F.plan(F.app("example", from: "2.0", skipped: CLIContract.Update.lookupFailed))
+        let oldTweak = F.plan(F.app("example", tweaks: [F.tweak("a.deb", from: "1.0", to: "1.1")]))
+        let tweakOffline = F.plan(F.app("example", tweaks: [F.tweak("a.deb", from: "1.0", to: nil, unchecked: true)],
+                                        install: false, nothingToDo: true))
+
+        XCTAssertEqual(AppUpdatesStore.merged(offline, over: old), old, "the App Store couldn't be asked")
+        XCTAssertEqual(AppUpdatesStore.merged(answered, over: old), answered, "it was asked")
+        XCTAssertEqual(AppUpdatesStore.merged(staged, over: old), staged, "a newer IPA was staged since")
+        XCTAssertEqual(AppUpdatesStore.merged(tweakOffline, over: oldTweak), oldTweak, "canister couldn't be asked")
+        XCTAssertEqual(AppUpdatesStore.merged(offline, over: nil), offline)
+    }
+
+    func test_check_now_that_failed_says_why() async throws {
+        let (store, said) = try await checkNowResult("", exit: 1)
+
+        XCTAssertEqual(store.checkResult?.failed, true)
+        XCTAssertTrue(store.checkResult?.message.hasPrefix("Couldn't check for updates") == true,
+                      store.checkResult?.message ?? "nil")
+        XCTAssertTrue(store.checkResult?.message.contains("the plan broke") == true)
+        XCTAssertEqual(said.count, 1)
+    }
+
+    /// The daily check stays quiet: only a check someone pressed for says
+    /// how it went.
+    func test_the_daily_check_says_nothing() async throws {
+        let cli = try fakeCLI(quick: F.planLine([F.app("example", install: false, nothingToDo: true)]))
+        let (store, _) = try makeStore(cli)
+        var said: [String] = []
+        store.announce = { said.append($0) }
+
+        await store.checkIfDue()
+
+        XCTAssertNil(store.checkResult)
+        XCTAssertEqual(said, [])
+    }
+
     // MARK: The daily check
 
     func test_the_daily_check_is_the_quick_plan_of_every_app_and_keeps_what_it_found() async throws {
@@ -226,6 +612,70 @@ final class AppUpdatesStoreTests: XCTestCase {
         config.endUpdate()
         await store.slotFreed()
         XCTAssertEqual(cli.argv(), ["--json --update --all --plan --quick"])
+    }
+
+    /// Rechecks that wait for the slot remember which apps they're for
+    /// (2.3.1 §3.6): one check of the apps asked for, in the order they
+    /// were, not every app's. The daily check stays due.
+    func test_rechecks_that_wait_for_the_slot_run_once_for_the_apps_they_name() async throws {
+        let cli = try fakeCLI(quick: F.planLine([F.app("example"), F.app("bravo")]))
+        let (store, config) = try makeStore(cli)
+        XCTAssertTrue(config.beginUpdate(apps: ["charlie"]))
+
+        await store.recheck(apps: ["example"])
+        await store.recheck(apps: ["bravo", "example"])
+        XCTAssertEqual(cli.argv(), [], "they wait")
+
+        config.endUpdate()
+        await store.slotFreed()
+        XCTAssertEqual(cli.argv(), ["--json --update example bravo --plan --quick"])
+        XCTAssertNotNil(store.plans["bravo"])
+
+        await store.checkIfDue()
+        XCTAssertEqual(cli.argv().last, "--json --update --all --plan --quick", "a recheck isn't the daily check")
+    }
+
+    /// Any of them for every app, and the one check is of every app.
+    func test_a_waiting_check_of_every_app_covers_the_rechecks_with_it() async throws {
+        let cli = try fakeCLI(quick: F.planLine([F.app("example")]))
+        let (store, config) = try makeStore(cli)
+        XCTAssertTrue(config.beginUpdate(apps: ["charlie"]))
+
+        await store.recheck(apps: ["example"])
+        await store.checkIfDue()
+        await store.recheck(apps: ["bravo"])
+
+        config.endUpdate()
+        await store.slotFreed()
+        XCTAssertEqual(cli.argv(), ["--json --update --all --plan --quick"])
+    }
+
+    /// The hands-on's case: a get that changes a hold rechecks its app, and
+    /// the config change it makes asks for the same app's plan while that
+    /// runs. The second check is that app's again, not every app's.
+    func test_a_recheck_that_comes_while_one_runs_is_of_its_own_apps() async throws {
+        let go = temporaryURL("update-recheck-go")
+        let cli = try ScriptCLI("""
+        case "$*" in
+        *--quick*)
+        while [ ! -e '\(go.path)' ]; do sleep 0.05; done
+        cat <<'EOF'
+        \(F.planLine([F.app("example")]))
+        EOF
+        ;;
+        esac
+        """, test: self)
+        let (store, _) = try makeStore(cli)
+
+        let first = Task { await store.recheck(apps: ["example"]) }
+        await eventually { store.isChecking }
+        await store.recheck(apps: ["example"])
+        FileManager.default.createFile(atPath: go.path, contents: nil)
+        await first.value
+
+        XCTAssertEqual(cli.argv(), ["--json --update example --plan --quick",
+                                    "--json --update example --plan --quick"])
+        XCTAssertFalse(store.isChecking)
     }
 
     func test_a_failed_check_shows_nothing_and_keeps_the_last_answer() async throws {
@@ -439,6 +889,56 @@ final class AppUpdatesStoreTests: XCTestCase {
         XCTAssertNotNil(store.plans["example"], "an app that didn't change keeps its result")
     }
 
+    /// A `graft` that refuses a plan naming charlie, as the CLI refuses one
+    /// naming an app it doesn't know (`update_plan`), and answers example's.
+    private func refusingCharlie() throws -> ScriptCLI {
+        try ScriptCLI("""
+        case "$*" in
+        *charlie*) echo "graft: no app named charlie" >&2; exit 2 ;;
+        *--quick*)
+        cat <<'EOF'
+        \(F.planLine([F.app("example", to: "2.0")]))
+        EOF
+        ;;
+        esac
+        """, test: self)
+    }
+
+    /// An app removed while a check of it waits for the slot (2.3.1
+    /// review): the CLI refuses the whole plan over the one it doesn't
+    /// know, and the quick plan is quiet, so the other apps' badges stayed
+    /// as they were. The removed app leaves the waiting check; the rest of
+    /// it still runs.
+    func test_an_app_removed_while_its_check_waits_leaves_that_check() async throws {
+        let cli = try refusingCharlie()
+        let (store, config) = try makeStore(cli)
+        XCTAssertTrue(config.beginUpdate(apps: ["bravo"]))
+        await store.recheck(apps: ["charlie", "example"])
+        XCTAssertEqual(cli.argv(), [], "premise: it waits")
+
+        await store.configChanged(from: before, to: [before[0], before[2]])
+        config.endUpdate()
+        await store.slotFreed()
+
+        XCTAssertEqual(cli.argv(), ["--json --update example --plan --quick"])
+        XCTAssertEqual(store.plans["example"]?.store.to, "2.0")
+    }
+
+    /// A waiting check of removed apps alone is dropped: nothing is left
+    /// for it to ask about.
+    func test_a_waiting_check_of_removed_apps_alone_is_dropped() async throws {
+        let cli = try refusingCharlie()
+        let (store, config) = try makeStore(cli)
+        XCTAssertTrue(config.beginUpdate(apps: ["bravo"]))
+        await store.checkNow(apps: ["charlie"])
+
+        await store.configChanged(from: before, to: [before[0], before[2]])
+        config.endUpdate()
+        await store.slotFreed()
+
+        XCTAssertEqual(cli.argv(), [])
+    }
+
     /// With "Check my apps for updates" off, a change to an app's config
     /// sends nothing (spec §11.4): only a check by hand does.
     func test_with_the_switch_off_a_change_to_an_apps_config_reads_no_plan() async throws {
@@ -561,6 +1061,103 @@ final class AppUpdatesStoreTests: XCTestCase {
         XCTAssertEqual(store.sheet, .progress)
         await eventually { store.progress?.end != nil }
         XCTAssertTrue(cli.argv().contains("--json --update example --with-affected"))
+    }
+
+    // MARK: A tweak update that needs the person's OK (2.3.1 A1)
+
+    private func unverified(_ filename: String = "a.deb") -> [String: Any] {
+        F.tweak(filename, name: "A Tweak", verified: false, reason: "source unknown: https://repo.example.com")
+    }
+
+    func test_an_unconfirmed_tweak_runs_only_once_its_source_is_trusted() async throws {
+        let full = F.planLine([F.app("example", tweaks: [unverified()], install: false, readiness: "checked")],
+                              quick: false)
+        let cli = try fakeCLI(full: full, run: F.end(ok: true, updated: ["example"]))
+        let (store, _) = try makeStore(cli)
+        store.openConfirmation(apps: ["example"])
+        await eventually { store.confirmation?.plan != nil }
+
+        XCTAssertEqual(store.confirmation?.trusted, [], "off by default")
+        XCTAssertEqual(store.confirmation?.runnable, [], "nothing runs without the person's OK")
+        XCTAssertEqual(store.confirmation.map(AppUpdatesSheet.confirmTitle), "Done")
+
+        store.setTrusted("a.deb", true)
+        XCTAssertEqual(store.confirmation?.runnable, ["example"])
+        XCTAssertEqual(store.confirmation.map(AppUpdatesSheet.confirmTitle), "Update")
+        XCTAssertTrue(store.confirm())
+
+        await eventually { store.progress?.end != nil }
+        XCTAssertTrue(cli.argv().contains("--json --update example --trust-tweak \(F.key("a.deb"))"),
+                      "the key of the update the sheet showed, not the bare file: \(cli.argv())")
+    }
+
+    func test_a_trust_taken_back_runs_nothing() async throws {
+        let full = F.planLine([F.app("example", tweaks: [unverified()], install: false, readiness: "checked")],
+                              quick: false)
+        let cli = try fakeCLI(full: full)
+        let (store, _) = try makeStore(cli)
+        store.openConfirmation(apps: ["example"])
+        await eventually { store.confirmation?.plan != nil }
+
+        store.setTrusted("a.deb", true)
+        store.setTrusted("a.deb", false)
+
+        XCTAssertEqual(store.confirmation?.runnable, [])
+        XCTAssertFalse(store.confirm())
+        XCTAssertFalse(cli.argv().contains { !$0.contains("--plan") }, "no run")
+    }
+
+    func test_beside_a_verified_change_an_untrusted_tweak_is_left_out_of_the_run() async throws {
+        let full = F.planLine([F.app("example", to: "2.0", tweaks: [unverified()], readiness: "checked")],
+                              quick: false)
+        let cli = try fakeCLI(full: full, run: F.end(ok: true, updated: ["example"]))
+        let (store, _) = try makeStore(cli)
+        store.openConfirmation(apps: ["example"])
+        await eventually { store.confirmation?.plan != nil }
+
+        XCTAssertEqual(store.confirmation?.runnable, ["example"], "the App Store version still runs")
+        XCTAssertTrue(store.confirm())
+
+        await eventually { store.progress?.end != nil }
+        let runs = cli.argv().filter { !$0.contains("--plan") }
+        XCTAssertEqual(runs, ["--json --update example"], "no --trust-tweak: the CLI leaves the tweak out")
+    }
+
+    func test_one_trust_covers_a_tweak_two_apps_share() async throws {
+        let full = F.planLine([F.app("example", tweaks: [unverified()], install: false, readiness: "checked"),
+                               F.app("bravo", tweaks: [unverified()], install: false, readiness: "checked")],
+                              quick: false)
+        let cli = try fakeCLI(full: full)
+        let (store, _) = try makeStore(cli)
+        store.openConfirmation(apps: ["example", "bravo"])
+        await eventually { store.confirmation?.plan != nil }
+
+        store.setTrusted("a.deb", true)
+
+        XCTAssertEqual(store.confirmation?.runnable, ["example", "bravo"])
+        XCTAssertEqual(store.confirmation?.trustedKeys, [F.key("a.deb")], "one key, for the one tweak")
+        XCTAssertEqual(AppUpdatesStore.runArguments(apps: ["example", "bravo"], withAffected: false,
+                                                    trusted: [F.key("b.deb"), F.key("a.deb")]),
+                       ["--json", "--update", "example", "bravo",
+                        "--trust-tweak", F.key("a.deb"), "--trust-tweak", F.key("b.deb")])
+    }
+
+    /// A tweak the CLI gave no `confirm_key` can't be confirmed: there's
+    /// nothing to bind the yes to.
+    func test_an_unconfirmed_tweak_without_a_key_never_runs() async throws {
+        var tweak = unverified()
+        tweak["confirm_key"] = NSNull()
+        let full = F.planLine([F.app("example", tweaks: [tweak], install: false, readiness: "checked")],
+                              quick: false)
+        let cli = try fakeCLI(full: full)
+        let (store, _) = try makeStore(cli)
+        store.openConfirmation(apps: ["example"])
+        await eventually { store.confirmation?.plan != nil }
+
+        store.setTrusted("a.deb", true)
+
+        XCTAssertEqual(store.confirmation?.runnable, [])
+        XCTAssertEqual(store.confirmation?.trustedKeys, [])
     }
 
     /// The confirmation turns into the progress in place: one sheet id for
@@ -1229,6 +1826,37 @@ final class AppUpdatesStoreTests: XCTestCase {
         await eventually { store.lastFinished != nil }
 
         XCTAssertEqual(store.progress?.rows.first?.targets.map(\.phase), [.done, .notStarted])
+    }
+
+    /// Stop Now cancels the install under way (2.3.1 §3.3): its device's
+    /// install started and never ended, and its result is the same as one a
+    /// Stop kept from starting. It reads "Stopped", with Try Again; the
+    /// device after it, never reached, "Not started".
+    func test_a_device_whose_install_stop_now_cancelled_reads_stopped() async throws {
+        let run = [
+            F.planLine([F.app("example", targets: [
+                F.target("Example iPhone"), F.target("Example iPad", udid: F.pad),
+                F.target("Spare iPhone", udid: F.spare),
+            ])], quick: false),
+            F.step("example", "install", "start", udid: F.phone, device: "Example iPhone"),
+            F.step("example", "install", "end", udid: F.phone, device: "Example iPhone"),
+            F.step("example", "install", "start", udid: F.pad, device: "Example iPad"),
+            F.appEnd("example", ok: false, stopped: true, done: ["build"], left: ["install"], targets: [
+                F.targetEnd(F.phone, device: "Example iPhone", ok: true),
+                F.targetEnd(F.pad, device: "Example iPad", ok: false, left: ["install"]),
+                F.targetEnd(F.spare, device: "Spare iPhone", ok: false, left: ["install"]),
+            ]),
+            F.end(ok: false, stopped: true),
+        ].joined(separator: "\n")
+        let (store, _) = try makeStore(try fakeCLI(run: run, runExit: 143))
+
+        store.start(apps: ["example"], withAffected: false, plan: nil)
+        await eventually { store.lastFinished != nil }
+
+        let targets = try XCTUnwrap(store.progress?.rows.first?.targets)
+        XCTAssertEqual(targets.map(\.phase), [.done, .stopped, .notStarted])
+        XCTAssertEqual(targets.map { AppUpdateText.phaseText($0.phase) }, ["Done", "Stopped", "Not started"])
+        XCTAssertEqual(targets.map(\.canTryAgain), [false, true, true])
     }
 
     /// The quit says which device's install it waits for: the one being

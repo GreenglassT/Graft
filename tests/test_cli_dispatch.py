@@ -136,6 +136,17 @@ _NON_VERB_PARAMS: dict[str, str] = {
         "refused it too. `_ModifierGate` refuses it anywhere `--fetch` isn't "
         "what runs, since a checksum nobody checks reads as one that passed."
     ),
+    "fetch_repository": (
+        "`--fetch-repository ID` pins `--fetch <package id>` to the Canister "
+        "repository a search result named (2.3.1 A1). Global, as `fetch_sha` is, "
+        "so `_ModifierGate` refuses it anywhere `--fetch` isn't what runs."
+    ),
+    "trust_tweak": (
+        "`--trust-tweak FILE` is the person's OK for a tweak update whose source "
+        "isn't verified (2.3.1 A1), read by `--update` (and its `--plan`) and "
+        "`--update-tweak`. Global, as `fetch_sha` is, so `_ModifierGate` refuses "
+        "it beside every other verb: a trust nobody reads would read as given."
+    ),
     "refresh": "`--refresh` qualifies `--repo-packages`: re-fetch the index before listing.",
     "refresh_artwork": (
         "`--refresh-artwork` qualifies two verbs — `--artwork`, and "

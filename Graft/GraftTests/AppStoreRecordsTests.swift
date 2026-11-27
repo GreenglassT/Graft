@@ -473,4 +473,44 @@ final class AppStoreRecordsTests: XCTestCase {
         XCTAssertFalse(status(upPresent: false).canGet)
         XCTAssertFalse(status(enrolled: false).canGet)
     }
+
+    /// B5: what stops Get latest and Update & Install before the App Store
+    /// is set up. Only what status *says* is missing, or a known-bad ipatool
+    /// (`canGet`'s too): "couldn't tell" (a locked keychain) isn't setup, and
+    /// the get says what it is.
+    func test_setup_is_missing_only_when_status_says_a_part_is() {
+        XCTAssertFalse(status().setUpMissing)
+        XCTAssertTrue(status(signedIn: false).setUpMissing)
+        XCTAssertTrue(status(upPresent: false).setUpMissing)
+        XCTAssertTrue(status(enrolled: false).setUpMissing)
+        XCTAssertFalse(status(signedIn: nil).setUpMissing, "couldn't tell isn't signed out")
+        XCTAssertTrue(status(warning: "2.8.1 can't download").setUpMissing,
+                      "a known-bad ipatool: Settings › App Store says what to do, as Add App does")
+        let legacy = AppStoreStatusRecord(
+            ipatool: .init(path: "/i", present: true, version: "2.8.0", signedIn: nil, warning: nil,
+                           legacySignin: true),
+            unfairplay: .init(path: "/u", present: true, version: "v0.4.0", enrolled: true, modelDir: "/m"),
+            setupCommands: []
+        )
+        XCTAssertTrue(legacy.setUpMissing, "Graft 1.x's sign-in: Sign In again")
+    }
+
+    /// The re-verify: `canGet` (Add App's offer) needs no known-bad ipatool,
+    /// and `setUpMissing` (the pane's Get) didn't look, so the two disagreed.
+    /// They now agree on every status but one: "couldn't tell" (a locked
+    /// keychain) isn't setup to do, so the pane leaves it to the CLI to say.
+    func test_setup_missing_is_cant_get_but_for_couldnt_tell() {
+        for signedIn in [true, false, nil] as [Bool?] {
+            for warning in [nil, "2.8.1 can't download"] as [String?] {
+                for upPresent in [true, false] {
+                    for enrolled in [true, false] {
+                        let s = status(signedIn: signedIn, warning: warning, upPresent: upPresent, enrolled: enrolled)
+                        let couldntTell = signedIn == nil && warning == nil && upPresent && enrolled
+                        XCTAssertEqual(s.setUpMissing, couldntTell ? false : !s.canGet,
+                                       "\(String(describing: signedIn)) \(String(describing: warning)) \(upPresent) \(enrolled)")
+                    }
+                }
+            }
+        }
+    }
 }

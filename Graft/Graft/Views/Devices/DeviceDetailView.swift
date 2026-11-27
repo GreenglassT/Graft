@@ -848,12 +848,10 @@ struct DeviceDetailView: View {
 
 extension DeviceRecord {
     /// How the device page names this device in a sentence ("Your apps on
-    /// this iPad"): "iPad", "iPhone" or "iPod" when the model says so, else
-    /// "device". Unlike `BuildTarget.deviceKind`, which reads an unknown
-    /// model as an iPhone, this never guesses: a page that said "phone" to
-    /// an iPad is what it replaces. One of four words, never the device's
-    /// name, so a sentence that carries it stays the length it was.
-    var kindName: String {
-        ["iPad", "iPhone", "iPod"].first { model.hasPrefix($0) } ?? "device"
-    }
+    /// this iPad"): `BuildTarget.deviceKind`'s word, "iPad", "iPhone" or
+    /// "iPod touch" when the model says so, else "device". It never
+    /// guesses: a page that said "phone" to an iPad is what it replaces. One
+    /// of four kinds, never the device's name, so a sentence that carries it
+    /// stays the length it was.
+    var kindName: String { BuildTarget.deviceKind(model: model) }
 }

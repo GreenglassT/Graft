@@ -113,11 +113,31 @@ class TestWhoBroughtIt:
         bare = tmp_path / "libother.dylib"
         bare.write_bytes(b"")
 
+        # A .deb by its control `Name` (2.3.1 §3.4), as `--tweaks` names it;
+        # a bare binary has only its file name.
         assert playcover.tweak_origins([deb, bare]) == {
-            "Example.dylib": "example-tweak_1.0.deb",
-            "ExampleKit.framework": "example-tweak_1.0.deb",
+            "Example.dylib": "Example Tweak",
+            "ExampleKit.framework": "Example Tweak",
             "libother.dylib": "libother.dylib",
         }
+
+    @pytest.mark.parametrize("control, named", [
+        # No `Name:`: `--tweaks` shows the package id, and so does this.
+        ("Package: com.example.tweak\nVersion: 1.0\n", "com.example.tweak"),
+        # No stanza to read a name from: the file's own name.
+        ("Version: 1.0\n", "example-tweak_1.0.deb"),
+    ])
+    def test_a_deb_without_a_name_goes_by_what_tweaks_shows(self, tmp_path: Path, control, named) -> None:
+        from .test_deb_control import _ar, _control_tar, _data_tar
+
+        deb = tmp_path / "example-tweak_1.0.deb"
+        deb.write_bytes(_ar([
+            ("debian-binary", b"2.0\n"),
+            ("control.tar.gz", _control_tar(control)),
+            ("data.tar.gz", _data_tar(["./Library/MobileSubstrate/DynamicLibraries/Example.dylib"])),
+        ]))
+
+        assert playcover.tweak_origins([deb]) == {"Example.dylib": named}
 
     def test_a_deb_it_cannot_read_claims_nothing(self, tmp_path: Path) -> None:
         bad = tmp_path / "broken.deb"
@@ -194,7 +214,7 @@ class TestTheWords:
         found = [playcover.UnsupportedLink("Example.dylib", "SpringBoardServices", "example.deb")]
         assert playcover.refusal_message(found) == (
             "example.deb needs iOS's SpringBoardServices, which macOS doesn't have, so it "
-            "can't run under PlayCover. Phone builds can still use it; to build for this "
+            "can't run under PlayCover. iPhone and iPad builds can still use it; to build for this "
             "Mac, remove it from the app first."
         )
 

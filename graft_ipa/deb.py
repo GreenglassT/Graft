@@ -105,9 +105,18 @@ def _control_text(payload: bytes, member: str) -> str | None:
     Python 3.14, and a .deb built with it on an older interpreter is simply one
     this function cannot read — which is a missing name in a list, not an error.
     """
-    mode = "r:zst" if member.endswith(".zst") else "r:*"
+    fileobj: Any = io.BytesIO(payload)
+    mode = "r:*"
+    if member.endswith(".zst"):
+        # `tarfile`'s own zstd mode only from Python 3.14; before it, the
+        # bundled `backports.zstd`, streamed so the entry-size bound below
+        # still holds (`data_names` reads data members the same way).
+        zstd = _zstd()
+        if zstd is None:
+            return None
+        fileobj, mode = zstd.open(fileobj, "rb"), "r|"
     try:
-        with tarfile.open(fileobj=io.BytesIO(payload), mode=mode) as tar:
+        with tarfile.open(fileobj=fileobj, mode=mode) as tar:
             for entry in tar:
                 if _strip_leading_dot_slash(entry.name) != "control" or not entry.isfile():
                     continue
@@ -125,6 +134,38 @@ def _control_text(payload: bytes, member: str) -> str | None:
     except Exception:
         return None
     return None
+
+
+def _stanza(path: Path) -> dict[str, str] | None:
+    """`path`'s control stanza, parsed, or None when it can't be read."""
+    try:
+        handle = path.open("rb")
+    except OSError:
+        return None
+    with handle:
+        member = next(_ar_members(handle), None)
+        if member is None:
+            return None
+        name, payload = member
+        text = _control_text(payload, name)
+    return None if text is None else _parse_stanza(text)
+
+
+def identity(path: Path) -> tuple[str, str, str | None] | None:
+    """`(Package, Version, Architecture)` from `path`'s control stanza, or None
+    when it isn't a .deb this can read, or names no package or version.
+
+    What a download is checked against before it goes into the library
+    (`tweak_sources.place`), and what names it there: the archive's own
+    word, not the repo's filename.
+    """
+    fields = _stanza(path)
+    if not fields:
+        return None
+    package, version = fields.get("Package", ""), fields.get("Version", "")
+    if not package or not version:
+        return None
+    return package, version, fields.get("Architecture") or None
 
 
 def control_fields(path: Path) -> dict[str, Any]:

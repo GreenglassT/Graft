@@ -557,8 +557,12 @@ final class AppStoreClaimTests: XCTestCase {
         }
         let legacy = AppStoreStore(runner: runner, shell: NoAdminShell())
         try who("legacy")
-        await legacy.loadStatus()
+        // The license answer first: with status read as Graft 1.x's sign-in,
+        // Get waits for a sign-in (`AppStoreStore.setUpReason`, B5), as the
+        // CLI would refuse it.
         await refusedFree(legacy)
+        await legacy.loadStatus()
+        XCTAssertNotNil(legacy.licenseNeeded["example"], "premise: read as legacy, the answer stands")
         try who("a@example.invalid")
         await legacy.loadStatus()
         XCTAssertNil(legacy.licenseNeeded["example"], "legacy, then Graft's own sign-in")

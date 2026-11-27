@@ -404,5 +404,88 @@ def test_the_update_check_reports_nothing_for_a_package_with_no_downloadable_bui
     from graft_ipa import updates
 
     rows = [dict(_sometweak("3.0.0", "iphoneos-arm64"), package_filename="")]
+
+    def answer(path, *_a, **_k):
+        return {"data": rows} if "/jailbreak/package/" in path else {"data": SAMPLE_REPO}
+
+    with patch.object(canister, "_get", side_effect=answer):
+        offers = updates.canister_offers("com.example.sometweak")
+    # Its source lists it, with nothing that could ever be downloaded.
+    assert [o.version for o in offers] == [None]
+    assert updates.resolve(None, None, [], offers).available is None
+
+
+def test_fetch_deb_says_which_row_and_repository_it_took(tmp_path: Path) -> None:
+    """`--fetch` records the tweak's source from this: the build actually
+    downloaded, after any fallback, not the first one tried."""
+    fake_get, _ = _sometweak_world(gone=("1.7.24_iphoneos-arm64.deb",))
+    picked: list = []
+    with patch("requests.get", side_effect=fake_get):
+        canister.fetch_deb("com.example.sometweak", tmp_path, version="1.7.24",
+                           on_pick=lambda pkg, repo: picked.append((pkg.package_filename, repo.uri)))
+    assert picked == [("./debs/example/sometweak/com.example.sometweak_1.7.24_iphoneos-arm.deb",
+                       "https://repo.example")]
+
+
+def test_fetch_deb_from_one_repository_never_takes_another_s_higher_version(tmp_path: Path) -> None:
+    """The first fetch, from a search result: the repository the person
+    picked, whatever version another repository lists (2.3.1 A1)."""
+    rows = [dict(_sometweak("1.7.24", "iphoneos-arm64"), repository_id="good"),
+            dict(_sometweak("9.9.9", "iphoneos-arm64"), repository_id="evil")]
+    picked: list = []
+
+    def answer(path, *_a, **_k):
+        if "/jailbreak/package/" in path:
+            return {"data": rows}
+        repo_id = path.rsplit("/", 1)[-1]
+        return {"data": {"id": repo_id, "name": repo_id, "uri": f"https://{repo_id}.example"}}
+
+    with patch.object(canister, "_get", side_effect=answer), \
+            patch.object(canister, "_download", side_effect=lambda url, dest, name, sha: dest / name):
+        canister.fetch_deb("com.example.sometweak", tmp_path, repository_id="good",
+                           on_pick=lambda pkg, repo: picked.append((pkg.version, repo.uri)))
+    assert picked == [("1.7.24", "https://good.example")]
+
+
+def test_a_repository_that_doesnt_list_the_package_is_said_plainly(tmp_path: Path) -> None:
+    rows = [dict(_sometweak("1.7.24", "iphoneos-arm64"), repository_id="good")]
     with patch.object(canister, "_get", return_value={"data": rows}):
-        assert updates.canister_latest("com.example.sometweak") is None
+        with pytest.raises(canister.CanisterError, match="elsewhere"):
+            canister.fetch_deb("com.example.sometweak", tmp_path, repository_id="elsewhere")
+
+
+def _two_repositories(rows_by_repo: dict[str, str]):
+    """canister lists com.example.sometweak from each repository, at each
+    version given; each repository's URI is https://<id>.example."""
+    rows = [dict(_sometweak(v, "iphoneos-arm64"), repository_id=r) for r, v in rows_by_repo.items()]
+
+    def answer(path, *_a, **_k):
+        if "/jailbreak/package/" in path:
+            return {"data": rows}
+        repo_id = path.rsplit("/", 1)[-1]
+        return {"data": {"id": repo_id, "name": repo_id, "uri": f"https://{repo_id}.example"}}
+
+    return answer
+
+
+def test_a_bare_fetch_that_several_repositories_list_is_refused(tmp_path: Path) -> None:
+    """Re-verify #4: by package id alone, the newest from any repository
+    won, and its source was then recorded as the tweak's. Several listing
+    it: name them, and ask for --fetch-repository."""
+    downloads: list = []
+    with patch.object(canister, "_get", side_effect=_two_repositories({"good": "1.7.24", "evil": "9.9.9"})), \
+            patch.object(canister, "_download", side_effect=lambda *a: downloads.append(a)):
+        with pytest.raises(canister.SeveralRepositoriesError) as refused:
+            canister.fetch_deb("com.example.sometweak", tmp_path)
+    assert refused.value.repositories == [("evil", "https://evil.example"), ("good", "https://good.example")]
+    assert "--fetch-repository" in (refused.value.hint or "")
+    assert downloads == [], "nothing downloaded"
+
+
+def test_a_bare_fetch_that_one_repository_lists_goes_ahead(tmp_path: Path) -> None:
+    picked: list = []
+    with patch.object(canister, "_get", side_effect=_two_repositories({"good": "1.7.24"})), \
+            patch.object(canister, "_download", side_effect=lambda url, dest, name, sha: dest / name):
+        canister.fetch_deb("com.example.sometweak", tmp_path,
+                           on_pick=lambda pkg, repo: picked.append(repo.repo_id))
+    assert picked == ["good"]

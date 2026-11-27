@@ -45,13 +45,17 @@ struct GraftApp: App {
     /// because the menu and the delegate need it. The same runner as
     /// `store`'s.
     @State private var updates: UpdateStore
-    /// One-click Update (`AppUpdatesStore`): the window's badges, daily check
+    /// Update & Install and Update All (`AppUpdatesStore`): the window's badges, daily check
     /// and sheet. Here, beside `updates`, because it is given the real
     /// preferences and hold. The same runner and `ConfigStore` as the window.
     @State private var appUpdates: AppUpdatesStore
     /// Help › Remove Graft's Data…: its sheet, over the main window. Here
     /// because the menu reaches it. The same runner as `store`'s.
     @StateObject private var removeData: RemoveDataStore
+    /// Which releases What's New opens on: Help sets it, and so does the
+    /// main window after an update, before they open the window. Plain
+    /// `@State`, only handed on: the window observes it.
+    @State private var whatsNew = WhatsNewStore()
     /// Set Up Decryption's administrator prompt: in-process NSAppleScript,
     /// and osascript only when that machinery can't run at all.
     private let adminShell: PrivilegedShell = FallbackAdminShell(
@@ -162,7 +166,8 @@ struct GraftApp: App {
                         // (as `LegacyDefaults` skips it).
                         .modifier(OpensWhatsNewAfterUpdate(
                             defaults: AdminShell.insideTests ? nil : .standard,
-                            version: AboutGraft.version(of: .main)
+                            version: AboutGraft.version(of: .main),
+                            store: whatsNew
                         ))
                         // Help › Remove Graft's Data…, over the setup
                         // screen as over the panes: someone who gave up
@@ -250,7 +255,7 @@ struct GraftApp: App {
                     Task { await updates.checkNow() }
                 }
                 .disabled(!support.runsApp)
-                WhatsNewCommand()
+                WhatsNewCommand(store: whatsNew)
                 Button("Licenses") {
                     if let folder = BundledLicenses.installed { NSWorkspace.shared.open(folder) }
                 }
@@ -272,7 +277,7 @@ struct GraftApp: App {
         // Help › What's New…: the changelog this copy carries. One window,
         // which the menu opens or brings forward.
         Window(WhatsNew.windowTitle, id: WhatsNew.windowID) {
-            WhatsNewView(changelog: Changelog.bundled, open: { NSWorkspace.shared.open($0) })
+            WhatsNewView(changelog: Changelog.bundled, store: whatsNew, open: { NSWorkspace.shared.open($0) })
                 .preferredColorScheme(.dark)
         }
         .defaultSize(width: 680, height: 720)
@@ -293,6 +298,16 @@ final class GraftAppDelegate: NSObject, NSApplicationDelegate {
         schedule: QuitAlert.afterDelay,
         notice: QuitAlert.notice
     )
+    /// `SheetsAllowQuit`, for the app's life.
+    private var sheetsAllowQuit: NSObjectProtocol?
+
+    /// A quit with a sheet open reaches `applicationShouldTerminate` below,
+    /// as one with none does: AppKit refused it unasked (`SheetsAllowQuit`).
+    /// In a test host too, which this changes nothing outside of, and whose
+    /// tests rely on it (`QuitWithSheetTests`).
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        sheetsAllowQuit = SheetsAllowQuit.observe(.default)
+    }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         quitGuard.shouldTerminate()

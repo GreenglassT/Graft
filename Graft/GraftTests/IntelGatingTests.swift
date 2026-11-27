@@ -232,20 +232,72 @@ final class IntelGatingTests: XCTestCase {
                        "a get running, or status being read")
     }
 
-    /// On screen, in Settings › App Store: Set Up Decryption… is there and
-    /// grayed out where it needs Apple silicon, with the line as its help
-    /// and under the UnfairPlay row; Sign Out, which works anywhere, isn't.
-    func test_set_up_decryption_is_shown_disabled_with_its_line_without_apple_silicon() async throws {
+    // MARK: - Settings › App Store's one card (a user's report)
+
+    /// Where no App Store get can run, the section's one line: what can get
+    /// apps, and what to do instead. The Intel download says which download
+    /// can; before macOS 14, where Graft.zip doesn't open, it doesn't send
+    /// anyone to it.
+    func test_the_app_store_line_says_what_can_get_apps_and_what_to_do_instead() {
+        let ventura = MacSupport(appleSiliconMac: true, build: .flavor(.x86_64), macOSMajorVersion: 13)
+
+        XCTAssertEqual(Self.intelMac.appStoreLine,
+                       "Getting apps from the App Store needs a Mac with Apple silicon. Add apps from a decrypted "
+                       + "IPA instead: drop one on Source IPA in an app's pane.")
+        XCTAssertEqual(Self.intelDownloadOnAppleSilicon.appStoreLine,
+                       "Getting apps from the App Store needs the Apple silicon download of Graft, Graft.zip. Add "
+                       + "apps from a decrypted IPA instead: drop one on Source IPA in an app's pane.")
+        XCTAssertEqual(ventura.appStoreLine,
+                       "Getting apps from the App Store needs Graft's Apple silicon download, which needs macOS 14 "
+                       + "or later. Add apps from a decrypted IPA instead: drop one on Source IPA in an app's pane.")
+        XCTAssertFalse(ventura.appStoreLine?.contains("Graft.zip") ?? true)
+        XCTAssertNil(Self.appleSilicon.appStoreLine)
+    }
+
+    /// The card offers Sign Out only for a sign-in status read as there, so
+    /// nobody's stuck signed in; with no status, no buttons. None on Apple
+    /// silicon, where the rows are as they were.
+    func test_the_card_offers_sign_out_only_when_signed_in() throws {
+        let signedIn = try decoded(Self.intelStatus)
+        let signedOut = try decoded(Self.signedOutIntelStatus)
+
+        XCTAssertEqual(AppStoreSettingsSection.unavailableCard(Self.intelMac, status: signedIn),
+                       .init(line: try XCTUnwrap(Self.intelMac.appStoreLine), signOut: true))
+        XCTAssertEqual(AppStoreSettingsSection.unavailableCard(Self.intelMac, status: signedOut)?.signOut, false)
+        XCTAssertEqual(AppStoreSettingsSection.unavailableCard(Self.intelMac, status: nil)?.signOut, false,
+                       "no status read yet: the line, without Sign Out")
+        XCTAssertNil(AppStoreSettingsSection.unavailableCard(Self.appleSilicon, status: signedIn))
+    }
+
+    private func decoded(_ line: String) throws -> AppStoreStatusRecord {
+        guard case let .appStoreStatus(status) = try BuildEvent.decode(line: line) else {
+            throw XCTSkip("fixture is not an appstore-status")
+        }
+        return status
+    }
+
+    private func buttons(_ nodes: [AccessibilityTree.Node]) -> [String] {
+        nodes.filter { $0.role == kAXButtonRole }.map(\.name)
+    }
+
+    /// On screen, in Settings › App Store, where it needs Apple silicon: the
+    /// card's line, as text; no rows, no Set Up Decryption…, no Sign In… or
+    /// Sign In Again…, no Terminal block; Sign Out, for the sign-in there.
+    func test_without_apple_silicon_settings_shows_one_card_and_only_sign_out() async throws {
         try AccessibilityTree.requireServed()
         for support in [Self.intelMac, Self.intelDownloadOnAppleSilicon] {
-            let line = try XCTUnwrap(support.unavailableLine)
+            let line = try XCTUnwrap(support.appStoreLine)
             let store = try await statusStore(Self.intelStatus)
             let (nodes, text) = try render(AppStoreSettingsSection(store: store), support, width: 720)
-            let setUp = try button(CLIContract.SettingsLabel.setUpDecryption, in: nodes)
-            XCTAssertEqual(setUp.enabled, false, "\(support)")
-            XCTAssertEqual(setUp.help, line, "\(support)")
             XCTAssertTrue(text.contains(line), "\(support): \(text)")
+            let shown = buttons(nodes)
+            for gone in [CLIContract.SettingsLabel.setUpDecryption, CLIContract.SettingsLabel.signIn,
+                         CLIContract.SettingsLabel.signInAgain] {
+                XCTAssertFalse(shown.contains(gone), "\(support): \(shown)")
+            }
             XCTAssertNotEqual(try button("Sign Out", in: nodes).enabled, false, "\(support)")
+            XCTAssertFalse(text.contains { $0.contains(AppStoreSettingsSection.notInThisDownload) }, "no rows: \(text)")
+            XCTAssertFalse(text.contains { $0.contains("can't be set up here") }, "no Terminal block: \(text)")
         }
     }
 
@@ -275,24 +327,28 @@ final class IntelGatingTests: XCTestCase {
 
     static let signedOutIntelStatus = ##"{"type":"appstore-status","ipatool":{"path":"/i","source":"bundled","present":true,"version":"2.8.0","signed_in":false,"email":null,"legacy_signin":false,"warning":null},"unfairplay":{"path":"/u","present":false,"version":null,"enrolled":false,"model_dir":"/m"},"setup_commands":[]}"##
 
-    /// On screen: Sign In… (signed out) and Sign In Again… (signed in) are
-    /// there, grayed out, with the line as their help; Sign Out isn't.
-    func test_sign_in_is_shown_disabled_with_its_line_without_apple_silicon() async throws {
+    /// Signed out, the card has no buttons at all: nothing grayed out to
+    /// read as a fault.
+    func test_signed_out_without_apple_silicon_the_card_has_no_buttons() async throws {
         try AccessibilityTree.requireServed()
         for support in [Self.intelMac, Self.intelDownloadOnAppleSilicon] {
-            let line = try XCTUnwrap(support.unavailableLine)
-            var (nodes, _) = try render(AppStoreSettingsSection(store: try await statusStore(Self.signedOutIntelStatus)),
-                                        support, width: 720)
-            let signIn = try button(CLIContract.SettingsLabel.signIn, in: nodes)
-            XCTAssertEqual(signIn.enabled, false, "\(support)")
-            XCTAssertEqual(signIn.help, line, "\(support)")
-            (nodes, _) = try render(AppStoreSettingsSection(store: try await statusStore(Self.intelStatus)),
-                                    support, width: 720)
-            let again = try button(CLIContract.SettingsLabel.signInAgain, in: nodes)
-            XCTAssertEqual(again.enabled, false, "\(support)")
-            XCTAssertEqual(again.help, line, "\(support)")
-            XCTAssertNotEqual(try button("Sign Out", in: nodes).enabled, false, "\(support)")
+            let store = try await statusStore(Self.signedOutIntelStatus)
+            let (nodes, text) = try render(AppStoreSettingsSection(store: store), support, width: 720)
+            XCTAssertTrue(text.contains(try XCTUnwrap(support.appStoreLine)), "\(support): \(text)")
+            XCTAssertEqual(buttons(nodes).filter { $0 != "Refresh" }, [], "\(support)")
         }
+    }
+
+    /// Before any status read, where it needs Apple silicon: the line, not
+    /// "Checking ipatool and UnfairPlay…" (nothing on the card waits for it).
+    func test_without_apple_silicon_the_card_never_says_checking() throws {
+        try AccessibilityTree.requireServed()
+        let store = AppStoreStore(runner: CLIRunner(executable: URL(fileURLWithPath: "/usr/bin/false")),
+                                  shell: NoAdminShell())
+        let (_, text) = try render(AppStoreSettingsSection(store: store), Self.intelMac, width: 720)
+
+        XCTAssertTrue(text.contains(MacSupport.appStoreNeedsAppleSilicon), "\(text)")
+        XCTAssertFalse(text.contains("Checking ipatool and UnfairPlay…"), "\(text)")
     }
 
     func test_the_versions_sheet_asks_only_where_store_requests_can_run() {

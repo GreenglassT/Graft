@@ -513,16 +513,41 @@ final class UpdateStore: ObservableObject, QuitHandover {
     /// pinned by tests/test_app_update_helper.py) is its time, to the
     /// second (`loggedTime`), then "installed Graft <version> at <app>; …".
     /// The helper is the one the attempt's own version started, so it's the
-    /// same line this version reads.
+    /// same line this version reads. It's read where it begins, which is
+    /// a line's start unless a tool's output before it had no newline
+    /// (`loggedTimes`).
     nonisolated static func installLogged(_ attempt: Attempt, in log: URL) -> Bool {
         guard let at = attempt.at, let tail = tail(of: log) else { return false }
         // Whole seconds: an install in the attempt's own second counts.
         let earliest = at.timeIntervalSinceReferenceDate.rounded(.down)
         let said = " installed Graft \(attempt.version) at "
         return lines(of: tail).contains { line in
-            guard let when = loggedTime(of: line, saying: said) else { return false }
-            return when.timeIntervalSinceReferenceDate >= earliest
+            loggedTimes(in: line, saying: said).contains { $0.timeIntervalSinceReferenceDate >= earliest }
         }
+    }
+
+    /// The length of the helper's time and offset ("2026-11-24 09:30:15
+    /// +1400"), which come right before what it says.
+    nonisolated static let stampLength = 25
+
+    /// When the helper said `said` in `line`: each place it's there whose
+    /// `stampLength` characters before it are the helper's time and offset
+    /// (`loggedTime`). At the line's start, as the helper writes it, or after
+    /// a tool's output that ended with no newline: 2.3's helper kept
+    /// lsregister's "failed to scan …: -10814 from spotlight" so, and its
+    /// "installed" line ran on from it (the 2.3.1 review). Its 2.3.1 helper
+    /// starts a line of its own whatever came before.
+    nonisolated static func loggedTimes(in line: String, saying said: String) -> [Date] {
+        var times: [Date] = []
+        var from = line.startIndex
+        while let found = line.range(of: said, range: from..<line.endIndex) {
+            if let start = line.index(found.lowerBound, offsetBy: -stampLength, limitedBy: line.startIndex),
+               let when = loggedTime(of: String(line[start...]), saying: said) {
+                times.append(when)
+            }
+            from = found.upperBound
+        }
+        return times
     }
 
     /// When a line of the helper's log was written, if what follows its

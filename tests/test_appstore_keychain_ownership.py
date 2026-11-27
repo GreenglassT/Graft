@@ -1187,15 +1187,21 @@ def _named_buttons(hint: str | None) -> set[str]:
     return {label for label in (SIGN_IN, SIGN_IN_AGAIN) if label in (hint or "")}
 
 
-def test_a_get_whose_renewal_needs_a_code_names_the_button_settings_shows(
-    get_cfg, cfg, app, bundled: FakeTools, store,
+@pytest.mark.parametrize("error", [
+    "auth code is required",
+    # An expired token, which got "not signed in" and a first sign-in's
+    # hint (the 2.3.1 review's T2-A2).
+    "password token is expired",
+])
+def test_a_get_whose_sign_in_has_expired_names_the_button_settings_shows(
+    get_cfg, cfg, app, bundled: FakeTools, store, error: str,
 ) -> None:
     """RENEW_HINT names Sign In Again…, which Settings shows only while
     status reads signed in: so it is right only where that holds, as it does
     for an expired sign-in (`auth info` reads only the keychain)."""
     app(True)
     _sign_in_graft(cfg)
-    bundled.set(download_error="auth code is required")
+    bundled.set(download_error=error)
     with pytest.raises(appstore.AppStoreError) as e:
         _get(get_cfg)
     assert e.value.hint == ipatool.RENEW_HINT
@@ -1226,6 +1232,9 @@ def test_the_renew_hint_is_used_only_where_status_reads_signed_in() -> None:
         # still reads (AUTH_CODE_REQUIRED). `account_error` is a download's
         # (`explain`), and a version list's and its versions' too.
         "ipatool.account_error": 1, "ipatool.explain_purchase": 1,
+        # ipatool's token expired: `auth info` still reads the keychain's
+        # sign-in. For both of those, after a code check.
+        "ipatool._expired": 1,
         # After `account` read signed in (and not another ipatool's).
         "appstore._require_signed_in": 1,
     }

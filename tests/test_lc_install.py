@@ -840,3 +840,78 @@ def test_a_partial_that_cant_be_removed_from_a_recorded_livecontainer_still_fail
     with pytest.raises(lc_manage.LiveContainerError):
         lc_manage.clean(udid="u1", device_ops=device, events=Recorder().events,
                         pushed={PRIMARY: {"example.ipa"}})
+
+
+# ---- the device changed, the record didn't (the 2.3.1 review's T2-B3) ----
+
+
+class _UnwritableLog(BuildLog):
+    """log.sqlite that reads, and refuses every write, as a full disk does."""
+
+    def _refuse(self, **_: object) -> None:
+        import sqlite3
+
+        raise sqlite3.OperationalError("database or disk is full")
+
+    record_lc_install = _refuse
+    record_cert_push = _refuse
+    forget_cert_push = _refuse
+
+
+def test_an_install_the_log_cant_record_still_installs_every_instance_and_says_so(
+    tmp_path: Path, ipa: Path
+) -> None:
+    """LiveContainer 1 was on the phone, unrecorded, and 2 and 3 were never
+    installed: the record's OperationalError ended the run as a failure
+    "graft doesn't know how to explain". The phone has what was asked."""
+    h = Harness(tmp_path, ipa)
+    h.log = _UnwritableLog(tmp_path / "log.sqlite")
+
+    results = h.install()
+
+    assert [r["bundle_id"] for r in results] == [PRIMARY, LC2, LC3]
+    assert len(h.device.installs) == 3
+    assert [e["bundle_id"] for e in h.of("lc-installed")] == [PRIMARY, LC2, LC3]
+    recorded = [w for w in h.recorder.warnings if "couldn't note" in w]
+    assert len(recorded) == 3
+    assert recorded[0] == (
+        f"LiveContainer 1 ({PRIMARY}) is installed on u1, but Graft couldn't note that in its "
+        "log (database or disk is full), so it shows as installed outside Graft: fix that, then "
+        "install LiveContainer again"
+    )
+
+
+def test_a_fresh_install_whose_certificate_record_cant_be_forgotten_says_how_to_clear_it(
+    tmp_path: Path, ipa: Path
+) -> None:
+    h = Harness(tmp_path, ipa)
+    h.log = _UnwritableLog(tmp_path / "log.sqlite")
+
+    h.install(instances=(1,))
+
+    assert h.of("lc-installed")
+    assert any(w.startswith(f"Graft couldn't forget the certificate it pushed to {PRIMARY}")
+               and "--lc-clean --cert-only" in w for w in h.recorder.warnings), h.recorder.warnings
+
+
+def test_a_certificate_push_the_log_cant_record_still_reminds_and_says_to_remove_it_by_hand(
+    tmp_path: Path,
+) -> None:
+    """The .p12 is in Documents, which its guest apps can read: the reminder
+    to remove it still comes, and since `--lc-clean` removes only what's
+    recorded, the warning says to remove it by hand."""
+    p12, _ = _make_p12(tmp_path)
+    device = FakeDevice({PRIMARY: {}})
+    rec = Recorder()
+
+    payload = lc_manage.push_cert(udid="u1", team=TEAM, p12=p12, device_ops=device,
+                                  events=rec.events, log=_UnwritableLog(tmp_path / "log.sqlite"))
+
+    assert device.pushed == [(PRIMARY, "AppleDevelopment.p12", p12.read_bytes())]
+    assert rec.of("lc-cert-pushed") == [payload]
+    assert payload["note"] == lc_manage.CERT_STAYS_NOTE
+    assert rec.warnings == [
+        f"AppleDevelopment.p12 is in {PRIMARY}'s Documents on u1, but Graft couldn't note that "
+        "in its log (database or disk is full), so --lc-clean won't remove it: once it's "
+        "imported, delete it in the Files app (On My iPhone or iPad > LiveContainer)"
+    ]

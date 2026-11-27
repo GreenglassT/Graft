@@ -37,10 +37,17 @@ final class CanisterStore: ObservableObject {
         return collected
     }
 
-    func fetch(_ target: String, argsOverride: [String]? = nil) async throws {
+    /// `--fetch`'s arguments: with `repository`, the search result's own
+    /// Canister repository, the only one the fetch takes it from (2.3.1 A1).
+    static func fetchArguments(_ target: String, repository: String?) -> [String] {
+        [Flag.json, Flag.fetch, target]
+            + (repository.map { $0.isEmpty ? [] : [Flag.fetchRepository, $0] } ?? [])
+    }
+
+    func fetch(_ target: String, repository: String? = nil, argsOverride: [String]? = nil) async throws {
         isFetching = true
         fetchResult = "Fetching \(target)…"
-        let args = argsOverride ?? [Flag.json, Flag.fetch, target]
+        let args = argsOverride ?? Self.fetchArguments(target, repository: repository)
         let events: [BuildEvent]
         do {
             events = try await runner.runEvents(args, failing: "Fetch")

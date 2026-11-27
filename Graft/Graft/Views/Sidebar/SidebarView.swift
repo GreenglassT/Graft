@@ -37,7 +37,7 @@ struct SidebarView: View {
     @ObservedObject var devices: DevicesStore
     /// Handed to Add App, which stages a chosen IPA through it.
     @PassedThrough var appStore: AppStoreStore
-    /// One-click Update: each row's mark, Update All, and Check for updates
+    /// Updates for your apps: each row's mark, Update All, and Check for updates
     /// now. Nil in a test of something else.
     @ObservedOptionalObject var appUpdates: AppUpdatesStore? = nil
 
@@ -68,6 +68,16 @@ struct SidebarView: View {
                         Button(AppUpdateText.checkNow) { Task { await appUpdates.checkNow() } }
                             .controlSize(.small)
                             .disabled(appUpdates.isChecking)
+                        // How it went (B10). One line: the column is narrow,
+                        // and the tooltip has it whole.
+                        if let result = appUpdates.checkResult, result.apps == nil {
+                            Text(result.message)
+                                .font(AppFont.monoSmall)
+                                .foregroundStyle(result.failed ? Palette.warn : Palette.textDim)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                                .help(result.message)
+                        }
                     }
                 }
                 ForEach(store.apps) { app in
@@ -267,7 +277,11 @@ struct SidebarView: View {
                 }
             }
             ForEach(devices.deviceErrors) { failure in
-                UndescribableDeviceRow(failure: failure, isRetrying: devices.isLoading) {
+                UndescribableDeviceRow(
+                    failure: failure,
+                    remembered: devices.remembered.first { $0.udid == failure.udid }?.name,
+                    isRetrying: devices.isLoading
+                ) {
                     Task { await retryDeviceListing() }
                 }
                 .contextMenu {
@@ -285,7 +299,7 @@ struct SidebarView: View {
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.textDim)
                     .lineLimit(1)
-                    .help("Plug an iPhone in over USB, or wake a paired device on the "
+                    .help("Plug an iPhone or iPad in over USB, or wake a paired device on the "
                           + "same network.")
             }
         }

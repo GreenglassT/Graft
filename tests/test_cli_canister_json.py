@@ -10,6 +10,8 @@ from graft_ipa.canister import Package
 from graft_ipa.config import load_config
 from graft_ipa.json_output import JsonEmitter
 
+from .test_tweak_source_records import write_deb
+
 
 @pytest.fixture
 def stub_packages() -> list[Package]:
@@ -71,8 +73,8 @@ def test_fetch_json_emits_start_and_success(
     from graft_ipa import cli as cli_mod
 
     cfg = load_config(temp_config_env)
-    fake_deb = tmp_path / "out.deb"
-    fake_deb.write_bytes(b"x" * 50)
+    fake_deb = write_deb(tmp_path / "out.deb", "com.example.first", "1.0")
+    size = fake_deb.stat().st_size
 
     with patch.object(cli_mod.canister, "fetch_deb", return_value=fake_deb):
         from io import StringIO
@@ -84,8 +86,9 @@ def test_fetch_json_emits_start_and_success(
     assert events[0] == {"type": "canister-fetch-start", "target": "com.example.first"}
     end = next(e for e in events if e["type"] == "canister-fetch-end")
     assert end["ok"] is True
-    assert end["filename"] == "out.deb"
-    assert end["size_bytes"] == 50
+    # Graft's name for it (`tweak_sources.place`), not the repo's.
+    assert end["filename"] == "com.example.first_1.0.deb"
+    assert end["size_bytes"] == size
 
 
 def test_fetch_json_passes_expected_sha(
@@ -97,8 +100,7 @@ def test_fetch_json_passes_expected_sha(
     from graft_ipa import cli as cli_mod
 
     cfg = load_config(temp_config_env)
-    fake_deb = tmp_path / "a.deb"
-    fake_deb.write_bytes(b"y" * 30)
+    fake_deb = write_deb(tmp_path / "a.deb", "com.example.a", "1.0")
 
     mock_fetch = MagicMock(return_value=fake_deb)
     with patch.object(cli_mod.canister, "fetch_deb", mock_fetch):

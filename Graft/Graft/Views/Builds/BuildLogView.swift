@@ -187,6 +187,14 @@ struct BuildLogView: View {
     static func lines(
         for event: BuildEvent, startVerb: String = "build start", startDetail: String? = nil
     ) -> [LogLine] {
+        // An update's device that went away mid-build waits (T2-B7): said in
+        // the update's words, dim, as its skipped install step is, never ✗.
+        // `progress` still reads it as a build that didn't finish, which is
+        // what every panel that tracks a build's state needs to know.
+        if case let .buildEnd(_, _, error, elapsed, _, true) = event {
+            let elapsedTxt = elapsed.map { String(format: "%.1fs", $0) } ?? "?"
+            return [LogLine(kind: .dim, text: "  \(error ?? "waiting for the device") (\(elapsedTxt))")]
+        }
         // Everything outside the build stream — `build-record`, the per-file
         // `build-pruned` rows — is no panel's business.
         guard let progress = event.progress else { return [] }

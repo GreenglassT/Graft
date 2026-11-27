@@ -113,7 +113,7 @@ async def _answered(step: Any, what: str) -> Any:
         return await asyncio.wait_for(step, SILENCE_SECONDS)
     except TimeoutError:
         raise PhoneWentSilentError(
-            f"the phone stopped answering: nothing for {SILENCE_SECONDS:.0f} s {what}"
+            f"the device stopped answering: nothing for {SILENCE_SECONDS:.0f} s {what}"
         ) from None
 
 
@@ -189,7 +189,7 @@ async def _install_until_silent(
                 )
             if quiet >= limit:
                 raise PhoneWentSilentError(
-                    f"the phone stopped answering: no word for {SILENCE_SECONDS:.0f} s "
+                    f"the device stopped answering: no word for {SILENCE_SECONDS:.0f} s "
                     "while it installed the app"
                 )
             done, _ = await asyncio.wait({task}, timeout=limit - quiet)

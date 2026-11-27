@@ -733,7 +733,7 @@ final class ConfigStore: ObservableObject, CLIStore {
     enum Busy: Equatable {
         case building(String)
         case checking(String)
-        /// A one-click Update of these apps (`AppUpdatesStore`).
+        /// An Update & Install (or Update All) of these apps (`AppUpdatesStore`).
         case updating([String])
 
         var explanation: String {
@@ -997,6 +997,23 @@ final class ConfigStore: ObservableObject, CLIStore {
     struct ReconcileOutcome {
         let states: [DeliveryStateRecord]
         let warnings: [String]
+        /// The device the check asked, and what it found there; nil when it
+        /// asked none (`reconcile-checked`).
+        var checked: ReconcileCheckedRecord? = nil
+
+        /// The pane's line for a check that raised no warning (2.3.1 §3.5):
+        /// the device it asked, by the CLI's name for it, else `knownName`
+        /// (the window's), and what it found. The record standing claims
+        /// only that the check raised no objection (`AppDetailView`'s
+        /// `deviceCheckNote`); a file that's gone says so, as the card above
+        /// does. With no device asked there is none to name.
+        func cleanLine(knownName: String?) -> String {
+            guard let checked else { return "Checked — the record still stands." }
+            let name = checked.deviceName ?? knownName ?? "the device"
+            return checked.found
+                ? "Checked \(name) — the record still stands."
+                : "Checked \(name) — the delivered file isn't there."
+        }
     }
 
     /// Check the connected device for what was last delivered, then fold the
@@ -1081,7 +1098,14 @@ final class ConfigStore: ObservableObject, CLIStore {
             return nil
         }
 
-        return ReconcileOutcome(states: states, warnings: warnings)
+        let checked = events.lazy.compactMap { event -> ReconcileCheckedRecord? in
+            if case let .reconcileChecked(record) = event, appName == nil || record.app == appName {
+                return record
+            }
+            return nil
+        }.first
+
+        return ReconcileOutcome(states: states, warnings: warnings, checked: checked)
     }
 
     /// Add an app from an App Store URL (or numeric ID), then reload the

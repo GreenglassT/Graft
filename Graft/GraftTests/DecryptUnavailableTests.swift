@@ -38,6 +38,21 @@ final class DecryptUnavailableTests: XCTestCase {
         return r
     }
 
+    /// B7: the list's Dump was enabled on a stock phone and ended in frida or
+    /// brew hints. It waits on what the card above found, saying the card's
+    /// words; before the card's probe lands, it's no answer.
+    func test_the_lists_dump_waits_on_a_device_the_card_found_unavailable() throws {
+        let stock = try Self.record(Self.readiness(frida: false, ssh: false))
+        let jailbroken = try Self.record(Self.readiness(frida: true, ssh: true))
+
+        XCTAssertEqual(InstalledAppsSection.dumpUnavailable(stock, appleSilicon: true),
+                       DeviceDecryptSection.unavailableLine)
+        XCTAssertEqual(InstalledAppsSection.dumpUnavailable(stock, appleSilicon: false),
+                       DeviceDecryptSection.unavailableLineWithoutAppStore)
+        XCTAssertNil(InstalledAppsSection.dumpUnavailable(jailbroken, appleSilicon: true))
+        XCTAssertNil(InstalledAppsSection.dumpUnavailable(nil, appleSilicon: true), "not probed yet")
+    }
+
     func test_a_phone_that_answers_neither_channel_is_unavailable() throws {
         XCTAssertTrue(DeviceDecryptSection.isUnavailable(try Self.record(Self.readiness(frida: false, ssh: false))))
     }

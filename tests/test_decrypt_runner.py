@@ -178,7 +178,7 @@ def test_frida_ssh_creds_come_from_the_environment(monkeypatch, tmp_path: Path, 
         # a locked phone, sending the user to hunt for a lock that is not there.
         (decrypt_runner.LAUNCH_DIED, "exited on its own", "unlock"),
         (decrypt_runner.LAUNCH_SLOW, "never reached the foreground", "unlock"),
-        (decrypt_runner.LAUNCH_REFUSED, "unlock the phone", "exited"),
+        (decrypt_runner.LAUNCH_REFUSED, "unlock the device", "exited"),
     ],
 )
 def test_each_way_a_launch_can_fail_gets_its_own_advice(
@@ -617,7 +617,7 @@ class TestBagbakFailureDiagnosis:
         assert "not evidence" in msg
         # And the old advice — go unlock a phone the readiness check just found
         # unlocked — must be gone rather than merely joined.
-        assert "most often this is a locked phone" not in msg
+        assert "most often this is a locked" not in msg
 
     def test_a_named_failure_still_beats_the_timeout_catch_all(self, monkeypatch, tmp_path: Path):
         """The timeout branch is last on purpose — a real extension failure that

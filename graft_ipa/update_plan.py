@@ -5,12 +5,17 @@ Three steps per app (spec 3.1), each skipped with a reason when it is:
 - **App Store:** "get V" when the App Store's current version is newer (by
   `version_key`) than the IPA a build would use (`find_in_cache`). Skipped
   for a held app, where App Store requests can't run
-  (`store_requests_blocker`), for a version the Apple ID was refused
+  (`store_requests_blocker`), before the App Store is set up on this Mac
+  (`appstore.setup_missing`), for a version the Apple ID was refused
   (`update_refusals`), and when the lookup failed. Lookups are batched: one
   request per store country (`store_versions`).
-- **Tweaks:** each attached tweak with a newer published build, and the apps
-  outside the run that share it (`also_affects`). One that couldn't be
-  checked is listed and left alone.
+- **Tweaks:** each attached tweak with a newer build from its own source
+  (`updates.statuses`, 2.3.1 A1), where it comes from, and the apps outside
+  the run that share it (`also_affects`). One that couldn't be checked is
+  listed and left alone; so is one whose update isn't verified
+  (`unverified_reason`) until the person confirms it (`trusted`,
+  `--trust-tweak`): it's `confirmed` only then, and only a confirmed one
+  counts. An app with one waiting is `needs_confirmation`.
 - **Install:** when either step above changes something, or the delivery
   state is `stale` because what a build would make differs from what was
   installed (a change staged since its last install). Only a real change is
@@ -34,11 +39,21 @@ Nothing here reads the keychain or runs ipatool, with or without `quick`.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import appstore, devices_seen, host, itunes, update_readiness, update_refusals, updates
+from . import (
+    appstore,
+    devices_seen,
+    host,
+    itunes,
+    preflight,
+    tweak_sources,
+    update_readiness,
+    update_refusals,
+    updates,
+)
 from .config import AppConfig, Config
 from .errors import ITunesError
 from .ipa_cache import find_in_cache
@@ -53,7 +68,16 @@ STEP_INSTALL = "install"
 
 #: Why the App Store step is skipped (`store.skipped_reason`).
 HELD = "held at {version}"
+#: Held, and the held version's file isn't staged: nothing to build from
+#: until it is got again. `{build}` is " (build 1 of 2)" for a hold by build
+#: of a version the App Store has more than one build of, else empty.
+HELD_MISSING = (
+    "held at {version}{build}, which isn't downloaded: get it again from Get an older version…"
+)
 NEEDS_APPLE_SILICON = "needs Apple silicon"
+#: The get can't run on this Mac yet (`appstore.setup_missing`).
+DECRYPTION_NOT_SET_UP = appstore.DECRYPTION_NOT_SET_UP
+NOT_SIGNED_IN = appstore.NOT_SIGNED_IN
 LOOKUP_FAILED = "couldn't check the App Store"
 #: No colon of its own: the app's confirmation shows it as "App Store 1.2.0:
 #: <reason>". Capitalized, unlike the others: the pane shows it alone, as a
@@ -82,10 +106,13 @@ STALE = "stale"
 
 @dataclass(frozen=True)
 class StoreAnswer:
-    """The App Store's current version of one app, or why there is none."""
+    """The App Store's current version of one app, or why there is none.
+    `unreachable`: the lookup itself failed (offline, or Apple refused), as
+    against an answer that the store doesn't sell it."""
 
     version: str | None
     error: str | None = None
+    unreachable: bool = False
 
 
 Ask = Callable[[list[str], str], dict[str, itunes.ITunesApp]]
@@ -133,7 +160,7 @@ def store_versions(apps: list[AppConfig], *, ask: Ask | None = None) -> dict[str
         for country in chains[app.name]:
             answer = answers[country]
             if isinstance(answer, ITunesError):
-                result = StoreAnswer(None, answer.message)
+                result = StoreAnswer(None, answer.message, unreachable=True)
                 break
             hit = answer.get(app.bundle_id)
             if hit is not None:
@@ -177,10 +204,17 @@ def store_step(cfg: Config, app: AppConfig, answer: StoreAnswer | None) -> Store
     if current is not None and version_key(answer.version) <= version_key(current):
         return StoreStep(current, None, None)
     held = appstore.held_version(app)
+    if held is not None and current is None:
+        build = appstore.held_build(cfg, app)
+        which = f" (build {build.number} of {build.count})" if build else ""
+        return StoreStep(current, answer.version, HELD_MISSING.format(version=held, build=which))
     if held is not None:
         return StoreStep(current, answer.version, HELD.format(version=held))
     if appstore.store_requests_blocker() is not None:
         return StoreStep(current, answer.version, NEEDS_APPLE_SILICON)
+    missing = appstore.setup_missing(cfg)
+    if missing is not None:
+        return StoreStep(current, answer.version, missing)
     refused = update_refusals.refused_version(cfg.state_dir, app)
     if refused is not None:
         if version_key(answer.version) > version_key(refused):
@@ -244,10 +278,52 @@ class TweakChange:
     #: What to download (`update_tweaks.update`); not in the event.
     status: updates.TweakStatus
     also_affects: list[str] = field(default_factory=list)
+    #: The `confirm_key` the person gave for this tweak (`--trust-tweak`), if
+    #: any. Their yes counts only while it is this update's own key.
+    given_key: str | None = None
+
+    @property
+    def source(self) -> str | None:
+        return self.status.available.source if self.status.available else None
+
+    @property
+    def verified(self) -> bool:
+        return self.status.verified
+
+    @property
+    def unverified_reason(self) -> str | None:
+        return self.status.available.unverified_reason if self.status.available else None
+
+    @property
+    def confirm_key(self) -> str | None:
+        return self.status.confirm_key if self.to_version is not None else None
+
+    @property
+    def trusted(self) -> bool:
+        """The person said yes to exactly this update (re-verify #2)."""
+        return self.given_key is not None and self.given_key == self.confirm_key
+
+    @property
+    def trust_changed(self) -> bool:
+        """The person said yes to this tweak's update, and it has changed
+        since: another version, build or source. Not trusted, and the run
+        holds its apps back rather than leave it out unsaid."""
+        return (self.given_key is not None and not self.trusted and not self.verified
+                and not self.unchecked and self.to_version is not None)
+
+    @property
+    def confirmed(self) -> bool:
+        """Verified, or the person said yes: only then does it run."""
+        return self.verified or self.trusted
 
     @property
     def planned(self) -> bool:
-        return not self.unchecked and self.to_version is not None
+        return not self.unchecked and self.to_version is not None and self.confirmed
+
+    @property
+    def awaiting_confirmation(self) -> bool:
+        """A newer build, shown, which runs only once the person confirms it."""
+        return not self.unchecked and self.to_version is not None and not self.confirmed
 
 
 @dataclass
@@ -274,6 +350,10 @@ class TargetPlan:
     waiting: str | None = None
     blocked_reason: str | None = None
     readiness_note: str | None = None
+    #: On usbmux as the plan was made, for every target, work or not: with
+    #: `kind`, the device's local facts, which `waiting` and `install` aren't
+    #: alone, being worked out only for a target with work.
+    connected: bool = False
 
     @property
     def manual_install(self) -> bool:
@@ -304,10 +384,26 @@ class AppPlan:
     #: Why the app has no target at all: never delivered, or every device
     #: dropped, or recorded only without a device Graft can name.
     no_target_reason: str | None = None
+    #: Of the lookups made online for this app (the App Store's, and
+    #: canister's for its tweaks), how many answered and how many couldn't be
+    #: made (`checks_failed`).
+    answered: int = 0
+    unanswered: int = 0
 
     @property
     def tweak_updates(self) -> list[TweakChange]:
         return [t for t in self.tweaks if t.planned]
+
+    @property
+    def trust_changed(self) -> list[TweakChange]:
+        """Its tweak updates the person confirmed that have changed since."""
+        return [t for t in self.tweaks if t.trust_changed]
+
+    @property
+    def needs_confirmation(self) -> bool:
+        """A tweak update waits for the person's OK (`--trust-tweak`). Alone
+        it's nothing to do: an update without that OK never runs it."""
+        return any(t.awaiting_confirmation for t in self.tweaks)
 
     @property
     def install(self) -> bool:
@@ -383,7 +479,8 @@ class AppPlan:
         return out
 
 
-def _changes(app_name: str, records: list[dict], statuses: dict[str, updates.TweakStatus]) -> list[TweakChange]:
+def _changes(app_name: str, records: list[dict], statuses: dict[str, updates.TweakStatus],
+             trusted: Mapping[str, str]) -> list[TweakChange]:
     out: list[TweakChange] = []
     for record in records:
         if app_name not in (record.get("used_by") or []):
@@ -393,11 +490,57 @@ def _changes(app_name: str, records: list[dict], statuses: dict[str, updates.Twe
             continue
         if status.update_available and status.available is not None:
             out.append(TweakChange(record["filename"], record.get("name"), status.installed,
-                                   status.available.version, False, status))
+                                   status.available.version, False, status,
+                                   given_key=trusted.get(record["filename"])))
         elif status.unchecked:
             out.append(TweakChange(record["filename"], record.get("name"), status.installed,
                                    None, True, status))
     return out
+
+
+def _asked_online(status: updates.TweakStatus,
+                  recorded: tweak_sources.Source | None) -> bool | None:
+    """Whether canister answered for this tweak: True, it did (a version from
+    any source, or "nothing published"); False, it couldn't be asked; None,
+    it wasn't asked online at all.
+
+    The same rule `updates.statuses` asks by: canister is asked for a file
+    unless its recorded source is a repo, whose cached index answers alone,
+    fresh or not (a stale one leaves it unchecked, which is that index's age,
+    not the network's). So it's the record that says whether the network was
+    tried, not which source the answer came from: a file with no record can
+    be answered by a repo after canister answered too."""
+    if not status.package_id or getattr(recorded, "kind", None) == tweak_sources.REPO:
+        return None
+    return not status.unchecked
+
+
+def _lookups(cfg: Config, app_name: str, answer: StoreAnswer | None, records: list[dict],
+             statuses: dict[str, updates.TweakStatus]) -> tuple[int, int]:
+    """How many of `app_name`'s online lookups answered, and how many
+    couldn't be made: the App Store's (none for Apple's own apps), and
+    canister's for each tweak it uses."""
+    asked: list[bool] = []
+    if answer is not None:
+        asked.append(not answer.unreachable)
+    for record in records:
+        status = statuses.get(record["filename"])
+        if status is not None and app_name in (record.get("used_by") or []):
+            filename = record["filename"]
+            recorded = tweak_sources.recorded_for(
+                cfg.state_dir, filename, tweak_sources.file_sha256(cfg.tweaks_dir / filename))
+            online = _asked_online(status, recorded)
+            if online is not None:
+                asked.append(online)
+    return asked.count(True), asked.count(False)
+
+
+def checks_failed(plans: list[AppPlan]) -> bool:
+    """The plan asked online and nothing answered: the App Store lookup and
+    canister both failed, which is how an offline Mac looks. Its apps then
+    read as up to date when nothing was learned (`update-plan`'s
+    `checks_failed`): the app keeps what it showed and asks again later."""
+    return any(p.unanswered for p in plans) and not any(p.answered for p in plans)
 
 
 def _order(cfg: Config, targets: list[TargetPlan]) -> list[TargetPlan]:
@@ -415,9 +558,15 @@ def plan(
     probe,
     tweak_records: Callable[[Config], list[dict]],
     delivery: Callable[[str], AppDeliveries],
+    trusted: Mapping[str, str] | None = None,
 ) -> list[AppPlan]:
     """The plan for `names`, in the order given, then (with `with_affected`)
     the apps that share a tweak being updated, sorted, until none is added.
+
+    `trusted`: the `confirm_key` the person confirmed for each library tweak
+    (`--trust-tweak`), by filename. Such an update counts although it isn't
+    verified, while it is still the update they were shown (`trust_changed`
+    otherwise).
 
     `tweak_records` is `--tweaks`' records (`cli._collect_tweak_records`);
     only the files the covered apps use are looked up. `delivery` answers
@@ -425,6 +574,7 @@ def plan(
     `probe` is `update_readiness`'s quick or full one, and is asked only
     about targets with something to do.
     """
+    keys: Mapping[str, str] = trusted or {}
     order = list(dict.fromkeys(names))
     for name in order:
         cfg.get_app(name)  # an unknown app is refused before anything is asked
@@ -442,12 +592,14 @@ def plan(
         covered = set(app_names)
         wanted = [r for r in records if r["filename"] not in statuses and set(users[r["filename"]]) & covered]
         if wanted:
-            for status in updates.statuses(wanted, updates.repo_catalog(cfg)):
+            for status in updates.statuses(cfg, wanted):
                 statuses[status.filename] = status
 
     look_up(order)
     while with_affected:
-        updated_files = [f for f, s in statuses.items() if s.update_available and set(users.get(f, [])) & set(order)]
+        updated_files = [f for f, s in statuses.items()
+                         if s.update_available and (s.verified or keys.get(f) == s.confirm_key)
+                         and set(users.get(f, [])) & set(order)]
         added = sorted({u for f in updated_files for u in users.get(f, [])
                         if u not in order and facts_for(u).targets})
         if not added:
@@ -461,7 +613,7 @@ def plan(
     for app in apps:
         found = facts_for(app.name)
         store = store_step(cfg, app, answers.get(app.name))
-        changes = _changes(app.name, records, statuses)
+        changes = _changes(app.name, records, statuses, keys)
         changes_something = store.planned or any(c.planned for c in changes)
         targets: list[TargetPlan] = []
         for f in found.targets:
@@ -478,6 +630,7 @@ def plan(
                 install_skipped_reason=None if changes_something else f.offered_only,
                 readiness=probe.readiness,
             ))
+        answered, unanswered = _lookups(cfg, app.name, answers.get(app.name), records, statuses)
         plans.append(AppPlan(
             app=app.name,
             display_name=app.cyan.display_name,
@@ -486,6 +639,8 @@ def plan(
             targets=targets,
             readiness=probe.readiness,
             no_target_reason=None if targets else _no_target_reason(app, found),
+            answered=answered,
+            unanswered=unanswered,
         ))
 
     asked = [(cfg.get_app(p.app), t) for p in plans for t in p.targets if t.work]
@@ -495,6 +650,13 @@ def plan(
         t.device_name = r.target.device_name or t.device_name
         t.lc_bundle_id = r.target.lc_bundle_id
         t.waiting, t.blocked_reason, t.readiness_note = r.waiting, r.blocked_reason, r.note
+    # One usbmux listing, and only when there's a target to say it of: no
+    # lockdown session, nothing asked of any device.
+    if any(p.targets for p in plans):
+        on_bus = {udid.lower() for udid, _ in preflight.list_connected_devices_with_transport()}
+        for p in plans:
+            for t in p.targets:
+                t.connected = t.udid.lower() in on_bus
     for p in plans:
         p.targets = _order(cfg, p.targets)
 
@@ -522,7 +684,8 @@ def _no_target_reason(app: AppConfig, found: AppDeliveries) -> str:
 
 def payload(plans: list[AppPlan], *, quick: bool) -> dict[str, Any]:
     """`update-plan`'s fields."""
-    return {"quick": quick, "apps": [_app_payload(p) for p in plans]}
+    return {"quick": quick, "checks_failed": checks_failed(plans),
+            "apps": [_app_payload(p) for p in plans]}
 
 
 def _app_payload(p: AppPlan) -> dict[str, Any]:
@@ -533,9 +696,17 @@ def _app_payload(p: AppPlan) -> dict[str, Any]:
                   "skipped_reason": p.store.skipped_reason},
         "tweaks": [
             {"filename": c.filename, "name": c.name, "from": c.from_version, "to": c.to_version,
-             "unchecked": c.unchecked, "also_affects": list(c.also_affects)}
+             "unchecked": c.unchecked, "also_affects": list(c.also_affects),
+             # Where it comes from, and whether it runs without the person's
+             # OK: `verified`, or `confirmed` by `--trust-tweak` (2.3.1 A1).
+             "source": c.source, "verified": c.verified,
+             "unverified_reason": c.unverified_reason, "confirmed": c.confirmed,
+             # What `--trust-tweak` takes to confirm exactly this update, and
+             # whether a key given for it is for an update it no longer is.
+             "confirm_key": c.confirm_key, "trust_changed": c.trust_changed}
             for c in p.tweaks
         ],
+        "needs_confirmation": p.needs_confirmation,
         "install": p.install,
         "install_skipped_reason": p.install_skipped_reason,
         "manual_install": p.manual_install,
@@ -557,6 +728,9 @@ def _target_payload(t: TargetPlan) -> dict[str, Any]:
         "install": t.install,
         "install_skipped_reason": t.install_skipped_reason,
         "manual_install": t.manual_install,
+        # The device's own facts, for every target (`TargetPlan.connected`).
+        "kind": t.kind,
+        "connected": t.connected,
         "waiting": t.waiting,
         "blocked_reason": t.blocked_reason,
         "readiness": t.readiness,
@@ -576,8 +750,16 @@ def describe(p: AppPlan) -> str:
         parts.append(p.store.skipped_reason)
     for c in p.tweaks:
         label = c.name or c.filename
-        parts.append(f"{label} couldn't be checked" if c.unchecked
-                     else f"{label} {c.from_version or '?'} → {c.to_version}")
+        if c.unchecked:
+            parts.append(f"{label} couldn't be checked")
+        elif c.trust_changed:
+            parts.append(f"{label} changed since you confirmed it: it's now {c.to_version} from "
+                         f"{c.source}: --trust-tweak {c.confirm_key}, if you trust it")
+        elif c.awaiting_confirmation:
+            parts.append(f"{label} {c.from_version or '?'} → {c.to_version} needs your OK "
+                         f"({c.unverified_reason}): --trust-tweak {c.confirm_key}")
+        else:
+            parts.append(f"{label} {c.from_version or '?'} → {c.to_version}")
         if c.also_affects:
             parts.append(f"also used by {', '.join(c.also_affects)}: it will need an install afterward")
     if p.install:

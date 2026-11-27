@@ -115,6 +115,62 @@ def test_check_without_app_checks_every_app(config: Path, store: None) -> None:
     assert sorted(e["app"] for e in _events(result)) == ["bravo", "example"]
 
 
+@pytest.fixture
+def no_keychain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check reads files only: any keychain question fails the test."""
+    from graft_ipa import keychain
+
+    def asked(*_a, **_k):
+        raise AssertionError("--appstore-check asked the keychain")
+
+    monkeypatch.setattr(keychain, "find_item", asked)
+    monkeypatch.setattr(keychain, "login_keychain_locked", asked)
+
+
+def _setup_missing(result) -> list[str | None]:
+    assert result.exit_code == 0, result.output
+    return [e["setup_missing"] for e in _events(result)]
+
+
+def test_check_says_the_app_store_is_set_up(config: Path, store: None, fakes: FakeTools,
+                                            no_keychain: None) -> None:
+    """B5: the app pane reads this as it appears, so Get latest waits before
+    the setup without a status read: no keychain, no ipatool."""
+    assert _setup_missing(_run(["--json", "--appstore-check", "--app", "example"])) == [None]
+    assert fakes.calls("ipatool") == [], "no ipatool run"
+
+
+def test_check_says_decryption_isnt_set_up(config: Path, store: None, fakes: FakeTools,
+                                           no_keychain: None) -> None:
+    (fakes.models / "enrollment.bin").unlink()
+
+    assert _setup_missing(_run(["--json", "--appstore-check", "--app", "example"])) == [
+        appstore.DECRYPTION_NOT_SET_UP]
+
+
+def test_check_says_graft_s_ipatool_isnt_signed_in(config: Path, store: None, fakes: FakeTools,
+                                                   no_keychain: None,
+                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    from graft_ipa import ipatool, tools
+
+    monkeypatch.setattr(ipatool, "source_of", lambda configured, *, explicit: tools.SOURCE_BUNDLED)
+
+    assert _setup_missing(_run(["--json", "--appstore-check", "--app", "example"])) == [
+        appstore.NOT_SIGNED_IN]
+    assert fakes.calls("ipatool") == []
+
+
+def test_check_on_intel_says_no_setup_is_missing(config: Path, store: None, fakes: FakeTools,
+                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    """No setup lets an Intel Mac get: its own reason is the one to show."""
+    from graft_ipa import host
+
+    (fakes.models / "enrollment.bin").unlink()
+    monkeypatch.setattr(host, "apple_silicon_blocker", lambda: host.INTEL_MAC)
+
+    assert _setup_missing(_run(["--json", "--appstore-check", "--app", "example"])) == [None]
+
+
 def test_a_stray_flag_on_check_is_named(config: Path) -> None:
     result = _run(["--appstore-check", "--allow-unverified"])
 

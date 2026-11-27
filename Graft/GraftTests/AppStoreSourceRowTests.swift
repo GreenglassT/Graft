@@ -19,6 +19,16 @@ final class AppStoreSourceRowTests: XCTestCase {
         )
     }
 
+    /// B5: the row says why Get waits before the App Store is set up, with
+    /// Open Settings; without Apple silicon its own line says why instead.
+    func test_before_setup_the_row_says_where_to_set_it_up() {
+        XCTAssertEqual(AppStoreSourceRow.setUpLine(AppStoreStore.setUpFirst, unavailable: nil),
+                       AppStoreStore.setUpFirst)
+        XCTAssertNil(AppStoreSourceRow.setUpLine(nil, unavailable: nil))
+        XCTAssertNil(AppStoreSourceRow.setUpLine(AppStoreStore.setUpFirst, unavailable: MacSupport.needsAppleSilicon))
+        XCTAssertEqual(AppStoreStore.setUpFirst, "Set up the App Store in Settings › App Store first.")
+    }
+
     func test_not_asked_yet() {
         XCTAssertEqual(AppStoreSourceRow.versionLine(nil), "Checking the App Store…")
     }

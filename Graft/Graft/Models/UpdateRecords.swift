@@ -6,7 +6,27 @@ struct UpdatePlanRecord: Decodable, Equatable {
     /// The background form (`--quick`): readiness is "likely", from what the
     /// last full look at the phone said.
     let quick: Bool
+    /// It asked the App Store and canister.me and neither answered, as when
+    /// offline (`update_plan.checks_failed`): every app reads up to date and
+    /// isn't known to be, so `AppUpdatesStore` keeps what it showed. False
+    /// from a CLI too old to say.
+    var checksFailed = false
     let apps: [UpdatePlanApp]
+}
+
+extension UpdatePlanRecord {
+    enum CodingKeys: String, CodingKey {
+        case quick, apps
+        case checksFailed = "checks_failed"
+    }
+
+    /// In an extension, so the memberwise initializer stays.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        quick = try c.decode(Bool.self, forKey: .quick)
+        checksFailed = try c.decodeIfPresent(Bool.self, forKey: .checksFailed) ?? false
+        apps = try c.decode([UpdatePlanApp].self, forKey: .apps)
+    }
 }
 
 /// One app's plan.
@@ -58,6 +78,13 @@ struct UpdatePlanApp: Decodable, Equatable, Identifiable {
     /// One attached tweak with a newer build (`to`), or that couldn't be
     /// checked (`unchecked`). `alsoAffects` names the apps outside this run
     /// that use it and will need an install afterward.
+    ///
+    /// `source`: where the newer build comes from, the tweak's own source
+    /// (2.3.1 A1). `verified`: that source is known, uses HTTPS and
+    /// publishes a checksum for it; `unverifiedReason` says why not.
+    /// `confirmed`: verified, or the person said yes (`--trust-tweak`); only
+    /// a confirmed one is part of an update. Each is false or nil when the
+    /// CLI leaves it out: what's missing never reads as trust.
     struct TweakChange: Decodable, Equatable, Identifiable {
         let filename: String
         let name: String?
@@ -65,12 +92,28 @@ struct UpdatePlanApp: Decodable, Equatable, Identifiable {
         let to: String?
         let unchecked: Bool
         let alsoAffects: [String]
+        var source: String? = nil
+        var verified = false
+        var unverifiedReason: String? = nil
+        var confirmed = false
+        /// What `--trust-tweak` takes to confirm exactly this update (its
+        /// file, source, version and builds, re-verify #2): the person's
+        /// yes is for this key, and the run refuses one that changed.
+        var confirmKey: String? = nil
+        /// A key the run was given for it is for another update of it.
+        var trustChanged = false
 
         var id: String { filename }
 
+        /// A newer build that runs only once the person confirms it.
+        var awaitsConfirmation: Bool { !unchecked && to != nil && !confirmed }
+
         enum CodingKeys: String, CodingKey {
-            case filename, name, from, to, unchecked
+            case filename, name, from, to, unchecked, source, verified, confirmed
             case alsoAffects = "also_affects"
+            case unverifiedReason = "unverified_reason"
+            case confirmKey = "confirm_key"
+            case trustChanged = "trust_changed"
         }
     }
 
@@ -95,12 +138,20 @@ struct UpdatePlanApp: Decodable, Equatable, Identifiable {
         let readinessNote: String?
 
         var id: String { udid }
+        /// Its delivery state ("never", "stale", "current", "unknown") and
+        /// whether its device was on usbmux, for every target: the device's
+        /// own facts, which `install` and `waiting` aren't alone, being worked
+        /// out only for a target with work (`AppUpdatesStore.merged`). Nil
+        /// from a CLI too old to send them.
+        var kind: String? = nil
+        var connected: Bool? = nil
+
         /// Neither waiting nor blocked: an install can go here now.
         var isReady: Bool { waiting == nil && blockedReason == nil }
         var deliversToLiveContainer: Bool { delivery == DeliveryMode.livecontainer.rawValue }
 
         enum CodingKeys: String, CodingKey {
-            case udid, delivery, install, waiting, readiness
+            case udid, delivery, install, waiting, readiness, kind, connected
             case deviceName = "device_name"
             case lcBundleId = "lc_bundle_id"
             case installSkippedReason = "install_skipped_reason"
@@ -122,8 +173,16 @@ struct UpdatePlanApp: Decodable, Equatable, Identifiable {
 
     /// A get from the App Store is planned.
     var getsFromStore: Bool { store.to != nil && store.skippedReason == nil }
-    /// The tweaks with a newer build to update to.
-    var tweakUpdates: [TweakChange] { tweaks.filter { !$0.unchecked && $0.to != nil } }
+    /// The tweaks with a newer build to update to, from a source that's
+    /// verified or that the person confirmed.
+    var tweakUpdates: [TweakChange] { tweaks.filter { !$0.unchecked && $0.to != nil && $0.confirmed } }
+    /// The tweaks with a newer build from a source that isn't verified, which
+    /// the confirmation asks about ("Trust this source"), off until asked.
+    var unconfirmedTweaks: [TweakChange] { tweaks.filter(\.awaitsConfirmation) }
+    /// A tweak update waits for the person's OK: shown on the pane and in
+    /// the confirmation, but not on its own an update (no mark, not in
+    /// Update All).
+    var needsConfirmation: Bool { !unconfirmedTweaks.isEmpty }
     /// The get or a tweak update changes the build, so every device needs
     /// the install.
     var changesBuild: Bool { getsFromStore || !tweakUpdates.isEmpty }
@@ -141,7 +200,8 @@ struct UpdatePlanApp: Decodable, Equatable, Identifiable {
     /// & Install's, not Update's, and an install only offered
     /// (`manualInstall`) is the person's to press.
     var hasUpdate: Bool {
-        !nothingToDo && (changesBuild ? !targets.isEmpty : targets.contains { $0.install || !$0.isReady })
+        (!nothingToDo && (changesBuild ? !targets.isEmpty : targets.contains { $0.install || !$0.isReady }))
+            || (needsConfirmation && !targets.isEmpty && installSkippedReason == nil)
     }
     /// Something Update would do now, on its own, on a device that's there:
     /// the sidebar's mark, Update All's count, and what the confirmation
@@ -178,6 +238,26 @@ struct UpdateStepRecord: Decodable, Equatable {
     enum CodingKeys: String, CodingKey {
         case app, step, status, detail, udid, waiting
         case deviceName = "device_name"
+    }
+}
+
+extension UpdatePlanApp.TweakChange {
+    /// The trust fields may be missing, and read as untrusted. In an
+    /// extension, so the memberwise initializer stays.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        filename = try c.decode(String.self, forKey: .filename)
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        from = try c.decodeIfPresent(String.self, forKey: .from)
+        to = try c.decodeIfPresent(String.self, forKey: .to)
+        unchecked = try c.decode(Bool.self, forKey: .unchecked)
+        alsoAffects = try c.decode([String].self, forKey: .alsoAffects)
+        source = try c.decodeIfPresent(String.self, forKey: .source)
+        verified = try c.decodeIfPresent(Bool.self, forKey: .verified) ?? false
+        unverifiedReason = try c.decodeIfPresent(String.self, forKey: .unverifiedReason)
+        confirmed = try c.decodeIfPresent(Bool.self, forKey: .confirmed) ?? false
+        confirmKey = try c.decodeIfPresent(String.self, forKey: .confirmKey)
+        trustChanged = try c.decodeIfPresent(Bool.self, forKey: .trustChanged) ?? false
     }
 }
 

@@ -65,6 +65,11 @@ struct AppStoreSourceRow: View {
     var getBlockedReason: String? = nil
     /// Get an older version… pressed: the pane opens the sheet.
     var onOlderVersions: () -> Void = {}
+    /// Why no get can run until the App Store is set up
+    /// (`AppStoreStore.setUpReason`), which the row says with Open Settings.
+    var setUpReason: String? = nil
+    /// Open Settings, for that line.
+    var onOpenSettings: () -> Void = {}
 
     /// Get Again's confirmation is up.
     @State private var confirmingGetAgain = false
@@ -188,7 +193,25 @@ struct AppStoreSourceRow: View {
                     .foregroundStyle(Palette.textDim)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            // B5: what Get waits for, in words, not only on a disabled
+            // button's tooltip.
+            if !isGetting, let line = Self.setUpLine(setUpReason, unavailable: mac.unavailableLine) {
+                HStack(spacing: Metrics.controlGap) {
+                    Text(line)
+                        .font(AppFont.monoSmall)
+                        .foregroundStyle(Palette.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Open Settings", action: onOpenSettings)
+                        .controlSize(.small)
+                }
+            }
         }
+    }
+
+    /// The line the row shows before the App Store is set up (B5), with Open
+    /// Settings, or nil. Without Apple silicon its own line says why instead.
+    static func setUpLine(_ reason: String?, unavailable: String?) -> String? {
+        unavailable == nil ? reason : nil
     }
 
     private var getBlocked: String? {

@@ -69,7 +69,7 @@ struct CanisterView: View {
                 // announces the column by it on every row.
                 TableColumn("Fetch") { pkg in
                     Button("Fetch") {
-                        Task { await runFetch(pkg.packageId) }
+                        Task { await runFetch(pkg) }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -104,9 +104,11 @@ struct CanisterView: View {
         }
     }
 
-    private func runFetch(_ packageId: String) async {
+    /// From the result's own repository: the build shown, never another
+    /// repository's higher version of the same id.
+    private func runFetch(_ pkg: CanisterPackage) async {
         do {
-            try await store.fetch(packageId)
+            try await store.fetch(pkg.packageId, repository: pkg.repositoryId)
         } catch {
             store.lastError = error.localizedDescription
         }

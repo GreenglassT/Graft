@@ -35,14 +35,28 @@ from __future__ import annotations
 
 import contextlib
 import signal
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import appstore, ipatool, update_plan, update_readiness, update_refusals, update_tweaks
+from . import (
+    appstore,
+    ipatool,
+    tweak_sources,
+    update_plan,
+    update_readiness,
+    update_refusals,
+    update_tweaks,
+)
 from .config import Config, load_config
-from .errors import AppStoreError, DeviceNotConnectedError, NoDeviceConnectedError, Stopped
+from .errors import (
+    AppStoreError,
+    DeviceNotConnectedError,
+    NoDeviceConnectedError,
+    Stopped,
+    presented,
+)
 from .json_output import JsonEmitter
 from .stop_deferral import StopGate
 from .update_plan import STEP_BUILD, STEP_GET, STEP_INSTALL, STEP_TWEAKS, AppPlan, TargetPlan
@@ -89,9 +103,52 @@ class Built:
     #: Mode off there (`cli._refusing_for_the_device`). The app's next device
     #: can still build.
     target_refused: bool = False
+    #: The device the next install goes to (`expecting`): how to ask whether
+    #: it's on usbmux now, and the sentence it waits with.
+    connected: Callable[[], bool] | None = None
+    waiting_sentence: str | None = None
+    #: That device's answer, once asked (`gone`).
+    _gone: bool | None = field(default=None, init=False, repr=False)
 
     def archived(self, path: Path | None, inputs: Any, version: str) -> None:
         self.archive, self.inputs, self.version = path, inputs, version
+
+    def expecting(self, connected: Callable[[], bool], sentence: str) -> None:
+        """The install that comes next is to the device `connected` asks
+        about, which waits with `sentence`: the build's own, then each later
+        one's (`_run_app`)."""
+        self.connected, self.waiting_sentence, self._gone = connected, sentence, None
+
+    def gone(self) -> bool:
+        """Whether that device isn't connected now. Asked once per install,
+        so the install's own `build-end` (`waits`, `install_waits`) and
+        `_run_app` read the same answer, and can't tell two stories."""
+        if self._gone is None:
+            self._gone = self.connected is not None and not self.connected()
+        return self._gone
+
+    def waits(self, exc: BaseException | None) -> str | None:
+        """The sentence the build's device waits with, when the build failing
+        with `exc` leaves it waiting rather than failed; else None. As
+        `_run_app` reads the same failure: unplugged before anything was
+        built (the build's own `DeviceNotConnectedError`), or gone once the
+        archive was made and before its install was done (T2-B7)."""
+        if exc is None or self.installed:
+            return None
+        if self.archive is None:
+            unplugged = isinstance(exc, (DeviceNotConnectedError, NoDeviceConnectedError))
+            return self.waiting_sentence if unplugged and not self.install_started else None
+        return self.waiting_sentence if self.gone() else None
+
+    def install_waits(self, exc: BaseException | None) -> str | None:
+        """`waits`, for a later device's install (`cli._do_update_install`):
+        not connected when it was looked for, or gone by the time it
+        failed."""
+        if exc is None:
+            return None
+        if isinstance(exc, (DeviceNotConnectedError, NoDeviceConnectedError)) or self.gone():
+            return self.waiting_sentence
+        return None
 
     def installing(self) -> None:
         if self.install_started:
@@ -133,15 +190,18 @@ def emit_plan(plans: list[AppPlan], *, quick: bool, emitter: JsonEmitter | None,
 
 
 def _plan(cfg: Config, names: list[str], *, quick: bool, with_affected: bool, probe,
-          pipeline: Pipeline) -> list[AppPlan]:
+          pipeline: Pipeline, trusted: Mapping[str, str] | None = None) -> list[AppPlan]:
     return update_plan.plan(cfg, names, quick=quick, with_affected=with_affected, probe=probe,
-                            tweak_records=pipeline.tweak_records, delivery=pipeline.delivery(cfg))
+                            tweak_records=pipeline.tweak_records, delivery=pipeline.delivery(cfg),
+                            trusted=trusted)
 
 
 def show_plan(cfg: Config, names: list[str], *, quick: bool, with_affected: bool, probe,
-              pipeline: Pipeline, emitter: JsonEmitter | None) -> None:
+              pipeline: Pipeline, emitter: JsonEmitter | None,
+              trusted: Mapping[str, str] | None = None) -> None:
     """`--update --plan`: what would change, and nothing changed."""
-    plans = _plan(cfg, names, quick=quick, with_affected=with_affected, probe=probe, pipeline=pipeline)
+    plans = _plan(cfg, names, quick=quick, with_affected=with_affected, probe=probe, pipeline=pipeline,
+                  trusted=trusted)
     emit_plan(plans, quick=quick, emitter=emitter, say=pipeline.say)
 
 
@@ -244,9 +304,13 @@ class _Run:
             extra: dict[str, Any] = {"waiting": waiting} if step == STEP_INSTALL else {}
             self.emitter.emit("update-step", app=app, step=step, status=status, detail=detail,
                               udid=udid, device_name=name, **extra)
+        elif status == START and app is None:
+            # The shared tweak step, named once as the app's sheet names it:
+            # "→ tweaks: 1 tweak" (`AppUpdateText.logLines`).
+            self.say(f"→ {step}" + (f": {detail}" if detail else ""))
         elif status == START:
             where = f" on {target.label}" if target is not None else ""
-            self.say(f"→ {app or 'every app'}: {step}{where}" + (f" {detail}" if detail else ""))
+            self.say(f"→ {app}: {step}{where}" + (f" {detail}" if detail else ""))
         elif status == SKIPPED and target is not None and detail != UP_TO_DATE:
             self.say(f"  {app}: not installing on {target.label}: {detail}")
 
@@ -317,7 +381,9 @@ def _stops_held() -> Iterator[None]:
 
 
 def _message(e: BaseException) -> str:
-    return str(e) or type(e).__name__
+    # A full disk, said as one, whichever step met it (`errors.presented`,
+    # the 2.3.1 review's T2-B6).
+    return str(presented(e)) or type(e).__name__
 
 
 def _announcer(emitter: JsonEmitter | None, pipeline: Pipeline) -> Callable[[str | None, str], None]:
@@ -358,12 +424,21 @@ def _update_tweaks(cfg: Config, state: _Run, *, gate: StopGate, pipeline: Pipeli
     for filename in sorted(todo):
         try:
             update_tweaks.update(cfg, todo[filename].status, users.get(filename, []), gate=gate,
-                                 emitter=state.emitter, on_done=lambda _done, f=filename: applied(f))
+                                 emitter=state.emitter, on_done=lambda _done, f=filename: applied(f),
+                                 trusted=todo[filename].trusted)
         except Exception as e:  # one tweak's failure is that tweak's, not the run's
             failures[filename] = _message(e)
             pipeline.warn(f"couldn't update {filename}: {_message(e)}")
     state.step(None, STEP_TWEAKS, END, f"{len(failures)} couldn't be updated" if failures else None)
     return failures
+
+
+def _trust_changed_error(p: AppPlan) -> str:
+    return "; ".join(
+        tweak_sources.TRUST_CHANGED.format(filename=t.name or t.filename, version=t.to_version,
+                                           source=t.source)
+        for t in p.trust_changed
+    ) + ". Look at it again, and confirm it if you trust it"
 
 
 def _get(cfg: Config, plan: AppPlan, *, emitter: JsonEmitter | None, pipeline: Pipeline) -> str:
@@ -493,6 +568,8 @@ def _run_app(cfg: Config, item: _Progress, failures: dict[str, str], *, state: _
         first, rest = candidates[0], candidates[1:]
         built = Built(on_install=lambda first=first: state.step(p.app, STEP_INSTALL, START, target=first),
                       also_for=[t.udid for t in rest])
+        built.expecting(lambda first=first: _connected(cfg, p.app, first),
+                        update_readiness.WAITING.format(device=first.label))
         error: str | None = None
         try:
             if not _connected(cfg, p.app, first):
@@ -548,10 +625,11 @@ def _run_app(cfg: Config, item: _Progress, failures: dict[str, str], *, state: _
     if built.installed:
         item.results[first.udid] = _FINE
         state.step(p.app, STEP_INSTALL, END, None, target=first)
-    elif not _connected(cfg, p.app, first):
+    elif built.gone():
         # Unplugged after the build found it (during the pre-flight, cyan or
         # zsign, or the push itself), so stage 5 failed: it waits, as it would
-        # have before the build (final review 3 #2b).
+        # have before the build (final review 3 #2b). The answer the build's
+        # own `build-end` was given (`Built.waits`).
         _now_waiting(p.app, first, item=item, state=state, started=True)
     else:
         item.results[first.udid] = _not_done(error or "the install didn't finish")
@@ -567,6 +645,8 @@ def _run_app(cfg: Config, item: _Progress, failures: dict[str, str], *, state: _
             _now_waiting(p.app, t, item=item, state=state)
             continue
         state.step(p.app, STEP_INSTALL, START, target=t)
+        built.expecting(lambda t=t: _connected(cfg, p.app, t),
+                        update_readiness.WAITING.format(device=t.label))
         try:
             pipeline.install(cfg=cfg, app_name=p.app, device=t.udid, built=built, emitter=state.emitter)
         except (DeviceNotConnectedError, NoDeviceConnectedError):
@@ -574,7 +654,7 @@ def _run_app(cfg: Config, item: _Progress, failures: dict[str, str], *, state: _
             _now_waiting(p.app, t, item=item, state=state, started=True)
             continue
         except Exception as e:  # this target failed; the next one still installs
-            if not _connected(cfg, p.app, t):
+            if built.gone():
                 # Unplugged during its push or install: it waits too.
                 _now_waiting(p.app, t, item=item, state=state, started=True)
                 continue
@@ -608,15 +688,17 @@ def _work(cfg: Config, state: _Run, *, gate: StopGate, pipeline: Pipeline) -> No
 
 
 def run(cfg: Config, names: list[str], *, all_apps: bool, with_affected: bool, probe,
-        pipeline: Pipeline, emitter: JsonEmitter | None) -> int:
+        pipeline: Pipeline, emitter: JsonEmitter | None, trusted: Mapping[str, str] | None = None) -> int:
     """`--update` without `--plan`. Returns the exit status: 0 when every app
-    it covered was updated, 1 otherwise. A Stop raises `Stopped`."""
+    it covered was updated, 1 otherwise. A Stop raises `Stopped`. A tweak
+    update that isn't verified runs only when `trusted` names it
+    (`--trust-tweak`): without that, it isn't part of the run."""
     state = _Run(emitter=emitter, say=pipeline.say if emitter is None else _quiet)
     gate = StopGate(_announcer(emitter, pipeline))
     with gate.installed():
         try:
             plans = _plan(cfg, names, quick=False, with_affected=with_affected, probe=probe,
-                          pipeline=pipeline)
+                          pipeline=pipeline, trusted=trusted)
         except Stopped:
             with _stops_held():
                 state.end(stopped=True)
@@ -630,7 +712,14 @@ def run(cfg: Config, names: list[str], *, all_apps: bool, with_affected: bool, p
                 emit_plan(plans, quick=False, emitter=emitter, say=pipeline.say)
                 # `--all` leaves out an app whose only work is waiting for its
                 # devices, as Update All (N) does: not a failure, and not an update.
-                covered = [p for p in plans if not p.nothing_to_do
+                # A tweak update the person confirmed that has changed since
+                # (re-verify #2): their yes was for something else, so nothing
+                # of that app runs, and it says why.
+                changed = [p for p in plans if p.trust_changed]
+                for p in changed:
+                    state.app_end(_Progress(p), ok=False, stopped=False, error=_trust_changed_error(p),
+                                  bucket=state.failed)
+                covered = [p for p in plans if not p.nothing_to_do and not p.trust_changed
                            and (not all_apps or (p.has_update and not p.waiting_only))]
                 state.waiting = sum(1 for p in plans for t in p.targets if t.waiting)
                 for p in covered:

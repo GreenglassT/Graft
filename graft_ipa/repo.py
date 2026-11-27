@@ -177,16 +177,24 @@ def _to_repo_package(fields: dict[str, str]) -> RepoPackage | None:
     )
 
 
-def parse_packages(text: str) -> list[RepoPackage]:
-    """Parse a Packages index into RepoPackages, deduped to the highest version."""
+def iter_packages(text: str) -> list[RepoPackage]:
+    """Every stanza of a Packages index, in its order: every version, every
+    architecture. `updates.repo_offers` needs them all, for the hashes."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    by_id: dict[str, RepoPackage] = {}
+    out: list[RepoPackage] = []
     for block in re.split(r"\n\n+", text):
         if not block.strip():
             continue
         pkg = _to_repo_package(_parse_stanza(block))
-        if pkg is None:
-            continue
+        if pkg is not None:
+            out.append(pkg)
+    return out
+
+
+def parse_packages(text: str) -> list[RepoPackage]:
+    """Parse a Packages index into RepoPackages, deduped to the highest version."""
+    by_id: dict[str, RepoPackage] = {}
+    for pkg in iter_packages(text):
         existing = by_id.get(pkg.package_id)
         if existing is None or _version_key(pkg.version) > _version_key(existing.version):
             by_id[pkg.package_id] = pkg

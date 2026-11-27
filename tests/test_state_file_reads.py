@@ -7,7 +7,9 @@ raises. Each is a memory, and a memory that can't be read is none.
 - `update-refusals.json` (`update_refusals`), which every daily
   `--update --plan --quick` reads;
 - `update-dropped-targets.json` (`update_drops`), which every plan reads;
-- `playcover-settings.json` (`playcover_handoff`).
+- `playcover-settings.json` (`playcover_handoff`);
+- `needs-macos.json` (`app_update.MACOS_NOTE`), in Graft's update cache,
+  which every `--check-update` reads (the 2.3.1 review's A4).
 """
 
 from __future__ import annotations
@@ -20,12 +22,14 @@ from pathlib import Path
 
 import pytest
 
-from graft_ipa import playcover_handoff, update_drops, update_refusals
+from graft_ipa import app_update, playcover_handoff, update_drops, update_refusals
 from graft_ipa.config import AppConfig, CyanOptions
 
 APP = AppConfig(name="example", bundle_id="com.example.app", preferred_version="latest",
                 tweaks=[], cyan=CyanOptions())
 PHONE = "00008130-FAKE00000000PHONE1"
+#: The zip a macOS note is about.
+ZIP_SHA = "ab" * 32
 
 
 class Memory:
@@ -47,6 +51,9 @@ MEMORIES = {
     "playcover": Memory(playcover_handoff.MEMORY_FILE,
                         {"format": 1, "apps": {"com.example.app": {"keymapping": True}}},
                         lambda state: playcover_handoff.remembered(state, "com.example.app")),
+    "macos-note": Memory(app_update.MACOS_NOTE,
+                         {"version": "2.0.2", "sha256": ZIP_SHA, "minimum": "15.0"},
+                         lambda root: app_update._noted_minimum(root, version="2.0.2", sha256=ZIP_SHA)),
 }
 
 

@@ -211,11 +211,25 @@ def test_not_signed_in_hints_the_login_command(fakes: FakeTools, tmp_path: Path)
     assert "Settings › App Store" in err.hint
 
 
-def test_an_expired_token_hints_the_login_command_too(fakes: FakeTools, tmp_path: Path) -> None:
+def test_an_expired_token_says_to_sign_in_again(fakes: FakeTools, tmp_path: Path) -> None:
+    """Settings still shows it signed in, with Sign In Again… (`auth info`
+    reads only the keychain), so "not signed in", and a first sign-in's
+    component download, was the wrong advice (the 2.3.1 review's T2-A2)."""
     err = _download_error(fakes, tmp_path, "password token is expired")
 
-    assert err.message.startswith("ipatool is not signed in")
-    assert ipatool.LOGIN_COMMAND in err.hint
+    assert err.message == (
+        "ipatool's App Store sign-in has expired (ipatool: password token is expired)"
+    )
+    assert err.hint == ipatool.RENEW_HINT
+    assert "Sign In Again…" in err.hint and ipatool.LOGIN_COMMAND in err.hint
+
+
+def test_an_expired_token_on_a_purchase_says_to_sign_in_again_too() -> None:
+    err = ipatool.explain_purchase("password token is expired", bundle_id="com.example.app",
+                                   path=Path("/nonexistent/ipatool"))
+
+    assert err.message.startswith("ipatool's App Store sign-in has expired")
+    assert err.hint == ipatool.RENEW_HINT
 
 
 def test_not_owned_says_to_tap_get_on_a_device(fakes: FakeTools, tmp_path: Path) -> None:

@@ -19,15 +19,15 @@ from graft_ipa.errors import GraftError
 from graft_ipa.ipa_cache import staged_name
 
 from .appstore_fakes import make_ipa
-from .update_fakes import DEVELOPMENT, PHONE, emitter, events, pipeline, plan_of
+from .update_fakes import DEVELOPMENT, PHONE, confirm_keys, emitter, events, new_name, pipeline, plan_of
 
 
-def _run(world, names, *, all_apps=False, with_affected=False):
+def _run(world, names, *, all_apps=False, with_affected=False, trusted=None):
     em, out = emitter()
     cfg = world.cfg
     code = update_run.run(cfg, names, all_apps=all_apps, with_affected=with_affected,
                           probe=update_readiness.FullProbe(cfg.state_dir),
-                          pipeline=pipeline(world, em), emitter=em)
+                          pipeline=pipeline(world, em), emitter=em, trusted=trusted or {})
     return code, events(out.getvalue())
 
 
@@ -76,7 +76,7 @@ def test_tweaks_are_updated_once_before_any_build(world) -> None:
     first_build = _index(evs, type="update-step", step="build", status="start")
     assert tweaks_end < first_build
     assert [c[0] for c in world.build.calls] == ["example", "bravo"], "one app at a time, in order"
-    assert [c[2][0] for c in world.build.calls] == ["atweak-tweak_1.1.deb"] * 2, "built re-pointed"
+    assert [c[2][0] for c in world.build.calls] == [new_name("com.example.atweak", "1.1")] * 2, "built re-pointed"
 
 
 def test_one_app_ends_before_the_next_starts(world) -> None:
@@ -276,7 +276,7 @@ def test_a_failed_tweak_update_resumes_at_the_tweak(world) -> None:
 
     assert code == 0
     assert _of(evs, "update-app-end")[0]["done"] == ["tweaks", "build"]
-    assert [c[2][0] for c in world.build.calls] == ["atweak-tweak_1.1.deb"]
+    assert [c[2][0] for c in world.build.calls] == [new_name("com.example.atweak", "1.1")]
 
 
 def test_a_failed_get_resumes_at_the_get(world) -> None:
@@ -349,3 +349,131 @@ def test_nothing_is_claimed_or_bought(world, monkeypatch, refused: bool) -> None
     argvs = [c["argv"] for c in world.tools.calls("ipatool")]
     assert argvs, "the get did run ipatool"
     assert not [a for a in argvs if a[:1] == ["purchase"] or "--purchase" in a]
+
+
+# --- 2.3.1 A1: an unverified tweak update needs the person's OK ------------------
+
+
+@pytest.mark.parametrize("all_apps", [False, True])
+def test_an_unverified_tweak_is_never_updated_without_the_person_s_ok(world, all_apps) -> None:
+    world.published["com.example.atweak"] = "1.1"
+    world.serve_insecure("com.example.atweak")
+    before = world.cfg_path.read_text()
+
+    code, evs = _run(world, [] if all_apps else ["example", "bravo"], all_apps=all_apps)
+
+    assert code == 0
+    assert world.fetches == [], "nothing downloaded"
+    assert world.cfg_path.read_text() == before, "no app re-pointed"
+    assert _of(evs, "update-app-end") == [], "nothing else to do, so neither app is run"
+    assert world.build.calls == []
+
+
+def test_with_the_person_s_ok_it_is_updated(world) -> None:
+    from graft_ipa import tweak_sources
+
+    world.published["com.example.atweak"] = "1.1"
+    world.serve_insecure("com.example.atweak")
+
+    code, evs = _run(world, ["example"], trusted=confirm_keys(world, ["example"]))
+
+    assert code == 0
+    new = new_name("com.example.atweak", "1.1")
+    assert [c[2][0] for c in world.build.calls] == [new]
+    cfg = world.cfg
+    recorded = tweak_sources.recorded_for(cfg.state_dir, new, tweak_sources.file_sha256(cfg.tweaks_dir / new))
+    assert recorded is not None and recorded.url.startswith("http://")
+
+
+def test_trust_tweak_reaches_the_run_through_the_cli(world) -> None:
+    world.published["com.example.atweak"] = "1.1"
+    world.serve_insecure("com.example.atweak")
+
+    key = confirm_keys(world, ["example"])["a-tweak.deb"]
+    result = CliRunner().invoke(cli_mod.app, ["--json", "--update", "example", "--plan",
+                                              "--trust-tweak", key])
+
+    assert result.exit_code == 0, result.output
+    (plan,) = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
+    (tweak,) = plan["apps"][0]["tweaks"]
+    assert tweak["confirmed"] is True and plan["apps"][0]["actionable"] is True
+
+
+def test_trust_tweak_takes_the_plan_s_confirm_key_not_a_filename(world) -> None:
+    """A bare filename trusted whatever that file's update turned into by
+    the time the run planned it (re-verify #2)."""
+    result = CliRunner().invoke(cli_mod.app, ["--update", "example", "--plan", "--trust-tweak", "a-tweak.deb"])
+
+    assert result.exit_code == 2
+    assert "confirm_key" in result.output
+
+
+def test_trust_tweak_must_name_a_library_tweak(world) -> None:
+    """A typo would otherwise trust nothing, without a word."""
+    result = CliRunner().invoke(cli_mod.app, ["--update", "example", "--plan",
+                                              "--trust-tweak", "nope.deb@" + "0" * 64])
+
+    assert result.exit_code == 15
+    assert "nope.deb" in result.output
+
+
+def test_an_update_that_changed_since_its_ok_is_refused_and_nothing_runs(world) -> None:
+    """The re-verify's probe: the confirmation showed 1.1; by the run, the
+    same tweak's update was 9.9. The person's yes was for 1.1, so the app
+    fails, and nothing is downloaded, re-pointed or built for it."""
+    world.published["com.example.atweak"] = "1.1"
+    world.serve_insecure("com.example.atweak")
+    keys = confirm_keys(world, ["example"])
+    world.published["com.example.atweak"] = "9.9"
+    before = world.cfg_path.read_text()
+
+    code, evs = _run(world, ["example"], trusted=keys)
+
+    assert code == 1
+    assert world.fetches == [] and world.build.calls == []
+    assert world.cfg_path.read_text() == before
+    (end,) = _of(evs, "update-app-end")
+    assert end["ok"] is False and end["app"] == "example"
+    assert "changed since you confirmed it" in end["error"] and "9.9" in end["error"]
+    assert _of(evs, "update-end")[0]["failed"] == ["example"]
+
+
+def test_a_changed_ok_holds_back_only_the_apps_that_use_that_tweak(world) -> None:
+    """b-tweak.deb is bravo's alone: example's App Store update still runs."""
+    world.published["com.example.btweak"] = "2.1"
+    world.serve_insecure("com.example.btweak")
+    keys = confirm_keys(world, ["bravo"])
+    world.published["com.example.btweak"] = "9.9"
+    world.store["com.example.app"] = "2.0"
+    world.offer_get("2.0")
+
+    code, evs = _run(world, ["example", "bravo"], trusted=keys)
+
+    assert code == 1
+    assert {e["app"]: e["ok"] for e in _of(evs, "update-app-end")} == {"example": True, "bravo": False}
+    assert [c[0] for c in world.build.calls] == ["example"]
+
+
+def test_trust_tweak_is_refused_beside_a_verb_that_ignores_it(world) -> None:
+    result = CliRunner().invoke(cli_mod.app, ["--list", "--trust-tweak", "a-tweak.deb"])
+
+    assert result.exit_code == 2
+    assert "--trust-tweak" in result.output
+
+
+def test_a_changed_ok_holds_back_the_app_s_other_work_too(world) -> None:
+    """The person confirmed example's whole update: with one part of it
+    changed, none of it runs (no get, no build), and it ends once."""
+    world.published["com.example.atweak"] = "1.1"
+    world.serve_insecure("com.example.atweak")
+    world.store["com.example.app"] = "2.0"
+    world.offer_get("2.0")
+    keys = confirm_keys(world, ["example"])
+    world.published["com.example.atweak"] = "9.9"
+
+    code, evs = _run(world, ["example"], trusted=keys)
+
+    assert code == 1
+    assert world.downloads() == 0 and world.build.calls == []
+    (end,) = _of(evs, "update-app-end")
+    assert end["ok"] is False and "changed since you confirmed it" in end["error"]

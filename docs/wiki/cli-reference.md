@@ -118,6 +118,7 @@ couldn't decrypt.
 ```bash
 graft --search "some tweak"                 # search canister.me
 graft --fetch com.example.sometweak         # download a package by id (SHA-256 checked)
+graft --fetch com.example.sometweak --fetch-repository <repository_id>   # from the repository a search listed (needed when several list it)
 graft --fetch https://example.com/some-tweak.deb --fetch-sha <sha256>
 graft --tweaks                              # list what is in tweaks_dir
 graft --attach-tweak some-tweak.deb --app example
@@ -125,6 +126,7 @@ graft --detach-tweak some-tweak.deb --app example
 graft --delete-tweak some-tweak.deb         # to the Trash; refused while an app uses it
 graft --tweak-updates                       # newer published versions?
 graft --update-tweak some-tweak.deb         # download the newest and re-point the apps using it
+graft --update-tweak some-tweak.deb --trust-tweak <confirm_key>   # one Graft can't verify, from --tweak-updates --json
 graft --add-repo https://repo.example.com
 graft --repos
 graft --repo-packages https://repo.example.com [--refresh]
@@ -132,7 +134,19 @@ graft --remove-repo https://repo.example.com
 ```
 
 A `--fetch` by package id is checked against Canister's published hash, when
-Canister has one. A URL is checked only if you pass `--fetch-sha`.
+Canister has one. A URL is checked only if you pass `--fetch-sha`. Either way
+Graft names the file (`<package id>_<version>.deb`), refuses one that isn't a
+.deb (or, by package id, isn't that package), refuses to replace a different
+tweak of that name, and records where it came from. A fetch by package id that
+more than one Canister repository lists names them and stops (exit 2): pick one
+with `--fetch-repository`.
+
+A tweak's updates come only from where it came from. `--tweak-updates` says
+whether each one is `verified`: that source is on record, uses HTTPS and lists
+a checksum for the new version. `--update-tweak` refuses one that isn't (exit
+2), with why, unless you pass `--trust-tweak` with its `confirm_key`, which
+`--tweak-updates --json` gives. The key is for that update alone: if the source
+offers something else by then, it's refused too.
 
 ## Building
 
@@ -194,7 +208,10 @@ build's own install on the first (the default device first, then by name),
 and the same build on each of the others. It also installs a change staged
 since a device's last install, on that device. A device that isn't connected
 waits while the others install, a device that fails doesn't stop the others,
-and an app never installed is left to a build. `--plan` says what it would do,
+and an app never installed is left to a build. A tweak update Graft can't
+verify is left out unless you confirm it with `--trust-tweak <confirm_key>`,
+the key `--plan --json` gives it (once per tweak); if that update changed
+since, the app isn't updated, and says so. `--plan` says what it would do,
 device by device, and changes nothing; it reads no keychain. Run it again to
 pick up where a failed or stopped update left off: it installs only where the
 app isn't up to date. A Stop during an install, or while a tweak is being

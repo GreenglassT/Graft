@@ -306,17 +306,13 @@ final class DevicesStoreTests: XCTestCase {
         XCTAssertFalse(store.isLoading)
     }
 
-    /// The caveat that keeps the comparison honest: a phone the listing could
-    /// not describe has no transport to compare, so it is checked for presence
-    /// alone and must not escalate every tick.
-    ///
-    /// `DeviceErrorRecord` carries no `connection_type` — a locked phone is on
-    /// the bus and answers the brief poll, but the full listing failed before it
-    /// could read anything off it. Treating "no remembered transport" as
-    /// "changed" would pay for a ~1s listing every five seconds, forever, for a
-    /// phone whose state has not moved.
+    /// B1: a phone waiting on Trust is on the bus the whole time, so a poll
+    /// that compared presence alone never read it again after the person
+    /// tapped Trust, and its row stayed "couldn't be read". While any phone
+    /// can't be read, every poll reads again: a cost paid only while one
+    /// can't, and only while the window is key (`ContentView`'s timer).
     @MainActor
-    func test_a_phone_that_could_not_be_described_does_not_escalate_every_tick() async throws {
+    func test_a_phone_that_could_not_be_described_is_read_again_on_the_next_poll() async throws {
         let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
         let store = DevicesStore(runner: runner)
         let seedScript = #"""
@@ -325,20 +321,89 @@ final class DevicesStoreTests: XCTestCase {
         _ = try await store.load(argsOverride: ["-c", seedScript])
         XCTAssertEqual(store.deviceErrors.map(\.udid), ["LOCKED"], "premise: the seed load landed")
 
-        // No `device` line: an escalation against this script would replace the
-        // seeded listing with nothing, which is what makes the assertion below
-        // falsifying.
-        let pollScript = #"""
-        printf '{"type":"device-brief","udid":"READABLE","connection_type":"USB"}\n{"type":"device-brief","udid":"LOCKED","connection_type":"USB"}\n{"type":"devices-end","count":2,"failed":0}\n'
+        // The same two phones on the bus, and this time the listing reads both.
+        let trusted = #"""
+        printf '{"type":"device-brief","udid":"READABLE","connection_type":"USB"}\n{"type":"device-brief","udid":"LOCKED","connection_type":"USB"}\n\#(Self.fullDeviceLine(udid: "READABLE"))\n\#(Self.fullDeviceLine(udid: "LOCKED"))\n{"type":"devices-end","count":2,"failed":0}\n'
         """#
-        await store.pollAndEscalateIfChanged(argsOverride: ["-c", pollScript])
+        await store.pollAndEscalateIfChanged(argsOverride: ["-c", trusted])
 
-        XCTAssertEqual(
-            store.devices.map(\.udid), ["READABLE"],
-            "nothing about the bus changed, but the poll escalated anyway — a phone with no "
-            + "remembered transport must be compared on presence alone"
-        )
+        XCTAssertEqual(store.devices.map(\.udid), ["READABLE", "LOCKED"],
+                       "the bus didn't change, so the poll never asked the phone again")
+        XCTAssertEqual(store.deviceErrors, [])
+    }
+
+    /// B1: the row said "connected, but couldn't be read" under a raw UDID,
+    /// with what to do on a 6 pt dot's tooltip. It says what to do, under
+    /// the device's name when Graft has seen it before.
+    func test_an_unreadable_row_says_what_to_do_under_the_name_graft_knows() {
+        XCTAssertEqual(UndescribableDeviceRow.subtitle, "Unlock it and tap Trust")
+        XCTAssertEqual(UndescribableDeviceRow.title(udid: "00008030-0000000000000009", remembered: "Example iPad"),
+                       "Example iPad")
+        XCTAssertEqual(UndescribableDeviceRow.title(udid: "00008030-0000000000000009", remembered: nil),
+                       "00008030-0000000000000009")
+    }
+
+    /// The re-verify's nit: a phone that stays locked all day cost a full
+    /// listing every five seconds, lockdown to every readable phone included.
+    /// Each poll for the first few, then every `unreadableBackoff`th: a
+    /// phone tapped Trust on a minute later still shows within half a minute.
+    @MainActor
+    func test_a_phone_that_stays_unreadable_is_read_again_less_often() async throws {
+        let log = FileManager.default.temporaryDirectory.appending(path: "devices-\(UUID().uuidString).log")
+        addTeardownBlock { try? FileManager.default.removeItem(at: log) }
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let store = DevicesStore(runner: runner)
+        let locked = #"{"type":"device-brief","udid":"LOCKED","connection_type":"USB"}\n{"type":"device-error","udid":"LOCKED","error":"locked"}\n{"type":"devices-end","count":0,"failed":1}\n"#
+        let script = "echo run >> '\(log.path)'; printf '\(locked)'"
+        _ = try await store.load(argsOverride: ["-c", script])
+        func runs() -> Int {
+            ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").count
+        }
+        var escalated: [Int] = []
+        for poll in 1...(2 * DevicesStore.unreadableBackoff) {
+            let before = runs()
+            await store.pollAndEscalateIfChanged(argsOverride: ["-c", script])
+            // A poll that escalates runs the script twice: brief, then full.
+            if runs() - before == 2 { escalated.append(poll) }
+        }
+
+        let first = Array(1...DevicesStore.unreadableEveryPoll)
+        XCTAssertEqual(escalated, first + [DevicesStore.unreadableBackoff, 2 * DevicesStore.unreadableBackoff]
+            .filter { $0 > DevicesStore.unreadableEveryPoll })
         XCTAssertEqual(store.deviceErrors.map(\.udid), ["LOCKED"])
+    }
+
+    /// Once every phone reads, the poll is back to comparing presence: no
+    /// listing every five seconds for a bench with nothing to re-read.
+    @MainActor
+    func test_with_every_phone_read_the_poll_compares_presence_again() async throws {
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let store = DevicesStore(runner: runner)
+        let seed = #"\#(Self.fullDeviceLine(udid: "READABLE"))\n{"type":"devices-end","count":1,"failed":0}\n"#
+        _ = try await store.load(argsOverride: ["-c", "printf '\(seed)'"])
+
+        // No `device` line: an escalation would empty the list.
+        await store.pollAndEscalateIfChanged(argsOverride: [
+            "-c", #"printf '{"type":"device-brief","udid":"READABLE","connection_type":"USB"}\n'"#,
+        ])
+
+        XCTAssertEqual(store.devices.map(\.udid), ["READABLE"])
+    }
+
+    /// Read again and still locked: the same answer publishes nothing.
+    @MainActor
+    func test_a_phone_still_unreadable_on_the_next_poll_publishes_nothing() async throws {
+        let runner = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let store = DevicesStore(runner: runner)
+        let listing = #"{"type":"device-error","udid":"LOCKED","error":"locked"}\n{"type":"devices-end","count":0,"failed":1}\n"#
+        _ = try await store.load(argsOverride: ["-c", "printf '\(listing)'"])
+        let changes = ObservableStoresTests.Changes(of: store)
+
+        let again = #"{"type":"device-brief","udid":"LOCKED","connection_type":"USB"}\n"# + listing
+        await store.pollAndEscalateIfChanged(argsOverride: ["-c", "printf '\(again)'"])
+
+        XCTAssertEqual(store.deviceErrors.map(\.udid), ["LOCKED"])
+        XCTAssertEqual(changes.count, 0)
     }
 
     /// This is the assertion the two-tier design rests on: a poll that finds

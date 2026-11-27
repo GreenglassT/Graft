@@ -120,6 +120,12 @@ private struct UpdateConfirmPane: View {
 
     var body: some View {
         Text("Update Apps").font(AppFont.title)
+        if let note = confirmation.offlineNote {
+            Text(note)
+                .font(AppFont.body)
+                .foregroundStyle(Palette.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
         if let failure = confirmation.failure {
             ErrorBanner(message: failure)
         } else if let plan = confirmation.plan {
@@ -207,6 +213,21 @@ private struct UpdateConfirmRow: View {
             }
             ForEach(row.changes, id: \.self) { line in
                 Text(line).font(AppFont.monoSmall).foregroundStyle(Palette.text)
+            }
+            // A tweak update whose source isn't verified (2.3.1 A1): where it
+            // comes from, why, and the person's OK, off until they give it.
+            ForEach(row.trust) { trust in
+                Text(trust.line).font(AppFont.monoSmall).foregroundStyle(Palette.text)
+                Text(trust.reason).font(AppFont.monoSmall).foregroundStyle(Palette.warn)
+                    .fixedSize(horizontal: false, vertical: true)
+                Toggle(AppUpdateText.trustTitle, isOn: Binding(
+                    get: { store.confirmation?.trusted.contains(trust.filename) ?? false },
+                    set: { store.setTrusted(trust.filename, $0) }
+                ))
+                .font(AppFont.body)
+                .disabled(store.isUpdating)
+                .help(AppUpdateText.trustHelp)
+                .accessibilityLabel(trust.toggleName)
             }
             ForEach(row.alsoUsed, id: \.self) { line in
                 Text(line).font(AppFont.monoSmall).foregroundStyle(Palette.warn)

@@ -225,7 +225,7 @@ struct ContentView: View {
     /// menu reaches it too. Nil only in a test that hosts this window for
     /// something else: no check runs and no banner shows.
     @ObservedOptionalObject private var updates: UpdateStore?
-    /// One-click Update: the daily check, the rechecks after a change, and
+    /// Updates for your apps: the daily check, the rechecks after a change, and
     /// the sheet. `GraftApp`'s, as `updates` is. Only handed on (review S1):
     /// the views that draw it observe it (the sidebar, each pane, Settings,
     /// the sheet's presenter), so its changes don't redraw the window. Nil
@@ -776,8 +776,13 @@ struct ContentView: View {
                 // installed; the sheet can't close while one runs.
                 .sheet(item: $liveContainerSetupFor) { device in
                     SetUpLiveContainerSheet(
-                        device: device, store: liveContainerStore, account: store.account,
-                        onRunEnded: { Task { _ = try? await devicesStore.load() } }
+                        device: device, store: liveContainerStore, settings: settingsStore,
+                        deviceInfo: deviceInfoStore, account: store.account,
+                        onRunEnded: { Task { _ = try? await devicesStore.load() } },
+                        onOpenSettings: {
+                            liveContainerSetupFor = nil
+                            selection = .section(.settings)
+                        }
                     )
                 }
         }
@@ -1161,7 +1166,7 @@ struct ContentView: View {
             // sidebar's alert.
             placeholder(text: didLoadApps && store.apps.isEmpty
                         ? "No apps yet. Use + in the sidebar to add one."
-                        : "Pick an app, a phone, or a section.")
+                        : "Pick an app, a device, or a section.")
         }
     }
 

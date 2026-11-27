@@ -316,3 +316,77 @@ def test_an_error_that_isnt_a_refusal_is_not_marked(world) -> None:
                            skip_decrypt_check=True, verbose=False, device=PHONE, outcome=built)
 
     assert built.target_refused is False
+
+
+# --- a device unplugged during its push: one story, not two (T2-B7) ---------------
+
+
+def _unplugged_mid_push(world, device: Device, udid: str = PHONE):
+    """The push starts, the device goes away, and the push fails as a
+    dropped connection does."""
+
+    def push(ipa, *, udid, **_k):
+        world.phones.pop(udid, None)
+        raise lc_runner.LiveContainerError(
+            f"failed to push example.ipa into LiveContainer: ConnectionTerminatedError on {udid}")
+
+    device.push = push
+
+
+def test_the_build_end_of_a_device_unplugged_mid_push_says_it_waits(world, tmp_path) -> None:
+    """The target said waiting while the stream also carried the build's own
+    `build-end {ok: false, "failed to push … ConnectionTerminatedError"}`:
+    two stories. The build-end now tells the update's."""
+    _on_both(world)
+    device = Device()
+    _unplugged_mid_push(world, device)
+
+    code, evs = _run(world, tmp_path, device)
+
+    waiting = "Example iPhone isn't connected: it'll update when it is"
+    assert _targets(evs)[PHONE]["waiting"] is True, "premise: the update says it waits"
+    (first, *_rest) = _of(evs, "build-end")
+    assert (first["ok"], first["stopped"], first.get("waiting"), first["error"]) == (
+        False, False, True, waiting)
+    assert code == 0, "waiting isn't failing"
+
+
+def test_a_push_that_fails_with_the_device_still_there_is_a_failure(world, tmp_path) -> None:
+    _on_both(world)
+    device = Device()
+
+    def push(ipa, *, udid, **_k):
+        raise lc_runner.LiveContainerError(
+            "failed to push example.ipa into LiveContainer: disk full")
+
+    device.push = push
+
+    code, evs = _run(world, tmp_path, device)
+
+    (first, *_rest) = _of(evs, "build-end")
+    assert (first["ok"], "waiting" in first) == (False, False)
+    assert "disk full" in first["error"]
+    assert _targets(evs)[PHONE]["waiting"] is False
+    assert code == 1
+
+
+def test_a_plain_build_s_failed_push_never_says_waiting(world, tmp_path) -> None:
+    """Only `graft --update` waits for a device: a Build & Install whose
+    phone went away failed."""
+    device = Device()
+    _unplugged_mid_push(world, device)
+    em, out = emitter()
+
+    with patch.object(cli_mod, "run_all_checks", return_value=[]), \
+         patch.object(cli_mod, "extract_ipa"), \
+         patch.object(cli_mod, "verify_decrypted", return_value=[]), \
+         patch.object(cli_mod, "run_cyan", return_value=_cyan(tmp_path)), \
+         patch.object(lc_runner, "check_push_target", side_effect=device.check), \
+         patch.object(lc_runner, "push_ipa_to_livecontainer", side_effect=device.push), \
+         pytest.raises(lc_runner.LiveContainerError):
+        cli_mod._build_one(cfg=world.cfg, app_name="example", dry_run=False, skip_install=False,
+                           skip_decrypt_check=True, verbose=False, device=PHONE, emitter=em)
+
+    (end,) = _of(events(out.getvalue()), "build-end")
+    assert (end["ok"], "waiting" in end) == (False, False)
+    assert "ConnectionTerminatedError" in end["error"]

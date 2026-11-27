@@ -21,6 +21,8 @@ struct TweaksView: View {
     @State private var query: String = ""
     @State private var orphansOnly: Bool = false
     @State private var pendingDelete: TweakRecord?
+    /// A tweak whose update isn't verified, waiting for the person's OK.
+    @State private var pendingTrust: TweakRecord?
     /// A delete the CLI refused because the tweak is still attached.
     ///
     /// Held separately from `store.lastError` because it is the one failure in
@@ -136,6 +138,16 @@ struct TweaksView: View {
             Text(Self.blockedMessage(blocked))
         }
         .alert(
+            pendingTrust.map { Self.trustTitle($0, store.update(for: $0)) } ?? "",
+            isPresented: $pendingTrust.isPresent(),
+            presenting: pendingTrust
+        ) { tweak in
+            Button("Cancel", role: .cancel) {}
+            Button("Trust and Update") { Task { await runUpdate(tweak, trust: true) } }
+        } message: { tweak in
+            Text(Self.trustMessage(store.update(for: tweak)))
+        }
+        .alert(
             "Move this tweak to the Trash?",
             isPresented: $pendingDelete.isPresent(),
             presenting: pendingDelete
@@ -155,6 +167,28 @@ struct TweaksView: View {
     static let reloadLabel = "Reload tweaks"
     static let checkUpdatesLabel = "Check for tweak updates"
     static func updateLabel(_ tweak: TweakRecord) -> String { "Update \(tweak.displayName)" }
+
+    /// An update whose source isn't verified (2.3.1 A1): its Update asks
+    /// first, and passes `--trust-tweak` only on a yes.
+    static func needsTrust(_ update: TweakUpdateRecord?) -> Bool {
+        guard let update, update.updateAvailable else { return false }
+        return !update.verified
+    }
+
+    static func trustTitle(_ tweak: TweakRecord, _ update: TweakUpdateRecord?) -> String {
+        let from = update?.source.map { " from \(AppUpdateText.sourceName($0))" } ?? ""
+        return "Update \(tweak.displayName)\(from)?"
+    }
+
+    /// The row's line for it: "Not verified (source unknown: https://…)".
+    static func notVerifiedLine(_ update: TweakUpdateRecord) -> String {
+        "Not verified (\(update.unverifiedReason ?? "its source isn't known"))"
+    }
+
+    static func trustMessage(_ update: TweakUpdateRecord?) -> String {
+        "Graft can't verify this update (\(update?.unverifiedReason ?? "its source isn't known")). "
+            + "Update it only if you trust where it comes from."
+    }
     static func deleteLabel(_ tweak: TweakRecord) -> String { "Delete \(tweak.displayName)" }
 
     static let filterPlaceholder = "Filter tweaks"
@@ -264,9 +298,15 @@ struct TweaksView: View {
     }
 
     /// Swap one tweak for its newest build, then say what that changed.
-    private func runUpdate(_ tweak: TweakRecord) async {
+    /// `trust`: the person said yes to this row's update, by its key.
+    private func runUpdate(_ tweak: TweakRecord, trust: Bool = false) async {
         updateNotice = nil
-        guard let result = await store.updateTweak(tweak) else { return }
+        let key = trust ? store.update(for: tweak)?.confirmKey : nil
+        if trust, key == nil {
+            updateNotice = "\(tweak.displayName): check for updates again, then confirm it"
+            return
+        }
+        guard let result = await store.updateTweak(tweak, trustKey: key) else { return }
         guard result.updated else {
             // A badge the user clicked after the library moved on under them.
             updateNotice = "\(tweak.displayName): \(result.reason ?? "nothing to update")"
@@ -360,7 +400,11 @@ struct TweaksView: View {
                             ProgressView().controlSize(.small)
                         } else {
                             Button("Update") {
-                                Task { await runUpdate(tweak) }
+                                if Self.needsTrust(update) {
+                                    pendingTrust = tweak
+                                } else {
+                                    Task { await runUpdate(tweak) }
+                                }
                             }
                             .controlSize(.small)
                             // Which tweak, for a list of rows each with its own.
@@ -375,6 +419,15 @@ struct TweaksView: View {
                     }
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.accent)
+                }
+                // Why an update needs the person's OK before it runs (2.3.1 A1).
+                if let update = store.update(for: tweak), Self.needsTrust(update) {
+                    HStack(spacing: 5) {
+                        Symbols.attention.image(size: 11)
+                        Text(Self.notVerifiedLine(update))
+                    }
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.warn)
                 }
                 // Per row, which lookups could not be made. The header's
                 // "N couldn't be checked" said how many and not which, so the

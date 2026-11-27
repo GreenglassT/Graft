@@ -117,6 +117,12 @@ enum CLIContract {
         static let tweaks = "--tweaks"
         static let tweakUpdates = "--tweak-updates"
         static let updateTweak = "--update-tweak"
+        /// `--trust-tweak FILE`, with `--update-tweak` or `--update`: the
+        /// person's OK for that tweak's update although its source isn't
+        /// verified (unknown, not HTTPS, or no published checksum). Without
+        /// it, `--update-tweak` refuses the update and `--update` leaves it
+        /// out (2.3.1 A1).
+        static let trustTweak = "--trust-tweak"
         // AppUpdatesStore: `graft --update` (Plan D). `updateAll` because
         // `all` is this enum's own set.
         static let update = "--update"
@@ -163,6 +169,9 @@ enum CLIContract {
         static let refresh = "--refresh"
         static let fetch = "--fetch"
         static let fetchSha = "--fetch-sha"
+        /// With `--fetch <package id>`: only from this Canister repository,
+        /// the search result's own (2.3.1 A1).
+        static let fetchRepository = "--fetch-repository"
 
         // CanisterStore
         static let search = "--search"
@@ -458,12 +467,13 @@ enum CLIContract {
             keepBundleId, noKeepBundleId, stripExtensions, noStripExtensions,
             stripSupportedDevices, noStripSupportedDevices, compressionLevel,
             lcBundleId, noLcBundleId, autoProfile, noAutoProfile,
-            tweaks, tweakUpdates, updateTweak, update, updateAll, plan, quick, withAffected, dropUpdateTarget,
+            tweaks, tweakUpdates, updateTweak, trustTweak, update, updateAll, plan, quick, withAffected,
+            dropUpdateTarget,
             deviceApps, decrypt, decryptFrontmost,
             stripEncryptedExtensions, keepEncryptedExtensions, decryptBackend,
             decryptCheck, verbose,
             deleteTweak,
-            repos, addRepo, removeRepo, repoPackages, refresh, fetch, fetchSha,
+            repos, addRepo, removeRepo, repoPackages, refresh, fetch, fetchSha, fetchRepository,
             search,
             checkUpdate, currentVersion, downloadUpdate, installUpdate, appPath, waitPid, relaunch,
             removeData, items,
@@ -780,6 +790,14 @@ enum CLIContract {
         static let readinessChecked = "checked"
         static let readinessLikely = "likely"
         static let needsAppleSilicon = "needs Apple silicon"
+        /// The get can't run on this Mac yet (`update_plan.setup_missing`):
+        /// the pane says to set up the App Store, with Open Settings.
+        static let decryptionNotSetUp = "decryption isn't set up on this Mac"
+        static let notSignedIn = "not signed in to the App Store"
+        /// The App Store lookup itself failed (`update_plan.LOOKUP_FAILED`):
+        /// offline, the last online answer still stands
+        /// (`AppUpdatesStore.merged`).
+        static let lookupFailed = "couldn't check the App Store"
         static let notInstalledYet = "not installed yet"
         /// `update-app-end`'s `error` for an app a Stop kept from starting
         /// (`update_run.NOT_STARTED`).
@@ -913,6 +931,7 @@ enum CLIContract {
         "app-updated",
         "artwork",
         "delivery-state",
+        "reconcile-checked",
         "cached-ipa",
         "ipa-provided",
         "staged-ipa",

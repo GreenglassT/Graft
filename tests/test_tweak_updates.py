@@ -6,11 +6,16 @@ offering to replace a build with an older or equal one — is an app that talks
 you into downgrading, and this library legitimately holds versions no repo has
 (anything compiled from source, and a `-jailed` variant alongside the plain
 build of the same version).
+
+Since 2.3.1 an update comes only from the tweak's own source (A1): the source
+logic itself is pinned in `test_tweak_update_source.py`; these pin the
+indexes it reads and `--tweak-updates` / `--update-tweak` around it.
 """
 
 from __future__ import annotations
 
 import json
+import os
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,13 +23,14 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from graft_ipa import updates
+from graft_ipa import canister, tweak_sources, updates
 from graft_ipa.json_output import JsonEmitter
-from graft_ipa.updates import Availability, TweakStatus
+from graft_ipa.tweak_sources import Source
+from graft_ipa.updates import Availability, Download, Offer, TweakStatus
 
+from .test_tweak_source_records import write_deb
 
-def _never_called(package_id: str) -> Availability | None:
-    raise AssertionError(f"looked up {package_id!r} for a file with no package id")
+ORIGIN = Source(tweak_sources.CANISTER, "r", "https://r.example")
 
 
 def _status(installed: str | None, latest: str | None, *, pid: str = "com.x") -> TweakStatus:
@@ -32,7 +38,7 @@ def _status(installed: str | None, latest: str | None, *, pid: str = "com.x") ->
         filename="t.deb",
         package_id=pid,
         installed=installed,
-        available=Availability(latest, "canister") if latest else None,
+        available=Availability(latest, ORIGIN, verified=True) if latest else None,
     )
 
 
@@ -66,113 +72,161 @@ def test_a_tweak_nothing_publishes_is_not_an_update():
     assert updates.as_event(status)["latest"] is None
 
 
-def test_a_deb_with_no_readable_package_id_is_still_listed():
+def test_a_deb_with_no_readable_package_id_is_still_listed(tmp_path: Path, monkeypatch):
     """A truncated download has no control stanza, so nothing can be looked up
     — but the file is in the library and the row still has to appear."""
-    results = updates.statuses([{"filename": "junk.deb"}], {}, lookup=_never_called)
+    def never(pid, *_a):
+        raise AssertionError(f"looked up {pid!r} for a file with no package id")
+
+    monkeypatch.setattr(updates, "canister_offers", never)
+    cfg = SimpleNamespace(state_dir=tmp_path, tweaks_dir=tmp_path, repos=[])
+    results = updates.statuses(cfg, [{"filename": "junk.deb"}])
     assert len(results) == 1
     assert results[0].package_id is None
     assert not results[0].update_available
 
 
-def test_the_repo_catalog_answers_before_the_network():
-    """A cached index costs nothing; the network costs a round trip per id."""
-    asked: list[str] = []
-
-    def lookup(pid: str):
-        asked.append(pid)
-        return Availability("9.9", "canister")
-
-    catalog = {"com.x": Availability("2.0", "https://repo.example")}
-    results = updates.statuses(
-        [{"filename": "a.deb", "package_id": "com.x", "version": "1.0"}], catalog, lookup=lookup
-    )
-
-    assert asked == [], "the network was consulted for a package already in a cached index"
-    assert results[0].available == Availability("2.0", "https://repo.example")
+# --- the configured repos' cached indexes (`repo_offers`) ------------------------
 
 
-def test_the_network_is_asked_once_per_id_not_once_per_file():
-    """Two files can carry the same package — `1.1.8` and `1.1.8-jailed` sit in
-    this library right now. That is one question, asked once."""
-    asked: list[str] = []
-
-    def lookup(pid: str):
-        asked.append(pid)
-        return Availability("2.0", "canister")
-
-    records = [
-        {"filename": "a.deb", "package_id": "com.x", "version": "1.1.8"},
-        {"filename": "b.deb", "package_id": "com.x", "version": "1.1.8-jailed"},
-    ]
-    results = updates.statuses(records, {}, lookup=lookup)
-
-    assert asked == ["com.x"]
-    # Both files answered for separately: either could be the one attached.
-    assert [r.filename for r in results] == ["a.deb", "b.deb"]
-    assert results[0].update_available
-    assert results[1].update_available
+def _repos(tmp_path: Path, *urls: str) -> SimpleNamespace:
+    return SimpleNamespace(state_dir=tmp_path, repos=[SimpleNamespace(url=u) for u in urls])
 
 
-def test_a_lookup_that_fails_is_not_an_update_and_not_a_crash():
-    """`canister_latest` swallows everything by contract; this pins that a
-    None answer degrades to silence rather than propagating."""
-    results = updates.statuses(
-        [{"filename": "a.deb", "package_id": "com.x", "version": "1.0"}], {}, lookup=lambda _: None
-    )
-    assert not results[0].update_available
-
-
-def test_the_repo_catalog_keeps_the_highest_version_across_repos(tmp_path: Path):
-    stanza = "Package: com.x\nVersion: {v}\nFilename: d.deb\n\n"
-
-    cfg = SimpleNamespace(
-        state_dir=tmp_path,
-        repos=[SimpleNamespace(url="https://a.example"), SimpleNamespace(url="https://b.example")],
-    )
-
+def _cache(tmp_path: Path, url: str, text: str) -> Path:
     from graft_ipa import repo as repo_mod
-    (tmp_path / "repos").mkdir()
-    repo_mod.cache_path(tmp_path, "https://a.example").write_text(stanza.format(v="1.0"))
-    repo_mod.cache_path(tmp_path, "https://b.example").write_text(stanza.format(v="2.0"))
 
-    catalog = updates.repo_catalog(cfg)  # type: ignore[arg-type]
-    assert catalog["com.x"].version == "2.0"
-    assert catalog["com.x"].source == "https://b.example"
-    # The download target comes from the same index entry the version did, so
-    # the file fetched is the build whose number was compared.
-    assert catalog["com.x"].download == "https://b.example/d.deb"
+    path = repo_mod.cache_path(tmp_path, repo_mod.normalize_url(url))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_each_repo_answers_for_itself(tmp_path: Path):
+    """Not one "highest version across repos", which let any repo publishing
+    the same package id win: an offer per repo, in config order."""
+    stanza = "Package: com.x\nVersion: {v}\nFilename: d.deb\n\n"
+    _cache(tmp_path, "https://a.example", stanza.format(v="1.0"))
+    _cache(tmp_path, "https://b.example", stanza.format(v="2.0"))
+
+    offers = updates.repo_offers(_repos(tmp_path, "https://a.example", "https://b.example"))  # type: ignore[arg-type]
+
+    assert [(o.source.url, o.version) for o in offers["com.x"]] == [
+        ("https://a.example", "1.0"), ("https://b.example", "2.0"),
+    ]
+    # The download comes from the same index entry the version did, so the
+    # file fetched is the build whose number was compared.
+    assert offers["com.x"][1].downloads == (Download("https://b.example/d.deb", None),)
+
+
+def test_a_repo_lists_every_hash_it_has_for_a_package(tmp_path: Path):
+    """What a library file's own hash is matched against: an older build's
+    too, since that's the one the library holds."""
+    _cache(tmp_path, "https://a.example",
+           "Package: com.x\nVersion: 1.0\nFilename: a.deb\nSHA256: AA11\n\n"
+           "Package: com.x\nVersion: 2.0\nFilename: b.deb\nSHA256: bb22\n\n")
+
+    (offer,) = updates.repo_offers(_repos(tmp_path, "https://a.example"))["com.x"]  # type: ignore[arg-type]
+
+    assert offer.hashes == {"aa11", "bb22"}
+    assert offer.version == "2.0" and offer.downloads == (Download("https://a.example/b.deb", "bb22"),)
 
 
 def test_a_repo_never_fetched_contributes_nothing(tmp_path: Path):
     """This runs behind a "check versions" button, not a "sync repos" one. A
     repo with no cache is skipped rather than downloaded on the spot."""
-    cfg = SimpleNamespace(
-        state_dir=tmp_path, repos=[SimpleNamespace(url="https://never-fetched.example")]
-    )
-    assert updates.repo_catalog(cfg) == {}  # type: ignore[arg-type]
+    assert updates.repo_offers(_repos(tmp_path, "https://never-fetched.example")) == {}  # type: ignore[arg-type]
 
 
-def test_the_event_names_where_the_version_came_from():
-    """The source is shown to the user, so it has to name somewhere they could
-    go and look — not just "an update exists"."""
-    event = updates.as_event(_status("1.0", "2.0"))
-    assert event == {
-        "filename": "t.deb",
-        "package_id": "com.x",
-        "installed": "1.0",
-        "latest": "2.0",
-        "source": "canister",
-        "update_available": True,
-        "unchecked": False,
-    }
+def test_a_stanza_with_no_filename_does_not_kill_the_whole_index(tmp_path: Path):
+    """`download_url` raises without a Filename, and one such stanza in any
+    cached index aborted the entire check."""
+    _cache(tmp_path, "https://a.example",
+           "Package: com.virtual\nVersion: 1.0\n\n"      # no Filename — a meta package
+           "Package: com.real\nVersion: 2.0\nFilename: r.deb\n\n")
+
+    offers = updates.repo_offers(_repos(tmp_path, "https://a.example"))  # type: ignore[arg-type]
+
+    assert offers["com.real"][0].version == "2.0", "one unusable stanza discarded the whole index"
+    assert offers["com.virtual"][0].version is None, "never offered: nothing could download it"
 
 
-def _install(cfg, name: str) -> Path:
-    cfg.tweaks_dir.mkdir(parents=True, exist_ok=True)
+def test_a_repo_url_with_a_trailing_slash_still_finds_its_cache(tmp_path: Path):
+    """Every writer hashes the *normalized* URL, and `cache_path` is a SHA-1 of
+    whatever string it is handed."""
+    _cache(tmp_path, "https://a.example", "Package: com.x\nVersion: 2.0\nFilename: d.deb\n\n")
+    offers = updates.repo_offers(_repos(tmp_path, "https://a.example/"))  # type: ignore[arg-type]
+    assert offers["com.x"][0].version == "2.0"
+
+
+def test_a_stale_cache_is_marked_stale(tmp_path: Path):
+    """The cache is refreshed only when the user runs --repo-packages. Left
+    unbounded it pins `latest` below the live figure and reports a tweak as up
+    to date on evidence it knows is months old."""
+    cached = _cache(tmp_path, "https://a.example", "Package: com.x\nVersion: 1.0\nFilename: d.deb\n\n")
+    old = cached.stat().st_mtime - (7 * 24 * 60 * 60)
+    os.utime(cached, (old, old))
+    cfg = _repos(tmp_path, "https://a.example")
+
+    assert not updates.repo_offers(cfg)["com.x"][0].fresh, "a week-old index answered as current"  # type: ignore[arg-type]
+    assert updates.repo_offers(cfg, max_age=30 * 24 * 60 * 60)["com.x"][0].fresh  # type: ignore[arg-type]
+
+
+# --- `--tweak-updates` and `--update-tweak` ---------------------------------------
+
+
+def _install(cfg, name: str, version: str = "1.0", *, pid: str = "com.x") -> Path:
+    return write_deb(cfg.tweaks_dir / name, pid, version)
+
+
+def _from_source(cfg, name: str) -> None:
+    """`name` was fetched from canister repository `r` (`ORIGIN`)."""
     path = cfg.tweaks_dir / name
-    path.write_bytes(b"x")
-    return path
+    tweak_sources.record(cfg.state_dir, cfg.tweaks_dir, name, ORIGIN, tweak_sources.file_sha256(path))
+
+
+def _publish(monkeypatch, version: str = "2.0", *, sha256: str | None = "0" * 64,
+             url: str = "https://r.example", pid: str = "com.x") -> str:
+    """canister repository `r` publishes `pid` at `version`; returns its URL."""
+    build = f"{url}/debs/{pid}_{version}.deb"
+    origin = Source(tweak_sources.CANISTER, "r", url)
+
+    def offers(package_id, *_a):
+        if package_id != pid:
+            return []
+        return [Offer(origin, version, (Download(build, sha256),))]
+
+    monkeypatch.setattr(updates, "repo_offers", lambda _c, max_age=0: {})
+    monkeypatch.setattr(updates, "canister_offers", offers)
+    return build
+
+
+def _serves(monkeypatch, *, pid: str = "com.x", version: str = "2.0", seen: list | None = None,
+            name: str = "download.deb") -> None:
+    """The download writes a real .deb of `pid` at `version`, named `name` by
+    the repo."""
+    def fetch(target, dest, expected_sha=None, **kwargs):
+        if seen is not None:
+            seen.append({"target": target, "sha": expected_sha, **kwargs})
+        return write_deb(dest / name, pid, version)
+
+    monkeypatch.setattr(canister, "fetch_deb", fetch)
+
+
+NEW = "com.x_2.0.deb"
+
+
+def _one_app(temp_config_env: Path, tweaks: list[str]) -> tuple[object, str]:
+    from graft_ipa.config import load_config, set_app_tweaks
+
+    cfg = load_config(temp_config_env)
+    app = next(iter(cfg.apps))
+    set_app_tweaks(cfg.path, app, tweaks)
+    return load_config(temp_config_env), app
+
+
+def _last_event(out: StringIO) -> dict:
+    return json.loads(out.getvalue().splitlines()[-1])
 
 
 def test_updating_swaps_the_file_on_every_app_that_used_it(temp_config_env: Path, monkeypatch):
@@ -180,76 +234,194 @@ def test_updating_swaps_the_file_on_every_app_that_used_it(temp_config_env: Path
     one. A download that lands without re-pointing anything has changed a file
     on disk and nothing the user cares about."""
     from graft_ipa import cli as cli_mod
-    from graft_ipa.config import load_config, set_app_tweaks
+    from graft_ipa.config import load_config, load_config as _reload
 
     cfg = load_config(temp_config_env)
     _install(cfg, "old.deb")
-    app = next(iter(cfg.apps))
-    set_app_tweaks(cfg.path, app, ["old.deb"])
-    cfg = load_config(temp_config_env)
-
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "old.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": [app]}],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
-    monkeypatch.setattr(
-        updates, "canister_latest", lambda _p: Availability("2.0", "canister", "com.x")
-    )
-    monkeypatch.setattr(
-        cli_mod.canister, "fetch_deb", lambda _t, dest, *a, **k: _install(cfg, "new.deb")
-    )
+    cfg, app = _one_app(temp_config_env, ["old.deb"])
+    _from_source(cfg, "old.deb")
+    _publish(monkeypatch)
+    _serves(monkeypatch)
 
     out = StringIO()
     cli_mod._do_update_tweak(cfg, "old.deb", emitter=JsonEmitter(stream=out))
-    event = json.loads(out.getvalue().splitlines()[-1])
+    event = _last_event(out)
 
     assert event["updated"] is True
-    assert event["new_filename"] == "new.deb"
+    assert event["new_filename"] == NEW, "Graft names the file, not the repo"
     assert event["apps"] == [app]
-    assert load_config(temp_config_env).apps[app].tweaks == ["new.deb"], (
+    assert _reload(temp_config_env).apps[app].tweaks == [NEW], (
         "the app still builds with the old .deb, so the update changed nothing that matters"
     )
     # The old file stays: it is the only way back if the new build misbehaves.
     assert (cfg.tweaks_dir / "old.deb").exists()
+    # And the new one's source is on record for its next update.
+    assert tweak_sources.recorded_for(cfg.state_dir, NEW, tweak_sources.file_sha256(cfg.tweaks_dir / NEW)) == ORIGIN
 
 
-def test_a_repo_that_reuses_the_filename_is_not_detached_and_reattached(
-    temp_config_env: Path, monkeypatch
-):
-    """`a-tweak.deb` is a stable name — the download overwrites it in
-    place and every app already points there. Detaching and re-attaching would
-    be a no-op at best, and at worst the detach lands and the attach doesn't,
-    silently dropping the tweak from the build."""
+def test_a_download_named_like_another_tweak_does_not_overwrite_it(temp_config_env: Path, monkeypatch):
+    """2.3.1 A2, in `--update-tweak`: the repo's filename is never the
+    library's, so a download called `b.deb` can't replace the `b.deb` another
+    app builds with."""
     from graft_ipa import cli as cli_mod
-    from graft_ipa.config import load_config, set_app_tweaks
 
-    cfg = load_config(temp_config_env)
-    _install(cfg, "same.deb")
-    app = next(iter(cfg.apps))
-    set_app_tweaks(cfg.path, app, ["same.deb"])
-    cfg = load_config(temp_config_env)
-
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "same.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": [app]}],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
-    monkeypatch.setattr(
-        updates, "canister_latest", lambda _p: Availability("2.0", "repo", "https://r/same.deb")
-    )
-    monkeypatch.setattr(
-        cli_mod.canister, "fetch_deb", lambda _t, dest, *a, **k: _install(cfg, "same.deb")
-    )
+    cfg, _app = _one_app(temp_config_env, [])
+    _install(cfg, "old.deb")
+    other = _install(cfg, "b.deb", "5.0", pid="com.b")
+    theirs = other.read_bytes()
+    _from_source(cfg, "old.deb")
+    _publish(monkeypatch)
+    _serves(monkeypatch, name="b.deb")
 
     out = StringIO()
-    cli_mod._do_update_tweak(cfg, "same.deb", emitter=JsonEmitter(stream=out))
-    event = json.loads(out.getvalue().splitlines()[-1])
+    cli_mod._do_update_tweak(cfg, "old.deb", emitter=JsonEmitter(stream=out))
 
-    assert event["replaced_in_place"] is True
-    assert load_config(temp_config_env).apps[app].tweaks == ["same.deb"]
+    assert other.read_bytes() == theirs
+    assert _last_event(out)["new_filename"] == NEW
+
+
+def test_a_different_file_under_graft_s_name_is_refused(temp_config_env: Path, monkeypatch):
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.tweak_sources import TweakFileError
+
+    cfg, app = _one_app(temp_config_env, ["old.deb"])
+    _install(cfg, "old.deb")
+    taken = write_deb(cfg.tweaks_dir / NEW, "com.x", "2.0", salt="someone else's")
+    there = taken.read_bytes()
+    _from_source(cfg, "old.deb")
+    _publish(monkeypatch)
+    _serves(monkeypatch)
+    config_before = cfg.path.read_text()
+
+    with pytest.raises(TweakFileError, match="already in your tweaks library"):
+        cli_mod._do_update_tweak(cfg, "old.deb")
+
+    assert taken.read_bytes() == there
+    assert cfg.path.read_text() == config_before
+    assert not (cfg.state_dir / "tweak-rollback" / "old.deb").exists()
+
+
+def test_a_download_that_isnt_a_deb_is_refused(temp_config_env: Path, monkeypatch):
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.tweak_sources import TweakFileError
+
+    cfg, _app = _one_app(temp_config_env, ["old.deb"])
+    _install(cfg, "old.deb")
+    _from_source(cfg, "old.deb")
+    _publish(monkeypatch)
+
+    def html(_t, dest, *_a, **_k):
+        (dest / "x.deb").write_bytes(b"<html>gone</html>")
+        return dest / "x.deb"
+
+    monkeypatch.setattr(canister, "fetch_deb", html)
+
+    with pytest.raises(TweakFileError, match=r"isn't a \.deb"):
+        cli_mod._do_update_tweak(cfg, "old.deb")
+
+    assert sorted(p.name for p in cfg.tweaks_dir.iterdir() if not p.name.startswith(".")) == ["old.deb"]
+
+
+def _key(cfg, filename: str) -> str:
+    """The tweak's `confirm_key` as `--tweak-updates` reports it now."""
+    from graft_ipa import cli as cli_mod
+
+    record = next(r for r in cli_mod._collect_tweak_records(cfg) if r["filename"] == filename)
+    key = updates.statuses(cfg, [record])[0].confirm_key
+    assert key is not None
+    return key
+
+
+def test_an_unverified_update_needs_trust_tweak(temp_config_env: Path, monkeypatch):
+    """2.3.1 A1: an update from a source that isn't verified (here, no
+    record and no index lists this file) runs only on the person's OK, for
+    exactly what they were shown (its `confirm_key`)."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.tweak_sources import UntrustedSourceError
+
+    cfg, app = _one_app(temp_config_env, ["old.deb"])
+    _install(cfg, "old.deb")
+    _publish(monkeypatch)
+    seen: list = []
+    _serves(monkeypatch, seen=seen)
+    key = _key(cfg, "old.deb")
+
+    with pytest.raises(UntrustedSourceError) as refused:
+        cli_mod._do_update_tweak(cfg, "old.deb")
+    assert "source unknown: https://r.example" in refused.value.message
+    assert f"--trust-tweak {key}" in (refused.value.hint or "")
+    assert seen == [], "nothing was downloaded"
+
+    cli_mod._do_update_tweak(cfg, "old.deb", trusted_key=key)
+
+    from graft_ipa.config import load_config
+    assert load_config(temp_config_env).apps[app].tweaks == [NEW]
+    assert tweak_sources.recorded_for(cfg.state_dir, NEW, tweak_sources.file_sha256(cfg.tweaks_dir / NEW)) == ORIGIN
+
+
+def test_an_ok_for_another_version_is_refused(temp_config_env: Path, monkeypatch):
+    """Re-verify #2: the row showed 2.0; by the press, the source offers
+    9.9. The yes was for 2.0, so nothing is downloaded."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.tweak_sources import UntrustedSourceError
+
+    cfg, _app = _one_app(temp_config_env, ["old.deb"])
+    _install(cfg, "old.deb")
+    _publish(monkeypatch, "2.0")
+    key = _key(cfg, "old.deb")
+    _publish(monkeypatch, "9.9")
+    seen: list = []
+    _serves(monkeypatch, seen=seen, version="9.9")
+
+    with pytest.raises(UntrustedSourceError, match="changed since you confirmed it"):
+        cli_mod._do_update_tweak(cfg, "old.deb", trusted_key=key)
+    assert seen == []
+
+
+def test_an_ok_from_another_source_is_refused(temp_config_env: Path, monkeypatch):
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.tweak_sources import UntrustedSourceError
+
+    cfg, _app = _one_app(temp_config_env, ["old.deb"])
+    _install(cfg, "old.deb")
+    _publish(monkeypatch, "2.0")
+    key = _key(cfg, "old.deb")
+    _publish(monkeypatch, "2.0", url="https://evil.example")
+
+    with pytest.raises(UntrustedSourceError, match="changed since you confirmed it"):
+        cli_mod._do_update_tweak(cfg, "old.deb", trusted_key=key)
+
+
+@pytest.mark.parametrize("given", ["b.deb@" + "0" * 64, "a.deb", "a.deb@nothex"])
+def test_trust_tweak_is_the_confirm_key_of_the_tweak_being_updated(temp_config_env: Path, given: str):
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+
+    result = CliRunner().invoke(cli_mod.app, [
+        "--config", str(temp_config_env), "--update-tweak", "a.deb", "--trust-tweak", given,
+    ])
+    assert result.exit_code == 2
+    assert "confirm_key" in result.output
+
+
+def test_the_key_changes_with_anything_the_person_was_shown(tmp_path: Path):
+    """The file, the source, the version, and each build and its hash."""
+    good = Source(tweak_sources.CANISTER, "r", "https://r.example")
+    builds = (Download("https://r.example/a.deb", "ab" * 32),)
+
+    def key(**kw) -> str:
+        args = {"version": "2.0", "origin": good, "downloads": builds} | kw
+        return updates.confirm_key("a.deb", Availability(args["version"], args["origin"], args["downloads"]))
+
+    base = key()
+    assert base == key(), "the same update, the same key"
+    assert base.startswith("a.deb@") and len(base) == len("a.deb@") + 64
+    assert len({base, key(version="2.1"), key(origin=Source(tweak_sources.CANISTER, "r", "https://evil.example")),
+                key(origin=Source(tweak_sources.CANISTER, "s", "https://r.example")),
+                key(downloads=(Download("https://r.example/a.deb", "cd" * 32),)),
+                key(downloads=(Download("https://r.example/b.deb", "ab" * 32),)),
+                updates.confirm_key("b.deb", Availability("2.0", good, builds))}) == 7
 
 
 def test_updating_something_already_current_changes_nothing(temp_config_env: Path, monkeypatch):
@@ -259,25 +431,18 @@ def test_updating_something_already_current_changes_nothing(temp_config_env: Pat
     from graft_ipa.config import load_config
 
     cfg = load_config(temp_config_env)
-    _install(cfg, "cur.deb")
+    _install(cfg, "cur.deb", "2.0")
+    _from_source(cfg, "cur.deb")
+    _publish(monkeypatch, "2.0")
 
     def _no_fetch(*_a, **_k):
         raise AssertionError("downloaded something for a tweak that was already current")
 
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "cur.deb", "package_id": "com.x",
-                     "version": "2.0", "used_by": []}],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
-    monkeypatch.setattr(
-        updates, "canister_latest", lambda _p: Availability("2.0", "canister", "com.x")
-    )
-    monkeypatch.setattr(cli_mod.canister, "fetch_deb", _no_fetch)
+    monkeypatch.setattr(canister, "fetch_deb", _no_fetch)
 
     out = StringIO()
     cli_mod._do_update_tweak(cfg, "cur.deb", emitter=JsonEmitter(stream=out))
-    event = json.loads(out.getvalue().splitlines()[-1])
+    event = _last_event(out)
 
     assert event["updated"] is False
     assert "newest" in event["reason"]
@@ -300,31 +465,24 @@ def test_the_verb_emits_one_event_per_file_and_a_summary(temp_config_env: Path, 
     from graft_ipa.config import load_config
 
     cfg = load_config(temp_config_env)
-    cfg.tweaks_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _cfg: [
-            {"filename": "old.deb", "package_id": "com.x", "version": "1.0"},
-            {"filename": "mine.deb", "package_id": "com.mine", "version": "1.0"},
-        ],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _cfg: {})
-    monkeypatch.setattr(
-        updates, "canister_latest",
-        lambda pid: Availability("2.0", "canister") if pid == "com.x" else None,
-    )
+    _install(cfg, "old.deb")
+    _from_source(cfg, "old.deb")
+    _install(cfg, "mine.deb", pid="com.mine")
+    _publish(monkeypatch)
 
     out = StringIO()
     cli_mod._do_tweak_updates(cfg, emitter=JsonEmitter(stream=out))
     events = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
 
+    by_file = {e.get("filename"): e for e in events}
     assert [e["type"] for e in events] == ["tweak-update", "tweak-update", "tweak-updates-end"]
-    assert events[0]["update_available"] is True
+    assert by_file["old.deb"]["update_available"] is True
+    assert by_file["old.deb"]["verified"] is True and by_file["old.deb"]["source"] == "https://r.example"
     # Emitted even though nothing publishes it: "we looked and found nothing"
     # has to be distinguishable from "we never looked".
-    assert events[1]["update_available"] is False
-    assert events[1]["latest"] is None
-    assert events[2] == {
+    assert by_file["mine.deb"]["update_available"] is False
+    assert by_file["mine.deb"]["latest"] is None
+    assert events[-1] == {
         "type": "tweak-updates-end", "checked": 2, "outdated": 1, "unchecked": 0
     }
 
@@ -333,205 +491,71 @@ def test_the_swap_keeps_the_tweak_where_it_was_in_the_list(temp_config_env: Path
     """cyan injects in list order, so an update that moves a tweak to the end
     changes what gets built — silently, and only for people with several."""
     from graft_ipa import cli as cli_mod
-    from graft_ipa.config import load_config, set_app_tweaks
+    from graft_ipa.config import load_config
 
     cfg = load_config(temp_config_env)
-    for name in ("first.deb", "old.deb", "last.deb"):
-        _install(cfg, name)
-    app = next(iter(cfg.apps))
-    set_app_tweaks(cfg.path, app, ["first.deb", "old.deb", "last.deb"])
-    cfg = load_config(temp_config_env)
-
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "old.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": [app]}],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
-    monkeypatch.setattr(
-        updates, "canister_latest", lambda _p: Availability("2.0", "canister", "com.x")
-    )
-    monkeypatch.setattr(
-        cli_mod.canister, "fetch_deb", lambda _t, dest, *a, **k: _install(cfg, "new.deb")
-    )
+    _install(cfg, "first.deb", pid="com.first")
+    _install(cfg, "old.deb")
+    _install(cfg, "last.deb", pid="com.last")
+    cfg, app = _one_app(temp_config_env, ["first.deb", "old.deb", "last.deb"])
+    _from_source(cfg, "old.deb")
+    _publish(monkeypatch)
+    _serves(monkeypatch)
 
     cli_mod._do_update_tweak(cfg, "old.deb")
 
     assert load_config(temp_config_env).apps[app].tweaks == [
-        "first.deb", "new.deb", "last.deb"
+        "first.deb", NEW, "last.deb"
     ], "the updated tweak moved position, changing cyan's injection order"
-
-
-# --- what the review found: each of these was a real way to mislead or break ---
-
-
-def test_a_stanza_with_no_filename_does_not_kill_the_whole_catalog(tmp_path: Path):
-    """`download_url` raises without a Filename, and one such stanza in any
-    cached index aborted the entire check — taking down update checking for
-    every tweak, including the ones canister answers and that never needed the
-    repo at all. `_do_repo_packages` already filters these out."""
-    from graft_ipa import repo as repo_mod
-
-    (tmp_path / "repos").mkdir()
-    repo_mod.cache_path(tmp_path, "https://a.example").write_text(
-        "Package: com.virtual\nVersion: 1.0\n\n"      # no Filename — a meta package
-        "Package: com.real\nVersion: 2.0\nFilename: r.deb\n\n"
-    )
-    cfg = SimpleNamespace(state_dir=tmp_path, repos=[SimpleNamespace(url="https://a.example")])
-
-    catalog = updates.repo_catalog(cfg)  # type: ignore[arg-type]
-    assert "com.real" in catalog, "one unusable stanza discarded the whole index"
-    assert "com.virtual" not in catalog
-
-
-def test_a_repo_url_with_a_trailing_slash_still_finds_its_cache(tmp_path: Path):
-    """Every writer hashes the *normalized* URL, and `cache_path` is a SHA-1 of
-    whatever string it is handed. Reading under the raw config value meant a
-    trailing slash silently found nothing and the repo contributed nothing —
-    swallowed by `except OSError`."""
-    from graft_ipa import repo as repo_mod
-
-    (tmp_path / "repos").mkdir()
-    repo_mod.cache_path(tmp_path, repo_mod.normalize_url("https://a.example/")).write_text(
-        "Package: com.x\nVersion: 2.0\nFilename: d.deb\n\n"
-    )
-    cfg = SimpleNamespace(state_dir=tmp_path, repos=[SimpleNamespace(url="https://a.example/")])
-
-    assert updates.repo_catalog(cfg)["com.x"].version == "2.0"  # type: ignore[arg-type]
-
-
-def test_a_stale_cache_does_not_answer_ahead_of_the_network(tmp_path: Path):
-    """The cache is refreshed only when the user runs --repo-packages. Left
-    unbounded it pins `latest` below the live figure and reports a tweak as up
-    to date on evidence it knows is months old."""
-    import os
-
-    from graft_ipa import repo as repo_mod
-
-    (tmp_path / "repos").mkdir()
-    cached = repo_mod.cache_path(tmp_path, "https://a.example")
-    cached.write_text("Package: com.x\nVersion: 1.0\nFilename: d.deb\n\n")
-    old = cached.stat().st_mtime - (7 * 24 * 60 * 60)
-    os.utime(cached, (old, old))
-    cfg = SimpleNamespace(state_dir=tmp_path, repos=[SimpleNamespace(url="https://a.example")])
-
-    assert updates.repo_catalog(cfg) == {}, "a week-old index answered as current"  # type: ignore[arg-type]
-    # Fresh again with a wide enough window, so the bound is what excluded it.
-    assert updates.repo_catalog(cfg, max_age=30 * 24 * 60 * 60)["com.x"].version == "1.0"  # type: ignore[arg-type]
-
-
-def test_the_repo_answer_carries_the_hash_it_published(tmp_path: Path):
-    """`fetch_deb` can only verify a URL target against a hash the caller hands
-    it, so without this the repo-sourced download was the one fetch path that
-    wrote an unverified .deb and then re-pointed every app at it."""
-    from graft_ipa import repo as repo_mod
-
-    (tmp_path / "repos").mkdir()
-    repo_mod.cache_path(tmp_path, "https://a.example").write_text(
-        "Package: com.x\nVersion: 2.0\nFilename: d.deb\nSHA256: abc123\n\n"
-    )
-    cfg = SimpleNamespace(state_dir=tmp_path, repos=[SimpleNamespace(url="https://a.example")])
-
-    assert updates.repo_catalog(cfg)["com.x"].sha256 == "abc123"  # type: ignore[arg-type]
-
-
-def test_an_unreachable_source_is_not_reported_as_up_to_date():
-    """The one claim this feature must never make without evidence. Offline,
-    every lookup returns nothing and `outdated` is 0 — which reads exactly like
-    having checked and being sure."""
-    def unreachable(_pid):
-        raise updates.LookupUnavailable("connection timed out")
-
-    results = updates.statuses(
-        [{"filename": "a.deb", "package_id": "com.x", "version": "1.0"}], {}, lookup=unreachable
-    )
-    assert results[0].unchecked is True
-    assert not results[0].update_available
-    assert updates.as_event(results[0])["unchecked"] is True
-
-
-def test_a_package_nothing_publishes_is_checked_not_unchecked():
-    """A 404 is an ordinary answer for anything built from source. It must not
-    look like a failed lookup, or the pane would nag about the network."""
-    results = updates.statuses(
-        [{"filename": "mine.deb", "package_id": "com.mine", "version": "1.0"}],
-        {}, lookup=lambda _p: None
-    )
-    assert results[0].unchecked is False
-    assert results[0].available is None
 
 
 def test_the_swap_collapses_a_duplicate_that_comes_after_the_old_entry(
     temp_config_env: Path, monkeypatch
 ):
     """An app can list both builds — the user fetched the new one through
-    Canister and attached it alongside. Collapsing only against entries already
-    emitted appended the new name twice, so cyan got the same .deb twice; the
-    outcome depended purely on which order the two sat in."""
-    from graft_ipa import cli as cli_mod
-    from graft_ipa.config import load_config, set_app_tweaks
-
-    cfg = load_config(temp_config_env)
-    for name in ("old.deb", "new.deb"):
-        _install(cfg, name)
-    app = next(iter(cfg.apps))
-    set_app_tweaks(cfg.path, app, ["old.deb", "new.deb"])
-    cfg = load_config(temp_config_env)
-
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "old.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": [app]}],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
-    monkeypatch.setattr(
-        updates, "canister_latest", lambda _p: Availability("2.0", "canister", "com.x")
-    )
-    monkeypatch.setattr(
-        cli_mod.canister, "fetch_deb", lambda _t, dest, *a, **k: _install(cfg, "new.deb")
-    )
-
-    cli_mod._do_update_tweak(cfg, "old.deb")
-
-    assert load_config(temp_config_env).apps[app].tweaks == ["new.deb"], (
-        "the app lists the same tweak twice, so cyan injects it twice"
-    )
-
-
-def test_an_in_place_replacement_still_leaves_a_rollback(temp_config_env: Path, monkeypatch):
-    """The docstring promises the old build survives so a bad update can be
-    undone. A repo serving a stable filename overwrites it — precisely the case
-    the promise is for."""
+    Canister and attached it alongside. The update reuses that file (the same
+    bytes) and the app lists it once, not twice."""
     from graft_ipa import cli as cli_mod
     from graft_ipa.config import load_config
 
     cfg = load_config(temp_config_env)
-    target = _install(cfg, "same.deb")
-    target.write_bytes(b"the-old-build")
+    _install(cfg, "old.deb")
+    fetched = _install(cfg, NEW, "2.0")
+    cfg, app = _one_app(temp_config_env, ["old.deb", NEW])
+    _from_source(cfg, "old.deb")
+    _publish(monkeypatch)
 
-    def _overwrite(_t, _dest, *_a, **_k):
-        target.write_bytes(b"the-new-build")
-        return target
+    def same(_t, dest, *_a, **_k):
+        (dest / "d.deb").write_bytes(fetched.read_bytes())
+        return dest / "d.deb"
 
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "same.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": []}],
+    monkeypatch.setattr(canister, "fetch_deb", same)
+
+    cli_mod._do_update_tweak(cfg, "old.deb")
+
+    assert load_config(temp_config_env).apps[app].tweaks == [NEW], (
+        "the app lists the same tweak twice, so cyan injects it twice"
     )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
-    monkeypatch.setattr(
-        updates, "canister_latest", lambda _p: Availability("2.0", "repo", "https://r/same.deb")
-    )
-    monkeypatch.setattr(cli_mod.canister, "fetch_deb", _overwrite)
+
+
+def test_an_update_leaves_a_rollback(temp_config_env: Path, monkeypatch):
+    """The docstring promises the old build survives so a bad update can be
+    undone, outside the library, where it would list as a second tweak."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.config import load_config
+
+    cfg = load_config(temp_config_env)
+    old = _install(cfg, "old.deb")
+    _from_source(cfg, "old.deb")
+    _publish(monkeypatch)
+    _serves(monkeypatch)
 
     out = StringIO()
-    cli_mod._do_update_tweak(cfg, "same.deb", emitter=JsonEmitter(stream=out))
-    event = json.loads(out.getvalue().splitlines()[-1])
+    cli_mod._do_update_tweak(cfg, "old.deb", emitter=JsonEmitter(stream=out))
+    event = _last_event(out)
 
-    assert event["replaced_in_place"] is True
     rollback = Path(event["rollback"])
-    assert rollback.read_bytes() == b"the-old-build", "the previous build is unrecoverable"
-    # And not in the library, where it would list as a second tweak.
+    assert rollback.read_bytes() == old.read_bytes()
     assert rollback.parent != cfg.tweaks_dir
 
 
@@ -547,11 +571,15 @@ def test_a_write_that_fails_partway_reports_which_apps_changed(
     # Two apps, so there is a "partway" to fail at.
     raw = yaml.safe_load(temp_config_env.read_text())
     first = next(iter(raw["apps"]))
+    raw["apps"][first]["tweaks"] = ["old.deb"]
     raw["apps"]["second"] = dict(raw["apps"][first])
     temp_config_env.write_text(yaml.safe_dump(raw))
 
     cfg = load_config(temp_config_env)
     _install(cfg, "old.deb")
+    _from_source(cfg, "old.deb")
+    _publish(monkeypatch)
+    _serves(monkeypatch)
     apps = [first, "second"]
 
     calls: list[str] = []
@@ -561,60 +589,35 @@ def test_a_write_that_fails_partway_reports_which_apps_changed(
         if len(calls) > 1:
             raise ConfigError("config.yaml changed underneath us")
 
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "old.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": apps}],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
-    monkeypatch.setattr(
-        updates, "canister_latest", lambda _p: Availability("2.0", "canister", "com.x")
-    )
-    monkeypatch.setattr(
-        cli_mod.canister, "fetch_deb", lambda _t, dest, *a, **k: _install(cfg, "new.deb")
-    )
     monkeypatch.setattr(cli_mod, "set_app_tweaks", _fail_on_second)
 
     out = StringIO()
     cli_mod._do_update_tweak(cfg, "old.deb", emitter=JsonEmitter(stream=out))
-    event = json.loads(out.getvalue().splitlines()[-1])
+    event = _last_event(out)
 
     assert event["updated"] is True, "the download landed; this is not a failed update"
     assert event["apps"] == [apps[0]], "the event must name what actually changed"
     assert "changed underneath" in event["error"]
 
 
-def test_the_repo_published_hash_reaches_the_download(temp_config_env: Path, monkeypatch):
-    """`fetch_deb` verifies a URL target only against a hash the caller hands
-    it. Without forwarding it, this was the one fetch path in the app that
-    wrote an unverified .deb and then re-pointed every app at it."""
+def test_exactly_the_compared_build_is_downloaded_against_its_hash(temp_config_env: Path, monkeypatch):
+    """Real repro (sometweak, 2026-11-17): the status said 1.7.24 and the
+    download resolved the package id a second time and came back with 1.7.20.
+    The build compared, from the source shown, is the one fetched, checked
+    against its own published hash."""
     from graft_ipa import cli as cli_mod
     from graft_ipa.config import load_config
 
     cfg = load_config(temp_config_env)
     _install(cfg, "old.deb")
-    seen: dict = {}
-
-    def _capture(target, dest, expected_sha=None, *_a, **_k):
-        seen["target"] = target
-        seen["sha"] = expected_sha
-        return _install(cfg, "new.deb")
-
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "old.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": []}],
-    )
-    monkeypatch.setattr(
-        updates, "repo_catalog",
-        lambda _c: {"com.x": Availability("2.0", "https://r", "https://r/new.deb", "deadbeef")},
-    )
-    monkeypatch.setattr(cli_mod.canister, "fetch_deb", _capture)
+    _from_source(cfg, "old.deb")
+    build = _publish(monkeypatch, sha256="deadbeef")
+    seen: list = []
+    _serves(monkeypatch, seen=seen)
 
     cli_mod._do_update_tweak(cfg, "old.deb")
 
-    assert seen["target"] == "https://r/new.deb"
-    assert seen["sha"] == "deadbeef", "the download was not verified against the published hash"
+    assert [(s["target"], s["sha"]) for s in seen] == [(build, "deadbeef")]
 
 
 def test_a_failed_download_leaves_no_rollback_behind(temp_config_env: Path, monkeypatch):
@@ -628,20 +631,13 @@ def test_a_failed_download_leaves_no_rollback_behind(temp_config_env: Path, monk
 
     cfg = load_config(temp_config_env)
     _install(cfg, "old.deb")
+    _from_source(cfg, "old.deb")
+    _publish(monkeypatch)
 
     def _404(*_a, **_k):
         raise GraftError("download failed: 404 Client Error")
 
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "old.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": []}],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
-    monkeypatch.setattr(
-        updates, "canister_latest", lambda _p: Availability("2.0", "canister", "com.x")
-    )
-    monkeypatch.setattr(cli_mod.canister, "fetch_deb", _404)
+    monkeypatch.setattr(canister, "fetch_deb", _404)
 
     with pytest.raises(GraftError):
         cli_mod._do_update_tweak(cfg, "old.deb")
@@ -665,65 +661,29 @@ def test_the_push_names_the_transport_it_actually_used(transport: str, expected:
     assert cli_mod._transport_label(transport) == expected
 
 
-def test_the_download_is_pinned_to_the_version_the_status_reported(
-    temp_config_env: Path, monkeypatch
-):
-    """Real repro (sometweak, 2026-11-17): the status said 1.7.24 and the download
-    resolved the package id a second time and came back with 1.7.20. The
-    version that was compared is the version that must be fetched."""
-    from graft_ipa import cli as cli_mod
-    from graft_ipa.config import load_config
-
-    cfg = load_config(temp_config_env)
-    _install(cfg, "old.deb")
-    seen: dict = {}
-
-    def _capture(target, dest, expected_sha=None, **kwargs):
-        seen.update(target=target, **kwargs)
-        return _install(cfg, "new.deb")
-
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "old.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": []}],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
-    monkeypatch.setattr(
-        updates, "canister_latest", lambda _p: Availability("2.0", "canister", "com.x")
-    )
-    monkeypatch.setattr(cli_mod.canister, "fetch_deb", _capture)
-
-    cli_mod._do_update_tweak(cfg, "old.deb")
-
-    assert seen["target"] == "com.x"
-    assert seen["version"] == "2.0"
-
-
 def test_a_missing_build_leaves_config_and_tweak_untouched_and_names_the_urls(
     temp_config_env: Path, monkeypatch
 ):
-    """End to end through the real `fetch_deb` with a repo that 404s every
-    variant of the reported version: the failure names what was wanted and what
-    404'd, and nothing on disk or in config.yaml changed."""
+    """End to end through the real `canister_offers` and `fetch_deb` with a
+    repo that 404s every variant of the reported version: the failure names
+    what was wanted and what 404'd, and nothing on disk or in config.yaml
+    changed."""
     from unittest.mock import MagicMock, patch
 
     import requests
 
     from graft_ipa import cli as cli_mod
-    from graft_ipa.config import load_config, set_app_tweaks
     from graft_ipa.errors import GraftError
 
-    cfg = load_config(temp_config_env)
+    cfg, _app = _one_app(temp_config_env, ["old.deb"])
     _install(cfg, "old.deb")
-    app = next(iter(cfg.apps))
-    set_app_tweaks(cfg.path, app, ["old.deb"])
+    _from_source(cfg, "old.deb")
     config_before = cfg.path.read_text()
-    cfg = load_config(temp_config_env)
 
     def _row(version, arch):
         return {
             "package_id": "com.x", "version": version, "repository_id": "r",
-            "package_filename": f"./debs/com.x_{version}_{arch}.deb",
+            "package_filename": f"./debs/com.x_{version}_{arch}.deb", "sha256_hash": "ab" * 32,
         }
 
     def fake_http(url, *a, **k):
@@ -745,12 +705,7 @@ def test_a_missing_build_leaves_config_and_tweak_untouched_and_names_the_urls(
             resp.raise_for_status.side_effect = requests.HTTPError("404", response=resp)
         return resp
 
-    monkeypatch.setattr(
-        cli_mod, "_collect_tweak_records",
-        lambda _c: [{"filename": "old.deb", "package_id": "com.x",
-                     "version": "1.0", "used_by": [app]}],
-    )
-    monkeypatch.setattr(updates, "repo_catalog", lambda _c: {})
+    monkeypatch.setattr(updates, "repo_offers", lambda _c, max_age=0: {})
 
     with patch("requests.get", side_effect=fake_http):
         with pytest.raises(GraftError) as exc:
@@ -760,4 +715,34 @@ def test_a_missing_build_leaves_config_and_tweak_untouched_and_names_the_urls(
     assert "com.x_2.0_iphoneos-arm64.deb" in exc.value.message
     assert "com.x_2.0_iphoneos-arm.deb" in exc.value.message
     assert cfg.path.read_text() == config_before
-    assert [p.name for p in cfg.tweaks_dir.iterdir()] == ["old.deb"]
+    assert sorted(p.name for p in cfg.tweaks_dir.iterdir() if not p.name.startswith(".")) == ["old.deb"]
+
+
+def test_update_tweak_never_takes_a_higher_version_from_another_repository(
+    temp_config_env: Path, monkeypatch
+):
+    """2.3.1 A1 end to end, through the real `canister_offers`: canister lists
+    the tweak from its own repository (`r`, 2.0) and from another (9.9). The
+    download is `r`'s, and the app builds with 2.0."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.config import load_config
+
+    cfg, app = _one_app(temp_config_env, ["old.deb"])
+    _install(cfg, "old.deb")
+    _from_source(cfg, "old.deb")
+    rows = [("r", "1.0"), ("r", "2.0"), ("evil", "9.9")]
+    monkeypatch.setattr(canister, "get_packages", lambda _pid: [
+        canister.Package("com.x", "x", v, "", "", "", repo_id, f"debs/com.x_{v}.deb", None, "ab" * 32,
+                         "", None) for repo_id, v in rows
+    ])
+    uris = {"r": "https://r.example", "evil": "https://evil.example"}
+    monkeypatch.setattr(canister, "get_repository",
+                        lambda repo_id: canister.Repository(repo_id, repo_id, uris[repo_id]))
+    monkeypatch.setattr(updates, "repo_offers", lambda _c, max_age=0: {})
+    seen: list = []
+    _serves(monkeypatch, seen=seen)
+
+    cli_mod._do_update_tweak(cfg, "old.deb")
+
+    assert [s["target"] for s in seen] == ["https://r.example/debs/com.x_2.0.deb"]
+    assert load_config(temp_config_env).apps[app].tweaks == [NEW]

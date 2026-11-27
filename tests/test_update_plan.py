@@ -13,7 +13,7 @@ from graft_ipa.errors import ConfigError
 from graft_ipa.update_plan import StoreAnswer
 from graft_ipa.update_readiness import FullProbe
 
-from .update_fakes import DEVELOPMENT, OTHER_PHONE, PHONE, FakePhone, deb, plan_of
+from .update_fakes import DEVELOPMENT, OTHER_PHONE, PHONE, REPO_URL, FakePhone, confirm_keys, deb, plan_of
 
 CONTRACT = Path(__file__).resolve().parent.parent / "Graft" / "Graft" / "Models" / "CLIContract.swift"
 
@@ -54,12 +54,117 @@ def test_a_held_app_is_not_got(world) -> None:
     assert step.skipped_reason == "held at 1.0" and not step.planned
 
 
+def _hold_by_build(world, version: str, version_id: str) -> None:
+    import yaml
+
+    raw = yaml.safe_load(world.cfg_path.read_text())
+    raw["apps"]["example"].update(preferred_version=version,
+                                  preferred_build={"version": version, "version_id": version_id})
+    world.cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+
+def test_a_held_build_whose_file_is_gone_says_it_isnt_downloaded(world, monkeypatch) -> None:
+    """T2-B8: "held at 1.2" alone, with nothing to build from, read as if
+    the hold were the only thing in the way."""
+    from graft_ipa import appstore
+
+    _hold_by_build(world, "1.2", "800200")
+    monkeypatch.setattr(appstore, "held_build",
+                        lambda cfg, app: appstore.HeldBuild(number=1, count=2))
+
+    step = _step(world, "example", StoreAnswer("1.2"))
+
+    assert step.from_version is None, "premise: the held build's file isn't staged"
+    assert step.skipped_reason == (
+        "held at 1.2 (build 1 of 2), which isn't downloaded: "
+        "get it again from Get an older version…"
+    )
+    assert not step.planned
+
+
+def test_a_held_version_whose_file_is_gone_says_it_isnt_downloaded(world) -> None:
+    set_app_options(world.cfg_path, "example", preferred_version="1.5")
+
+    step = _step(world, "example", StoreAnswer("2.0"))
+
+    assert step.skipped_reason == (
+        "held at 1.5, which isn't downloaded: get it again from Get an older version…")
+
+
 def test_without_apple_silicon_the_newer_version_shows_and_is_not_got(world, monkeypatch) -> None:
     monkeypatch.setattr(host, "apple_silicon_blocker", lambda: host.INTEL_MAC)
 
     step = _step(world, "example", StoreAnswer("2.0"))
 
     assert (step.to_version, step.skipped_reason) == ("2.0", update_plan.NEEDS_APPLE_SILICON)
+
+
+def test_without_decryption_set_up_the_newer_version_shows_and_is_not_got(world) -> None:
+    """B5: Update & Install before the App Store's setup failed at the get,
+    with the enrollment's Terminal steps. The plan says it can't, and why."""
+    (world.tools.models / "enrollment.bin").unlink()
+
+    step = _step(world, "example", StoreAnswer("2.0"))
+
+    assert (step.to_version, step.skipped_reason) == ("2.0", update_plan.DECRYPTION_NOT_SET_UP)
+    assert not step.planned
+
+
+def test_without_unfairplay_the_newer_version_is_not_got(world) -> None:
+    world.tools.unfairplay.unlink()
+
+    step = _step(world, "example", StoreAnswer("2.0"))
+
+    assert step.skipped_reason == update_plan.DECRYPTION_NOT_SET_UP
+
+
+def _bundled_ipatool(monkeypatch) -> None:
+    """Graft.app's own ipatool, as status would find it."""
+    from graft_ipa import ipatool, tools
+
+    monkeypatch.setattr(ipatool, "source_of", lambda configured, *, explicit: tools.SOURCE_BUNDLED)
+
+
+def test_graft_s_ipatool_never_signed_in_is_not_got(world, monkeypatch) -> None:
+    """Read from Graft's own record of its sign-in, not the keychain: the
+    plan reads no keychain, and with Graft's ipatool a get needs the
+    sign-in that record vouches for."""
+    _bundled_ipatool(monkeypatch)
+
+    step = _step(world, "example", StoreAnswer("2.0"))
+
+    assert (step.to_version, step.skipped_reason) == ("2.0", update_plan.NOT_SIGNED_IN)
+
+
+def test_graft_s_ipatool_signed_in_is_got(world, monkeypatch) -> None:
+    from graft_ipa import appstore_account
+
+    _bundled_ipatool(monkeypatch)
+    appstore_account._write_marker({
+        "format": appstore_account.MARKER_FORMAT, "ipatool_source": "bundled",
+        "bundled_items": {"account": "2026-11-26 10:00:00 +0000"},
+    })
+
+    assert _step(world, "example", StoreAnswer("2.0")).planned
+
+
+def test_signed_out_with_graft_s_ipatool_is_not_got(world, monkeypatch) -> None:
+    """A Sign Out takes `account` off the record and leaves the device item."""
+    from graft_ipa import appstore_account
+
+    _bundled_ipatool(monkeypatch)
+    appstore_account._write_marker({
+        "format": appstore_account.MARKER_FORMAT, "ipatool_source": "bundled",
+        "bundled_items": {"anisette-v4": "2026-11-26 10:00:00 +0000"},
+    })
+
+    assert _step(world, "example", StoreAnswer("2.0")).skipped_reason == update_plan.NOT_SIGNED_IN
+
+
+def test_another_ipatool_s_sign_in_is_its_own_business(world) -> None:
+    """One set in config.yaml may be signed in in Terminal, which Graft has
+    no record of: the get finds out, as before."""
+    assert _step(world, "example", StoreAnswer("2.0")).planned
 
 
 def test_a_failed_lookup_is_couldnt_check(world) -> None:
@@ -110,8 +215,8 @@ def test_a_newer_app_store_version_plans_a_get_and_an_install(world) -> None:
     assert plan["targets"] == [{
         "udid": PHONE, "device_name": "Example iPhone", "delivery": "livecontainer",
         "lc_bundle_id": "com.kdt.livecontainer", "install": True, "install_skipped_reason": None,
-        "manual_install": False, "waiting": None, "blocked_reason": None, "readiness": "checked",
-        "readiness_note": None,
+        "manual_install": False, "kind": "current", "connected": True, "waiting": None,
+        "blocked_reason": None, "readiness": "checked", "readiness_note": None,
     }]
     assert (plan["manual_install"], plan["readiness_note"]) == (False, None)
 
@@ -122,8 +227,12 @@ def test_a_newer_tweak_is_listed_with_its_versions(world) -> None:
     plan = plan_of(world, ["bravo"])["bravo"]
 
     assert plan["tweaks"] == [{"filename": "b-tweak.deb", "name": "B Tweak", "from": "2.0", "to": "2.1",
-                               "unchecked": False, "also_affects": []}]
+                               "unchecked": False, "also_affects": [], "source": REPO_URL,
+                               "verified": True, "unverified_reason": None, "confirmed": True,
+                               "confirm_key": confirm_keys(world, ["bravo"])["b-tweak.deb"],
+                               "trust_changed": False}]
     assert plan["install"] is True
+    assert plan["needs_confirmation"] is False
 
 
 def test_a_tweak_that_couldnt_be_checked_is_listed_and_left_alone(world) -> None:
@@ -132,7 +241,9 @@ def test_a_tweak_that_couldnt_be_checked_is_listed_and_left_alone(world) -> None
     plan = plan_of(world, ["bravo"])["bravo"]
 
     assert plan["tweaks"] == [{"filename": "b-tweak.deb", "name": "B Tweak", "from": "2.0", "to": None,
-                               "unchecked": True, "also_affects": []}]
+                               "unchecked": True, "also_affects": [], "source": None,
+                               "verified": False, "unverified_reason": None, "confirmed": False,
+                               "confirm_key": None, "trust_changed": False}]
     assert plan["install"] is False and plan["nothing_to_do"] is True
 
 
@@ -239,6 +350,119 @@ def test_a_failed_lookup_never_blocks_the_tweak_and_install_steps(world) -> None
     assert plan["store"]["skipped_reason"] == update_plan.LOOKUP_FAILED
     assert [t["to"] for t in plan["tweaks"]] == ["1.1"]
     assert plan["install"] is True
+
+
+def _payload(world, names: list[str]) -> dict:
+    from graft_ipa import cli as cli_mod
+
+    cfg = world.cfg
+    plans = update_plan.plan(cfg, names, quick=True, with_affected=False,
+                             probe=FullProbe(cfg.state_dir),
+                             tweak_records=cli_mod._collect_tweak_records,
+                             delivery=cli_mod._delivery_targets(cfg))
+    return update_plan.payload(plans, quick=True)
+
+
+def _offline(world) -> None:
+    world.lookup_error = "iTunes lookup request failed: offline"
+    world.unreachable |= {"com.example.atweak", "com.example.btweak"}
+
+
+def test_a_plan_whose_every_lookup_failed_says_the_checks_failed(world) -> None:
+    """T2-A1: offline, the plan still says every app has nothing to do; the
+    app mustn't take that for an answer."""
+    _offline(world)
+
+    payload = _payload(world, ["example", "bravo"])
+
+    assert payload["checks_failed"] is True
+    assert all(a["nothing_to_do"] for a in payload["apps"]), "premise: it looks like up to date"
+
+
+def test_a_plan_that_got_its_answers_hasnt_failed(world) -> None:
+    assert _payload(world, ["example", "bravo"])["checks_failed"] is False
+
+
+@pytest.mark.parametrize("answered", ["store", "canister"])
+def test_one_service_answering_is_an_answer(world, answered: str) -> None:
+    _offline(world)
+    if answered == "store":
+        world.lookup_error = None
+    else:
+        world.unreachable.clear()
+
+    assert _payload(world, ["example", "bravo"])["checks_failed"] is False
+
+
+def test_not_on_the_store_is_an_answer_too(world) -> None:
+    """A store that answered "no such app" was reached."""
+    _offline(world)
+    world.lookup_error = None
+    world.store.clear()
+
+    assert _payload(world, ["example"])["checks_failed"] is False
+
+
+REPO = "https://repo.example.com"
+
+
+def _from_the_repo(world, monkeypatch, *, fresh: bool) -> None:
+    """Both library tweaks recorded as fetched from `REPO`, whose cached index
+    (`updates.repo_offers`) carries them, `fresh` or past `CACHE_MAX_AGE`.
+    `updates.statuses` then reads that index alone, and asks canister nothing."""
+    from graft_ipa import tweak_sources, updates
+    from graft_ipa.tweak_sources import REPO as KIND
+    from graft_ipa.tweak_sources import Source, file_sha256
+    from graft_ipa.updates import Download, Offer
+
+    cfg = world.cfg
+    source = Source(KIND, REPO, REPO)
+    offers: dict[str, list[Offer]] = {}
+    for filename, package_id, version in (("a-tweak.deb", "com.example.atweak", "1.0"),
+                                          ("b-tweak.deb", "com.example.btweak", "2.0")):
+        sha = file_sha256(cfg.tweaks_dir / filename)
+        tweak_sources.record(cfg.state_dir, cfg.tweaks_dir, filename, source, sha)
+        build = Download(f"{REPO}/debs/{filename}", "0" * 64)
+        offers[package_id] = [Offer(source, version, (build,), frozenset({sha}), fresh=fresh)]
+    monkeypatch.setattr(updates, "repo_offers", lambda _cfg, max_age=updates.CACHE_MAX_AGE: offers)
+
+
+def test_a_cached_repo_index_is_no_sign_of_being_online(world, monkeypatch) -> None:
+    """A tweak its own repo's recently fetched index answered was never asked
+    online, so it says nothing about the network."""
+    world.lookup_error = "iTunes lookup request failed: offline"
+    _from_the_repo(world, monkeypatch, fresh=True)
+
+    payload = _payload(world, ["example", "bravo"])
+
+    assert world.latest_asked == [], "premise: canister wasn't asked"
+    assert payload["checks_failed"] is True
+
+
+def test_a_stale_repo_index_is_no_sign_of_being_offline(world, monkeypatch) -> None:
+    """Past `CACHE_MAX_AGE` a repo-sourced tweak is unchecked, and that's the
+    index's age, not the network: nothing was asked online. Here nothing else
+    is asked either (an app of Apple's own isn't looked up), so nothing
+    failed."""
+    _from_the_repo(world, monkeypatch, fresh=False)
+    add_app(world.cfg_path, "apple", {"bundle_id": "com.apple.example", "delivery": "livecontainer",
+                                      "tweaks": ["a-tweak.deb"]})
+
+    payload = _payload(world, ["apple"])
+
+    assert payload["apps"][0]["tweaks"][0]["unchecked"] is True, "premise: the stale index"
+    assert world.latest_asked == [] and world.lookups == [], "premise: nothing was asked online"
+    assert payload["checks_failed"] is False
+
+
+def test_a_plan_that_asks_nothing_online_hasnt_failed(world) -> None:
+    """Apple's own apps aren't looked up, and a tweak with no package id
+    isn't either: nothing asked is nothing failed."""
+    _offline(world)
+    add_app(world.cfg_path, "apple", {"bundle_id": "com.apple.example", "delivery": "livecontainer",
+                                      "tweaks": []})
+
+    assert _payload(world, ["apple"])["checks_failed"] is False
 
 
 def test_a_held_app_still_gets_its_tweaks_and_install(world) -> None:
@@ -375,6 +599,9 @@ def test_the_apps_vocabulary_matches_the_cli() -> None:
         "statusEnd": update_run.END, "statusSkipped": update_run.SKIPPED,
         "readinessChecked": update_readiness.CHECKED, "readinessLikely": update_readiness.LIKELY,
         "needsAppleSilicon": update_plan.NEEDS_APPLE_SILICON,
+        "decryptionNotSetUp": update_plan.DECRYPTION_NOT_SET_UP,
+        "notSignedIn": update_plan.NOT_SIGNED_IN,
+        "lookupFailed": update_plan.LOOKUP_FAILED,
         "notInstalledYet": update_plan.NOT_INSTALLED_YET,
         "notStarted": update_run.NOT_STARTED,
         "refusedPrefix": update_plan.REFUSED.split("{", 1)[0],
@@ -605,3 +832,120 @@ def test_the_human_line_names_a_blocked_device(world) -> None:
         "Example+: App Store 2.0 · rebuild & install on Example iPhone · blocked on Example iPad: "
         "Example iPad listed no apps: unlock it and keep it on the home screen"
     )
+
+
+# --- 2.3.1 A1: a tweak update whose source isn't verified ------------------------
+
+INSECURE = REPO_URL.replace("https://", "http://")
+
+
+def test_an_unverified_tweak_is_shown_and_waits_for_the_person(world) -> None:
+    """Shown, with where it comes from and why it isn't verified, and not
+    counted: alone it's nothing to do, so Update All and `--all` leave it."""
+    world.published["com.example.btweak"] = "2.1"
+    world.serve_insecure("com.example.btweak")
+
+    plan = plan_of(world, ["bravo"])["bravo"]
+
+    (tweak,) = plan["tweaks"]
+    assert (tweak["to"], tweak["source"], tweak["verified"], tweak["confirmed"]) == \
+        ("2.1", INSECURE, False, False)
+    assert tweak["unverified_reason"] == f"{INSECURE} doesn't use HTTPS"
+    assert plan["needs_confirmation"] is True
+    assert (plan["nothing_to_do"], plan["actionable"], plan["install"]) == (True, False, False)
+    assert [t["install"] for t in plan["targets"]] == [False]
+
+
+def test_the_person_s_ok_plans_it(world) -> None:
+    world.published["com.example.btweak"] = "2.1"
+    world.serve_insecure("com.example.btweak")
+
+    keys = confirm_keys(world, ["bravo"])
+
+    plan = plan_of(world, ["bravo"], trusted=keys)["bravo"]
+
+    (tweak,) = plan["tweaks"]
+    assert (tweak["verified"], tweak["confirmed"], tweak["trust_changed"]) == (False, True, False)
+    assert tweak["confirm_key"] == keys["b-tweak.deb"]
+    assert tweak["confirm_key"].startswith("b-tweak.deb@") and len(tweak["confirm_key"]) == len("b-tweak.deb@") + 64
+    assert (plan["needs_confirmation"], plan["actionable"], plan["install"]) == (False, True, True)
+
+
+def test_an_ok_counts_only_for_what_was_confirmed(world) -> None:
+    """Re-verify #2: the person said yes to 2.1 from this source. A plan made
+    after it moved on (another version, another build, another source) isn't
+    confirmed by that yes, and says so (`trust_changed`)."""
+    world.published["com.example.btweak"] = "2.1"
+    world.serve_insecure("com.example.btweak")
+    keys = confirm_keys(world, ["bravo"])
+    world.published["com.example.btweak"] = "9.9"
+
+    plan = plan_of(world, ["bravo"], trusted=keys)["bravo"]
+
+    (tweak,) = plan["tweaks"]
+    assert (tweak["to"], tweak["confirmed"], tweak["trust_changed"]) == ("9.9", False, True)
+    assert tweak["confirm_key"] != keys["b-tweak.deb"]
+    assert (plan["needs_confirmation"], plan["actionable"]) == (True, False)
+
+
+def test_another_tweak_s_ok_doesn_t_count(world) -> None:
+    world.published["com.example.btweak"] = "2.1"
+    world.serve_insecure("com.example.btweak")
+
+    plan = plan_of(world, ["bravo"], trusted={"a-tweak.deb": "a-tweak.deb@" + "0" * 64})["bravo"]
+
+    assert plan["needs_confirmation"] is True and plan["actionable"] is False
+
+
+def test_with_affected_doesn_t_reach_through_an_unconfirmed_tweak(world) -> None:
+    world.published["com.example.atweak"] = "1.1"
+    world.serve_insecure("com.example.atweak")
+
+    plans = plan_of(world, ["example"], with_affected=True)
+
+    assert list(plans) == ["example"]
+
+
+def test_the_terminal_line_says_what_needs_the_person_s_ok(world) -> None:
+    from graft_ipa import cli as cli_mod
+
+    world.published["com.example.btweak"] = "2.1"
+    world.serve_insecure("com.example.btweak")
+    cfg = world.cfg
+    (plan,) = update_plan.plan(cfg, ["bravo"], quick=False, with_affected=False,
+                               probe=FullProbe(cfg.state_dir),
+                               tweak_records=cli_mod._collect_tweak_records,
+                               delivery=cli_mod._delivery_targets(cfg))
+
+    (change,) = plan.tweaks
+    assert update_plan.describe(plan) == (
+        f"bravo: B Tweak 2.0 → 2.1 needs your OK ({INSECURE} doesn't use HTTPS): "
+        f"--trust-tweak {change.confirm_key}"
+    )
+
+
+# --- every target's local facts, for the app's offline merge ----------------------
+
+
+def test_every_target_says_its_delivery_state_and_whether_its_device_is_connected(world) -> None:
+    """Readiness (`install`, `waiting`) is worked out only for a target with
+    work, and an App Store update gives every target work, so those two say
+    as much about the network as about the device. `kind` and `connected`
+    are the device's alone, for every target: what the app compares to tell
+    an offline plan's local change (`AppUpdatesStore.merged`)."""
+    devices_seen.remember(world.cfg.state_dir, OTHER_PHONE, name="Example iPad")
+    world.deliver("example", udid=OTHER_PHONE)  # the iPad isn't plugged in
+
+    targets = {t["udid"]: t for t in plan_of(world, ["example"])["example"]["targets"]}
+
+    assert (targets[PHONE]["kind"], targets[PHONE]["connected"]) == ("current", True)
+    assert (targets[OTHER_PHONE]["kind"], targets[OTHER_PHONE]["connected"]) == ("current", False)
+    assert targets[OTHER_PHONE]["waiting"] is None, "premise: no work, so no readiness was asked"
+
+
+def test_a_target_whose_build_changed_since_says_stale(world) -> None:
+    world.stage("example", "2.0")
+
+    (target,) = plan_of(world, ["example"])["example"]["targets"]
+
+    assert (target["kind"], target["connected"]) == ("stale", True)

@@ -57,6 +57,8 @@ from . import (
     repo,
     stop_deferral,
     storefronts,
+    tweak_sources,
+    update_tweaks,
     updates,
 )
 from . import ipa_inspect as ipa_inspect_module
@@ -108,13 +110,16 @@ from .devices import BriefDevice, DeviceInfo, list_devices, list_devices_brief
 from .errors import (
     EXIT_BROKEN_PIPE,
     ConfigError,
+    DeviceNotConnectedError,
     DeviceNotRegisteredError,
     GraftError,
+    NoDeviceConnectedError,
     SeveralDevicesError,
     StagedIPAInUseError,
     Stopped,
     TweakInUseError,
     TweakNotFoundError,
+    presented,
 )
 from .init_flow import run_init
 from .installer import InstallError, Target, install, resolve_target, select_device
@@ -657,9 +662,14 @@ class _BuildReport:
         dry_run: bool = False,
         for_playcover: bool = False,
         export_to: Path | None = None,
+        waits: Callable[[BaseException | None], str | None] | None = None,
     ) -> None:
         self._emitter = emitter
         self._app_name = app_name
+        # Under `graft --update` (`update_run.Built.waits`): the sentence its
+        # device waits with when the failure leaves it waiting, which
+        # `build-end` then says rather than the failure (T2-B7).
+        self._waits = waits
         self._bundle_id = bundle_id
         self._delivery = delivery
         self._dry_run = dry_run
@@ -867,7 +877,9 @@ class _BuildReport:
         # says `stopped`, which the app reads as canceled rather than as
         # "Last build failed / 143".
         stopped = isinstance(exc, (Stopped, KeyboardInterrupt))
-        error = None if exc is None or stopped else (str(exc) or exc.__class__.__name__)
+        # A full disk, said as one (`presented`); the reason below still
+        # reads the exception itself.
+        error = None if exc is None or stopped else (str(presented(exc)) or exc.__class__.__name__)
         # Why an export failed, for an agent: `EXPORT_FAILURE_REASONS`.
         self._reason = None if error is None else _export_reason(exc)
         # A second Stop while the terminal records go out would raise from in
@@ -875,12 +887,25 @@ class _BuildReport:
         # moment the mask is restored.
         held = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGHUP})
         try:
-            self._finish(error, elapsed, stopped=stopped)
+            waiting = self._waiting_after(exc) if error is not None else None
+            self._finish(error, elapsed, stopped=stopped, waiting=waiting)
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, held)
         return False
 
-    def _finish(self, error: str | None, elapsed: float, *, stopped: bool) -> None:
+    def _waiting_after(self, exc: BaseException | None) -> str | None:
+        """`waits`' answer for this failure, or None: no hook (a plain build),
+        or asking failed, which is no reason to lose `build-end`."""
+        if self._waits is None:
+            return None
+        try:
+            return self._waits(exc)
+        except Exception:
+            return None
+
+    def _finish(
+        self, error: str | None, elapsed: float, *, stopped: bool, waiting: str | None = None
+    ) -> None:
         # Three steps, each inside the next one's `finally`, because each of the
         # first two can throw and none of them may cost the ones after it:
         #
@@ -910,15 +935,23 @@ class _BuildReport:
                 self._run_sweep()
         finally:
             try:
-                self._emit_end(error, elapsed, stopped=stopped)
+                self._emit_end(error, elapsed, stopped=stopped, waiting=waiting)
             finally:
                 self._detach_tee()
 
-    def _emit_end(self, error: str | None, elapsed: float, *, stopped: bool = False) -> None:
+    def _emit_end(
+        self, error: str | None, elapsed: float, *, stopped: bool = False,
+        waiting: str | None = None,
+    ) -> None:
         """The terminal event. Last, and exactly once, however the block was left.
 
         `stopped` on every one, true only for a Stop, whose `error` is null:
         `{"type": "build-end", "ok": false, "stopped": true, "error": null}`.
+
+        `waiting` only under `graft --update`, for a device that went away
+        during its build or install: `waiting: true`, and its sentence as
+        `error` ("iPad mini isn't connected: it'll update when it is"), as the
+        update's own events say it. The history row keeps what failed.
         """
         if not self._emitter:
             return
@@ -930,6 +963,9 @@ class _BuildReport:
         }
         if stopped:
             fields["error"] = None
+        elif waiting is not None:
+            fields["error"] = waiting
+            fields["waiting"] = True
         elif error is not None:
             fields["error"] = error
         # An export's, always: null unless it failed for one of
@@ -1178,10 +1214,10 @@ def _do_reinstall_build(cfg: Config, build_id: int, emitter: JsonEmitter | None 
         # -archive error instead, which is also a refusal — neither path pushes.
         if _target_of(row) == "mac":
             raise GraftError(
-                f"build {build_id} was built for this Mac, not for a phone",
+                f"build {build_id} was built for this Mac, not for an iPhone or iPad",
                 hint=f"install it here with `--install-to-mac {Path(ipa_path).name}`. "
                 "Its tweak dylib points at a bundled stub Preferences.framework, "
-                "which iOS has for real — on a phone the tweak would break silently",
+                "which iOS has for real — on an iPhone or iPad the tweak would break silently",
             )
         # Through the door the archive was built for, or not at all: the app's
         # mode may have changed since. A LiveContainer archive is unsigned and
@@ -1226,7 +1262,10 @@ def _reship(
     remote_name: str | None = None
 
     if app_cfg.delivery == "livecontainer":
-        console.print(f"→ re-installing [cyan]{app_name}[/cyan] {row['version']} into LiveContainer")
+        # Escaped: the version is the IPA's own CFBundleShortVersionString,
+        # which a dropped IPA can set to `[/x]` (the 2.3.1 review's A6).
+        console.print(f"→ re-installing [cyan]{escape(app_name)}[/cyan] {escape(str(row['version']))} "
+                      "into LiveContainer")
         if emitter:
             emitter.emit("stage", name="lc-push", status="start")
         lc_result = lc_runner.push_ipa_to_livecontainer(
@@ -1246,7 +1285,7 @@ def _reship(
                          documents_path=lc_result.documents_path, dry_run=False)
         console.print(
             f"   [green]✓[/green] {lc_result.size_bytes/1_000_000:.1f} MB into "
-            f"{lc_result.bundle_id} on {udid}"
+            f"{escape(lc_result.bundle_id)} on {escape(str(udid))}"
         )
         _report_lc_choice(emitter, app_name=app_name, result=lc_result,
                           pinned=bool(app_cfg.lc_bundle_id))
@@ -1255,7 +1294,8 @@ def _reship(
         # how it was built — the same rule the build path's push follows.
         remote_name = Path(lc_result.documents_path).name
     else:
-        console.print(f"→ re-installing [cyan]{app_name}[/cyan] {row['version']} on the device")
+        console.print(f"→ re-installing [cyan]{escape(app_name)}[/cyan] {escape(str(row['version']))} "
+                      "on the device")
         if emitter:
             emitter.emit("stage", name="install", status="start")
         ir = install(ipa, udid=udid, transport=transport, dry_run=False)
@@ -1263,7 +1303,7 @@ def _reship(
             emitter.emit("stage", name="install", status="end")
         _emit_log_lines(emitter, "install", ir.stdout)
         _emit_log_lines(emitter, "install", ir.stderr)
-        console.print(f"   [green]✓[/green] installed on {udid}")
+        console.print(f"   [green]✓[/green] installed on {escape(str(udid))}")
 
     # After the push returned, which is the only point at which this
     # artifact is known to have reached the phone — the same placement rule
@@ -1312,6 +1352,7 @@ def _do_update_install(
         app_name=app_name,
         bundle_id=app_cfg.bundle_id if app_cfg else "",
         delivery=app_cfg.delivery if app_cfg else None,
+        waits=built.install_waits,
     ) as report:
         app_cfg = cfg.get_app(app_name)
         from .lc_manage import refuse_legacy_build
@@ -2304,7 +2345,7 @@ def _delivery_state_for(
                 summary=(
                     "Our record says delivered; the file is not on the device."
                     if row["delivery"] == "livecontainer"
-                    else "The phone is out of date."
+                    else "The device is out of date."
                 ),
                 reasons=["last delivery is no longer on the device"],
                 pushed_at=row["timestamp"],
@@ -2530,7 +2571,8 @@ def _do_delivery_state(
 
 
 def _reconcile_app(
-    log: BuildLog, app_name: str, *, udid: str | None, emitter: JsonEmitter | None = None
+    log: BuildLog, app_name: str, *, udid: str | None, emitter: JsonEmitter | None = None,
+    device_name: str | None = None,
 ) -> None:
     """Check that the device still has what we recorded delivering.
 
@@ -2548,6 +2590,11 @@ def _reconcile_app(
     Takes the log rather than a Config: nothing here reads configuration, and
     the row is the only description of the delivery that can be trusted —
     config.yaml can have been edited since.
+
+    Once the device answered, `reconcile-checked` says which one it was (by
+    `device_name`, what Graft knows it as, else null) and whether the file
+    was there, so Check device can name it (2.3.1 §3.5). Nothing else does:
+    a check that asked no device must not read as one that did.
     """
     row = log.latest_delivery(app_name)
     if row is None:
@@ -2586,14 +2633,18 @@ def _reconcile_app(
         # screen is the right thing to leave standing. Through `_warn` so it
         # reaches the panel as a `log` event as well as stderr — stdout carries
         # the JSON event stream and cannot hold prose.
-        _warn(emitter, f"couldn't check {app_name} on the device: {exc}")
+        _warn(emitter, f"couldn't check {app_name} on {device_name or udid}: {exc}")
         return
 
-    log.mark_reconciled(int(row["id"]), seen=row["remote_name"] in names)
+    found = row["remote_name"] in names
+    log.mark_reconciled(int(row["id"]), seen=found)
+    if emitter:
+        emitter.emit("reconcile-checked", app=app_name, udid=udid, device_name=device_name, found=found)
 
 
 def _reconcile_device(
-    log: BuildLog, app_name: str, *, device: str | None, emitter: JsonEmitter | None
+    log: BuildLog, app_name: str, *, device: str | None, emitter: JsonEmitter | None,
+    state_dir: Path | None = None,
 ) -> str | None:
     """The device to check `app_name` on, connected, or None after saying why
     not. Nothing delivered is None in silence: there is nothing to check.
@@ -2603,7 +2654,12 @@ def _reconcile_device(
     `_reconcile_app` leaves a row pushed to another phone alone, so asking any
     other device checked nothing and said "the record still stands". An
     explicit `--device` is used as given, and a row it doesn't match is said.
+    Warnings name a device as `state_dir`'s `devices_seen` last saw it,
+    else by its UDID.
     """
+    def label(udid: str) -> str:
+        return devices_seen.label(state_dir, udid) if state_dir is not None else udid
+
     row = log.latest_delivery(app_name)
     # Only a LiveContainer delivery is checked (`_reconcile_app` says why), so
     # no device is looked for, or warned about, for anything else.
@@ -2611,8 +2667,8 @@ def _reconcile_device(
         return None
     delivered_to = row["udid"]
     if device and delivered_to and device != delivered_to:
-        _warn(emitter, f"{app_name} was last delivered to {delivered_to}, not {device}: "
-                       "not checked")
+        _warn(emitter, f"{app_name} was last delivered to {label(delivered_to)}, not "
+                       f"{label(device)}: not checked")
         return None
     want = device or delivered_to
     if not want:
@@ -2623,8 +2679,11 @@ def _reconcile_device(
     except GraftError as exc:
         # `_warn`, like every other warning in this module: stdout is where
         # the JSON events go, so prose can only reach a machine consumer as
-        # a `log` event.
-        _warn(emitter, f"no device checked for {app_name}: {exc.message}")
+        # a `log` event. Not connected, whichever way usbmux said it, is
+        # said of the device the check wanted, by name.
+        missing = isinstance(exc, (DeviceNotConnectedError, NoDeviceConnectedError))
+        why = f"{label(want)} isn't connected" if missing else exc.message
+        _warn(emitter, f"no device checked for {app_name}: {why}")
         return None
     return udid
 
@@ -2655,9 +2714,11 @@ def _do_reconcile(
     if isinstance(log, BuildLog):
         try:
             for name in names:
-                udid = _reconcile_device(log, name, device=device, emitter=emitter)
+                udid = _reconcile_device(log, name, device=device, emitter=emitter,
+                                         state_dir=cfg.state_dir)
                 if udid is not None:
-                    _reconcile_app(log, name, udid=udid, emitter=emitter)
+                    _reconcile_app(log, name, udid=udid, emitter=emitter,
+                                   device_name=devices_seen.name_of(cfg.state_dir, udid))
         except sqlite3.Error as exc:
             # `mark_reconciled` is a write, and the database this writes to
             # is the one a concurrent build is writing its own rows into —
@@ -2808,17 +2869,52 @@ def _do_appstore_search(
     )
 
 
+def _fetch_into_library(cfg: Config, target: str, expected_sha: str | None,
+                        repository_id: str | None = None) -> Path:
+    """`--fetch`'s download, into a folder of its own, then into the library
+    under Graft's name for it (`tweak_sources.place`: a .deb, of the package
+    and version canister listed for a package id, never over a different
+    file), with its source recorded for its updates: the canister repository
+    it came from, or the configured repo a URL is under."""
+    picked: list[tuple[canister.Package, canister.Repository]] = []
+    is_url = bool(canister._URL_RE.match(target))
+    with update_tweaks.workdir(cfg.tweaks_dir) as work:
+        try:
+            downloaded = canister.fetch_deb(
+                target, work, expected_sha, repository_id=repository_id,
+                on_pick=lambda pkg, repository: picked.append((pkg, repository)),
+            )
+        except canister.SeveralRepositoriesError as e:
+            # The person picks the repository, by its id (exit 2: a flag is
+            # missing). Graft won't guess one and record it as trusted.
+            raise ConfigError(e.message, hint=e.hint) from e
+        dest = tweak_sources.place(
+            downloaded, cfg.tweaks_dir, package_id=None if is_url else target,
+            version=picked[-1][0].version if picked else None,
+        )
+    if picked:
+        pkg, repository = picked[-1]
+        source: tweak_sources.Source | None = tweak_sources.Source(
+            tweak_sources.CANISTER, pkg.repository_id, repository.uri.rstrip("/"))
+    else:
+        source = tweak_sources.repo_source_for(cfg.repos, target) if is_url else None
+    if source is not None:
+        update_tweaks.record_source(cfg, dest, source)
+    return dest
+
+
 def _do_fetch(
     cfg: Config,
     target: str,
     emitter: JsonEmitter | None = None,
     expected_sha: str | None = None,
+    repository_id: str | None = None,
 ) -> None:
     cfg.tweaks_dir.mkdir(parents=True, exist_ok=True)
     if emitter:
         emitter.emit("canister-fetch-start", target=target)
         try:
-            dest = canister.fetch_deb(target, cfg.tweaks_dir, expected_sha)
+            dest = _fetch_into_library(cfg, target, expected_sha, repository_id)
         except GraftError as e:
             emitter.emit("canister-fetch-end", ok=False, error=str(e))
             # The event carries the detail for the GUI; the exit code carries
@@ -2833,8 +2929,8 @@ def _do_fetch(
             path=str(dest),
         )
         return
-    console.print(f"→ fetching [cyan]{target}[/cyan] into {cfg.tweaks_dir}")
-    dest = canister.fetch_deb(target, cfg.tweaks_dir, expected_sha)
+    console.print(f"→ fetching [cyan]{escape(target)}[/cyan] into {escape(str(cfg.tweaks_dir))}")
+    dest = _fetch_into_library(cfg, target, expected_sha, repository_id)
     size_kb = dest.stat().st_size / 1024
     console.print(f"[green]✓[/green] {escape(dest.name)}  ({size_kb:,.1f} KB)")
     console.print(
@@ -3672,6 +3768,10 @@ def _handoff_copy(cfg: Config, archive: Path) -> Path:
                 f"couldn't copy {archive.name} to hand it to PlayCover: {exc}",
                 hint=f"check the free space in {root}",
             ) from exc
+        except BaseException:
+            # A Stop mid-copy: the half-made copy goes too.
+            shutil.rmtree(private, ignore_errors=True)
+            raise
     finally:
         hold.release()
     return copy
@@ -3742,87 +3842,99 @@ def _do_install_to_mac(
             hint="run --staged-ipas to see what's in the cache",
         )
     origins = _tweak_origins_of(cfg, target)
-    private_copy = target.parent == cfg.built_dir
-    if private_copy:
-        # Retention can move a built archive at any moment after the lock is
-        # let go, PlayCover's read included (`_handoff_copy`).
-        target = _handoff_copy(cfg, target)
+    from . import lc_manage
 
-    # PlayCover re-signs it, so all of the buyer's data can go, and in place:
-    # `open` returns before PlayCover reads the file, so a temporary copy
-    # removed here would be gone by then (K8). A built archive's private copy
-    # is the one rewritten; the copy itself stays until a later handoff.
-    target = _without_account_data(target, emitter=emitter, workdir=None)
-    info = read_info_plist(target)
-    try:
-        _refuse_what_macos_lacks(target, origins, emitter, name=filename)
-    except GraftError:
-        # Nothing was handed over, so the private copy is nobody's.
-        if private_copy:
-            shutil.rmtree(target.parent, ignore_errors=True)
-        raise
-    version, build = playcover_handoff.archive_versions(target)
-    # Before the handoff: the app's PlayCover settings as the person left them.
-    before = playcover_handoff.snapshot(_playcover_settings_dir(), cfg.state_dir, info.bundle_id)
-    began = time.time()
-    result = subprocess.run(
-        ["open", "-b", PLAYCOVER_BUNDLE_ID, str(target)],
-        capture_output=True, text=True, env=child_env(),
-    )
-    if result.returncode != 0:
-        # Named, not passed through. Measured — `open -b` on an unregistered
-        # bundle id says "LSCopyApplicationURLsForBundleIdentifier() failed
-        # while trying to determine the application with bundle identifier
-        # <id>.", not the friendlier sentence an earlier draft here invented —
-        # true and useless either way to somebody who never typed `open`.
-        #
-        # Only two states are reachable through this exit code, and the
-        # message says exactly those two and no more: not installed (that
-        # message above, exit 1), or installed but unable to launch (its own
-        # distinct stderr — e.g. "...its executable is missing.", also exit
-        # 1). A *third* wording, "refused the file", would claim PlayCover
-        # opened this IPA and rejected it — but `open -b` does not consult
-        # document types, so that refusal is not something a non-zero exit
-        # can ever mean, and PlayCover's own Info.plist declares `public.item`
-        # at Default rank besides, so it was never reachable on type grounds
-        # to begin with. See the design doc's §5 for why presence is inferred
-        # from this exit rather than checked separately beforehand.
-        #
-        # Except on an Intel Mac, where the release app also runs: there the
-        # reason is the processor, and "not installed" would send the user to
-        # install something that cannot run. Likewise in the Intel build of
-        # Graft on an Apple silicon Mac, which has no PlayCover handover: the
-        # fix is the other download. Asked only after the failure, so a
-        # working handoff costs nothing extra.
-        blocker = host.apple_silicon_blocker()
-        if blocker == host.INTEL_MAC:
-            raise ConfigError(
-                f"PlayCover needs an Apple silicon Mac, and {host.INTEL_MAC}",
-                hint=(
-                    "PlayCover runs iPhone and iPad apps only on Apple silicon. "
-                    "Deliver the build to an iPhone or iPad instead "
-                    "(LiveContainer or sideload)"
-                ),
+    # A Stop (SIGTERM, the app's) during the copy, the scrub or the checks is
+    # a Stop, exit 143, not a kill. And a private copy is a whole IPA in the
+    # temp folder: unless `open` handed it to PlayCover, it goes, however
+    # this ends (the 2.3.1 review's T2-B4). Handed over, it stays for
+    # PlayCover to read, until a later handoff's sweep (`_handoff_copy`).
+    private: Path | None = None
+    handed = False
+    with lc_manage.exit_on_termination():
+        try:
+            if target.parent == cfg.built_dir:
+                # Retention can move a built archive at any moment after the
+                # lock is let go, PlayCover's read included (`_handoff_copy`).
+                target = _handoff_copy(cfg, target)
+                private = target.parent
+
+            # PlayCover re-signs it, so all of the buyer's data can go, and in place:
+            # `open` returns before PlayCover reads the file, so a temporary copy
+            # removed here would be gone by then (K8). A built archive's private copy
+            # is the one rewritten; the copy itself stays until a later handoff.
+            target = _without_account_data(target, emitter=emitter, workdir=None)
+            info = read_info_plist(target)
+            _refuse_what_macos_lacks(target, origins, emitter, name=filename)
+            version, build = playcover_handoff.archive_versions(target)
+            # Before the handoff: the app's PlayCover settings as the person left them.
+            before = _settings_before(cfg, info.bundle_id)
+            began = time.time()
+            result = subprocess.run(
+                ["open", "-b", PLAYCOVER_BUNDLE_ID, str(target)],
+                capture_output=True, text=True, env=child_env(),
             )
-        if blocker is not None:
-            raise ConfigError(
-                f"PlayCover can't be handed this build here: {blocker}",
-                hint="Deliver the build to an iPhone or iPad instead (LiveContainer or sideload)",
-            )
-        # The hint says where PlayCover comes from, which is the fix for the
-        # first of the two states, and installing it again is the fix for the
-        # second. `open`'s own words follow. Graft.app's Build options says the
-        # same before a Mac build starts, when LaunchServices has no app for
-        # PLAYCOVER_BUNDLE_ID.
-        raise ConfigError(
-            "PlayCover is not installed, or could not launch",
-            hint=(
-                f"get PlayCover from {PLAYCOVER_RELEASES_URL} and install it, "
-                "or install it again if it won't open, then try again. "
-                f"`open -b {PLAYCOVER_BUNDLE_ID}` exited {result.returncode}: "
-                f"{result.stderr.strip() or 'no output'}"
-            ),
-        )
+            if result.returncode != 0:
+                # Named, not passed through. Measured — `open -b` on an unregistered
+                # bundle id says "LSCopyApplicationURLsForBundleIdentifier() failed
+                # while trying to determine the application with bundle identifier
+                # <id>.", not the friendlier sentence an earlier draft here invented —
+                # true and useless either way to somebody who never typed `open`.
+                #
+                # Only two states are reachable through this exit code, and the
+                # message says exactly those two and no more: not installed (that
+                # message above, exit 1), or installed but unable to launch (its own
+                # distinct stderr — e.g. "...its executable is missing.", also exit
+                # 1). A *third* wording, "refused the file", would claim PlayCover
+                # opened this IPA and rejected it — but `open -b` does not consult
+                # document types, so that refusal is not something a non-zero exit
+                # can ever mean, and PlayCover's own Info.plist declares `public.item`
+                # at Default rank besides, so it was never reachable on type grounds
+                # to begin with. See the design doc's §5 for why presence is inferred
+                # from this exit rather than checked separately beforehand.
+                #
+                # Except on an Intel Mac, where the release app also runs: there the
+                # reason is the processor, and "not installed" would send the user to
+                # install something that cannot run. Likewise in the Intel build of
+                # Graft on an Apple silicon Mac, which has no PlayCover handover: the
+                # fix is the other download. Asked only after the failure, so a
+                # working handoff costs nothing extra.
+                blocker = host.apple_silicon_blocker()
+                if blocker == host.INTEL_MAC:
+                    raise ConfigError(
+                        f"PlayCover needs an Apple silicon Mac, and {host.INTEL_MAC}",
+                        hint=(
+                            "PlayCover runs iPhone and iPad apps only on Apple silicon. "
+                            "Deliver the build to an iPhone or iPad instead "
+                            "(LiveContainer or sideload)"
+                        ),
+                    )
+                if blocker is not None:
+                    raise ConfigError(
+                        f"PlayCover can't be handed this build here: {blocker}",
+                        hint=(
+                            "Deliver the build to an iPhone or iPad instead "
+                            "(LiveContainer or sideload)"
+                        ),
+                    )
+                # The hint says where PlayCover comes from, which is the fix for the
+                # first of the two states, and installing it again is the fix for the
+                # second. `open`'s own words follow. Graft.app's Build options says the
+                # same before a Mac build starts, when LaunchServices has no app for
+                # PLAYCOVER_BUNDLE_ID.
+                raise ConfigError(
+                    "PlayCover is not installed, or could not launch",
+                    hint=(
+                        f"get PlayCover from {PLAYCOVER_RELEASES_URL} and install it, "
+                        "or install it again if it won't open, then try again. "
+                        f"`open -b {PLAYCOVER_BUNDLE_ID}` exited {result.returncode}: "
+                        f"{result.stderr.strip() or 'no output'}"
+                    ),
+                )
+            handed = True
+        finally:
+            if private is not None and not handed:
+                shutil.rmtree(private, ignore_errors=True)
 
     _await_playcover(
         cfg, filename=filename, bundle_id=info.bundle_id, name=info.display_name,
@@ -3889,10 +4001,15 @@ def _await_playcover(
             if not emitter:
                 console.print("[dim]  stopped waiting; PlayCover may still be installing it[/dim]")
             raise
-        settled = playcover_handoff.settle(
-            _playcover_settings_dir(), cfg.state_dir, bundle_id, before,
-            wait=playcover_handoff.SETTINGS_WAIT_S,
-        )
+        try:
+            settled = playcover_handoff.settle(
+                _playcover_settings_dir(), cfg.state_dir, bundle_id, before,
+                wait=playcover_handoff.SETTINGS_WAIT_S,
+            )
+        except Exception:
+            # It says it never raises; should it anyway, the install it
+            # follows still stands (the 2.3.1 review's A3).
+            settled = playcover_handoff.Settled()
 
     fields = {"bundle_id": bundle_id, "display_name": name,
               "settings_disabled": settled.disabled, "settings_restored": settled.restored}
@@ -3915,6 +4032,17 @@ def _await_playcover(
         console.print(escape(playcover_handoff.disabled_notice(settled.disabled, name)))
     if settled.restored:
         console.print(f"[dim]{escape(playcover_handoff.restored_line(settled.restored, name))}[/dim]")
+
+
+def _settings_before(cfg: Config, bundle_id: str) -> playcover_handoff.Before:
+    """`playcover_handoff.snapshot`: the app's PlayCover settings before the
+    handoff. Should it break (it says it never raises), a `Before` that
+    `settle` leaves the settings alone for: they are kept around the handoff,
+    never a reason not to make it (the 2.3.1 review's A3)."""
+    try:
+        return playcover_handoff.snapshot(_playcover_settings_dir(), cfg.state_dir, bundle_id)
+    except Exception:
+        return playcover_handoff.Before(existed=True, values=None)
 
 
 def _settings_lines(settled: playcover_handoff.Settled, name: str) -> list[str]:
@@ -4435,7 +4563,7 @@ def _still_encrypted_hint(
         # structural extension limit, and no amount of stripping fixes it.
         return (
             "these are outside any app extension, so stripping cannot help: the dump "
-            "itself came back incomplete. Keep the phone unlocked and the app "
+            "itself came back incomplete. Keep the device unlocked and the app "
             "foreground-active and retry."
         )
     if extensions_only and not stripped_attempted:
@@ -4470,7 +4598,7 @@ def _still_encrypted_hint(
         )
     return (
         "the app was running while dumped, or bagbak couldn't decrypt an extension "
-        "— force-quit it on the phone and retry; iOS reaps short-lived extension "
+        "— force-quit it on the device and retry; iOS reaps short-lived extension "
         "processes mid-dump and some apps' extensions resist bagbak entirely"
     )
 
@@ -4572,7 +4700,7 @@ def _do_set_ssh_password(cfg: Config, *, device: str | None) -> None:
         elif not found:
             raise _fatal(GraftError(
                 "no device connected",
-                hint="plug the phone in (or pass --device <udid>)",
+                hint="plug the iPhone or iPad in (or pass --device <udid>)",
             ))
         else:
             names = ", ".join(f"{d.name} ({d.udid})" for d in found)
@@ -4831,7 +4959,7 @@ def _unexpected(e: Exception) -> GraftError:
     if any(cls.__name__ == _USBMUXD_DOWN for cls in type(e).__mro__):
         return GraftError(
             "couldn't reach usbmuxd, the macOS service that talks to iPhones and iPads",
-            hint="it runs whenever macOS does; unplug and reconnect the phone, and if "
+            hint="it runs whenever macOS does; unplug and reconnect the iPhone or iPad, and if "
             "this persists restart the Mac. With USBMUXD_SOCKET_ADDRESS set, check that "
             "it points at a running usbmuxd",
         )
@@ -4945,7 +5073,8 @@ def _reported(fn: Callable[..., Any]) -> Callable[..., Any]:
         except (typer.Exit, typer.Abort):
             raise
         except GraftError as e:
-            raise _fatal(e) from e
+            # A full disk, said as one, whatever was writing (`presented`).
+            raise _fatal(presented(e)) from e
         except BrokenPipeError as e:
             # Both streams, because a hung-up *stderr* produces the same 120 by
             # itself: measured here, a verb that warns through `err_console`
@@ -4977,7 +5106,8 @@ def _reported(fn: Callable[..., Any]) -> Callable[..., Any]:
             # the tool worked. The exit code carries everything a script needs.
             raise typer.Exit(code=EXIT_BROKEN_PIPE) from e
         except Exception as e:
-            raise _fatal(_unexpected(e)) from e
+            shown = presented(e)
+            raise _fatal(shown if isinstance(shown, GraftError) else _unexpected(e)) from e
 
     return wrapper
 
@@ -5296,7 +5426,7 @@ def _do_tweak_updates(cfg: Config, *, emitter: JsonEmitter | None = None) -> Non
     and silence about them would read the same as "up to date".
     """
     records = _collect_tweak_records(cfg)
-    results = updates.statuses(records, updates.repo_catalog(cfg))
+    results = updates.statuses(cfg, records)
 
     if emitter:
         for status in results:
@@ -5330,10 +5460,14 @@ def _do_tweak_updates(cfg: Config, *, emitter: JsonEmitter | None = None) -> Non
     table.add_column("from", style="dim")
     for status in outdated:
         assert status.available is not None
-        table.add_row(
-            status.filename, status.installed or "?", status.available.version,
-            status.available.source,
-        )
+        # Each cell is a .deb's or a repo's own text: escaped (see the note
+        # above `_do_add_repo`).
+        where = status.available.source
+        if not status.available.verified:
+            where += f" (needs your OK: {status.available.unverified_reason})"
+        table.add_row(*(escape(cell) for cell in (
+            status.filename, status.installed or "?", status.available.version, where,
+        )))
     console.print(table)
 
 
@@ -5368,9 +5502,15 @@ def _repoint(
 
 
 def _do_update_tweak(
-    cfg: Config, filename: str, *, emitter: JsonEmitter | None = None
+    cfg: Config, filename: str, *, emitter: JsonEmitter | None = None, trusted_key: str | None = None
 ) -> None:
     """Download the newest build of `filename`'s package and re-point its apps.
+
+    Only from the tweak's own source (`updates.statuses`), and only a
+    verified update unless the person confirmed it (`trusted`:
+    `--trust-tweak` naming this file): otherwise refused before anything is
+    downloaded. The download is checked and named by `tweak_sources.place`,
+    and its source recorded for the new file.
 
     One verb rather than the GUI driving `--fetch`, `--detach-tweak` and
     `--attach-tweak` in sequence: a download that lands and an attach that
@@ -5391,7 +5531,7 @@ def _do_update_tweak(
             hint="run --tweaks to see what the library holds",
         )
 
-    status = updates.statuses([record], updates.repo_catalog(cfg))[0]
+    status = updates.statuses(cfg, [record])[0]
     if not status.update_available or status.available is None:
         # Not an error: the answer to "update this" can legitimately be "there
         # is nothing newer", and a caller acting on a stale badge deserves that
@@ -5409,43 +5549,42 @@ def _do_update_tweak(
             console.print(f"[dim]{escape(filename)}: {payload['reason']}[/dim]")
         return
 
+    available = status.available
+    if not available.verified:
+        key = status.confirm_key or ""
+        if trusted_key is None:
+            raise tweak_sources.untrusted(filename, available.version, available.source,
+                                          available.unverified_reason, key)
+        if trusted_key != key:
+            # The person said yes to another update of it (re-verify #2).
+            raise tweak_sources.trust_changed(filename, available.version, available.source)
     apps = list(record.get("used_by") or [])
 
-    # Copy the current build somewhere the download cannot overwrite, *before*
-    # fetching. A repo serving a stable filename (`a-tweak.deb`) writes
-    # straight over it, so the rollback this function promises did not exist in
-    # exactly the case the promise is for. Kept outside `tweaks_dir` so it is
-    # not itself listed as a tweak.
     rollback_dir = cfg.state_dir / "tweak-rollback"
-    rollback_dir.mkdir(parents=True, exist_ok=True)
     rollback = rollback_dir / filename
-    shutil.copy2(cfg.tweaks_dir / filename, rollback)
+    with update_tweaks.workdir(cfg.tweaks_dir) as work:
+        # Exactly the builds whose version was compared, from the tweak's own
+        # source, each against its own hash (`updates.download`). Resolving
+        # the package id afresh here is what downloaded a stale 1.7.20 after
+        # the check said 1.7.24, and took the highest version from any repo.
+        downloaded = updates.download(available, work)
+        tweak_sources.checked_name(downloaded, cfg.tweaks_dir, package_id=status.package_id,
+                                   version=available.version)
+        # Copied once the download is in hand: a failed download replaced
+        # nothing, and a copy then is a rollback of nothing, one per attempt.
+        # Kept outside `tweaks_dir` so it is not itself listed as a tweak.
+        rollback_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(cfg.tweaks_dir / filename, rollback)
+        try:
+            dest = tweak_sources.place(downloaded, cfg.tweaks_dir, package_id=status.package_id,
+                                       version=available.version)
+        except Exception:
+            rollback.unlink(missing_ok=True)
+            raise
+    update_tweaks.record_source(cfg, dest, available.origin)
 
-    try:
-        # Pinned to the version the status reported. Resolving the package id
-        # afresh here is what downloaded a stale 1.7.20 after the check said
-        # 1.7.24 (canister lists every version, unordered, per request). Other
-        # variants of that version are tried if the first 404s; an older
-        # *version* never is.
-        dest = canister.fetch_deb(
-            status.available.download,
-            cfg.tweaks_dir,
-            status.available.sha256,
-            version=status.available.version,
-        )
-    except Exception:
-        # Nothing was replaced, so the copy is not a rollback of anything —
-        # just a file that would sit in state/ forever, one per failed attempt.
-        # A published version whose .deb 404s is a normal upstream state, not a
-        # rare one, so this accumulates.
-        rollback.unlink(missing_ok=True)
-        raise
-
-    # A repo that serves a stable filename (`a-tweak.deb`) has just
-    # overwritten the file in place, and every app already points at that name.
-    # Detaching and re-attaching it would be a no-op at best; at worst the
-    # detach lands and the attach doesn't, and the tweak silently leaves the
-    # build it was part of.
+    # The download is byte for byte the file already in use, under Graft's
+    # name: every app already points at it, and re-pointing is nothing.
     replaced_in_place = dest.name == filename
     # Named before the loop so a write that fails partway can still report
     # which apps were re-pointed: the download has landed and some configs are
@@ -5516,9 +5655,38 @@ def _do_update_tweak(
 
 
 def _verb_update_tweak(
-    *, cfg: Config, update_tweak: str | None, json_mode: bool, **_: Any
+    *, cfg: Config, update_tweak: str | None, trust_tweak: list[str] | None, json_mode: bool,
+    **_: Any,
 ) -> None:
-    _do_update_tweak(cfg, update_tweak or "", emitter=JsonEmitter() if json_mode else None)
+    filename = update_tweak or ""
+    keys = _trust_keys(trust_tweak)
+    if keys and set(keys) != {filename}:
+        raise ConfigError(
+            f"--trust-tweak with --update-tweak is the confirm_key of the tweak being updated, {filename}",
+            hint="graft --tweak-updates --json gives it; nothing was run",
+        )
+    _do_update_tweak(cfg, filename, emitter=JsonEmitter() if json_mode else None,
+                     trusted_key=keys.get(filename))
+
+
+def _trust_keys(values: list[str] | None) -> dict[str, str]:
+    """`--trust-tweak`'s values, each a tweak's `confirm_key` (`FILE@KEY`),
+    by filename. A bare filename is refused: it would trust whatever that
+    file's update had turned into by the time it ran (re-verify #2)."""
+    keys: dict[str, str] = {}
+    for value in values or []:
+        filename = updates.confirm_key_file(value)
+        if filename is None:
+            raise ConfigError(
+                f"--trust-tweak takes a tweak's confirm_key (FILE@KEY), not {value!r}",
+                hint="graft --update … --plan --json and graft --tweak-updates --json give each "
+                     "tweak's confirm_key; nothing was run",
+            )
+        if keys.get(filename, value) != value:
+            raise ConfigError(f"--trust-tweak names {filename} twice, with two keys",
+                              hint="nothing was run")
+        keys[filename] = value
+    return keys
 
 
 def _update_pipeline(emitter: JsonEmitter | None) -> Any:
@@ -5554,10 +5722,15 @@ def _verb_update(
     plan_only: bool | None,
     quick_plan: bool | None,
     with_affected: bool | None,
+    trust_tweak: list[str] | None,
     json_mode: bool,
     **_: Any,
 ) -> int:
-    """`--update`: the plan (`--plan`), or the plan and the work (`update_run`)."""
+    """`--update`: the plan (`--plan`), or the plan and the work (`update_run`).
+
+    `--trust-tweak FILE`: the person's OK for that tweak's update although it
+    isn't verified (2.3.1 A1). Each must be a library tweak: a typo would
+    otherwise trust nothing, without a word."""
     from . import update_readiness, update_run
 
     names = list(apps or [])
@@ -5576,6 +5749,15 @@ def _verb_update(
             "--quick works only with --plan: an update looks at the device properly before it "
             "changes anything",
         )
+    trusted = _trust_keys(trust_tweak)
+    if trusted:
+        library = {r["filename"] for r in _collect_tweak_records(cfg)}
+        unknown = sorted(set(trusted) - library)
+        if unknown:
+            raise TweakNotFoundError(
+                f"--trust-tweak names {', '.join(unknown)}, which isn't in your tweaks library",
+                hint="graft --update … --plan --json gives each tweak's confirm_key",
+            )
     emitter = JsonEmitter() if json_mode else None
     pipeline = _update_pipeline(emitter)
     targets = sorted(cfg.apps) if update_all else names
@@ -5583,11 +5765,11 @@ def _verb_update(
         probe = (update_readiness.QuickProbe(cfg.state_dir) if quick_plan
                  else update_readiness.FullProbe(cfg.state_dir))
         update_run.show_plan(cfg, targets, quick=bool(quick_plan), with_affected=bool(with_affected),
-                             probe=probe, pipeline=pipeline, emitter=emitter)
+                             probe=probe, pipeline=pipeline, emitter=emitter, trusted=trusted)
         return 0
     return update_run.run(cfg, targets, all_apps=bool(update_all), with_affected=bool(with_affected),
                           probe=update_readiness.FullProbe(cfg.state_dir), pipeline=pipeline,
-                          emitter=emitter)
+                          emitter=emitter, trusted=trusted)
 
 
 def _verb_drop_update_target(
@@ -5617,9 +5799,16 @@ def _verb_search(*, search: str | None, json_mode: bool, **_: Any) -> None:
 
 
 def _verb_fetch(
-    *, cfg: Config, fetch: str | None, fetch_sha: str | None, json_mode: bool, **_: Any
+    *, cfg: Config, fetch: str | None, fetch_sha: str | None, fetch_repository: str | None,
+    json_mode: bool, **_: Any
 ) -> None:
-    _do_fetch(cfg, fetch, emitter=JsonEmitter() if json_mode else None, expected_sha=fetch_sha)
+    if fetch_repository and canister._URL_RE.match(fetch or ""):
+        raise ConfigError(
+            "--fetch-repository goes with a package id, not a URL",
+            hint="a URL names its own repo; nothing was run",
+        )
+    _do_fetch(cfg, fetch, emitter=JsonEmitter() if json_mode else None, expected_sha=fetch_sha,
+              repository_id=fetch_repository)
 
 
 def _verb_add_repo(*, cfg: Config, add_repo_url: str | None, json_mode: bool, **_: Any) -> None:
@@ -6909,7 +7098,7 @@ def _do_decrypt(
                 # flag that will time out.
                 ". frida-ios-dump can never read an extension — they run in "
                 "their own processes. bagbak can, but not the 4.x pinned here: "
-                "extensions came back whole on this phone under frida-server "
+                "extensions came back whole on a device under frida-server "
                 "17.x with bagbak 5.x, which is the pairing to restore if you "
                 "need them (at the cost of frida-ios-dump). A pre-decrypted IPA "
                 "via `--provide-ipa` is the other route"
@@ -7200,7 +7389,7 @@ def _verb_decrypt_frontmost(
     if not bundle:
         raise _fatal(decrypt_runner.DecryptError(
             "no app is in the foreground on the device",
-            hint="open the app you want to decrypt on the phone and leave it on "
+            hint="open the app you want to decrypt on the device and leave it on "
             "screen, then retry — this dumps whatever is frontmost",
         ))
     # Pass the *resolved* udid, not the raw `device`: the app we detected as
@@ -7892,6 +8081,12 @@ _MODIFIERS: dict[str, str] = {
     "for_playcover": "--for-playcover",
     "skip_decrypt_check": "--skip-decrypt-check",
     "fetch_sha": "--fetch-sha",
+    # A tweak update the person confirmed although its source isn't
+    # verified: dropped by another verb, it would read as a trust given.
+    "trust_tweak": "--trust-tweak",
+    # Which Canister repository a fetch takes: dropped, the fetch would take
+    # the newest from any of them.
+    "fetch_repository": "--fetch-repository",
     # `--init`'s, beside anything else: a setup flag a verb drops would read
     # as a setup that ran.
     "init_account": "--account",
@@ -7923,7 +8118,7 @@ _MODIFIER_HINTS: dict[tuple[str, str], str] = {
     ("--export-ipa", "device"): "an export installs nothing, so it uses no device",
     ("--export-ipa", "skip_install"): "an export installs nothing anyway",
     ("--export-ipa", "for_playcover"): (
-        "an export is the build for a phone, unsigned; Build for this Mac is a build of its own"
+        "an export is the build for an iPhone or iPad, unsigned; Build for this Mac is a build of its own"
     ),
 }
 
@@ -8062,7 +8257,7 @@ _VERBS: tuple[_Verb | _StrayFlagGate | _DryRunGate | _ModifierGate, ...] = (
         "--appstore-search", "appstore_search_term", _verb_appstore_search,
         accepts=frozenset({"--country", "--limit"}),
     ),
-    # One-click Update (`update_run`): an app's newer App Store version, its
+    # Update (`update_run`): an app's newer App Store version, its
     # tweaks' newer builds, then the build and install. Below the gate, which
     # checks its four flags; it takes the app names a build takes, and no
     # `--device`: each app goes to every device it was delivered to (spec
@@ -8220,6 +8415,7 @@ def main(
     plan_only: bool | None = typer.Option(None, "--plan", help="With --update: work out what would change, and change nothing. Reads no keychain and runs no ipatool."),
     quick_plan: bool | None = typer.Option(None, "--quick", help="With --update --plan: the background form. Asks usbmux which devices are connected and nothing more, so readiness is only likely. Graft.app runs it once a day."),
     with_affected: bool | None = typer.Option(None, "--with-affected", help="With --update: also update and install the other apps that use a tweak the update changes."),
+    trust_tweak: list[str] | None = typer.Option(None, "--trust-tweak", metavar="FILE@KEY", help="With --update or --update-tweak: update a library tweak although its update isn't verified (its source isn't confirmed, isn't HTTPS, or publishes no checksum), because you trust where it comes from. Takes the tweak's confirm_key, from --update --plan --json or --tweak-updates --json, which is for exactly that update: one that changed since (another version, build or source) is refused. Repeat it for each tweak."),
     drop_update_target: str | None = typer.Option(None, "--drop-update-target", metavar="APP", help="With --device UDID: stop updating APP on that device, one it was installed on, until it's installed there again. For a device that's gone (sold, retired or reset). Changes nothing on any device."),
     check: bool = typer.Option(False, "--check", help="Run pre-flight checks and exit."),
     init: bool = typer.Option(False, "--init", help="First-run setup. Asks its questions in Terminal, or none with --account."),
@@ -8238,6 +8434,7 @@ def main(
     search: str | None = typer.Option(None, "--search", help="Search canister.me for tweaks matching QUERY."),
     fetch: str | None = typer.Option(None, "--fetch", help="Download a .deb into tweaks_dir (package id or direct URL)."),
     fetch_sha: str | None = typer.Option(None, "--fetch-sha", help="Expected SHA-256 for a --fetch URL download (verified after download)."),
+    fetch_repository: str | None = typer.Option(None, "--fetch-repository", metavar="ID", help="With --fetch <package id>: only from this Canister repository (a --search result's repository_id), so another repository's higher version can't win. Its updates then come only from there."),
     add_repo_url: str | None = typer.Option(None, "--add-repo", help="Add an APT repo by URL and cache its package index."),
     remove_repo_url: str | None = typer.Option(None, "--remove-repo", help="Remove a previously added APT repo by URL."),
     add_app_url: str | None = typer.Option(None, "--add-app", help="Add an app to config.yaml from its App Store URL or numeric ID."),
@@ -8361,10 +8558,10 @@ def main(
         "--with-icons",
         help=(
             "With --device-apps: also read each app's home-screen icon off the "
-            "phone, cache it, and report it as icon_path. The first run is one "
+            "device, cache it, and report it as icon_path. The first run is one "
             "extra pass over the device, roughly doubling what the listing "
             "takes (measured: +4s for 67 apps over Wi-Fi); later runs ask only "
-            "about ids the cache has no answer for (+0.5s on the same phone). "
+            "about ids the cache has no answer for (+0.5s on the same device). "
             "An app SpringBoard has no icon for simply has none."
         ),
     ),
@@ -8386,7 +8583,7 @@ def main(
     decrypt_mode: str | None = typer.Option(None, "--decrypt-mode", help="bagbak dump mode. Only all (the default: the whole app bundle) is accepted, since --decrypt and --decrypt-frontmost stage the dump for a build and no other mode dumps an app."),
     decrypt_backend: str | None = typer.Option(None, "--decrypt-backend", help="Decrypt backend: frida-ios-dump (reliable, needs the app running + device SSH) or bagbak (spawns the app; bagbak 4.x also pulls over device SSH, so it needs the same SSH password)."),
     decrypt_frontmost: bool = typer.Option(False, "--decrypt-frontmost", help="Dump a decrypted IPA of whatever app is currently on screen on the device — auto-detects the foreground app, no bundle id needed. Open the app and keep it foreground first."),
-    strip_encrypted_extensions: bool | None = typer.Option(None, "--strip-encrypted-extensions/--keep-encrypted-extensions", help="A dump drops app extensions it cannot decrypt (no tool can read one built for a newer iOS than the phone runs) and stages the rest — the app keeps working, minus its widgets and share sheet, and what went is always reported. `--keep-encrypted-extensions` refuses that trade and fails instead. The app's own binaries are never removed either way."),
+    strip_encrypted_extensions: bool | None = typer.Option(None, "--strip-encrypted-extensions/--keep-encrypted-extensions", help="A dump drops app extensions it cannot decrypt (no tool can read one built for a newer iOS than the device runs) and stages the rest — the app keeps working, minus its widgets and share sheet, and what went is always reported. `--keep-encrypted-extensions` refuses that trade and fails instead. The app's own binaries are never removed either way."),
     set_p12_password: bool = typer.Option(False, "--set-p12-password", help="Prompt for the .p12 password and store it in the macOS Keychain."),
     set_ssh_password: bool = typer.Option(False, "--set-ssh-password", help="Prompt for the device's root SSH password and store it in the macOS Keychain (needed by the frida-ios-dump decrypt backend, and by bagbak 4.x, which also pulls over SSH)."),
     decrypt_check: bool = typer.Option(False, "--decrypt-check", help="Report whether the device can decrypt an app right now, and what is blocking it."),
@@ -8460,7 +8657,7 @@ def main(
         raise ConfigError(
             "--for-playcover builds an artifact only this Mac can run",
             hint="pass --skip-install too, then hand the build over with "
-            "--install-to-mac. Installing it on a phone would point the tweak "
+            "--install-to-mac. Installing it on an iPhone or iPad would point the tweak "
             "at a stub framework iOS already has for real",
         )
 
@@ -8562,6 +8759,7 @@ def _report_app_failure(app_name: str, exc: Exception, *, emitter: JsonEmitter |
     — the failure of app 1 skipping apps 2 and 3, which is the exact bug the
     widened `except Exception` above was added to fix.
     """
+    exc = presented(exc)
     if isinstance(exc, GraftError):
         message, hint = exc.message, exc.hint
     else:
@@ -8997,6 +9195,8 @@ def _build_one(
         dry_run=dry_run,
         for_playcover=for_playcover,
         export_to=export_to,
+        # A lookup, as the envelope's header must be (`test_cli_build_envelope`).
+        waits=outcome.waits if outcome else None,
     ) as report:
         app_cfg = cfg.get_app(app_name)
         report.tweaks = list(app_cfg.tweaks)
@@ -9334,7 +9534,7 @@ def _build_one(
                             f"{lc_result.bundle_id} on {report.udid}"
                         )
                         console.print(
-                            "   [dim]open LiveContainer on the phone, the new IPA appears in its "
+                            "   [dim]open LiveContainer on the device, the new IPA appears in its "
                             "Documents tab and can be added as a managed app[/dim]"
                         )
                         _report_lc_choice(emitter, app_name=app_name, result=lc_result,
@@ -9345,11 +9545,15 @@ def _build_one(
                         # says whether it went. On a dry run `bundle_id` is
                         # the container discovery chose on the phone, or the
                         # pin when the phone did not answer (`lc_runner`).
+                        # `udid` and `device_name` (null when Graft was never
+                        # told one) are the device it went to, for the app's
+                        # "Sent to LiveContainer on <device>" (2.3.1 B9).
                         emitter.emit(
                             "stage", name="lc-push", status="end",
                             bundle_id=lc_result.bundle_id, size_bytes=lc_result.size_bytes,
                             others=lc_result.others,
                             documents_path=lc_result.documents_path, dry_run=dry_run,
+                            udid=planned.udid, device_name=planned.name,
                         )
                     # Inside `if not skip_install`, after the push returned: this is
                     # the only point at which an artifact is known to have reached

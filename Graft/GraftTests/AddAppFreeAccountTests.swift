@@ -153,17 +153,30 @@ final class AddAppFreeAccountTests: XCTestCase {
         XCTAssertEqual(outcome.delivery, "sideload")
     }
 
-    func test_paid_adds_with_nothing_remembered_send_livecontainer() async throws {
+    /// Decided for 2.3.1: a paid account's new apps are sideloaded,
+    /// as the README, the wiki and the setup screen say.
+    func test_paid_adds_with_nothing_remembered_send_sideload() async throws {
         for path in [Path.url, .manual] {
             let outcome = try await add(via: path, account: .paid, remembered: nil)
-            XCTAssertEqual(outcome.delivery, "livecontainer", "\(path)")
-            XCTAssertEqual(outcome.rememberedAfter, "livecontainer", "\(path)")
+            XCTAssertEqual(outcome.delivery, "sideload", "\(path)")
+            XCTAssertEqual(outcome.rememberedAfter, "sideload", "\(path)")
         }
     }
 
-    /// The picker on a free account: LiveContainer, disabled, Sideload still
-    /// on screen, and the reason both as its tooltip and as a line under it.
-    func test_the_free_picker_is_disabled_with_its_reason() async throws {
+    /// A free add is no choice: it remembers nothing, so an account that turns
+    /// paid later still starts on Sideload.
+    func test_free_adds_with_nothing_remembered_remember_nothing() async throws {
+        for path in [Path.url, .manual] {
+            let outcome = try await add(via: path, account: .free, remembered: nil)
+            XCTAssertEqual(outcome.delivery, "livecontainer", "\(path)")
+            XCTAssertNil(outcome.rememberedAfter, "\(path)")
+        }
+    }
+
+    /// A free account has one delivery, so it's said, not offered: a plain
+    /// "Delivery: LiveContainer" with the reason under it, and no picker. A
+    /// paid one gets the picker, with a line saying what each mode does.
+    func test_a_free_account_is_told_its_delivery_and_a_paid_one_picks() async throws {
         try AccessibilityTree.requireServed()
         for account in [AccountMode.free, .paid] {
             let store = try await accountTestStore([accountEventLine(account.rawValue)])
@@ -183,19 +196,26 @@ final class AddAppFreeAccountTests: XCTestCase {
                     && [DeliveryMode.sideload.displayName, DeliveryMode.livecontainer.displayName]
                         .contains($0.name)
             }
-            XCTAssertEqual(segments.count, 2, "\(account): both segments are on screen")
             let selected = segments.first { ($0.value as? NSNumber)?.boolValue == true }?.name
             let texts = nodes.filter { $0.role == kAXStaticTextRole }.compactMap { $0.value as? String }
             switch account {
             case .free:
-                XCTAssertEqual(selected, DeliveryMode.livecontainer.displayName)
-                XCTAssertTrue(segments.allSatisfy { $0.enabled == false }, "\(segments.map(\.enabled))")
+                XCTAssertEqual(segments.count, 0, "no picker: \(segments.map(\.name))")
+                XCTAssertTrue(texts.contains(DeliveryMode.livecontainer.displayName), "\(texts)")
                 XCTAssertTrue(texts.contains(PaidOnly.sideload), "\(texts)")
+                XCTAssertFalse(texts.contains(AddAppSheet.deliveryExplanation), "\(texts)")
             case .paid:
+                XCTAssertEqual(segments.count, 2, "both segments are on screen")
                 XCTAssertEqual(selected, DeliveryMode.sideload.displayName, "the remembered choice")
                 XCTAssertTrue(segments.allSatisfy { $0.enabled != false })
+                XCTAssertTrue(texts.contains(AddAppSheet.deliveryExplanation), "\(texts)")
                 XCTAssertFalse(texts.contains(PaidOnly.sideload))
             }
         }
+    }
+
+    func test_the_delivery_line_says_what_each_mode_does() {
+        XCTAssertEqual(AddAppSheet.deliveryExplanation,
+                       "LiveContainer: goes into the LiveContainer app. Sideload: installs as a normal app.")
     }
 }

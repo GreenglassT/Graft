@@ -47,8 +47,8 @@ struct DeviceSidebarRow: View {
                     .truncationMode(.tail)
                     // What "LC" means, since the row has no space to say it.
                     .help(device.livecontainerBundleId.map {
-                        "LiveContainer is installed on this phone: \($0)"
-                    } ?? "LiveContainer is not installed on this phone, so a "
+                        "LiveContainer is installed on this \(device.kindName): \($0)"
+                    } ?? "LiveContainer is not installed on this \(device.kindName), so a "
                         + "LiveContainer delivery cannot land here.")
             }
             Spacer(minLength: 4)
@@ -124,12 +124,25 @@ struct DeviceSidebarRow: View {
 /// sentence off the row and on the `help`.
 struct UndescribableDeviceRow: View {
     let failure: DeviceErrorRecord
+    /// The name Graft last saw this device under (`device-seen`), or nil for
+    /// one it has never read: a new phone waiting on Trust.
+    var remembered: String? = nil
     /// Mirrors `DevicesStore.isLoading`, so the retry can say it is working
     /// rather than just going dead.
     let isRetrying: Bool
     /// Re-run the full listing. See `SidebarView.retryDeviceListing` for why
     /// the failure of *that* run goes to the app's alert channel.
     let onRetry: () -> Void
+
+    /// The row's second line: what to do (B1). It said "connected, but
+    /// couldn't be read", with what to do on the dot's tooltip.
+    static let subtitle = "Unlock it and tap Trust"
+
+    /// The row's first line: the name Graft last saw the device under
+    /// (`device-seen`), else its UDID.
+    static func title(udid: String, remembered: String?) -> String {
+        remembered ?? udid
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -141,7 +154,7 @@ struct UndescribableDeviceRow: View {
             DeviceSilhouette(productType: "", size: CGSize(width: 14, height: 21))
                 .opacity(0.6)
             VStack(alignment: .leading, spacing: 2) {
-                Text(failure.udid)
+                Text(Self.title(udid: failure.udid, remembered: remembered))
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.text)
                     .lineLimit(1)
@@ -149,7 +162,7 @@ struct UndescribableDeviceRow: View {
                     // distinguishing, same treatment `AppSidebarRow` gives a
                     // bundle id.
                     .truncationMode(.middle)
-                Text("connected, but couldn't be read")
+                Text(Self.subtitle)
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.textDim)
                     .lineLimit(1)
@@ -170,13 +183,10 @@ struct UndescribableDeviceRow: View {
         .padding(.vertical, 2)
     }
 
-    /// The only way back from this state, and it needs to be on the row.
-    ///
-    /// The poll cannot recover it on its own: it escalates to a full listing
-    /// when the *set* of UDIDs on the bus changes, and a phone that is locked is
-    /// still on the bus with the same UDID — so unlocking it and tapping "Trust
-    /// this Computer" changes nothing the poll can see. Every other refresh in
-    /// the app is attached to a device pane, and this row has no pane.
+    /// A way back from this state now, rather than the only one: the poll
+    /// reads a device it couldn't read again on every tick
+    /// (`DevicesStore.hasMoved`, B1), so unlocking it and tapping Trust shows
+    /// within a few seconds. This is for the person who'd rather not wait.
     private var retryButton: some View {
         Button(action: onRetry) {
             Symbols.refresh.image(size: 10)

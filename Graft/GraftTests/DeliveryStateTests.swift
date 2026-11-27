@@ -406,6 +406,49 @@ final class DeliveryStateTests: XCTestCase {
         )
     }
 
+    /// 2.3.1 §3.5: the check says which device it asked (`reconcile-checked`),
+    /// and the pane's line names it.
+    @MainActor
+    func test_a_check_names_the_device_it_asked() async throws {
+        let store = ConfigStore(runner: shRunner(), cliArgs: ["-c", Fixture.twoAppsExampleCurrent], notify: { _ in })
+        _ = try await store.loadApps()
+
+        let outcome = try await store.reconcile(appName: "example", argsOverride: ["-c", Fixture.checkOnTheIPad])
+
+        XCTAssertEqual(outcome.warnings, [])
+        XCTAssertEqual(outcome.checked, ReconcileCheckedRecord(app: "example", udid: "00000000-0000000000000002",
+                                                               deviceName: "Example iPad", found: true))
+        XCTAssertEqual(outcome.cleanLine(knownName: nil), "Checked Example iPad — the record still stands.")
+        XCTAssertEqual(store.deliveryStates["example"]?.kind, .current)
+    }
+
+    func test_reconcile_checked_decodes_with_or_without_a_name() throws {
+        let line = #"{"type":"reconcile-checked","app":"example","udid":"U","device_name":null,"found":false}"#
+        guard case let .reconcileChecked(record) = try BuildEvent.decode(line: line) else {
+            return XCTFail("not a reconcile-checked event")
+        }
+        XCTAssertEqual(record, ReconcileCheckedRecord(app: "example", udid: "U", deviceName: nil, found: false))
+    }
+
+    /// The device by the CLI's name for it, else the one the window has for
+    /// it, and what the check found there: the file gone reads as the card
+    /// above it does, not "the record still stands". A check that asked no
+    /// device has none to name.
+    func test_the_checks_line_names_the_device_and_what_it_found() {
+        func line(_ checked: ReconcileCheckedRecord?, known: String? = nil) -> String {
+            ConfigStore.ReconcileOutcome(states: [], warnings: [], checked: checked).cleanLine(knownName: known)
+        }
+        let found = ReconcileCheckedRecord(app: "example", udid: "U", deviceName: "Example iPad", found: true)
+        let gone = ReconcileCheckedRecord(app: "example", udid: "U", deviceName: "Example iPad", found: false)
+        let unnamed = ReconcileCheckedRecord(app: "example", udid: "U", deviceName: nil, found: true)
+        XCTAssertEqual(line(found), "Checked Example iPad — the record still stands.")
+        XCTAssertEqual(line(gone), "Checked Example iPad — the delivered file isn't there.")
+        XCTAssertEqual(line(found, known: "Spare iPad"), "Checked Example iPad — the record still stands.")
+        XCTAssertEqual(line(unnamed, known: "Spare iPad"), "Checked Spare iPad — the record still stands.")
+        XCTAssertEqual(line(unnamed), "Checked the device — the record still stands.")
+        XCTAssertEqual(line(nil), "Checked — the record still stands.")
+    }
+
     /// K6(a) / C-NOTICE: a startup notice — written before the verb, about
     /// the machine — is not the check's result. Counted, a renamed
     /// environment variable became every Check device's only "warning", so a
@@ -605,15 +648,18 @@ final class DeliveryStateTests: XCTestCase {
         /// line is the *unchanged* local answer: this is byte-identical to a
         /// clean check apart from the warning above it.
         static let checkWithNoDevice = emit([noDeviceWarning, exampleStateCurrent])
+        /// A check that asked the iPad the app went to, and found its file.
+        static let checkedOnTheIPad = #"{"type":"reconcile-checked","app":"example","udid":"00000000-0000000000000002","device_name":"Example iPad","found":true}"#
+        static let checkOnTheIPad = emit([checkedOnTheIPad, exampleStateCurrent])
         /// C-NOTICE: the line `main` writes before any verb while a renamed
         /// environment variable is still set.
         static let startupNotice = #"{"type":"log","source":"startup","line":"TB_SSH_PASS is set but no longer read; use GRAFT_SSH_PASS"}"#
         static let checkAfterANotice = emit([startupNotice, exampleStateCurrent])
         /// What the CLI writes while `open_lockdown` waits on a phone that
         /// has not trusted this Mac (`say_trust_prompt`).
-        static let trustPromptLine = "Unlock the phone and tap Trust on the 'Trust This Computer?' "
+        static let trustPromptLine = "Unlock the iPhone or iPad and tap Trust on the 'Trust This Computer?' "
             + "prompt (waiting up to 60 s)"
-        static let trustPrompt = #"{"type":"log","source":"device","line":"Unlock the phone and tap Trust on the \u0027Trust This Computer?\u0027 prompt (waiting up to 60 s)"}"#
+        static let trustPrompt = #"{"type":"log","source":"device","line":"Unlock the iPhone or iPad and tap Trust on the \u0027Trust This Computer?\u0027 prompt (waiting up to 60 s)"}"#
         static let checkAfterATrustPrompt = emit([trustPrompt, exampleStateCurrent])
         static let checkWithNoDeviceAfterATrustPrompt = emit(
             [trustPrompt, noDeviceWarning, exampleStateCurrent]
@@ -651,5 +697,113 @@ final class DeliveryStateTests: XCTestCase {
             // %s so a JSON body containing a % can never be read as a format.
             "printf '%s\\n' " + lines.map { "'\($0)'" }.joined(separator: " ")
         }
+    }
+}
+
+/// What a LiveContainer build says once its push is done (2.3.1 B9): the IPA
+/// is in LiveContainer's Documents, and the last step is the person's, on the
+/// device. The CLI's own reminder went to stderr and the pane said "Done".
+/// The device comes off the push's own `stage` end (`udid`, `device_name`).
+@MainActor
+final class LiveContainerSentTests: XCTestCase {
+    private static func events(pushEnd: String, ok: Bool = true) -> [BuildEvent] {
+        """
+        {"type":"build-start","app":"example","bundle_id":"com.example.app","delivery":"livecontainer"}
+        {"type":"stage","name":"lc-push","status":"start","transport":"usb"}
+        \(pushEnd)
+        {"type":"build-end","app":"example","ok":\(ok),"error":null,"elapsed_seconds":3.0}
+        """.buildEvents()
+    }
+
+    private static let pushed = #"{"type":"stage","name":"lc-push","status":"end","bundle_id":"com.kdt.livecontainer.ABCDE12345","size_bytes":7,"others":[],"documents_path":"Documents/example.ipa","dry_run":false,"udid":"00008030-0000000000000002","device_name":"Example iPad"}"#
+
+    func test_a_push_that_went_says_where_and_what_is_left() {
+        let sent = AppDetailView.liveContainerSent(in: Self.events(pushEnd: Self.pushed))
+        XCTAssertEqual(sent, AppDetailView.LiveContainerSent(
+            udid: "00008030-0000000000000002", deviceName: "Example iPad", filename: "example.ipa"))
+        XCTAssertEqual(AppDetailView.sentLine(device: "Example iPad", app: "Example"),
+                       "Sent to LiveContainer on Example iPad. Open LiveContainer and import Example to finish.")
+        XCTAssertEqual(AppDetailView.sentFileLine("example.ipa"), "It's example.ipa in LiveContainer's Documents.")
+    }
+
+    func test_a_dry_run_or_a_sideload_sent_nothing() {
+        let dry = Self.pushed.replacingOccurrences(of: #""dry_run":false"#, with: #""dry_run":true"#)
+        XCTAssertNil(AppDetailView.liveContainerSent(in: Self.events(pushEnd: dry)))
+        let install = #"{"type":"stage","name":"install","status":"end"}"#
+        XCTAssertNil(AppDetailView.liveContainerSent(in: Self.events(pushEnd: install)))
+    }
+
+    /// A device Graft has no name for: the pane's own lists name it if they
+    /// can, else the line says "your iPhone or iPad", never a UDID.
+    func test_a_device_with_no_name_is_named_by_what_the_pane_knows() throws {
+        let unnamed = Self.pushed.replacingOccurrences(of: #""device_name":"Example iPad""#, with: #""device_name":null"#)
+        let sent = try XCTUnwrap(AppDetailView.liveContainerSent(in: Self.events(pushEnd: unnamed)))
+        XCTAssertNil(sent.deviceName)
+        XCTAssertNil(AppDetailView.sentDeviceName(sent, devices: [], remembered: []))
+        let seen = #"{"type":"device-seen","udid":"00008030-0000000000000002","name":"Example iPad","model":null,"ios_version":null,"is_default":false}"#
+        guard case let .deviceSeen(record)? = seen.buildEvents().first else { return XCTFail("fixture") }
+        XCTAssertEqual(AppDetailView.sentDeviceName(sent, devices: [], remembered: [record]), "Example iPad")
+        XCTAssertEqual(AppDetailView.sentLine(device: nil, app: "Example"),
+                       "Sent to LiveContainer on your iPhone or iPad. Open LiveContainer and import Example to finish.")
+    }
+
+    /// Through the pane: Build & Install, a push the CLI reports done, and the
+    /// line on the pane.
+    func test_the_pane_says_what_to_do_after_a_livecontainer_build() async throws {
+        try AccessibilityTree.requireServed()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("graft-lcsent-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let appLine = #"{"type":"app","name":"example","bundle_id":"com.example.app","preferred_version":"latest","tweaks":[],"display_name":"Example","delivery":"livecontainer","auto_profile":false,"keep_bundle_id":true,"strip_extensions":false,"strip_supported_devices":true,"compression_level":6}"#
+        let cached = #"{"type":"cached-ipa","exists":true,"app":"example","bundle_id":"com.example.app","version":"1.0","filename":"com.example.app_1.0.ipa","path":"/nonexistent/com.example.app_1.0.ipa","size_bytes":1000}"#
+        let cli = dir.appendingPathComponent("graft")
+        try """
+        #!/bin/sh
+        case "$*" in
+          "--json --list") printf '%s\\n' '\(appLine)' ;;
+          *--cached-ipa*) printf '%s\\n' '\(cached)' ;;
+          "--json example")
+            printf '%s\\n' '{"type":"build-start","app":"example","bundle_id":"com.example.app","delivery":"livecontainer"}'
+            printf '%s\\n' '{"type":"stage","name":"lc-push","status":"start","transport":"usb"}'
+            printf '%s\\n' '\(Self.pushed)'
+            printf '%s\\n' '{"type":"build-end","app":"example","ok":true,"error":null,"elapsed_seconds":1.0}'
+            ;;
+        esac
+        exit 0
+        """.write(to: cli, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cli.path)
+        let runner = CLIRunner(executable: cli)
+        let sh = CLIRunner(executable: URL(fileURLWithPath: "/bin/sh"))
+        let config = ConfigStore(runner: runner, notify: { _ in })
+        config.postNote = { _ in }
+        let apps = try await config.loadApps()
+        let app = try XCTUnwrap(apps.first)
+        let view = AppDetailView(
+            app: app, runner: runner, store: config,
+            artwork: ArtworkStore(runner: sh), devices: DevicesStore(runner: sh),
+            tweaksStore: TweaksStore(runner: sh), staged: StagedIPAStore(runner: sh),
+            appStore: AppStoreStore(runner: sh, shell: NoAdminShell()), liveContainer: LiveContainerStore(runner: sh),
+            settings: SettingsStore(runner: sh), showSettings: {}, playCover: .inert
+        )
+        let box = hosted(view, size: NSSize(width: 1000, height: 1000))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        settle(box, seconds: 0.2)
+        let line = AppDetailView.sentLine(device: "Example iPad", app: "Example")
+        XCTAssertFalse(try AccessibilityTree.texts(in: box.window).contains(line), "premise: not before a build")
+
+        try clickButton(named: "Build & Install", in: box.window)
+        XCTAssertEqual(config.buildingApp, "example", "premise: the click started a build")
+        var waited = 0
+        while config.buildingApp != nil || waited == 0, waited < 50 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            waited += 1
+        }
+        try await Task.sleep(nanoseconds: 300_000_000)
+        settle(box, seconds: 0.2)
+
+        let texts = try AccessibilityTree.texts(in: box.window)
+        XCTAssertTrue(texts.contains(line), "\(texts)")
+        XCTAssertTrue(texts.contains(AppDetailView.sentFileLine("example.ipa")), "\(texts)")
     }
 }

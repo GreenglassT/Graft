@@ -51,8 +51,10 @@ tools Graft.app doesn't include, which you install yourself:
 | [bagbak](https://github.com/ChiChou/bagbak) | The other backend. `npm install -g bagbak@4.0.3` for a 16.x frida-server. |
 | `iproxy`, from libimobiledevice | The SSH tunnel to the device. `brew install libimobiledevice`, or from MacPorts, `sudo port install libimobiledevice`. |
 
-The card checks what, if anything, is blocking a dump right now. Unless you
-choose a backend, Graft picks the one that can run, preferring frida-ios-dump:
+The card checks what, if anything, is blocking a dump right now. On a device
+with no jailbreak it says so in one line, and **Dump** in the device's list of
+apps waits. Unless you choose a backend, Graft picks the one that can run,
+preferring frida-ios-dump:
 
 - **frida-ios-dump** attaches to the running app. Graft brings it to the
   foreground first, launching it if needed. It copies the bundle over SSH:

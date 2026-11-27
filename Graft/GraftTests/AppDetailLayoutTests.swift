@@ -1455,4 +1455,47 @@ extension AppDetailLayoutTests {
                        "LiveContainer missing, with Set Up",
                        width: Metrics.windowMinWidth, height: Metrics.windowMinHeight)
     }
+
+    /// A paid account's missing LiveContainer also offers Sideload (2.3.1 B2).
+    /// At the window's minimum width, beside Set Up LiveContainer… and Change,
+    /// each line of it is laid out whole. Unlike the fit checks above, this
+    /// one can see a truncation: each text's width, read back off the
+    /// accessibility tree (which skips when macOS isn't serving it), against
+    /// the width its string needs. As one 90-character line it was cut.
+    func test_the_paid_offer_of_sideload_is_laid_out_whole_at_the_minimum_width() throws {
+        try AccessibilityTree.requireServed()
+        let missing = BuildTarget.liveContainerMissing(
+            name: "iPhone 15 Pro", udid: "00008030-0000000000000001", kind: "iPhone", sideload: true
+        )
+        let (_, window) = hosted(BarHarness(target: missing, setUp: { _ in }),
+                                 width: Metrics.windowMinWidth, height: Metrics.windowMinHeight)
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+        let deadline = Date().addingTimeInterval(0.4)
+        while Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+
+        // The bar reads its sentence as one element (`children: .combine`),
+        // so the two lines come back joined, and the element is as wide as
+        // the wider of them laid out: a cut line would be cut to it.
+        let parts = [BuildTargetBar.liveContainerMissingLine(name: "iPhone 15 Pro"), BuildTargetBar.sideloadOffer]
+        let node = try XCTUnwrap(AccessibilityTree.nodes(in: window).first {
+            $0.role == kAXStaticTextRole && (($0.value as? String)?.contains("LiveContainer isn't on") == true)
+        }, "premise: the bar's sentence is on screen")
+        XCTAssertEqual(node.value as? String, parts.joined(separator: ", "), "the offer is a line of its own")
+        let element = node.element
+        let width = try XCTUnwrap(AccessibilityTree.offMain { () -> Double? in
+            guard let raw = AccessibilityTree.attribute(element, kAXSizeAttribute),
+                  CFGetTypeID(raw) == AXValueGetTypeID() else { return nil }
+            var size = CGSize.zero
+            AXValueGetValue(raw as! AXValue, .cgSize, &size)
+            return Double(size.width)
+        } ?? nil, "no width for the sentence")
+        for part in parts {
+            let needed = (part as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 13)]).width
+            XCTAssertGreaterThanOrEqual(width + 0.5, Double(needed),
+                                        "\"\(part)\" was cut to \(width)pt of \(needed)pt")
+        }
+    }
 }

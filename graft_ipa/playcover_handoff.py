@@ -136,9 +136,11 @@ def _read_plist(path: Path) -> tuple[dict[str, Any], int] | None:
     try:
         data = path.read_bytes()
         settings = plistlib.loads(data)
-    except (OSError, ValueError, ExpatError):
+    except (OSError, ValueError, ExpatError, RecursionError):
         # ExpatError, which is no ValueError: XML cut off mid-write, as a
-        # file PlayCover is writing right now reads.
+        # file PlayCover is writing right now reads. RecursionError: a binary
+        # plist nested deeper than Python's recursion limit, which plistlib
+        # reads a frame a level (the 2.3.1 review's A3).
         return None
     if not isinstance(settings, dict):
         return None

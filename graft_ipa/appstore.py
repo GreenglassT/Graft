@@ -467,7 +467,12 @@ def check(
     (`release_hold`). `held_version_id` is the build held, when a get by id
     set the hold, and `held_build` which of that version's builds it is
     (`held_build`), when the App Store has more than one.
+
+    `setup_missing` is why no get can run on this Mac yet (`setup_missing`),
+    the same on every app's event: null when one can, and on a Mac where no
+    App Store request runs, whose own reason is the one to give.
     """
+    setup = None if store_requests_blocker() is not None else setup_missing(cfg)
     for name in app_names:
         app = cfg.get_app(name)
         store_version: str | None = None
@@ -500,6 +505,7 @@ def check(
                 # its version's builds that is, when there are several.
                 held_version_id=held_version_id(app),
                 held_build=asdict(build) if build is not None else None,
+                setup_missing=setup,
                 error=error,
             )
             continue
@@ -824,6 +830,38 @@ STORE_NEEDS_HINT = (
 )
 
 
+#: Why a get can't run on this Mac yet (`setup_missing`), as Settings › App
+#: Store's rows would say: no UnfairPlay or no enrollment, or Graft's own
+#: ipatool with no sign-in on its record. `update_plan`'s skipped reasons too.
+DECRYPTION_NOT_SET_UP = "decryption isn't set up on this Mac"
+NOT_SIGNED_IN = "not signed in to the App Store"
+
+
+def setup_missing(cfg: Config) -> str | None:
+    """Why a get can't run on this Mac yet, or None when it may: what
+    `fetched` would refuse first, as far as files can tell.
+
+    No keychain, no ipatool: UnfairPlay and its enrollment are files, and
+    for Graft's own ipatool, whether it signed in is on Graft's record of its
+    sign-in (`appstore_account.vouched`), without which a get refuses (signed
+    out, or another ipatool's sign-in it can't read). Any other ipatool may
+    be signed in in Terminal, which no file says: the get finds out. Nor is a
+    known-bad ipatool version here: telling needs `ipatool --version`.
+
+    `update_plan.store_step` skips the get with it, and `check` reports it
+    (`appstore-version`'s `setup_missing`), which the app pane reads as it
+    appears.
+    """
+    store_tools = cfg.appstore
+    up = unfairplay.resolve_tool(store_tools)
+    if not unfairplay.present(up.path) or not unfairplay.enrolled(store_tools.unfairplay_models):
+        return DECRYPTION_NOT_SET_UP
+    source = ipatool.source_of(store_tools.ipatool, explicit="ipatool" in store_tools.explicit)
+    if source == SOURCE_BUNDLED and "account" not in appstore_account.vouched():
+        return NOT_SIGNED_IN
+    return None
+
+
 def store_requests_blocker() -> AppStoreError | None:
     """The refusal of any ipatool App Store request (sign-in, a get, a free
     claim, an app's older versions) on an Intel Mac or in the Intel build
@@ -994,7 +1032,7 @@ def _refuse_apples_own(app: AppConfig) -> None:
         raise AppStoreError(
             f"{app.bundle_id} is one of Apple's own apps, which Graft doesn't get from the App Store",
             hint="iOS ships Apple's apps itself, and only Apple can sign a com.apple bundle id: "
-            "get it on the iPhone from the App Store, and pick another app for Graft",
+            "get it on the iPhone or iPad from the App Store, and pick another app for Graft",
         )
 
 

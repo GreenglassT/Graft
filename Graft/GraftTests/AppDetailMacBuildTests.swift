@@ -9,6 +9,54 @@ import XCTest
 /// and asserting it through a rendered SwiftUI body would be slower, more
 /// brittle, and would need a real `graft` to produce the row.
 final class AppDetailMacBuildTests: XCTestCase {
+    /// B3: Build & Install with no IPA failed with a red card of CLI flags.
+    /// It waits, saying how to add one. Only once the cache has said there's
+    /// none: a read still running, or one that failed, isn't that answer.
+    func test_build_and_install_waits_while_the_ipa_is_known_to_be_missing() {
+        let missing = CachedIPARecord(exists: false, app: "example", bundleId: "", version: "", filename: "",
+                                      path: "", sizeBytes: 0)
+        let staged = CachedIPARecord(exists: true, app: "example", bundleId: "com.example.app", version: "1.0",
+                                     filename: "com.example.app_1.0.ipa", path: "/x.ipa", sizeBytes: 1)
+
+        XCTAssertEqual(AppDetailView.missingIPA(missing),
+                       "Add a decrypted IPA first: drop one on Source IPA below, or use Get latest from App Store.")
+        XCTAssertNil(AppDetailView.missingIPA(staged))
+        XCTAssertNil(AppDetailView.missingIPA(nil), "not read yet is no answer")
+    }
+
+    /// Where no App Store get can run (an Intel Mac, or the Intel download),
+    /// Get latest is disabled: the wait doesn't send anyone to it.
+    func test_without_app_store_gets_the_ipa_wait_names_only_the_drop() {
+        let missing = CachedIPARecord(exists: false, app: "example", bundleId: "", version: "", filename: "",
+                                      path: "", sizeBytes: 0)
+
+        XCTAssertEqual(AppDetailView.missingIPA(missing, appStore: false),
+                       "Add a decrypted IPA first: drop one on Source IPA below.")
+    }
+
+    /// The re-verify of B3: Build for this Mac and Export IPA… ran with no
+    /// IPA too, and failed with flag hints. Both wait for it now; only the
+    /// Mac build waits for a refusal of every build, since an export signs
+    /// nothing.
+    func test_build_for_this_mac_and_export_wait_for_an_ipa_too() {
+        let missing = CachedIPARecord(exists: false, app: "example", bundleId: "", version: "", filename: "",
+                                      path: "", sizeBytes: 0)
+        let staged = CachedIPARecord(exists: true, app: "example", bundleId: "com.example.app", version: "1.0",
+                                     filename: "com.example.app_1.0.ipa", path: "/x.ipa", sizeBytes: 1)
+        let refused = "Sideload needs a paid Apple Developer account."
+        let words = AppDetailView.missingIPA(missing)
+
+        XCTAssertEqual(AppDetailView.popoverWait(.macBuild, refusal: nil, cached: missing, appStore: true), words)
+        XCTAssertEqual(AppDetailView.popoverWait(.export, refusal: nil, cached: missing, appStore: true), words)
+        XCTAssertEqual(AppDetailView.popoverWait(.macBuild, refusal: refused, cached: staged, appStore: true), refused)
+        XCTAssertNil(AppDetailView.popoverWait(.export, refusal: refused, cached: staged, appStore: true),
+                     "an export signs nothing: a sideload app on a free Apple ID can still have one")
+        XCTAssertNil(AppDetailView.popoverWait(.macBuild, refusal: nil, cached: nil, appStore: true),
+                     "not read yet is no answer")
+        XCTAssertEqual(AppDetailView.popoverWait(.export, refusal: nil, cached: missing, appStore: false),
+                       AppDetailView.missingIPA(missing, appStore: false))
+    }
+
 
     // MARK: - Which archive gets handed over
 

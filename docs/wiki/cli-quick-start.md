@@ -63,6 +63,6 @@ the questions does, and are what the app runs.
 - `--dry-run` checks everything and writes nothing.
 - The interactive `--init` copies the files it's given as they are, so an
   expired profile shows up in `--check`, and a certificate the profile doesn't
-  list only when the phone refuses the install.
+  list only when the device refuses the install.
 - `--config <path>` works with any of these, for a config somewhere else. The
   app always uses the default one.

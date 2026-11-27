@@ -267,6 +267,9 @@ def test_a_deleted_file_is_pruned_on_the_next_write(tmp_path: Path) -> None:
         '{"format": 1}',
         '{"format": 1, "entries": []}',
         "null",
+        # Too deep for the parser: RecursionError, which is no ValueError
+        # (the 2.3.1 review's T2-B5).
+        "[" * 10_000 + "]" * 10_000,
     ],
     ids=[
         "garbage",
@@ -276,6 +279,7 @@ def test_a_deleted_file_is_pruned_on_the_next_write(tmp_path: Path) -> None:
         "no-entries-key",
         "entries-not-an-object",
         "json-null",
+        "nested-too-deep",
     ],
 )
 def test_an_unusable_memo_falls_back_to_reading_the_plist(tmp_path: Path, body: str) -> None:
@@ -552,6 +556,49 @@ def test_a_version_rewritten_under_the_same_name_is_re_read(tmp_path: Path) -> N
 
     assert found is not None
     assert found.version == "22.1.0", "the memo answered for a file that changed"
+
+
+def _within(seconds: float, fifo: Path, work):
+    """`work()`'s answer, or a failure if it's still waiting after
+    `seconds`, as a read of a FIFO with no writer waits."""
+    import threading
+
+    answer: list[object] = []
+    worker = threading.Thread(target=lambda: answer.append(work()), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    if worker.is_alive():
+        try:  # free the stuck reader
+            os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
+        pytest.fail(f"waited on the FIFO at {fifo.name}")
+    return answer[0]
+
+
+def test_a_fifo_where_the_memo_goes_is_no_memo(tmp_path: Path) -> None:
+    """Read as Graft's other small state files are (`data_dirs.
+    read_small_json`): a plain read of a FIFO waited for a writer that never
+    came, and with it the daily check and every build (T2-B5)."""
+    _cached_ipa(tmp_path, "22.1.0")
+    os.mkfifo(tmp_path / MEMO_FILENAME)
+
+    found = _within(5, tmp_path / MEMO_FILENAME, lambda: find_in_cache(_Cfg(tmp_path), _app()))
+
+    assert found is not None and found.version == "22.1.0"
+
+
+def test_a_fifo_named_as_a_cached_ipa_is_skipped(tmp_path: Path) -> None:
+    """Only a regular file is a candidate: opening a FIFO to read its
+    Info.plist waited forever too."""
+    real = _cached_ipa(tmp_path, "22.1.0")
+    fifo = tmp_path / f"{BUNDLE}_99.0.ipa"
+    os.mkfifo(fifo)
+
+    found = _within(5, fifo, lambda: find_in_cache(_Cfg(tmp_path), _app()))
+
+    assert found is not None and found.path == real
+    assert _within(5, fifo, lambda: IPAInfoMemo.load(tmp_path).info_for(fifo)) is None
 
 
 def test_a_corrupt_memo_does_not_break_find_in_cache(tmp_path: Path) -> None:

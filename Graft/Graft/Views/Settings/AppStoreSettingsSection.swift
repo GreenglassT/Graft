@@ -15,15 +15,17 @@ import SwiftUI
 /// (`AppStoreEnrollSheet`). The Terminal block remains only for a missing
 /// tool, which in Graft.app means a damaged bundle.
 ///
-/// **Without Apple silicon** (`MacSupport.unavailableLine`): Sign In…, Sign
-/// In Again… and Set Up Decryption… are disabled, each with the line saying
-/// why, whether or not this download has UnfairPlay (the Intel one doesn't).
-/// Every App Store sign-in runs ipatool's emulator, which the Intel build
-/// can't run (`appstore.store_requests_blocker`), and nothing a sign-in is
-/// for (a get, a free claim, older versions) can be decrypted there.
-/// Searching the App Store and adding an app by name need no sign-in: they
-/// use Apple's public lookup. Sign Out still works: it only forgets the
-/// sign-in in the login keychain.
+/// **Without Apple silicon** (`MacSupport.appStoreLine`): one neutral card in
+/// place of the rows, their buttons and the Terminal block, saying what can
+/// get apps and what to do instead. Every App Store sign-in runs ipatool's
+/// emulator, which the Intel build can't run
+/// (`appstore.store_requests_blocker`), and nothing a sign-in is for (a get,
+/// a free claim, older versions) can be decrypted there. Searching the App
+/// Store and adding an app by name need no sign-in: they use Apple's public
+/// lookup. The rows' red dots and grayed Sign In, with the reason only in a
+/// tooltip, read as something to fix (a user's report). Sign Out stays
+/// on the card for a sign-in that's there: it only forgets it in the login
+/// keychain.
 struct AppStoreSettingsSection: View {
     @ObservedObject var store: AppStoreStore
     @State private var showSignIn = false
@@ -310,8 +312,63 @@ struct AppStoreSettingsSection: View {
         }
     }
 
+    /// The card where no App Store get can run here: its line, and whether
+    /// it offers Sign Out (a sign-in status has read as there). Nil where
+    /// gets can run: the rows, as they are. Doesn't wait for status: only
+    /// Sign Out does, and with no status there's none.
+    struct UnavailableCard: Equatable {
+        let line: String
+        let signOut: Bool
+    }
+
+    static func unavailableCard(_ mac: MacSupport, status: AppStoreStatusRecord?) -> UnavailableCard? {
+        guard let line = mac.appStoreLine else { return nil }
+        return UnavailableCard(line: line, signOut: status?.ipatool.signedIn == true)
+    }
+
     @ViewBuilder
     private var content: some View {
+        if let card = Self.unavailableCard(mac, status: store.status) {
+            unavailable(card)
+        } else {
+            rowsContent
+        }
+    }
+
+    /// `UnavailableCard`, drawn: the line, in the card's body text, one
+    /// element for VoiceOver, and Sign Out beside it when there's a sign-in.
+    private func unavailable(_ card: UnavailableCard) -> some View {
+        VStack(alignment: .leading, spacing: Metrics.rowGap) {
+            HStack(alignment: .top, spacing: 12) {
+                Text(card.line)
+                    .font(AppFont.body)
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityElement(children: .combine)
+                if card.signOut {
+                    Button(store.account.isSigningOut ? "Signing Out…" : AccountButton.signOut.label) {
+                        Task { await store.account.signOut() }
+                    }
+                    .disabled(store.account.isSigningOut || !actionsEnabled)
+                    .help(store.accountBlockedReason ?? "")
+                }
+            }
+            if card.signOut, let error = store.account.signOutError {
+                Text(error)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.danger)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(Metrics.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle()
+    }
+
+    @ViewBuilder
+    private var rowsContent: some View {
         switch Self.state(
             hasLoaded: store.hasLoadedStatus, status: store.status, error: store.statusError
         ) {

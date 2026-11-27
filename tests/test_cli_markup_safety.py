@@ -191,30 +191,33 @@ def test_an_app_whose_itunes_name_looks_like_a_tag_is_still_reported_as_added(
     assert "[config]" in capsys.readouterr().out
 
 
-def test_a_deb_filename_that_looks_like_a_tag_still_reports_the_download(
+def test_a_fetch_whose_url_looks_like_a_tag_still_reports_the_download(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The filename is chosen by whoever built the .deb, not by this process.
+    """The URL is the person's (or a repo's), not this process's.
 
-    An opening tag, not a closing one: a filename cannot contain `/`, so this
-    site's hazard is the quiet half — rich deletes `[bold]` and the line names a
-    file the user will not find in `tweaks_dir`, with nothing saying a word.
+    An opening tag, not a closing one: rich deletes `[bold]` in silence, and
+    the line names a URL nobody typed. The library name is Graft's own
+    (`tweak_sources.library_name`, letters, digits and `.+~-` only), so it
+    can't carry markup, and is printed whole, twice.
     """
     from unittest.mock import MagicMock, patch
 
     from graft_ipa import cli as cli_mod
 
+    from .test_tweak_source_records import write_deb
+
     cfg = MagicMock()
     cfg.tweaks_dir = tmp_path / "tweaks"
     cfg.path = tmp_path / "config.yaml"
-    dest = tmp_path / "tweaks" / "tweak[bold].deb"
-    dest.parent.mkdir(parents=True)
-    dest.write_bytes(b"x" * 10)
+    cfg.repos = []
+    fetched = write_deb(tmp_path / "work" / "tweak[bold].deb", "com.example.tweak", "1.0")
 
-    with patch.object(cli_mod.canister, "fetch_deb", return_value=dest):
-        cli_mod._do_fetch(cfg, "com.example.tweak")
+    with patch.object(cli_mod.canister, "fetch_deb", return_value=fetched):
+        cli_mod._do_fetch(cfg, "https://repo.example/[bold]tweak.deb")
 
     # Whitespace-normalized: rich wraps at the console width, and a tmp_path is
-    # long enough to break the filename across lines. Both prints, because both
-    # name the file and either one alone would leave the other unpinned.
-    assert "".join(capsys.readouterr().out.split()).count("tweak[bold].deb") == 2
+    # long enough to break a line.
+    out = "".join(capsys.readouterr().out.split())
+    assert "https://repo.example/[bold]tweak.deb" in out
+    assert out.count("com.example.tweak_1.0.deb") == 2

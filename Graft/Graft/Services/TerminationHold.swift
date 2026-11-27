@@ -550,3 +550,77 @@ final class QuitGuard {
         reply(quit)
     }
 }
+
+/// Lets a quit reach `applicationShouldTerminate`, and so `QuitGuard`, while
+/// a sheet is open (2.3.1 spec §2).
+///
+/// **Why it didn't.** AppKit's `terminate:` won't quit while any window is
+/// document-modal (a sheet on another window) whose
+/// `preventsApplicationTerminationWhenModal` is true, the default: it returns
+/// without asking the app's delegate, and without a sound. SwiftUI leaves that
+/// default on a `.sheet`'s window and a `.confirmationDialog`'s; NSAlert sets
+/// it false on its own panel, so an `.alert` never had this. So with any sheet
+/// open (an update's progress, Edit…, a confirmation), ⌘Q, Graft › Quit Graft,
+/// a logout's or restart's quit, and Remove Graft's Data's own Quit Graft all
+/// stopped inside `terminate:`, and QuitGuard never ran. Not a modal session
+/// (`NSApp.modalWindow` is nil while a sheet is up), and not the menu: its
+/// Quit sends `terminate:` to NSApp, enabled, as with no sheet. Measured on
+/// 2026-11-26 in a standalone SwiftUI app with `terminate:` logged: with a
+/// sheet up it ran and asked nothing; with the sheet's window set not to
+/// prevent it, the delegate was asked, from ⌘Q's `terminate:` and the Quit
+/// item alike, for AppKit's own sheets as for SwiftUI's. A confirmation over
+/// a sheet is a sheet on the sheet, and both have to be let through.
+///
+/// **The fix.** As each sheet begins, every window is set not to prevent a
+/// quit: the sheet's, on whatever window it goes over, and the rest, on
+/// which the flag does nothing unless they are modal (NSAlert sets it false
+/// on its own panel already). A quit with a sheet open then goes to
+/// `applicationShouldTerminate` as one with none does: QuitGuard's question
+/// while work runs, Quit Anyway's wait for an install an update has begun
+/// included, and otherwise Graft quits, the sheet and any unsaved edits in
+/// it going with the window, as closing it would. `GraftAppDelegate` starts
+/// it once, for the app's life.
+@MainActor
+enum SheetsAllowQuit {
+    /// None of `windows` stops a quit: each one, not only those that are
+    /// sheets by now, so a sheet AppKit hasn't attached yet is let through
+    /// too.
+    static func allow(_ windows: [NSWindow]) {
+        for window in windows where window.preventsApplicationTerminationWhenModal {
+            window.preventsApplicationTerminationWhenModal = false
+        }
+    }
+
+    /// From now on, every sheet in this app: the windows there are now, and
+    /// all of them again as each sheet begins
+    /// (`NSWindow.willBeginSheetNotification`, which `center` posts for the
+    /// window it goes over; `sheetBegins`). Keep what this returns for as
+    /// long as it should last.
+    static func observe(_ center: NotificationCenter) -> NSObjectProtocol {
+        allow(NSApp.windows)
+        return center.addObserver(forName: NSWindow.willBeginSheetNotification, object: nil, queue: nil) { _ in
+            MainActor.assumeIsolated {
+                sheetBegins(windows: { NSApp.windows }, later: { block in
+                    RunLoop.main.perform(inModes: [.common]) { MainActor.assumeIsolated(block) }
+                })
+            }
+        }
+    }
+
+    /// A sheet is beginning: let every one of `windows` through now, and
+    /// once more `later`, on the next run-loop turn. The sheet's window has
+    /// its `sheetParent` when AppKit says it begins, on the macOS this was
+    /// measured on, though the parent's `attachedSheet` is still nil. The
+    /// app runs on macOS 13 too, which wasn't measured: an older AppKit may
+    /// attach the sheet only after saying so, even after the next turn. So
+    /// neither look asks which window is a sheet: the sheet's is let through
+    /// as long as it's among `windows`, attached or not, and the second
+    /// look is for one that isn't among them yet.
+    static func sheetBegins(
+        windows: @escaping @MainActor () -> [NSWindow],
+        later: (@escaping @MainActor () -> Void) -> Void
+    ) {
+        allow(windows())
+        later { allow(windows()) }
+    }
+}

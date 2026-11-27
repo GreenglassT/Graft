@@ -470,7 +470,7 @@ def check_devices(
                 name=DEVICES_CHECK_NAME,
                 ok=bool(udids),
                 detail=", ".join(udids) if udids else "none",
-                hint="plug an iPhone in via USB and trust this Mac",
+                hint="plug an iPhone or iPad in via USB and trust this Mac",
             )
         )
     elif problem is None:
@@ -581,7 +581,7 @@ def check_devices(
                     # is the snapshot Save and test took.
                     hint = (
                         "auto-provisioning covers app_store_connect.device_udids "
-                        "and the default device, and this phone is neither. Once "
+                        "and the default device, and this device is neither. Once "
                         "it is registered at developer.apple.com -> Devices, press "
                         "Save and test in Settings › App Store Connect (or run "
                         "`graft --set-portal` again) to refresh the list, or make "
@@ -737,7 +737,7 @@ def check_livecontainer(
             # same evidence the same way, `lc_runner._ListedNoApps`).
             results.append(CheckResult(
                 name=LIVECONTAINER_CHECK_NAME, ok=False,
-                detail=f"{udid}: the device listed no apps at all, which is how a locked phone answers",
+                detail=f"{udid}: the device listed no apps at all, which is how a locked device answers",
                 hint="unlock the device, keep it on the home screen, and run `graft --check` again",
             ))
             continue

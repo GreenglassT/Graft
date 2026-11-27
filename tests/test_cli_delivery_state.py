@@ -863,7 +863,7 @@ def test_a_demoted_sideload_delivery_keeps_the_definite_wording(
     _deliver(cfg, log, delivery="sideload")
     log.mark_reconciled(log.latest_delivery("example")["id"], seen=False)
 
-    assert _state(cfg, log)["summary"] == "The phone is out of date."
+    assert _state(cfg, log)["summary"] == "The device is out of date."
 
 
 def test_a_delivery_the_device_no_longer_has_reads_stale(temp_config_env: Path) -> None:
@@ -1591,6 +1591,111 @@ def test_the_reconcile_verb_says_when_the_named_device_isn_t_the_app_s(
     (warning,) = [e for e in _events(result.stdout) if e["type"] == "log"]
     assert "example was last delivered to 00008130-ipad" in warning["line"]
     assert log.latest_delivery("example")["reconcile_ok"] is None
+
+
+# --- Check device names the device (2.3.1 §3.5) -------------------------------
+
+
+@pytest.mark.parametrize("listed, found", [(["example.ipa"], True), (["nothing.ipa"], False)])
+def test_the_reconcile_verb_says_which_device_it_checked(temp_config_env: Path, listed, found) -> None:
+    """`reconcile-checked` once a device was asked: which one, by the name
+    Graft knows it by, and whether the file was there. The app's line names
+    it ("Checked Example iPad — the record still stands")."""
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+    from graft_ipa import devices_seen
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    _lc_deliver(cfg, log, udid="00008130-ipad")
+    devices_seen.remember(cfg.state_dir, "00008130-ipad", name="Example iPad")
+
+    with patch.object(cli_mod, "select_device", return_value=("00008130-ipad", "usb")), \
+         patch.object(cli_mod, "list_livecontainer_documents", return_value=listed):
+        result = CliRunner().invoke(cli_mod.app, ["--json", "--reconcile", "--app", "example"])
+
+    assert result.exit_code == 0, result.output
+    events = _events(result.stdout)
+    assert [e["type"] for e in events] == ["reconcile-checked", "delivery-state"]
+    assert events[0] == {"type": "reconcile-checked", "app": "example", "udid": "00008130-ipad",
+                         "device_name": "Example iPad", "found": found}
+
+
+def test_a_device_graft_has_no_name_for_is_checked_with_none(temp_config_env: Path) -> None:
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    _lc_deliver(cfg, log, udid="00008130-ipad")
+
+    with patch.object(cli_mod, "select_device", return_value=("00008130-ipad", "usb")), \
+         patch.object(cli_mod, "list_livecontainer_documents", return_value=["example.ipa"]):
+        result = CliRunner().invoke(cli_mod.app, ["--json", "--reconcile"])
+
+    (checked,) = [e for e in _events(result.stdout) if e["type"] == "reconcile-checked"]
+    assert (checked["udid"], checked["device_name"]) == ("00008130-ipad", None)
+
+
+def test_a_check_that_reached_no_device_says_none_was_checked(temp_config_env: Path) -> None:
+    """No `reconcile-checked` without a device asked: the app's line can't
+    name one it never looked on."""
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    _lc_deliver(cfg, log, udid="00008130-ipad")
+
+    with patch.object(cli_mod, "select_device", return_value=("00008130-ipad", "usb")), \
+         patch.object(cli_mod, "list_livecontainer_documents", side_effect=OSError("the device went away")):
+        result = CliRunner().invoke(cli_mod.app, ["--json", "--reconcile"])
+
+    assert [e["type"] for e in _events(result.stdout)] == ["log", "delivery-state"]
+
+
+def test_the_reconcile_warnings_name_the_device_by_its_name(temp_config_env: Path) -> None:
+    """Each warning names the device as Graft knows it, not by its UDID:
+    not connected, didn't answer, or not the one the app went to."""
+    from typer.testing import CliRunner
+
+    from graft_ipa import cli as cli_mod
+    from graft_ipa import devices_seen
+    from graft_ipa.errors import DeviceNotConnectedError, NoDeviceConnectedError
+
+    cfg = load_config(temp_config_env)
+    _stage(cfg)
+    log = BuildLog(cfg.state_dir / "log.sqlite")
+    _lc_deliver(cfg, log, udid="00008130-ipad")
+    devices_seen.remember(cfg.state_dir, "00008130-ipad", name="Example iPad")
+    devices_seen.remember(cfg.state_dir, "00008130-phone", name="Example iPhone")
+
+    def warning(*args: str, **patches) -> str:
+        with patch.object(cli_mod, "select_device", **patches["select"]), \
+             patch.object(cli_mod, "list_livecontainer_documents", **patches.get("listing", {"return_value": []})):
+            result = CliRunner().invoke(cli_mod.app, ["--json", "--reconcile", *args])
+        (line,) = [e["line"] for e in _events(result.stdout) if e["type"] == "log"]
+        return line
+
+    assert warning(select={"side_effect": DeviceNotConnectedError("00008130-ipad")}) == (
+        "no device checked for example: Example iPad isn't connected"
+    )
+    assert warning(select={"side_effect": NoDeviceConnectedError("no iOS devices connected")}) == (
+        "no device checked for example: Example iPad isn't connected"
+    )
+    assert warning(select={"return_value": ("00008130-ipad", "usb")},
+                   listing={"side_effect": OSError("the device went away")}) == (
+        "couldn't check example on Example iPad: the device went away"
+    )
+    assert warning("--device", "00008130-phone", select={"return_value": ("00008130-phone", "usb")}) == (
+        "example was last delivered to Example iPad, not Example iPhone: not checked"
+    )
 
 
 # --- a reinstall is a third push ---------------------------------------------

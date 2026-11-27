@@ -125,8 +125,11 @@ def private_identity(src: Path, password: str, *, prefix: str = "graft-p12-") ->
             signal.pthread_sigmask(signal.SIG_SETMASK, held)
 
 
-#: The directories `private_identity` makes: zsign's (`signer`) and the default.
-COPY_PREFIXES = ("graft-zsign-", "graft-p12-")
+#: The directories that hold a copy of the identity: `private_identity`'s,
+#: zsign's (`signer`) and the default, and the one `--lc-push-cert` writes the
+#: .p12 into to push it to LiveContainer (`lc_manage.UsbmuxDevice.
+#: push_document`, the 2.3.1 review's A5).
+COPY_PREFIXES = ("graft-zsign-", "graft-p12-", "lcdoc-")
 #: How old a copy must be before a sweep removes it: far past any signing
 #: another Graft could still be doing with it.
 STALE_COPY_SECONDS = 60 * 60

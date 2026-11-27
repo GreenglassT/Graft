@@ -994,6 +994,29 @@ final class UpdateStoreTests: XCTestCase {
         XCTAssertEqual(sut.phase, .failed(version: "2.0.1", message: UpdateStore.installDidNotTake(.appleSilicon), retryable: false))
     }
 
+    /// A line the helper wrote right after a tool's output that ended with
+    /// no newline: 2.3's helper kept lsregister's "failed to scan …: -10814
+    /// from spotlight" so, and its "installed" line ran on from it (the
+    /// 2.3.1 review). The helper's time and line still count where they
+    /// begin, and only as they would at a line's start: after the attempt,
+    /// in the helper's own form, for the attempt's version.
+    func test_an_install_logged_after_a_tool_s_unended_line_still_counts() throws {
+        let attempt = UpdateStore.Attempt(version: "2.0.1", from: "2.0", at: clock.now + 0.7)
+        let spotlight = "failed to scan /private/var/empty/Example/Trash/Graft.app: -10814 from spotlight"
+        func counts(_ line: String) throws -> Bool {
+            try writeLog([logged("waiting for Graft (pid 4242) to quit", at: clock.now), line])
+            return UpdateStore.installLogged(attempt, in: updateLog)
+        }
+
+        XCTAssertTrue(try counts(spotlight + logged(Self.installedLine(), at: clock.now + 2)))
+        XCTAssertTrue(try counts("-10814" + logged(Self.installedLine(), at: clock.now + 2)), "after digits")
+        XCTAssertFalse(try counts(spotlight + logged(Self.installedLine(), at: clock.now - 2)), "before the attempt")
+        XCTAssertFalse(try counts(spotlight + logged(Self.installedLine("2.0.2"), at: clock.now + 2)), "another version")
+        XCTAssertFalse(try counts(spotlight + logged(Self.installedLine(), at: clock.now + 2, offset: false)),
+                       "a time with no offset")
+        XCTAssertFalse(try counts(spotlight + " " + Self.installedLine()), "no time at all")
+    }
+
     /// A time with anything but a plain ±hhmm after it isn't the helper's,
     /// so the line doesn't count. Each line's time is half an hour before
     /// the attempt in UTC's digits: read with an offset of -0100, it's half

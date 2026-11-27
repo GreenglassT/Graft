@@ -25,7 +25,7 @@ from graft_ipa.config import set_app_options
 from graft_ipa.errors import GraftError, Stopped
 from graft_ipa.installer import InstallResult, Target
 
-from .update_fakes import PHONE, emitter, events, pipeline
+from .update_fakes import PHONE, emitter, events, new_name, pipeline
 
 pytestmark = pytest.mark.usefixtures("stop_safety_net")
 
@@ -250,7 +250,7 @@ def test_a_stop_during_a_tweak_write_waits_and_no_build_starts(world, monkeypatc
     evs = _stopped_run(world, ["example", "bravo"])
 
     assert _of(evs, "update-stopping") == [{"type": "update-stopping", "app": None, "step": "tweaks"}]
-    assert {a.tweaks[0] for a in world.cfg.apps.values()} == {"atweak-tweak_1.1.deb"}, "every app re-pointed"
+    assert {a.tweaks[0] for a in world.cfg.apps.values()} == {new_name("com.example.atweak", "1.1")}, "every app re-pointed"
     assert world.build.calls == []
     ends = _of(evs, "update-app-end")
     assert [e["error"] for e in ends] == [update_run.NOT_STARTED] * 2

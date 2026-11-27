@@ -588,3 +588,38 @@ def test_a_reinstall_holds_its_archive_until_it_is_delivered(
     assert "refused: a build is delivering" in sweep.stdout, sweep.stdout
     assert seen["archive_there"], "another process trashed the archive mid-delivery"
     assert archive.exists()
+
+
+@pytest.mark.parametrize("delivery", ["livecontainer", "sideload"])
+def test_a_version_that_reads_as_markup_is_printed_as_it_is(
+    temp_config_env: Path, tmp_path: Path, delivery: str
+) -> None:
+    """The row's version is the dropped IPA's own CFBundleShortVersionString,
+    which can be anything: `[/x]` printed as Rich markup raised MarkupError
+    and failed a re-install that had nothing wrong with it (the 2.3.1
+    review's A6)."""
+    from graft_ipa import cli as cli_mod
+    from graft_ipa.installer import InstallResult
+    from graft_ipa.lc_runner import LCDeliveryResult
+
+    _seed_app_in_config(temp_config_env, "echo", delivery=delivery)
+    cfg = load_config(temp_config_env)
+    ipa = tmp_path / "echo.ipa"
+    ipa.write_bytes(b"x" * 1024)
+    BuildLog(cfg.state_dir / "log.sqlite").record(
+        app="echo", bundle_id="com.example.echo", version="1.0[/x]", tweaks=[], ipa_path=ipa,
+        signing_team="TEAM", udid="00008130-x", success=True, delivery=delivery,
+    )
+    with sqlite3.connect(cfg.state_dir / "log.sqlite") as conn:
+        build_id = int(conn.execute("SELECT MAX(id) FROM builds").fetchone()[0])
+    pushed = LCDeliveryResult(udid="00008130-test", bundle_id="com.kdt.livecontainer.X",
+                              documents_path="Documents/echo.ipa", size_bytes=1024)
+    installed = InstallResult(udid="00008130-test", stdout="Install: Complete", stderr="")
+
+    with patch.object(cli_mod, "select_device", return_value=("00008130-test", "usb")), \
+         patch.object(cli_mod.lc_runner, "push_ipa_to_livecontainer", return_value=pushed), \
+         patch.object(cli_mod, "install", return_value=installed), \
+         cli_mod.console.capture() as cap:
+        cli_mod._do_reinstall_build(cfg, build_id, emitter=None)
+
+    assert "re-installing echo 1.0[/x]" in cap.get()

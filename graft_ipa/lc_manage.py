@@ -34,6 +34,7 @@ import hashlib
 import plistlib
 import re
 import signal
+import sqlite3
 import tempfile
 import threading
 import uuid
@@ -573,6 +574,9 @@ class UsbmuxDevice:
         from .lc_runner import _write_into_place
 
         path = f"Documents/{_plain(name)}"
+        # A prefix `p12.sweep_stale_copies` knows: the file is the .p12, and
+        # a SIGKILL leaves it behind for the next run's sweep (the 2.3.1
+        # review's A5).
         with tempfile.TemporaryDirectory(prefix="lcdoc-") as tmp:
             local = Path(tmp) / _plain(name)
             local.write_bytes(data)
@@ -689,6 +693,20 @@ class ProfileSource(Protocol):
     def check_devices(self) -> None: ...
 
 
+def require_app_store_connect(cfg: Any) -> Any:
+    """`cfg.app_store_connect`, or the refusal: installing LiveContainer makes
+    its profiles with an App Store Connect key. In the words the app's Set Up
+    LiveContainer sheet uses, which gates on the same key (2.3.1 B6)."""
+    asc = cfg.app_store_connect
+    if asc is None:
+        raise ConfigError(
+            "installing LiveContainer needs an App Store Connect key",
+            hint="set one up in Graft.app's Settings › App Store Connect, or run "
+            "`graft --setup-portal`",
+        )
+    return asc
+
+
 class AscProfiles:
     """Profiles from App Store Connect for the configured devices.
 
@@ -703,12 +721,7 @@ class AscProfiles:
     ) -> None:
         from . import apple_portal
 
-        asc = cfg.app_store_connect
-        if asc is None:
-            raise ConfigError(
-                "--lc-install needs an app_store_connect section",
-                hint="run `graft --setup-portal`",
-            )
+        asc = require_app_store_connect(cfg)
         self._portal = apple_portal
         self._client = apple_portal.ASCClient(apple_portal.PortalCredentials(
             key_id=asc.key_id, issuer_id=asc.issuer_id, key_path=asc.key_file,
@@ -973,18 +986,38 @@ def install(
                 wait_notice_seconds=wait_notice_seconds,
                 updating=prepared.bundle_id.lower() in on_device,
             )
-            log.record_lc_install(udid=udid, bundle_id=prepared.bundle_id,
-                                  version=release.version, channel=release.channel,
-                                  ipa_sha256=sha)
+            # The phone has it now: a log that can't take the record (a
+            # full disk) is said, and the rest still install (the 2.3.1
+            # review's T2-B3).
+            unrecorded: list[str] = []
+            try:
+                log.record_lc_install(udid=udid, bundle_id=prepared.bundle_id,
+                                      version=release.version, channel=release.channel,
+                                      ipa_sha256=sha)
+            except (sqlite3.Error, OSError) as e:
+                unrecorded.append(
+                    f"LiveContainer {n} ({prepared.bundle_id}) is installed on {udid}, but Graft "
+                    f"couldn't note that in its log ({e}), so it shows as installed outside "
+                    "Graft: fix that, then install LiveContainer again"
+                )
             if prepared.bundle_id.lower() not in on_device:
                 # A fresh install: the copy a certificate was recorded going
                 # into was deleted, Documents and all, so the record is stale.
                 # Kept, it would remind of a certificate that isn't there and
                 # vouch for a file Graft never pushed into this copy.
-                log.forget_cert_push(udid=udid, bundle_id=prepared.bundle_id)
+                try:
+                    log.forget_cert_push(udid=udid, bundle_id=prepared.bundle_id)
+                except (sqlite3.Error, OSError) as e:
+                    unrecorded.append(
+                        f"Graft couldn't forget the certificate it pushed to {prepared.bundle_id} "
+                        f"on {udid} before this install replaced it ({e}): --lc-clean --cert-only "
+                        "clears that (Remove it, on the device's pane)"
+                    )
             result = {"udid": udid, "bundle_id": prepared.bundle_id, "instance": n,
                       "version": release.version, "channel": release.channel}
             events.installed(**result)
+            for line in unrecorded:
+                events.warning(line)
             results.append(result)
     return results
 
@@ -1030,14 +1063,27 @@ def push_cert(
             "push; not overwriting it",
             hint=(
                 f"remove or rename {CERT_NAME} in LiveContainer's Documents (Files app, "
-                "On My iPhone > LiveContainer), then try again"
+                "On My iPhone or iPad > LiveContainer), then try again"
             ),
         )
     device_ops.push_document(udid, primary, CERT_NAME, data)
-    log.record_cert_push(udid=udid, bundle_id=primary, name=CERT_NAME)
+    # In Documents now, whatever the log says: the reminder still comes, and
+    # a record that couldn't be written (a full disk) is said, since
+    # `--lc-clean` removes only what's recorded (the 2.3.1 review's T2-B3).
+    unrecorded: str | None = None
+    try:
+        log.record_cert_push(udid=udid, bundle_id=primary, name=CERT_NAME)
+    except (sqlite3.Error, OSError) as e:
+        unrecorded = (
+            f"{CERT_NAME} is in {primary}'s Documents on {udid}, but Graft couldn't note that "
+            f"in its log ({e}), so --lc-clean won't remove it: once it's imported, delete it in "
+            "the Files app (On My iPhone or iPad > LiveContainer)"
+        )
     payload = {"udid": udid, "bundle_id": primary, "path": f"Documents/{CERT_NAME}",
                "note": CERT_STAYS_NOTE}
     events.cert_pushed(**payload)
+    if unrecorded is not None:
+        events.warning(unrecorded)
     return payload
 
 
@@ -1259,6 +1305,8 @@ def run_install(
 
     team, target = _paid_team(cfg, "--lc-install"), _target(cfg, udid)
     picked, channel = parse_instances(instances), check_channel(channel)
+    # Before the keychain: a refusal shouldn't ask for the .p12's password.
+    require_app_store_connect(cfg)
     password = signer.resolve_p12_password(cfg)
     if password is None:
         raise SigningError(

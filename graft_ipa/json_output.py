@@ -83,7 +83,9 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # a get by id set the hold (`preferred_build`), else null; and
         # `held_build` {number, count} says which of that version's builds it
         # is, from the oldest, when the App Store has more than one, else null
-        # (`appstore.held_build`).
+        # (`appstore.held_build`). `setup_missing`: why no get can run on this
+        # Mac yet ("decryption isn't set up on this Mac", "not signed in to
+        # the App Store"), from files alone, or null (`appstore.setup_missing`).
         "appstore-version",
         # `--appstore-versions`, one per version the App Store serves this
         # Apple ID for the app, newest first: `app`, `bundle_id`,
@@ -256,7 +258,11 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # explained.
         "artwork",
         # `app`, `ok`, `stopped`, `elapsed_seconds`, and `error` when it
-        # failed. An `--export-ipa`'s also carries `reason`: null, or why the
+        # failed. Under `graft --update`, one whose device went away during
+        # the build or its install also has `waiting: true`, with the waiting
+        # sentence as `error` (`update_run.Built.waits`): the device waits,
+        # as the update's own events say. An `--export-ipa`'s also carries
+        # `reason`: null, or why the
         # export failed, one of `cli.EXPORT_FAILURE_REASONS` ("exists",
         # "bad-destination", "unwritable", "no-space", "write-failed",
         # "no-ipa"), for an agent that must ask before `--overwrite`.
@@ -306,6 +312,14 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # (item ids) and `freed_bytes`. Exit 1 when any failed.
         "data-removal-end",
         "delivery-state",
+        # `--reconcile` (Check device) asked a device about an app's last
+        # delivery and it answered: `app`, `udid`, `device_name` (what Graft
+        # last knew it as, `devices_seen`, else null) and `found` (whether
+        # the delivered file is in its LiveContainer's Documents). Before
+        # that app's `delivery-state`. None when no device was asked (not
+        # connected, a sideload, a delivery that recorded none): a `log`
+        # warning says why, when there's anything to say.
+        "reconcile-checked",
         "device",
         # One connected device, from `--devices` (never `--brief`): `udid`,
         # `name`, `model`, `ios_version`, `connection_type`,
@@ -591,7 +605,7 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # and `url`, its page (both null on a failure); `update_available`;
         # `needs_macos`, the macOS the latest release needs when a download
         # found this Mac's older (`update_available` is then false), else
-        # null; and on a failure `reason` (offline|http|malformed), `status`
+        # null; and on a failure `reason` (offline|timeout|http|malformed), `status`
         # (the HTTP status, or null) and `message`, the sentence Help › Check
         # for Updates… shows. `release_check.event` builds it.
         "update-check",
@@ -617,7 +631,10 @@ EVENT_TYPES: frozenset[str] = frozenset(
         "update-install",
         # `graft --update`'s plan (`update_plan.payload`), first and once:
         # `quick` (the background form: usbmux's list only, readiness
-        # "likely") and `apps`, one per app the command covers: `app`,
+        # "likely"), `checks_failed` (it asked the App Store or canister.me
+        # and neither answered, as when offline: every app then looks up to
+        # date and isn't, `update_plan.checks_failed`) and `apps`, one per
+        # app the command covers: `app`,
         # `display_name`, `store` {from, to, skipped_reason}, `tweaks`
         # [{filename, name, from, to, unchecked, also_affects}], `install`,
         # `install_skipped_reason`, `manual_install` (the install is offered
@@ -632,7 +649,10 @@ EVENT_TYPES: frozenset[str] = frozenset(
         # §11.3), the default first, then by name, less those dropped with
         # `--drop-update-target`: {udid, device_name, delivery, lc_bundle_id,
         # install (it installs in this run), install_skipped_reason,
-        # manual_install, waiting (the sentence when its device isn't
+        # manual_install, kind (its delivery state: never, stale, current or
+        # unknown), connected (on usbmux as the plan was made: for every
+        # target, where `waiting` and `install` are worked out only for one
+        # with work), waiting (the sentence when its device isn't
         # connected), blocked_reason, readiness, readiness_note}. A get is
         # planned when `store.to` is set and `store.skipped_reason` isn't.
         # `--plan` emits this alone.

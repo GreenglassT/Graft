@@ -52,6 +52,44 @@ def test_stale_identity_copies_are_swept(tmp_path: Path) -> None:
     assert fresh.exists() and other.exists() and plain.exists()
 
 
+def test_a_stale_certificate_copy_for_livecontainer_is_swept(tmp_path: Path) -> None:
+    """`--lc-push-cert` writes the .p12 into an `lcdoc-*` folder to push it
+    (`UsbmuxDevice.push_document`), and a SIGKILL left it there (the 2.3.1
+    review's A5). The startup sweep takes it, once it's older than any push."""
+    stale = _aged_dir(tmp_path / "lcdoc-abc123", 3)
+    fresh = _aged_dir(tmp_path / "lcdoc-now", 0.01)  # another run pushing right now
+
+    removed = p12.sweep_stale_copies(tmp_path)
+
+    assert removed == [stale]
+    assert not stale.exists() and fresh.exists()
+
+
+def test_the_certificate_push_writes_where_the_sweep_looks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tied to the code that makes it, so a renamed folder can't slip past
+    the sweep."""
+    from graft_ipa import lc_manage
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    seen: list[str] = []
+
+    def running(_self, _udid, _work):
+        seen.extend(p.name for p in tmp_path.iterdir())
+        seen.extend(f.name for d in tmp_path.iterdir() for f in d.iterdir())
+
+    monkeypatch.setattr(lc_manage.UsbmuxDevice, "_sandbox", lambda *_a: None)
+    monkeypatch.setattr(lc_manage.UsbmuxDevice, "_run", running)
+
+    lc_manage.UsbmuxDevice().push_document("u1", "com.example.lc", lc_manage.CERT_NAME, b"p12")
+
+    folder, name = seen
+    assert folder.startswith(p12.COPY_PREFIXES)
+    assert name == lc_manage.CERT_NAME
+    assert list(tmp_path.iterdir()) == [], "removed however the push ends, but a SIGKILL"
+
+
 def test_startup_sweeps_them(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     scratch = tmp_path / "tmp"
     stale = _aged_dir(scratch / "graft-zsign-left", 3)

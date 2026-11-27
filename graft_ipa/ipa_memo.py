@@ -35,13 +35,19 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
 
+from . import data_dirs
 from .ipa_inspect import IPAInfo, read_info_plist
 
 MEMO_FILENAME = ".ipa-info.json"
+
+#: The most the memo may be: a few hundred bytes an IPA, so far above any
+#: cache's. A larger file reads as no memo.
+MEMO_LIMIT = 4 * 1024 * 1024
 
 # Bumped when the entry shape changes incompatibly. A memo written by a
 # different format is discarded wholesale rather than merged, because a partial
@@ -92,12 +98,11 @@ class IPAInfoMemo:
         return memo
 
     def _read(self) -> None:
-        try:
-            raw = json.loads(self.path.read_text())
-        except (OSError, ValueError):
-            # Absent, unreadable, a directory, or not JSON. All the same
-            # answer: start empty and re-read the plists.
-            return
+        # Absent, unreadable, a directory, a link, a FIFO (which a plain read
+        # waited on forever), too big, not JSON or nested too deep to parse
+        # (RecursionError, which is no ValueError): all the same answer,
+        # start empty and re-read the plists (the 2.3.1 review's T2-B5).
+        raw = data_dirs.read_small_json(self.path, limit=MEMO_LIMIT)
         if not isinstance(raw, dict) or raw.get("format") != MEMO_FORMAT:
             return
         entries = raw.get("entries")
@@ -115,12 +120,15 @@ class IPAInfoMemo:
         """
         key = os.path.abspath(ipa)
         before = _stat_key(key)
-        if before is not None:
-            hit = self._entries.get(key)
-            if isinstance(hit, dict) and (hit.get("size"), hit.get("mtime_ns")) == before:
-                info = _entry_to_info(hit)
-                if info is not None:
-                    return info
+        if before is None:
+            # Missing, or not a regular file: a FIFO named `*.ipa` would hold
+            # the read below open forever (the 2.3.1 review's T2-B5).
+            return None
+        hit = self._entries.get(key)
+        if isinstance(hit, dict) and (hit.get("size"), hit.get("mtime_ns")) == before:
+            info = _entry_to_info(hit)
+            if info is not None:
+                return info
 
         try:
             info = read_info_plist(ipa)
@@ -208,8 +216,11 @@ class IPAInfoMemo:
 
 
 def _stat_key(path: str) -> tuple[int, int] | None:
+    """The file's `(size, mtime_ns)`, or None unless it's a regular file."""
     try:
         st = os.stat(path)
     except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
         return None
     return (st.st_size, st.st_mtime_ns)

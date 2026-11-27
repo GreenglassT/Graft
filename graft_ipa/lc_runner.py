@@ -136,7 +136,7 @@ def push_ipa_to_livecontainer(
         raise LiveContainerError(
             f"failed to push {ipa.name} into LiveContainer: {e}",
             hint=connection_hint(f"{type(e).__name__}: {e}") or (
-                "is the phone unlocked, trusted and connected (USB or Wi-Fi)? "
+                "is the device unlocked, trusted and connected (USB or Wi-Fi)? "
                 f"`graft --lc-status --device {udid}` lists the LiveContainers Graft can see"
             ),
         ) from e
@@ -248,7 +248,7 @@ async def _check_async(
             return target_bid  # the push says why the sandbox would not open
         async with closing_best_effort(ha):
             if await _is_foreign(ha, target_name, target_bid, ours, archives):
-                raise _foreign_file(target_bid, udid, target_name)
+                raise _foreign_file(target_bid, udid, target_name, lock)
     return target_bid
 
 
@@ -377,14 +377,21 @@ def _end_of(archive: Path, length: int) -> bytes:
         return f.read(length)
 
 
-def _foreign_file(target_bid: str, udid: str, target_name: str) -> LiveContainerError:
+def _foreign_file(target_bid: str, udid: str, target_name: str, lock=None) -> LiveContainerError:
+    """The refusal of a file at `Documents/<target_name>` Graft didn't put
+    there, with the Files app's folder for it on that kind of device ("On My
+    iPad"), read from `lock`, the session the push has open; without one,
+    "On My iPhone or iPad"."""
+    from .devices import family_from_lockdown
+
     path = f"Documents/{target_name}"
+    kind = family_from_lockdown(lock) or "iPhone or iPad"
     return LiveContainerError(
         f"{target_bid} on {udid} already has a {path} that Graft did not "
         "push; not overwriting it",
         hint=(
             f"rename or remove {target_name} in LiveContainer's Documents "
-            "(Files app, On My iPhone > LiveContainer), then try again"
+            f"(Files app, On My {kind} > LiveContainer), then try again"
         ),
     )
 
@@ -423,7 +430,7 @@ async def _push_async(
                 f"could not open sandbox for {target_bid} on {udid}: {e}",
                 hint=connection_hint(f"{type(e).__name__}: {e}") or (
                     f"{target_bid} is installed, but iOS would not open its Documents: "
-                    "unlock the phone, open LiveContainer once, and try again"
+                    "unlock the device, open LiveContainer once, and try again"
                 ),
             ) from e
         async with closing_best_effort(ha, within=teardown):
@@ -434,7 +441,7 @@ async def _push_async(
             # user's (their own copy of the app, kept in SideStore's
             # LiveContainer), not a stale push of ours.
             if await _is_foreign(ha, target_name, target_bid, ours, archives):
-                raise _foreign_file(target_bid, udid, target_name)
+                raise _foreign_file(target_bid, udid, target_name, lock)
             await _write_into_place(ha, ipa, path, teardown)
     return target_bid, others
 
@@ -594,5 +601,5 @@ async def _resolve_lc_bundle_id(
     installed = await _answered(lc_discovery.installed_bundle_ids(lock),
                                 "when Graft looked for LiveContainer")
     if not installed:
-        raise _ListedNoApps("the device listed no apps at all, which is how a locked phone answers")
+        raise _ListedNoApps("the device listed no apps at all, which is how a locked device answers")
     return lc_discovery.choose(installed, pinned=pinned, team=team, free_account=free_account)

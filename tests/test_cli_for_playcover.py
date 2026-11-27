@@ -116,6 +116,27 @@ class TestThePreparationBranch:
             cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None, tweaks=[bare])
         assert check.call_args[0][1] == {"libexample.dylib": "libexample.dylib"}
 
+    def test_the_refusal_names_the_tweak_as_the_library_does(self, tmp_path: Path) -> None:
+        """2.3.1 §3.4: by its control `Name`, as the Tweaks library shows it,
+        not "example-tweak_1.0.deb needs iOS's …"."""
+        from .test_deb_control import _ar, _control_tar, _data_tar
+
+        deb = tmp_path / "example-tweak_1.0.deb"
+        deb.write_bytes(_ar([
+            ("debian-binary", b"2.0\n"),
+            ("control.tar.gz", _control_tar()),
+            ("data.tar.gz", _data_tar(["./Library/MobileSubstrate/DynamicLibraries/Example.dylib"])),
+        ]))
+
+        def found(_ipa, origins):
+            return [playcover.UnsupportedLink(b, "SpringBoardServices", t) for b, t in origins.items()]
+
+        with patch.object(playcover, "check_ipa", side_effect=found), \
+                patch.object(playcover, "prepare_ipa", return_value=[]):
+            with pytest.raises(GraftError) as e:
+                cli_mod._prepare_for_playcover(tmp_path / "a.ipa", None, tweaks=[deb])
+        assert e.value.message.startswith("Example Tweak needs iOS's SpringBoardServices,"), e.value.message
+
     def test_an_unreadable_tweak_binary_is_a_readable_error(self, tmp_path: Path) -> None:
         boom = playcover.PlayCoverPrepError("couldn't read Example.dylib's linked libraries", hint="h")
         with patch.object(playcover, "check_ipa", side_effect=boom):

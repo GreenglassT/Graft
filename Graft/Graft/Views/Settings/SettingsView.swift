@@ -955,6 +955,13 @@ struct AppUpdatesToggle: View {
                     ProgressView().controlSize(.small)
                 }
             }
+            // How it went (B10): pressed, it used to say nothing at all.
+            if let result = store.checkResult, result.apps == nil {
+                Text(result.message)
+                    .font(AppFont.body)
+                    .foregroundStyle(result.failed ? Palette.warn : Palette.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }

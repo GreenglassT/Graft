@@ -554,6 +554,46 @@ class TestTheInstallAndTheSettings:
         events = self._stopped(tmp_path, monkeypatch)
         assert [e["type"] for e in events] == ["handed-to-playcover"]
 
+    def test_a_snapshot_that_breaks_never_stops_the_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _playcover_here: Path
+    ) -> None:
+        """The settings are kept around the handoff, never a reason not to
+        make it (the 2.3.1 review's A3: a RecursionError out of a settings
+        file nested too deep). Nothing known is remembered, so the settle
+        after it changes nothing."""
+        from graft_ipa import playcover_handoff
+
+        settings = self._settings(tmp_path, monkeypatch)
+        plist = settings / "com.example.app.plist"
+
+        def broken(*_a, **_k):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        def playcover_installs() -> None:
+            plist.write_bytes(plistlib.dumps({"playChain": True, "keymapping": True}))
+            _install(_playcover_here)
+
+        monkeypatch.setattr(playcover_handoff, "snapshot", broken)
+        events = self._hand_over(tmp_path, during=playcover_installs)
+
+        assert [e["type"] for e in events] == ["handed-to-playcover", "playcover-installed"]
+        assert (events[-1]["settings_disabled"], events[-1]["settings_restored"]) == ([], [])
+        assert plistlib.loads(plist.read_bytes()) == {"playChain": True, "keymapping": True}
+
+    def test_a_settle_that_breaks_never_fails_the_handoff(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _playcover_here: Path
+    ) -> None:
+        from graft_ipa import playcover_handoff
+
+        def broken(*_a, **_k):
+            raise RecursionError("maximum recursion depth exceeded")
+
+        monkeypatch.setattr(playcover_handoff, "settle", broken)
+        events = self._hand_over(tmp_path, during=lambda: _install(_playcover_here))
+
+        assert [e["type"] for e in events] == ["handed-to-playcover", "playcover-installed"]
+        assert (events[-1]["settings_disabled"], events[-1]["settings_restored"]) == ([], [])
+
     def test_a_bundle_id_no_path_may_be_built_from_is_handed_over_and_never_followed(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -630,8 +670,9 @@ class TestTheFrameworkCheck:
             with pytest.raises(GraftError) as e:
                 cli_mod._do_install_to_mac(cfg, filename=archive.name, emitter=None)
         run.assert_not_called()
+        # By its control Name, as the Tweaks library shows it (2.3.1 §3.4).
         assert e.value.message.startswith(
-            "example.deb needs iOS's SpringBoardServices, which macOS doesn't have, so it "
+            "Example Tweak needs iOS's SpringBoardServices, which macOS doesn't have, so it "
             "can't run under PlayCover."
         )
         assert not list(tmp_path.glob("graft-playcover-*")), "the copy nobody was handed is gone"
@@ -789,6 +830,101 @@ class TestReachingABuiltIPA:
 
         assert not stale.exists()
         assert fresh.exists(), "PlayCover may not have read a recent one yet"
+
+    # A failed handoff leaves no copy (the 2.3.1 review's T2-B4): the private
+    # copy is a whole IPA in the temp folder, and nobody was handed it.
+
+    def _fails(self, tmp_path: Path, *, opened=None, expect=Exception):
+        path = _ipa(tmp_path / "built")
+        cache = tmp_path / "cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        answer = opened or (lambda argv, **_: SimpleNamespace(returncode=0, stdout="", stderr=""))
+        with patch.object(cli_mod.subprocess, "run", side_effect=answer) as run, \
+                pytest.raises(expect) as e:
+            cli_mod._do_install_to_mac(_cfg(cache, path.parent), filename=path.name, emitter=None)
+        return run, e.value
+
+    def test_a_failed_open_leaves_no_copy(self, tmp_path: Path, _handoffs: Path,
+                                          monkeypatch: pytest.MonkeyPatch) -> None:
+        from graft_ipa import host
+
+        monkeypatch.setattr(host, "apple_silicon_blocker", lambda: None)
+        _, error = self._fails(
+            tmp_path, expect=ConfigError,
+            opened=lambda argv, **_: SimpleNamespace(returncode=1, stdout="", stderr=OPEN_MISSING_BUNDLE_STDERR),
+        )
+        assert error.message == "PlayCover is not installed, or could not launch"
+        assert list(_handoffs.iterdir()) == [], "nobody was handed the copy"
+
+    def test_an_archive_it_cannot_read_leaves_no_copy(
+        self, tmp_path: Path, _handoffs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from graft_ipa.errors import IPAInspectionError
+
+        def unreadable(_ipa):
+            raise IPAInspectionError("no Payload/*.app/Info.plist in the archive")
+
+        monkeypatch.setattr(cli_mod, "read_info_plist", unreadable)
+        run, _ = self._fails(tmp_path, expect=IPAInspectionError)
+        run.assert_not_called()
+        assert list(_handoffs.iterdir()) == []
+
+    def test_a_scrub_that_breaks_leaves_no_copy(
+        self, tmp_path: Path, _handoffs: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def broken(*_a, **_k):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(cli_mod, "_without_account_data", broken)
+        run, _ = self._fails(tmp_path, expect=OSError)
+        run.assert_not_called()
+        assert list(_handoffs.iterdir()) == []
+
+    def test_a_stop_during_the_copy_is_a_stop_and_leaves_no_copy(
+        self, tmp_path: Path, _handoffs: Path, monkeypatch: pytest.MonkeyPatch, stop_safety_net
+    ) -> None:
+        """The GUI's Stop is a SIGTERM. Outside `exit_on_termination` it
+        killed graft mid-copy (exit -15), and the half-written copy stayed."""
+        import os
+        import signal
+
+        from graft_ipa.errors import Stopped
+
+        real_copy = cli_mod.shutil.copyfile
+
+        def copying(src, dst):
+            real_copy(src, dst)
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise AssertionError("the Stop didn't end the copy")
+
+        monkeypatch.setattr(cli_mod.shutil, "copyfile", copying)
+        run, _ = self._fails(tmp_path, expect=Stopped)
+        run.assert_not_called()
+        assert list(_handoffs.iterdir()) == []
+
+    def test_a_stop_during_the_scrub_is_a_stop_and_leaves_no_copy(
+        self, tmp_path: Path, _handoffs: Path, monkeypatch: pytest.MonkeyPatch, stop_safety_net
+    ) -> None:
+        import os
+        import signal
+
+        from graft_ipa.errors import Stopped
+
+        def scrubbing(*_a, **_k):
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise AssertionError("the Stop didn't end the scrub")
+
+        monkeypatch.setattr(cli_mod, "_without_account_data", scrubbing)
+        run, _ = self._fails(tmp_path, expect=Stopped)
+        run.assert_not_called()
+        assert list(_handoffs.iterdir()) == []
+
+    def test_the_copy_handed_over_stays_for_playcover(self, tmp_path: Path, _handoffs: Path) -> None:
+        """`open` returns before PlayCover reads it: only a later handoff's
+        sweep removes it."""
+        handed = self._hand_over(tmp_path, _ipa(tmp_path / "built"))
+        assert handed.is_file()
+        assert [p.name for p in _handoffs.iterdir()] == [handed.parent.name]
 
     def test_a_staged_dump_is_still_handed_over_where_it_is(
         self, tmp_path: Path, _handoffs: Path

@@ -519,6 +519,43 @@ class TestHalfWrittenXML:
         )
 
 
+def _nested_bplist(depth: int) -> bytes:
+    """A binary plist of `depth` one-element arrays, each holding the next,
+    around an empty dict: plistlib reads it recursively, one frame a level."""
+    import struct
+
+    objects = [bytes([0xA1]) + struct.pack(">I", i + 1) for i in range(depth)] + [bytes([0xD0])]
+    body, offsets = b"bplist00", []
+    for obj in objects:
+        offsets.append(len(body))
+        body += obj
+    table = len(body)
+    body += b"".join(struct.pack(">I", off) for off in offsets)
+    return body + struct.pack(">6xBBQQQ", 4, 4, len(objects), 0, table)
+
+
+class TestADeeplyNestedSettingsFile:
+    """A settings file nested deeper than Python's recursion limit: plistlib
+    raises RecursionError for it, which is no ValueError (the 2.3.1 review's
+    A3). Unreadable, like any other file that can't be parsed."""
+
+    def test_the_fixture_is_too_deep_for_plistlib(self) -> None:
+        with pytest.raises(RecursionError):
+            plistlib.loads(_nested_bplist(5000))
+
+    def test_snapshot_reads_it_as_unreadable(self, dirs) -> None:
+        settings, state = dirs
+        (settings / f"{BID}.plist").write_bytes(_nested_bplist(5000))
+        assert ph.snapshot(settings, state, BID) == ph.Before(existed=False, values=None)
+
+    def test_settle_never_raises_for_it(self, dirs) -> None:
+        settings, state = dirs
+        _write(settings, {"keymapping": True, "playChain": False})
+        before = ph.snapshot(settings, state, BID)
+        (settings / f"{BID}.plist").write_bytes(_nested_bplist(5000))
+        assert ph.settle(settings, state, BID, before, sleep=_no_sleep) == ph.Settled()
+
+
 class TestFirstHandoffDefaultsAreNeverLost:
     """A first handoff whose settle doesn't finish (a Stop during the wait,
     the settings wait running out, no settings folder yet, a write that

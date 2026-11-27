@@ -260,7 +260,7 @@ struct AddAppSheet: View {
         /// this states the fact and offers nothing.
         var versionLine: String? {
             guard let installedVersion, installedVersion != staged.version else { return nil }
-            return "This phone runs \(installedVersion); the staged dump is \(staged.version)."
+            return "This device runs \(installedVersion); the staged dump is \(staged.version)."
         }
 
         /// What `.onAppear` below prefills `manualDisplayName` with — pulled
@@ -285,15 +285,18 @@ struct AddAppSheet: View {
     }
 
     @State private var mode: Mode = .search
-    @State private var urlDelivery: DeliveryMode = AddAppSheet.defaultDelivery
+    /// Each form's delivery picker, nil until it's touched: until then it
+    /// shows `seededDelivery`, which follows the account as soon as `--list`
+    /// says which it is.
+    @State private var urlDelivery: DeliveryMode?
     @State private var appStoreURL: String = ""
     @State private var manualName: String = ""
     @State private var manualBundleId: String = ""
     @State private var manualDisplayName: String = ""
-    @State private var manualDelivery: DeliveryMode = AddAppSheet.defaultDelivery
+    @State private var manualDelivery: DeliveryMode?
     @State private var searchTerm: String = ""
     @State private var picked: AppStoreSearchPick?
-    @State private var searchDelivery: DeliveryMode = AddAppSheet.defaultDelivery
+    @State private var searchDelivery: DeliveryMode?
     @State private var getAfterAdd: Bool = false
     /// The App Store status didn't answer within `statusTimeout`.
     @State private var statusTimedOut = false
@@ -301,16 +304,32 @@ struct AddAppSheet: View {
     @State private var stagedIPASize: Int = 0
     @State private var isWorking: Bool = false
     @State private var errorMessage: String?
-    /// The last delivery mode an add actually used, so the next one starts
-    /// where the last one left off. Shared with the unprefilled sheet: it is a
-    /// fact about this bench (a jailbroken phone runs LiveContainer; a stock
-    /// one is sideloaded), not about which surface asked.
-    @AppStorage("lastDeliveryMode") private var lastDelivery: DeliveryMode = AddAppSheet.defaultDelivery
+    /// The last delivery mode a paid account's add actually used, so the next
+    /// one starts where the last one left off; nil until there has been one.
+    /// Shared with the unprefilled sheet: it is a fact about this bench (a
+    /// jailbroken phone runs LiveContainer; a stock one is sideloaded), not
+    /// about which surface asked.
+    @AppStorage("lastDeliveryMode") private var lastDelivery: DeliveryMode?
 
-    /// Where the picker starts before any add has gone through: LiveContainer,
-    /// the mode the README recommends. It was Sideload, so the first app a new
-    /// user added went the other way from the instructions they had just read.
-    static let defaultDelivery: DeliveryMode = .livecontainer
+    /// Where the picker starts before any add has gone through: Sideload on a
+    /// paid account, as the README, the wiki and the setup screen say (decided
+    /// for 2.3.1), and LiveContainer on a free Apple ID, the only
+    /// mode it has. Not known yet (no `--list` answer), LiveContainer, which
+    /// every account can build.
+    static func defaultDelivery(for account: AccountMode?) -> DeliveryMode {
+        account == .paid ? .sideload : .livecontainer
+    }
+
+    /// Under the picker: what the two modes do, for someone who has read
+    /// neither word before.
+    static let deliveryExplanation = "LiveContainer: goes into the LiveContainer app. "
+        + "Sideload: installs as a normal app."
+
+    /// What an untouched picker shows: the last add's choice, else the
+    /// account's default.
+    private var seededDelivery: DeliveryMode {
+        lastDelivery ?? Self.defaultDelivery(for: store.account)
+    }
 
     /// Search first: finding the app by name needs no URL from a browser.
     static let defaultMode: Mode = .search
@@ -366,9 +385,6 @@ struct AddAppSheet: View {
             appStore.search.reset()
             guard let prefill else {
                 mode = initialMode
-                urlDelivery = lastDelivery
-                manualDelivery = lastDelivery
-                searchDelivery = lastDelivery
                 return
             }
             mode = .manual
@@ -383,7 +399,6 @@ struct AddAppSheet: View {
             // home screen. See `Prefill.prefilledDisplayName`'s own doc for
             // what replaced it and why.
             manualDisplayName = prefill.prefilledDisplayName
-            manualDelivery = lastDelivery
         }
         // Kills a search still running when the sheet closes.
         .onDisappear { appStore.search.reset() }
@@ -459,7 +474,7 @@ struct AddAppSheet: View {
         // `ipa_inspect.py`'s own fallback when an IPA's plist has neither
         // `CFBundleDisplayName` nor `CFBundleName` — "Add Unknown" would read
         // as a bug in this sheet rather than as "this app has no name to show".
-        guard prefill.displayName != "Unknown" else { return "Add app from this phone" }
+        guard prefill.displayName != "Unknown" else { return "Add app from this device" }
         return "Add \(prefill.displayName)"
     }
 
@@ -698,32 +713,45 @@ struct AddAppSheet: View {
         }
     }
 
-    /// On a free Apple ID the picker shows LiveContainer and is disabled, with
-    /// the reason under it: Sideload stays on screen, grayed, so the user can
-    /// see the option exists and why it is not theirs, rather than wonder
-    /// where it went.
-    private func deliveryPicker(selection: Binding<DeliveryMode>) -> some View {
+    /// On a free Apple ID there is one delivery, so it is said, not offered:
+    /// "Delivery: LiveContainer", with the reason under it. A disabled picker
+    /// put a control a new user couldn't use first in the form. Otherwise the
+    /// picker, with what each mode does under it (`deliveryExplanation`).
+    @ViewBuilder
+    private func deliveryPicker(selection: Binding<DeliveryMode?>) -> some View {
         let account = store.account
-        let shown = Binding(
-            get: { Self.delivery(chosen: selection.wrappedValue, account: account) },
-            set: { selection.wrappedValue = $0 }
-        )
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Delivery").font(AppFont.bodyMedium).foregroundStyle(Palette.text)
-                Picker("", selection: shown) {
-                    // Through `displayName` rather than as literals, because the
-                    // app pane's build-target bar now says the same two words in a
-                    // sentence and the two must not drift apart.
-                    Text(DeliveryMode.sideload.displayName).tag(DeliveryMode.sideload)
-                    Text(DeliveryMode.livecontainer.displayName).tag(DeliveryMode.livecontainer)
+        if account.isFree {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Delivery").font(AppFont.bodyMedium).foregroundStyle(Palette.text)
+                    Text(DeliveryMode.livecontainer.displayName)
+                        .font(AppFont.body).foregroundStyle(Palette.text)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .paidOnly(account.isFree ? PaidOnly.sideload : nil)
-            }
-            if account.isFree {
                 Text(PaidOnly.sideload)
+                    .font(AppFont.monoSmall)
+                    .foregroundStyle(Palette.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            let seeded = seededDelivery
+            let shown = Binding(
+                get: { Self.delivery(chosen: selection.wrappedValue ?? seeded, account: account) },
+                set: { selection.wrappedValue = $0 }
+            )
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("Delivery").font(AppFont.bodyMedium).foregroundStyle(Palette.text)
+                    Picker("", selection: shown) {
+                        // Through `displayName` rather than as literals, because the
+                        // app pane's build-target bar now says the same two words in a
+                        // sentence and the two must not drift apart.
+                        Text(DeliveryMode.sideload.displayName).tag(DeliveryMode.sideload)
+                        Text(DeliveryMode.livecontainer.displayName).tag(DeliveryMode.livecontainer)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                Text(Self.deliveryExplanation)
                     .font(AppFont.monoSmall)
                     .foregroundStyle(Palette.textDim)
                     .fixedSize(horizontal: false, vertical: true)
@@ -796,14 +824,14 @@ struct AddAppSheet: View {
             guard let picked else { return nil }
             return Self.searchRequest(
                 picked,
-                delivery: Self.delivery(chosen: searchDelivery, account: store.account),
+                delivery: Self.delivery(chosen: searchDelivery ?? seededDelivery, account: store.account),
                 getAfterAdd: getAfterAdd,
                 offer: Self.getOffer(status: appStore.status, hasLoaded: appStore.hasLoadedStatus,
                                      unavailable: mac.unavailableLine)
             )
         case .url:
             return .url(
-                appStoreURL, delivery: Self.delivery(chosen: urlDelivery, account: store.account)
+                appStoreURL, delivery: Self.delivery(chosen: urlDelivery ?? seededDelivery, account: store.account)
             )
         case .manual:
             let trimmedDisplay = manualDisplayName.trimmingCharacters(in: .whitespaces)
@@ -811,7 +839,7 @@ struct AddAppSheet: View {
                 name: manualName.trimmingCharacters(in: .whitespaces),
                 bundleId: manualBundleId.trimmingCharacters(in: .whitespaces),
                 displayName: trimmedDisplay.isEmpty ? nil : trimmedDisplay,
-                delivery: Self.delivery(chosen: manualDelivery, account: store.account),
+                delivery: Self.delivery(chosen: manualDelivery ?? seededDelivery, account: store.account),
                 ipa: stagedIPAURL
             )
         }
@@ -831,13 +859,13 @@ struct AddAppSheet: View {
         )
     }
 
-    /// The picker state of the mode on screen: what `lastDeliveryMode`
-    /// remembers (see `submit`).
+    /// The picker state of the mode on screen, as it shows: what
+    /// `lastDeliveryMode` remembers (see `submit`).
     private var chosenDelivery: DeliveryMode {
         switch mode {
-        case .search: return searchDelivery
-        case .url: return urlDelivery
-        case .manual: return manualDelivery
+        case .search: return searchDelivery ?? seededDelivery
+        case .url: return urlDelivery ?? seededDelivery
+        case .manual: return manualDelivery ?? seededDelivery
         }
     }
 
@@ -912,12 +940,11 @@ struct AddAppSheet: View {
             // above), leaves this untouched, so neither can change what the
             // next sheet defaults to.
             //
-            // The picker's state, not what was sent. On a free Apple ID the two
-            // differ: LiveContainer is sent whatever the picker holds, and the
-            // disabled picker still holds the choice a paid account made, which
-            // a free add must not overwrite. Writing `delivery(chosen:account:)`
-            // here would.
-            lastDelivery = chosenDelivery
+            // Never on a free Apple ID: its add was no choice (LiveContainer is
+            // sent whatever was remembered), and it must not overwrite a paid
+            // account's choice, nor leave LiveContainer remembered for an
+            // account that later turns paid and should start on Sideload.
+            if !store.account.isFree { lastDelivery = chosenDelivery }
             dismiss()
         }
     }

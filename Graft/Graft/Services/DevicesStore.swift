@@ -92,6 +92,23 @@ final class DevicesStore: ObservableObject {
     /// there is no transport on a `DeviceErrorRecord` to remember.
     /// Unpublished: a change to it alone redraws nothing.
     private var knownUnreadable: Set<String> = []
+    /// Polls in a row that found the same phones unreadable on the bus, for
+    /// how often they're read again (`rereads`).
+    /// Unpublished: bookkeeping, which nothing draws.
+    private var unreadablePolls = 0
+
+    /// A phone the listing couldn't read is read again on each of this many
+    /// polls in a row (about half a minute at the window's 5 s tick)...
+    static let unreadableEveryPoll = 6
+    /// ...then on every this-many'th: a phone left locked all day cost a full
+    /// listing every tick, lockdown to every readable phone included.
+    static let unreadableBackoff = 6
+
+    /// Whether the `poll`th poll in a row with the same unreadable phones
+    /// reads them again.
+    static func rereads(poll: Int) -> Bool {
+        poll <= unreadableEveryPoll || poll % unreadableBackoff == 0
+    }
 
     let runner: CLIRunner
 
@@ -231,7 +248,10 @@ final class DevicesStore: ObservableObject {
         knownTransports = Dictionary(
             devices.map { ($0.udid, $0.connectionType) }, uniquingKeysWith: { _, latest in latest }
         )
-        knownUnreadable = Set(deviceErrors.map(\.udid))
+        let unreadable = Set(deviceErrors.map(\.udid))
+        // Other phones, or none: the next one is read again at once.
+        if unreadable != knownUnreadable { unreadablePolls = 0 }
+        knownUnreadable = unreadable
         return devices
     }
 
@@ -338,8 +358,22 @@ final class DevicesStore: ObservableObject {
     /// `knownTransports`/`knownUnreadable`, and it points the safe way — the
     /// worst it can cost is one stale "USB" on a phone the pane could not read
     /// anyway.
+    ///
+    /// **And a phone the listing couldn't read is read again on every poll**
+    /// while it's still on the bus (B1). Presence alone can't see the moment
+    /// that matters: a phone waiting on "Trust This Computer?" is there before
+    /// the tap and after it, so the row went on saying "couldn't be read" until
+    /// something else forced a listing. The cost, a listing a tick, is paid
+    /// only while a phone can't be read, and only while the window is key
+    /// (`ContentView`'s timer), and backs off after the first few
+    /// (`rereads`); a still-locked phone's answer publishes nothing
+    /// (`setIfChanged`).
     private func hasMoved(_ seen: [String: DeviceRecord.ConnectionType]) -> Bool {
         if Set(seen.keys) != Set(knownTransports.keys).union(knownUnreadable) { return true }
+        if !knownUnreadable.isDisjoint(with: seen.keys) {
+            unreadablePolls += 1
+            if Self.rereads(poll: unreadablePolls) { return true }
+        }
         return knownTransports.contains { udid, transport in seen[udid] != transport }
     }
 }

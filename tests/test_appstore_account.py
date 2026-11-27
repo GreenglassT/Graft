@@ -168,3 +168,58 @@ def test_not_found_with_no_item_is_simply_signed_out(monkeypatch) -> None:
     assert appstore_account.keychain_refused(
         "failed to get account: failed to get item: The specified item could not be found in the keyring"
     ) is False
+
+
+# --- the marker read as untrusted input: every daily check reads it ----------------
+#
+# `update_plan.store_step` -> `appstore.setup_missing` -> `vouched` runs on every
+# plan, the daily check's included, so a marker that can't be read as Graft wrote
+# it must be "nothing vouched", never an exception or a hang.
+
+
+def _vouching() -> dict:
+    return {"format": appstore_account.MARKER_FORMAT, "ipatool_source": tools.SOURCE_BUNDLED,
+            "bundled_items": {"account": "2026-11-26 10:00:00 +0000"}}
+
+
+def test_a_marker_nested_too_deep_vouches_for_nothing() -> None:
+    path = appstore_account.marker_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("[" * 100_000 + "]" * 100_000)
+
+    assert appstore_account.vouched() == {}
+
+
+def test_a_fifo_at_the_marker_vouches_for_nothing_and_doesnt_hang() -> None:
+    import os
+    import threading
+
+    path = appstore_account.marker_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(path)
+    said: list[dict] = []
+    reader = threading.Thread(target=lambda: said.append(appstore_account.vouched()), daemon=True)
+
+    reader.start()
+    reader.join(5)
+
+    assert not reader.is_alive(), "reading a FIFO marker hung"
+    assert said == [{}]
+
+
+def test_a_marker_that_is_a_link_isnt_followed(tmp_path) -> None:
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps(_vouching()))
+    path = appstore_account.marker_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(elsewhere)
+
+    assert appstore_account.vouched() == {}
+
+
+def test_a_marker_graft_wrote_still_vouches() -> None:
+    path = appstore_account.marker_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(_vouching()))
+
+    assert appstore_account.vouched() == {"account": "2026-11-26 10:00:00 +0000"}

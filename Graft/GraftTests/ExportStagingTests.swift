@@ -774,7 +774,7 @@ final class ExportStagingTests: XCTestCase {
             "couldn't write \(destination.path): No space left on device; free some space on the disk "
                 + "the export's temporary folder is on, or choose another folder (\(destination.path))"
         )
-        guard case let .buildEnd(app, ok, error, elapsed, stopped)? = staging.heard(
+        guard case let .buildEnd(app, ok, error, elapsed, stopped, _)? = staging.heard(
             .buildEnd(app: "example", ok: false, error: said, elapsedSeconds: 2, stopped: false)
         ) else { return XCTFail("a failure is heard as it comes") }
         XCTAssertEqual(app, "example")
@@ -809,7 +809,7 @@ final class ExportStagingTests: XCTestCase {
             events.map { event -> String in
                 switch event {
                 case let .ipaExported(record): return "ipa-exported \(record.path)"
-                case let .buildEnd(_, ok, error, elapsed, _):
+                case let .buildEnd(_, ok, error, elapsed, _, _):
                     return "build-end \(ok) \(error ?? "-") \(elapsed.map { "\($0)" } ?? "-")"
                 default: return "\(event)"
                 }
@@ -878,7 +878,7 @@ final class ExportStagingTests: XCTestCase {
         let ending = await staging.finishRun(events: cli, app: "example") { said.events.append($0) }
 
         guard case .failed = ending else { return XCTFail("\(ending)") }
-        guard case let .buildEnd(_, false, error?, _, _)? = said.events.first, said.events.count == 1 else {
+        guard case let .buildEnd(_, false, error?, _, _, _)? = said.events.first, said.events.count == 1 else {
             return XCTFail("\(said.names)")
         }
         XCTAssertTrue(error.hasPrefix("A file named Example 1.0.ipa appeared in that folder"), error)

@@ -170,7 +170,7 @@ def test_a_phone_that_lists_no_apps_at_all_is_asked_to_unlock(
     row = _rows(load_config(_free(tmp_path)), lambda udid: [])[preflight.LIVECONTAINER_CHECK_NAME]
 
     assert row.ok is False
-    assert row.detail == "UDID1: the device listed no apps at all, which is how a locked phone answers"
+    assert row.detail == "UDID1: the device listed no apps at all, which is how a locked device answers"
     assert "unlock" in row.hint and "graft --check" in row.hint
     assert "SideStore" not in row.hint
 

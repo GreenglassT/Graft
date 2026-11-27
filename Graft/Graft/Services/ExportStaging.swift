@@ -308,7 +308,7 @@ struct ExportStaging {
     @MainActor
     func finishRun(events: [BuildEvent], app: String, say: (BuildEvent) -> Void) async -> Ending {
         let elapsed = events.lazy.reversed().compactMap { event -> Double? in
-            if case let .buildEnd(_, _, _, elapsedSeconds, _) = event { return elapsedSeconds }
+            if case let .buildEnd(_, _, _, elapsedSeconds, _, _) = event { return elapsedSeconds }
             return nil
         }.first
         switch await finish(events: events) {
@@ -330,9 +330,10 @@ struct ExportStaging {
     func heard(_ event: BuildEvent) -> BuildEvent? {
         if let progress = event.progress, Self.holdsUntilPlaced(progress) { return nil }
         switch event {
-        case let .buildEnd(app, ok, error, elapsed, stopped):
+        case let .buildEnd(app, ok, error, elapsed, stopped, waiting):
             return .buildEnd(
-                app: app, ok: ok, error: error.map(userFacing), elapsedSeconds: elapsed, stopped: stopped
+                app: app, ok: ok, error: error.map(userFacing), elapsedSeconds: elapsed, stopped: stopped,
+                waiting: waiting
             )
         case let .log(source, line):
             return .log(source: source, line: userFacing(line))

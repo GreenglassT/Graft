@@ -90,7 +90,7 @@ def test_a_get_that_failed_for_another_reason_says_nothing_of_the_store(
     result = _run(["--appstore-get", "--app", "example"])
 
     assert result.exit_code != 0
-    assert "not signed in" in _words(result)
+    assert "sign-in has expired" in _words(result)
     assert "GB App Store" not in _words(result)
 
 

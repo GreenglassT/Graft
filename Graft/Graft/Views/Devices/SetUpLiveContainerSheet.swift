@@ -20,10 +20,16 @@ import SwiftUI
 /// Up, as on the device's page: `--lc-install` won't install over them. Its
 /// steps then start with importing the certificate from that store.
 ///
+/// Before anything is pressed, the paid side says what would stop it: no App
+/// Store Connect key (`needsKey`), which `--lc-install` makes LiveContainer's
+/// profiles with, and Developer Mode (`developerMode`), which a development-
+/// signed LiveContainer needs on iOS 16 and later to open at all.
+///
 /// On a free Apple ID there is no Set Up and no certificate of Graft's: the
 /// CLI's own steps (`LCStatusRecord.freeSetupSteps`), with the SideStore and
 /// iloader links the first-run screen shows (`FreeStepRow`), then the same
-/// steps on the device.
+/// steps on the device. With LiveContainer already there, it says what it
+/// found, and the one step left is importing the certificate (`freeSteps`).
 ///
 /// While a run is going, Close waits (Stop is beside the run), so the
 /// download, install and certificate never carry on with nothing on screen.
@@ -38,15 +44,24 @@ import SwiftUI
 struct SetUpLiveContainerSheet: View {
     let device: DeviceRecord
     @ObservedObject var store: LiveContainerStore
+    /// `ContentView`'s, for whether an App Store Connect key is set
+    /// (`needsKey`). Read when the sheet opens, if nothing has yet.
+    @ObservedObject var settings: SettingsStore
+    /// `ContentView`'s, for Developer Mode on this device (`--device-info`).
+    @ObservedObject var deviceInfo: DeviceInfoStore
     /// `ConfigStore.account`. Nil (not known yet) disables nothing.
     let account: AccountMode?
     /// A run started here ended, however it ended. `ContentView` reads the
     /// device list again (`--devices`).
     var onRunEnded: () -> Void = {}
+    /// Open Settings, for a missing App Store Connect key: `ContentView`
+    /// closes the sheet and shows Settings. Nil offers no button.
+    var onOpenSettings: (() -> Void)? = nil
 
-    /// Which LiveContainers an install puts on, and from which channel: the
-    /// choices the device page's Install / Update had.
-    @State private var instances: Set<Int> = [1, 2, 3]
+    /// Which LiveContainers an install puts on, once a checkbox is touched;
+    /// until then `defaultInstances`. And from which channel: the choices
+    /// the device page's Install / Update had.
+    @State private var pickedInstances: Set<Int>?
     @State private var channel = "nightly"
     /// "I imported the certificate" was ticked since the last push. What the
     /// tick shows is `importTicked`.
@@ -116,15 +131,103 @@ struct SetUpLiveContainerSheet: View {
 
     static func showsSetUp(account: AccountMode?) -> Bool { !account.isFree }
 
+    static let needsKeyLine = "Set up an App Store Connect key in Settings › App Store Connect first."
+    static let openSettingsLabel = "Open Settings"
+    static let checkAgainLabel = "Check again"
+    /// The channel picker's name, for VoiceOver: on screen it shows only
+    /// "nightly" or "stable".
+    static let channelLabel = "Release channel"
+
+    /// Why Set Up and Install / Update can't start, or nil: settings that
+    /// report no usable App Store Connect key (named, its .p8 on disk), on
+    /// the paid side. `--lc-install` makes LiveContainer's profiles with it,
+    /// and without one it could only refuse. Nil disables nothing: settings
+    /// not read yet, or a CLI too old to report the key (`AccountMode`'s rule
+    /// for an unknown, as `EditAppSheet.autoProfileLock` reads it). Nil too
+    /// where SideStore or AltStore manages LiveContainer (`status`): Graft
+    /// installs nothing there, key or not, and `altStoreNote` says why.
+    static func needsKey(
+        account: AccountMode?, settings: SettingsRecord?, status: LCStatusRecord? = nil
+    ) -> String? {
+        guard showsSetUp(account: account), status?.managedBy != .altstore,
+              let settings, settings.reportsAppStoreConnect else { return nil }
+        return settings.appStoreConnect?.isUsable == true ? nil : needsKeyLine
+    }
+
+    enum DeveloperMode: Equatable { case on, off, unknown }
+
+    /// Developer Mode, as the sheet shows it, or nil where it isn't the sheet's
+    /// to say. Graft signs LiveContainer with a development profile, so on
+    /// iOS 16 and later it opens only with Developer Mode on (README's
+    /// Delivery). Not on a free Apple ID (SideStore or iloader installs it),
+    /// not where SideStore or AltStore manages it, and not before iOS 16,
+    /// which has no Developer Mode. `reading` is `--device-info`'s.
+    static func developerMode(
+        account: AccountMode?, status: LCStatusRecord?, iosVersion: String, reading: Bool?
+    ) -> DeveloperMode? {
+        guard showsSetUp(account: account), status?.managedBy != .altstore else { return nil }
+        if let major = Int(iosVersion.split(separator: ".").first ?? ""), major < 16 { return nil }
+        switch reading {
+        case true?: return .on
+        case false?: return .off
+        case nil: return .unknown
+        }
+    }
+
+    /// What to do about it, while it's off or couldn't be read.
+    static func developerModeNote(name: String) -> String {
+        "LiveContainer from Graft is signed for development, so on iOS 16 and later it opens only "
+            + "with Developer Mode on. On \(name), turn it on in Settings › Privacy & Security › "
+            + "Developer Mode, then confirm after it restarts. iOS shows the switch once LiveContainer "
+            + "is installed."
+    }
+
+    /// Which LiveContainers Set Up and Install / Update start with: the ones
+    /// already on the device, by role, so an update updates each; else one,
+    /// the primary. Side-by-side copies are for people who know they want
+    /// them, and three used to be the default.
+    static func defaultInstances(status: LCStatusRecord?) -> Set<Int> {
+        let roles = ["primary": 1, "2": 2, "3": 3]
+        let installed = Set((status?.instances ?? []).compactMap { roles[$0.role] })
+        return installed.isEmpty ? [1] : installed
+    }
+
+    /// What VoiceOver reads for LiveContainer `n`'s checkbox, which shows
+    /// only its number; its tooltip too.
+    static func instanceLabel(_ n: Int) -> String {
+        n == 1 ? "LiveContainer (the primary)" : "LiveContainer\(n)"
+    }
+
+    /// The free side's steps: the CLI's (`given`), or the fallback when it
+    /// sent none. With LiveContainer on the device already, only the last,
+    /// importing the certificate from SideStore.
+    static func freeSteps(given: [String], status: LCStatusRecord?) -> [String] {
+        let steps = given.isEmpty ? freeFallback : given
+        guard status?.instances.isEmpty == false, let last = steps.last else { return steps }
+        return [last]
+    }
+
+    /// "Graft found LiveContainer 3.8.14 on Example iPad.", for the free side,
+    /// or nil when none is there. The primary's version, else the first's.
+    static func foundLine(status: LCStatusRecord?, name: String) -> String? {
+        guard let instances = status?.instances, !instances.isEmpty else { return nil }
+        let shown = instances.first { $0.role == "primary" } ?? instances[0]
+        return "Graft found LiveContainer \(shown.version) on \(name)."
+    }
+
     /// Whether Set Up can start: the device was read, and isn't one where
     /// SideStore or AltStore keeps LiveContainer (`--lc-install` refuses it,
     /// so it isn't offered, as on the device's page). A resume puts the
     /// certificate on only, so it needs no LiveContainer ticked.
+    ///
+    /// `keyMissing` (`needsKey`) stops an install, not a resume: putting the
+    /// certificate on uses no App Store Connect key.
     static func setUpEnabled(
-        status: LCStatusRecord?, busy: Bool, instances: Set<Int>, resumes: Bool
+        status: LCStatusRecord?, busy: Bool, instances: Set<Int>, resumes: Bool, keyMissing: Bool = false
     ) -> Bool {
         guard let status, status.reachable, status.managedBy != .altstore, !busy else { return false }
-        return resumes || !instances.isEmpty
+        if resumes { return true }
+        return !keyMissing && !instances.isEmpty
     }
 
     /// Put certificate on device, alone, only where `--lc-push-cert` has
@@ -142,13 +245,17 @@ struct SetUpLiveContainerSheet: View {
         var removesCertificate = false
     }
 
-    /// The steps on the device. `kind` is "iPad" or "iPhone"
-    /// (`BuildTarget.deviceKind`), for the Files app's "On My iPad". Where
-    /// SideStore or AltStore manages LiveContainer (`managedBy`), the
-    /// certificate comes from that store, not from Graft.
+    /// The steps on the device. `kind` is "iPad", "iPhone", "iPod touch" or
+    /// "device" (`BuildTarget.deviceKind`), for the Files app's "On My
+    /// iPad". An iPod touch's is "On My iPod", as the Files app names it,
+    /// and a "device" is "On My iPhone or iPad", as the Files app has no
+    /// folder by that name. Where SideStore or AltStore manages
+    /// LiveContainer (`managedBy`), the certificate comes from that store,
+    /// not from Graft.
     static func deviceSteps(
         account: AccountMode?, kind: String, managedBy: LCStatusRecord.ManagedBy? = nil
     ) -> [DeviceStep] {
+        let folder = ["device": "iPhone or iPad", "iPod touch": "iPod"][kind] ?? kind
         let rest = [
             DeviceStep(text: "Settings › JIT-Less Diagnose: \"keychain-access-groups correct\" "
                        + "should say Yes."),
@@ -159,7 +266,7 @@ struct SetUpLiveContainerSheet: View {
         if managedBy == .altstore { return [DeviceStep(text: storeCertificateStep)] + rest }
         return [
             DeviceStep(
-                text: "Settings › Import Certificate: pick AppleDevelopment.p12 (On My \(kind) › "
+                text: "Settings › Import Certificate: pick AppleDevelopment.p12 (On My \(folder) › "
                     + "LiveContainer) and enter your .p12's password. " + passwordNote + " "
                     + iOS26Note,
                 removesCertificate: true
@@ -244,6 +351,14 @@ struct SetUpLiveContainerSheet: View {
     private var resumes: Bool {
         store.resumesAtCertificate(udid: device.udid, instances: instances, channel: channel)
     }
+    private var instances: Set<Int> { pickedInstances ?? Self.defaultInstances(status: status) }
+    private var keyLine: String? {
+        Self.needsKey(account: account, settings: settings.settings, status: status)
+    }
+    private var shownDeveloperMode: DeveloperMode? {
+        Self.developerMode(account: account, status: status, iosVersion: device.iosVersion,
+                           reading: deviceInfo.info[device.udid]?.developerMode)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -277,7 +392,12 @@ struct SetUpLiveContainerSheet: View {
         .interactiveDismissDisabled(store.isBusy)
         .task(id: device.udid) {
             store.remember(device)
+            // Concurrently: the settings read touches one file, the status
+            // asks the device. Both only on the paid side, which uses them.
+            async let read: Void = Self.readSettings(settings, account: account)
             await store.load(udid: device.udid)
+            if shownDeveloperMode != nil { await deviceInfo.load(udid: device.udid) }
+            await read
         }
         .onChange(of: store.isBusy) { busy in
             if !busy { onRunEnded() }
@@ -287,6 +407,13 @@ struct SetUpLiveContainerSheet: View {
                 VoiceOverAnnouncement.thisMac.post(line)
             }
         }
+    }
+
+    /// `--settings`, for the key, unless something has read them already
+    /// (Settings, Edit App) or this is the free side.
+    static func readSettings(_ settings: SettingsStore, account: AccountMode?) async {
+        guard showsSetUp(account: account), settings.settings == nil else { return }
+        _ = try? await settings.loadSettings()
     }
 
     @ViewBuilder
@@ -313,14 +440,16 @@ struct SetUpLiveContainerSheet: View {
             if let status {
                 ForEach(DeviceLiveContainerSection.installNotes(for: status), id: \.self) { dim($0) }
             }
+            if let keyLine { keyNote(keyLine) }
+            if let shownDeveloperMode { developerModeBlock(shownDeveloperMode) }
             installChoices
             HStack(spacing: Metrics.controlGap) {
                 Button(Self.setUpLabel) {
                     ticked = false
                     store.startSetUp(udid: device.udid, instances: instances, channel: channel)
                 }
-                .disabled(!Self.setUpEnabled(status: status, busy: store.isBusy,
-                                             instances: instances, resumes: resumes))
+                .disabled(!Self.setUpEnabled(status: status, busy: store.isBusy, instances: instances,
+                                             resumes: resumes, keyMissing: keyLine != nil))
                 .help(setUpHelp)
                 Spacer(minLength: 0)
             }
@@ -347,7 +476,52 @@ struct SetUpLiveContainerSheet: View {
         if resumes {
             return "Put the certificate on \(device.name): LiveContainer is already installed"
         }
+        if let keyLine { return keyLine }
         return "Check \(device.name), install LiveContainer and put the certificate on, in that order"
+    }
+
+    /// No App Store Connect key: what to do, and the way there.
+    private func keyNote(_ line: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Metrics.controlGap) {
+            Text(line)
+                .font(AppFont.monoSmall)
+                .foregroundStyle(Palette.warn)
+                .fixedSize(horizontal: false, vertical: true)
+            if let onOpenSettings {
+                Button(Self.openSettingsLabel) { onOpenSettings() }
+                    .controlSize(.small)
+                    .fixedSize()
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// Developer Mode on this device: on, off, or not read, with what to do
+    /// while it isn't known to be on, and Check again for after the restart.
+    private func developerModeBlock(_ state: DeveloperMode) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if state != .unknown {
+                HStack(spacing: 6) {
+                    (state == .on ? Symbols.ok : Symbols.attention).image(size: 11)
+                        .foregroundStyle(state == .on ? Palette.success : Palette.warn)
+                        // The line beside it says it in words.
+                        .accessibilityHidden(true)
+                    Text(DeviceDeveloperModeRow.line(isOn: state == .on))
+                        .font(AppFont.monoSmall)
+                        .foregroundStyle(Palette.text)
+                }
+            }
+            if state != .on {
+                HStack(alignment: .firstTextBaseline, spacing: Metrics.controlGap) {
+                    dim(Self.developerModeNote(name: device.name))
+                    Button(Self.checkAgainLabel) { Task { await deviceInfo.load(udid: device.udid) } }
+                        .controlSize(.small)
+                        .fixedSize()
+                        .help("Read Developer Mode on \(device.name) again")
+                    Spacer(minLength: 0)
+                }
+            }
+        }
     }
 
     /// Which LiveContainers, and which channel: for Set Up and Install /
@@ -356,14 +530,20 @@ struct SetUpLiveContainerSheet: View {
         HStack(spacing: Metrics.controlGap) {
             Text("LiveContainers:")
             ForEach([1, 2, 3], id: \.self) { n in
-                Toggle(n == 1 ? "1" : "\(n)", isOn: Binding(
+                Toggle("\(n)", isOn: Binding(
                     get: { instances.contains(n) },
-                    set: { on in if on { instances.insert(n) } else { instances.remove(n) } }
+                    set: { on in
+                        var next = instances
+                        if on { next.insert(n) } else { next.remove(n) }
+                        pickedInstances = next
+                    }
                 ))
                 .toggleStyle(.checkbox)
-                .help(n == 1 ? "LiveContainer (the primary)" : "LiveContainer\(n)")
+                .help(Self.instanceLabel(n))
+                .accessibilityLabel(Self.instanceLabel(n))
             }
-            Picker("", selection: $channel) {
+            // Its title is hidden on screen and read by VoiceOver.
+            Picker(Self.channelLabel, selection: $channel) {
                 Text("nightly").tag("nightly")
                 Text("stable").tag("stable")
             }
@@ -419,8 +599,9 @@ struct SetUpLiveContainerSheet: View {
             }
             .controlSize(.small)
             .fixedSize()
-            .disabled(!Self.setUpEnabled(status: status, busy: store.isBusy,
-                                         instances: instances, resumes: false))
+            .disabled(!Self.setUpEnabled(status: status, busy: store.isBusy, instances: instances,
+                                         resumes: false, keyMissing: keyLine != nil))
+            .help(keyLine ?? "Install LiveContainer, or update it, without the other steps")
             if Self.offersPushCert(status: status) {
                 Button(Self.pushLabel) {
                     ticked = false
@@ -434,14 +615,22 @@ struct SetUpLiveContainerSheet: View {
         }
     }
 
+    /// No refusal: what Graft found, or the way to install it, then the
+    /// steps. They say what to do, and a paid-only line under them only
+    /// told a new user what they can't have.
     private var freeSide: some View {
-        let given = status?.freeSetupSteps ?? []
-        let steps = given.isEmpty ? Self.freeFallback : given
+        let steps = Self.freeSteps(given: status?.freeSetupSteps ?? [], status: status)
         return VStack(alignment: .leading, spacing: Metrics.rowGap) {
-            dim(PaidOnly.installLiveContainer)
-            Text(Self.freeIntro)
-                .font(AppFont.bodyMedium)
-                .foregroundStyle(Palette.text)
+            if let found = Self.foundLine(status: status, name: device.name) {
+                Text(found)
+                    .font(AppFont.bodyMedium)
+                    .foregroundStyle(Palette.text)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(Self.freeIntro)
+                    .font(AppFont.bodyMedium)
+                    .foregroundStyle(Palette.text)
+            }
             ForEach(Array(steps.enumerated()), id: \.offset) { index, text in
                 FreeStepRow(number: index + 1, text: text)
             }
@@ -449,8 +638,8 @@ struct SetUpLiveContainerSheet: View {
     }
 
     private var checklist: some View {
-        let given = status?.freeSetupSteps.count ?? 0
-        let first = account.isFree ? (given == 0 ? Self.freeFallback.count : given) + 1 : 1
+        let freeCount = Self.freeSteps(given: status?.freeSetupSteps ?? [], status: status).count
+        let first = account.isFree ? freeCount + 1 : 1
         let steps = Self.deviceSteps(account: account, kind: kind, managedBy: status?.managedBy)
         return VStack(alignment: .leading, spacing: Metrics.rowGap) {
             Text(Self.checklistTitle(name: device.name))
