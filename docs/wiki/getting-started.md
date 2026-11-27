@@ -28,7 +28,8 @@ libimobiledevice's `iproxy` and tools you install yourself (see
   everything.
 - **On an Intel Mac,** download `Graft-Intel.zip`, which also runs on
   macOS 13. It's a test build until it has run on a real Intel Mac.
-  Everything works except what needs Apple silicon:
+  It works from a decrypted IPA you already have, and leaves out what needs
+  Apple silicon:
   - App Store sign-in, and getting and decrypting App Store apps, older
     versions and free ones included (search still works, for adding an app
     by name, and needs no sign-in);
