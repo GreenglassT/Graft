@@ -12,6 +12,9 @@ that guest apps keep their logins.
 
 A device's pane has a LiveContainer section. It lists what is installed and
 who manages it, on either account.
+
+![iPhone 15 Pro's pane: storage, battery, Developer Mode: On, its apps and their delivery state, the Decrypt card, and the LiveContainer section with LiveContainer 3.4.0, Set Up LiveContainer… and Clean up.](img/device-page.png "A device's pane, with its LiveContainer section at the bottom.")
+
 - **Set Up LiveContainer…** does the whole setup in one sheet. With a paid
   account, its **Set Up** button checks the device against your developer
   account (reading the registered devices again if the device is new to
@@ -43,6 +46,8 @@ who manages it, on either account.
   says so, with **Remove it**.
 - **Clean up** is there whenever the device has a LiveContainer, whoever
   installed it.
+
+![The Set Up LiveContainer sheet for iPad mini: Developer Mode: On, one LiveContainer selected, nightly, Set Up, then the four steps in LiveContainer on the device.](img/set-up-livecontainer.png "Set Up LiveContainer, with the steps left on the device.")
 
 ## Side-by-side LiveContainers
 

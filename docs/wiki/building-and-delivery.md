@@ -80,7 +80,7 @@ Build & Install runs this pipeline. Build options (beside it) picks the
 device and can build without installing. It can also export the IPA unsigned
 instead (see [Exporting an IPA](#exporting-an-ipa)).
 
-![An app pane with two tweaks attached and the Build & Install button shown, under a yellow bar saying no device is connected.](img/app-ready.png "An app with two tweaks attached. The yellow bar says no device is connected.")
+![An app pane with two tweaks attached and the Build & Install button shown, under a bar saying to connect an iPhone or iPad.](img/app-ready.png "An app with two tweaks attached. The bar says to connect an iPhone or iPad.")
 
 1. **Pre-flight.** Tools, signing files, password, device, and that the device
    is in the profile. Only what the delivery mode needs is checked. Settings ›
@@ -123,6 +123,8 @@ don't use it: an update installs on every device the app is on. The
 menu also makes a device the default. In Terminal, `--device <UDID>` does the
 same for one build, and that device must be connected. When a build goes
 somewhere other than the default, its log says where and why.
+
+![The app's bar with the Change menu open: iPhone 15 Pro, checked and the default, and iPad mini, each with its iOS version and LiveContainer, then Open Settings.](img/device-bar-change.png "Change on the bar picks the device for the next Build & Install.")
 
 With no device connected, Build & Install waits, and the bar says to connect
 one. A device that's locked, or asking whether to trust this Mac, is connected
@@ -223,6 +225,9 @@ a newer version on the App Store, a newer build of a tweak an app uses, or a
 build that changed since it was last installed. An app with something to
 update shows an arrow mark in the sidebar, and its pane says what: "Update
 available: App Store 1.2.0 · 1 tweak".
+
+![An app pane whose update line says Update available: App Store 4.2.0 · 1 tweak, installs on iPhone 15 Pro and iPad mini, with Update & Install. The sidebar has Update All (2) above the apps, and arrow marks on two of them.](img/update-line.png "An app with an update: the pane says what, and Update All is above the apps.")
+
 - **Update & Install** (or **Update Tweaks & Install**, or **Install
   Update**) shows what will change, app by app, and each device it installs
   on, then does it when you choose **Update**: the tweaks, the App Store
@@ -278,6 +283,10 @@ available: App Store 1.2.0 · 1 tweak".
   stopped updating), it shows what Graft knows without the network until it
   can check again. Graft tries again within the hour, and the confirmation
   says when it couldn't check online.
+
+![The Update Apps confirmation: Photos to iPhone 15 Pro and to iPad mini via LiveContainer, each to import there, App Store 4.1.0 to 4.2.0, and example-tweak 1.0.0 to 1.1.0 from repo.example.com.](img/update-confirm.png "The confirmation: what changes, and each device it installs on.")
+
+![Updating Apps midway: Photos is done on iPhone 15 Pro and installing on iPad mini, above the build log and a Stop button.](img/update-progress.png "An update in progress, device by device.")
 
 Settings › Updates › **Check my apps for updates** turns the daily check off,
 and the checks after a get, build, tweak update, update, change to an app's

@@ -110,11 +110,15 @@ one's date. Graft reads ten at a time, and **Show More** reads the next ten.
 Press **Get** on one, and Graft downloads, decrypts and stages it as Get latest
 does.
 
+![The Older Versions sheet listing 1.4.0 down to 1.0.0 with their dates, two builds of 1.2.0, and 1.2.0 (build 1 of 2) marked held.](img/versions-held.png "Older Versions, with the app held at 1.2.0 (build 1 of 2).")
+
 Graft then holds the app at that version: its builds use it, and the pane says
 "Held at 1.2.0 · newest 1.4.0" instead of "update available". **Get latest
 from App Store** lets go of the hold and gets the newest version again. The
 hold is the app's preferred version, which Edit App also shows. A preferred
 version set in Edit App is a hold too; Get latest sets it back to latest.
+
+![The Source IPA section saying Held at 1.2.0 (build 1 of 2) · newest 1.4.0, beside Get an older version and Get latest from App Store.](img/held-line.png "An app held at an older build.")
 
 - Only apps your Apple ID has. If it doesn't have the app yet, get it first.
 - Apple doesn't serve every old version. One it won't describe or hand over

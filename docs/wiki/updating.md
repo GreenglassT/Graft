@@ -80,3 +80,5 @@ Help › What's New… shows what changed in the latest release. It also opens
 by itself once, the first time a new version of Graft starts, on what's new
 since the version you used before. **Show earlier releases** adds the rest. The
 [Changelog](../../CHANGELOG.md) has every release.
+
+![The What's New window showing the 2.3.1 release notes: Security, Changed and Fixes.](img/whats-new.png "Help › What's New…")
